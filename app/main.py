@@ -17,7 +17,7 @@ from app.logging_config import setup_logging
 
 setup_logging(log_dir="logs", level="INFO")
 
-from app.api.endpoints import auth, file, session, user
+from app.api.endpoints import auth, file, session, share, user
 from app.database import engine
 from app.exception_handlers import (
     general_exception_handler,
@@ -30,7 +30,7 @@ from app.rate_limit import limiter, rate_limit_exceeded_handler
 from config import settings
 from slowapi.errors import RateLimitExceeded
 
-ROUTERS = [auth.router, file.router, session.router, user.router]
+ROUTERS = [auth.router, file.router, session.router, share.router, user.router]
 
 
 def _make_redis_client(

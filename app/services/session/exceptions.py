@@ -12,3 +12,11 @@ class SessionServiceError(Exception):
 
 class GenerationInProgressError(SessionServiceError):
     """A new turn was requested while one is still running."""
+
+
+class FileNotInSessionError(SessionServiceError):
+    """A file_key was looked up against a session it doesn't belong to.
+
+    Surfaces both the owner-side (caller's own session) and share-side
+    (recipient's accessible share) authorization miss in one shape; the
+    endpoint layer turns it into 403."""

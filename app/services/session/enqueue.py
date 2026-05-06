@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.message import Message, MessageRole
 from app.models.session import Session, SessionStatus
+from app.models.session_files import SessionFile
 from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.schemas.session import FileRef
 from app.services.redis import (
@@ -107,6 +108,15 @@ async def queue_user_message(
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
     db.add(session_turn)
+    # Bind every uploaded file to this session in the same transaction
+    # as the message that references it. Authoritative for download
+    # authorization — the JSONB-blob copy in ``user_msg.blocks`` is
+    # presentation-only. Same file referenced by a future message is
+    # silently no-op'd via ON CONFLICT in the worker / migration paths;
+    # here a duplicate would be a bug worth surfacing, so we don't
+    # swallow it.
+    for file_ref in files:
+        db.add(SessionFile(session_id=session.id, file_key=file_ref.file_key))
     await db.commit()  # releases the FOR UPDATE lock + makes session_turn visible
 
     # Wake any idle worker — fire-and-forget; if it fails the worker's

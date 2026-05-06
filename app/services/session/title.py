@@ -2,8 +2,9 @@
 
 A single stateless helper: take a user message, return a short
 Chinese title describing what the conversation is about. The backend
-calls it from the ``POST /titles`` endpoint; there's no DB persistence
-or session awareness here — the caller decides whether to save it.
+calls it from the ``POST /sessions/titles`` endpoint; there's no DB
+persistence or session awareness here — the caller decides whether
+to save it.
 
 One shared ``AsyncOpenAI`` client is created per process at import
 time; it reads settings from ``config.settings`` (``llm_base_url``,
@@ -26,9 +27,13 @@ _MAX_CONTENT_CHARS = 4000
 _TITLE_MAX_CHARS = 30
 
 _SYSTEM_PROMPT = (
-    "你是一个对话标题生成器。阅读用户给出的首条消息，"
-    "用中文生成一个 15 字以内、简洁、能体现主题的标题。"
-    "只返回标题本身，不要引号、不要标点、不要解释。"
+    "You are a conversation title generator. Read the user's first "
+    "message and produce a concise title that captures its topic. "
+    "Reply in the same language as the user's message — Chinese for "
+    "Chinese input, English for English input, etc. Keep it short: "
+    "at most ~8 words in English or ~15 characters in Chinese. "
+    "Output only the title itself — no quotes, no punctuation, "
+    "no explanation."
 )
 
 _client = AsyncOpenAI(

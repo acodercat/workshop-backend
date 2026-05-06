@@ -1,26 +1,22 @@
-"""File upload/download presigned URL endpoints.
+"""File upload endpoint — presigned PUT URL for OSS.
 
-The frontend exchanges bytes with OSS directly via presigned URLs;
-the backend never proxies file content.
+Upload is session-agnostic: the frontend may collect a file key from
+this endpoint before knowing which session (or whether) it'll
+reference the file. Validation happens at upload time (extension
+whitelist + server-side size cap); the file→session binding is
+recorded later by the message-create path inserting a ``session_files``
+row in the same transaction as the user message.
 
-**Authorization model**: both endpoints require a valid JWT (via
-:func:`authenticate_and_get_user`). Beyond that, we do *not* check
-whether the caller "owns" a given ``file_key`` — the file_key itself
-is UUID-backed and practically unguessable (``documents/{uuid4}/…``
-for user uploads, ``outputs/{session_uuid}/{tool_use_id}/…`` for
-tool outputs), and the presigned URL's 60-minute TTL is the final
-capability boundary. Tying the download endpoint to ``Message``/
-``Session`` tables added coupling (and a timing hole during live
-streaming, since tool outputs reach the SSE stream before the DB
-commit at end-of-turn) without meaningful defense-in-depth beyond
-what the key entropy and TTL already provide.
+Download is **not** here — it's session-bound (authorization is a
+single ``session_files`` lookup) and lives in :mod:`session` alongside
+the rest of the owner-side surface.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.auth import authenticate_and_get_user
 from app.models.user import User
-from app.schemas.file import DownloadUrlResponse, UploadUrlResponse
+from app.schemas.file import UploadUrlResponse
 from app.services import file_storage
 from app.services.file_storage import FileTooLargeError, UnsupportedFileTypeError
 
@@ -49,20 +45,3 @@ async def get_upload_url(
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc),
         )
-
-
-@router.get("/files/download-url", response_model=DownloadUrlResponse)
-async def get_download_url(
-    file_key: str = Query(..., description="OSS file key returned from the upload step"),
-    filename: str = Query(..., description="Original filename for Content-Disposition"),
-    _user: User = Depends(authenticate_and_get_user),
-):
-    """Mint a presigned GET URL for a previously-minted file_key.
-
-    Any authenticated caller who knows the key can fetch one — see the
-    module docstring for why this is the right authorization boundary.
-    """
-    url, expires_in = file_storage.generate_download_url(
-        file_key=file_key, filename=filename,
-    )
-    return DownloadUrlResponse(download_url=url, file_key=file_key, expires_in=expires_in)

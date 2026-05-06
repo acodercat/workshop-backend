@@ -76,10 +76,12 @@ class SessionDetailResponse(BaseModel):
 
 
 class TitleGenerateRequest(BaseModel):
-    """Body for ``POST /titles`` — content of the user's first message."""
+    """Body for ``POST /sessions/titles`` — content of the user's
+    first message."""
     content: str = Field(..., min_length=1, max_length=10000)
 
 
 class TitleGenerateResponse(BaseModel):
-    """Response for ``POST /titles`` — LLM-generated conversation title."""
+    """Response for ``POST /sessions/titles`` — LLM-generated
+    conversation title."""
     title: str

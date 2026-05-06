@@ -71,8 +71,72 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 
+# ---- share-view tokens ----------------------------------------------------
+#
+# Share-view tokens are a separate JWT class scoped to a single share-link
+# recipient. Three properties make them safe to coexist with user tokens:
+#
+#   1. They carry ``scope == "share-view"``; the user-token decoder rejects
+#      anything with a ``scope`` field, and the share decoder rejects
+#      anything without one. Two tokens, two decoders, zero crossover.
+#   2. ``sub`` is the share token (URL-safe) rather than a user phone, so
+#      a forged token has nothing to bind to a user account even if the
+#      decoder were tricked.
+#   3. TTL is short (15 minutes by default) — the recipient is expected to
+#      be in an active session of viewing; longer would just expand the
+#      window for a stolen token.
+
+SHARE_VIEW_SCOPE = "share-view"
+
+
+def create_share_view_token(share_token: str) -> tuple[str, datetime]:
+    """Mint a short-lived JWT bound to a single share token.
+
+    Returns the encoded token and its absolute expiry so the caller
+    (the unlock endpoint) can hand both to the client without
+    decoding the JWT a second time to read ``exp``.
+    """
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.share_view_token_expire_minutes
+    )
+    payload = {
+        "sub": share_token,
+        "scope": SHARE_VIEW_SCOPE,
+        "exp": expires_at,
+    }
+    return (
+        jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm),
+        expires_at,
+    )
+
+
+def decode_share_view_token(token: str) -> str | None:
+    """Verify a share-view JWT and return the bound share token.
+
+    Returns None on any failure (bad signature, expired, wrong scope,
+    missing sub) — caller decides whether None means 401-locked or
+    just "no token presented."
+    """
+    try:
+        payload = jwt.decode(
+            token, settings.secret_key, algorithms=[settings.algorithm]
+        )
+    except InvalidTokenError as exc:
+        logger.info(f"Rejected share-view token: {type(exc).__name__}: {exc}")
+        return None
+    if payload.get("scope") != SHARE_VIEW_SCOPE:
+        return None
+    sub = payload.get("sub")
+    return sub if isinstance(sub, str) else None
+
+
 async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
-    """Decode the JWT, verify its token_version, and return the matching user."""
+    """Decode the JWT, verify its token_version, and return the matching user.
+
+    Tokens carrying ``scope`` are rejected — those are share-view tokens
+    that have no user identity bound to them and must never be accepted
+    on a user-auth path.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -84,6 +148,12 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
         )
     except InvalidTokenError as exc:
         logger.info(f"Rejected token: {type(exc).__name__}: {exc}")
+        raise credentials_exception
+
+    if "scope" in payload:
+        # A scoped token (share-view) reaching the user-auth path is a
+        # caller mistake at best, an attempted privilege escalation at
+        # worst. Refuse without distinguishing the two.
         raise credentials_exception
 
     phone: str | None = payload.get("sub")

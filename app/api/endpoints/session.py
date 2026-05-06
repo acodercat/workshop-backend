@@ -17,24 +17,32 @@ SSE streaming — lives in :mod:`app.services.session`.
 """
 
 import logging
+import secrets
+import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from openai import OpenAIError
 import redis.asyncio as aioredis
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.dependencies import get_db, get_redis, get_redis_streaming
-from app.auth import authenticate_and_get_user, authenticate_for_streaming
+from app.auth import (
+    authenticate_and_get_user,
+    authenticate_for_streaming,
+    get_password_hash,
+)
 from app.database import AsyncSessionLocal
 from config import settings
 from app.common.pagination import paginate
 from app.models.message import Message
 from app.models.session import Session, SessionStatus
+from app.models.session_share import SessionShare
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
+from app.schemas.file import DownloadUrlResponse
 from app.schemas.session import (
     MessageCreate,
     MessageQueuedResponse,
@@ -46,16 +54,24 @@ from app.schemas.session import (
     TitleGenerateRequest,
     TitleGenerateResponse,
 )
+from app.schemas.session_share import ShareCreate, ShareResponse
+from app.services import file_storage
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import generate_title, queue_user_message, stream_events
-from app.services.session.exceptions import GenerationInProgressError
+from app.services.session.exceptions import (
+    FileNotInSessionError,
+    GenerationInProgressError,
+)
+from app.services.session.files import assert_file_belongs_to_session
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
 
 
-async def _get_or_404(db: AsyncSession, session_id: str, user_id: int) -> Session:
+async def _get_or_404(
+    db: AsyncSession, session_id: str | uuid.UUID, user_id: int
+) -> Session:
     """Return the session row iff it exists AND the caller owns it.
 
     404 (not 403) on an ownership miss so the existence of other users'
@@ -321,8 +337,8 @@ async def list_messages(
     return await _load_messages(db, session_id)
 
 
-@router.post("/titles", response_model=TitleGenerateResponse)
-async def post_title(
+@router.post("/sessions/titles", response_model=TitleGenerateResponse)
+async def generate_session_title(
     body: TitleGenerateRequest,
 ) -> TitleGenerateResponse:
     """Stateless LLM-backed title generator for a conversation.
@@ -346,3 +362,136 @@ async def post_title(
             detail="Title generation failed",
         )
     return TitleGenerateResponse(title=title)
+
+
+# ---- session share (owner-side) ------------------------------------------
+#
+# Singleton sub-resource of the session: one share per session.
+# Public-side read access for share recipients lives in
+# :mod:`app.api.endpoints.share`; the two surfaces deliberately don't
+# overlap on auth (user JWTs are rejected on the public path, share-
+# view tokens are rejected here).
+
+
+@router.post(
+    "/sessions/{session_id}/share",
+    response_model=ShareResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_share(
+    session_id: uuid.UUID,
+    body: ShareCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Create or rotate the share for ``session_id``.
+
+    Idempotent at the URL level (the resource at
+    ``/sessions/{id}/share`` is replaced) but not at the token level —
+    each call mints a fresh token, which is the point of "rotate":
+    the previous URL stops working. The replace happens in one
+    transaction: any prior row is deleted before the new one is
+    inserted.
+    """
+    session = await _get_or_404(db, session_id, current_user.id)
+
+    await db.execute(
+        delete(SessionShare).where(SessionShare.session_id == session.id)
+    )
+
+    password_hash = (
+        await get_password_hash(body.password) if body.password else None
+    )
+    share = SessionShare(
+        session_id=session.id,
+        token=secrets.token_urlsafe(32),
+        password_hash=password_hash,
+    )
+    db.add(share)
+    await db.commit()
+    await db.refresh(share)
+    return share
+
+
+@router.get(
+    "/sessions/{session_id}/share",
+    response_model=ShareResponse,
+)
+async def get_session_share(
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Return the session's current share, or 404 if there isn't one."""
+    await _get_or_404(db, session_id, current_user.id)
+
+    stmt = select(SessionShare).where(SessionShare.session_id == session_id)
+    share = (await db.execute(stmt)).scalar_one_or_none()
+    if share is None:
+        raise HTTPException(status_code=404, detail="Share not found")
+    return share
+
+
+@router.delete(
+    "/sessions/{session_id}/share",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_share(
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Delete the session's share. No-op if none exists, so retries
+    from a flaky client are safe."""
+    await _get_or_404(db, session_id, current_user.id)
+    await db.execute(
+        delete(SessionShare).where(SessionShare.session_id == session_id)
+    )
+    await db.commit()
+
+
+# ---- session file download (presigned URL + ownership check) -------------
+#
+# Authorization is a single ``session_files`` lookup —
+# ``(session_id, file_key)`` is the FK invariant set up at write time
+# (user uploads in ``services/session/enqueue.py``, tool outputs in
+# the worker before its SSE emit). Upload (session-agnostic — the
+# frontend may collect a file_key before knowing which session will
+# reference it) lives in :mod:`app.api.endpoints.file`.
+
+
+@router.get(
+    "/sessions/{session_id}/files/download-url",
+    response_model=DownloadUrlResponse,
+)
+async def get_download_url(
+    session_id: uuid.UUID,
+    file_key: str = Query(..., description="OSS file key returned from the upload step"),
+    filename: str = Query(..., description="Original filename for Content-Disposition"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Mint a presigned GET URL for a file referenced by ``session_id``.
+
+    Two-step authorization: ``_get_or_404`` verifies the caller owns
+    the session, then a ``session_files`` lookup verifies the
+    ``file_key`` actually belongs to it. Refuses with 403 on the
+    second check so a probe can't use someone else's file_key against
+    their own session.
+    """
+    session = await _get_or_404(db, session_id, current_user.id)
+    try:
+        await assert_file_belongs_to_session(
+            db, session_id=session.id, file_key=file_key,
+        )
+    except FileNotInSessionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="File is not part of this session",
+        )
+    url, expires_in = file_storage.generate_download_url(
+        file_key=file_key, filename=filename,
+    )
+    return DownloadUrlResponse(
+        download_url=url, file_key=file_key, expires_in=expires_in,
+    )

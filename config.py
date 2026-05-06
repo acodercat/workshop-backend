@@ -35,6 +35,14 @@ class Settings(BaseSettings):
         default=MINUTES_PER_WEEK,
         description="Access token lifetime in minutes",
     )
+    # Share-view tokens are minted after a recipient enters the share's
+    # password. Short TTL because the recipient is expected to be
+    # actively viewing — re-prompting after 15 min idle is acceptable
+    # and limits the blast radius of a leaked token.
+    share_view_token_expire_minutes: int = Field(
+        default=15,
+        description="Share-view token lifetime in minutes",
+    )
     bcrypt_rounds: int = Field(default=12, description="Bcrypt work factor (10-14 typical)")
 
     # CORS — explicit allowlist; wildcard is forbidden because we use
@@ -49,6 +57,10 @@ class Settings(BaseSettings):
     rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
     rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
+    rate_limit_share_unlock: str = Field(
+        default="5/5minute",
+        description="Per-IP share-unlock attempts (password brute-force guard)",
+    )
 
     # Redis — two pools, sized differently because their workloads
     # don't mix safely. ``redis_pool_size`` serves short ops (XADD,

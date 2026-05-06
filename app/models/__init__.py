@@ -14,6 +14,16 @@ for module_info in pkgutil.iter_modules(__path__):
 from app.models.message import Message  # re-exports for convenience
 from app.models.sandbox import Sandbox
 from app.models.session import Session
+from app.models.session_files import SessionFile
+from app.models.session_share import SessionShare
 from app.models.user import User
 
-__all__ = ["Base", "User", "Session", "Sandbox", "Message"]
+__all__ = [
+    "Base",
+    "User",
+    "Session",
+    "SessionFile",
+    "SessionShare",
+    "Sandbox",
+    "Message",
+]
