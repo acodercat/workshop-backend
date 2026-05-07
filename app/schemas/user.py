@@ -9,7 +9,6 @@ class UserResponse(BaseModel):
     id: int
     name: str
     phone: str | None
-    is_admin: bool
     last_login_at: datetime | None
     created_at: datetime
     updated_at: datetime

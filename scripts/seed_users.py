@@ -35,13 +35,13 @@ async def main() -> None:
             if cur.fetchone():
                 print(f"skip  {phone} (already exists)")
                 continue
-            # is_admin / token_version are Python-side defaults on the
-            # ORM model; raw INSERT must pass them explicitly because
-            # the DB columns have NOT NULL with no server default.
+            # ``token_version`` is a Python-side default on the ORM
+            # model; raw INSERT must pass it explicitly because the
+            # DB column has NOT NULL with no server default.
             cur.execute(
                 'INSERT INTO "user" '
-                "(name, phone, password_hash, is_admin, token_version) "
-                "VALUES (%s, %s, %s, false, 0) RETURNING id",
+                "(name, phone, password_hash, token_version) "
+                "VALUES (%s, %s, %s, 0) RETURNING id",
                 (phone, phone, await get_password_hash(password)),
             )
             new_id = cur.fetchone()[0]

@@ -75,8 +75,8 @@ def test_user() -> Iterator[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 'INSERT INTO "user" '
-                "(name, phone, password_hash, is_admin, token_version) "
-                "VALUES (%s, %s, %s, false, 0) RETURNING id",
+                "(name, phone, password_hash, token_version) "
+                "VALUES (%s, %s, %s, 0) RETURNING id",
                 (phone, phone, password_hash),
             )
             user_id = cur.fetchone()[0]
