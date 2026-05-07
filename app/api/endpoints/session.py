@@ -26,7 +26,6 @@ from openai import OpenAIError
 import redis.asyncio as aioredis
 import sqlalchemy as sa
 from sqlalchemy import delete, func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -47,12 +46,7 @@ from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.file import DownloadUrlResponse
-from app.schemas.message_feedback import (
-    FeedbackResponse,
-    FeedbackUpsert,
-    parse_rating,
-    serialize_rating,
-)
+from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
 from app.schemas.session import (
     MessageCreate,
     MessageQueuedResponse,
@@ -124,11 +118,7 @@ async def _load_messages(
             blocks=message.blocks,
             created_at=message.created_at,
             feedback=(
-                FeedbackResponse(
-                    rating=serialize_rating(feedback.rating),
-                    comment=feedback.comment,
-                    updated_at=feedback.updated_at,
-                )
+                FeedbackResponse.model_validate(feedback)
                 if feedback is not None
                 else None
             ),
@@ -583,46 +573,42 @@ async def upsert_feedback(
 ):
     """Upsert the caller's feedback on an assistant message.
 
-    PUT semantics — idempotent. Postgres ``ON CONFLICT`` on the
-    ``(message_id, user_id)`` UNIQUE does the upsert in one statement
-    so we never have a window where the row exists with a stale
-    rating; ``updated_at`` is bumped explicitly because ``onupdate``
-    only fires on a true UPDATE through the ORM, not on a raw INSERT
-    ON CONFLICT path.
+    PUT semantics — idempotent. Look up an existing row by
+    ``(message_id, user_id)``: present → mutate fields, absent →
+    insert a new row. ``UNIQUE(message_id, user_id)`` is the backstop
+    if a concurrent request from the same user races us through the
+    SELECT-then-INSERT window — the second one IntegrityErrors,
+    which only happens if the frontend's submit-disable state has
+    been bypassed (impossible from our own UI).
     """
     await _resolve_assistant_message(
         db, session_id, message_id, current_user.id,
     )
-    rating_int = parse_rating(body.rating)
     # Schema validator already stripped + rejected blank — ``body.comment``
     # is either ``None`` or a non-empty trimmed string here.
-    comment = body.comment
 
-    stmt = (
-        pg_insert(MessageFeedback)
-        .values(
+    stmt = select(MessageFeedback).where(
+        MessageFeedback.message_id == message_id,
+        MessageFeedback.user_id == current_user.id,
+    )
+    feedback = (await db.execute(stmt)).scalar_one_or_none()
+    if feedback is None:
+        feedback = MessageFeedback(
             message_id=message_id,
             user_id=current_user.id,
-            rating=rating_int,
-            comment=comment,
+            rating=body.rating,
+            comment=body.comment,
         )
-        .on_conflict_do_update(
-            constraint="uq_message_feedback_user",
-            set_={
-                "rating": rating_int,
-                "comment": comment,
-                "updated_at": func.now(),
-            },
-        )
-        .returning(MessageFeedback)
-    )
-    row = (await db.execute(stmt)).scalar_one()
+        db.add(feedback)
+    else:
+        feedback.rating = body.rating
+        feedback.comment = body.comment
+        # ``MessageFeedback.updated_at`` has ``onupdate=func.now()``;
+        # SQLAlchemy fires it on real UPDATE flushes (which this is),
+        # so no explicit bump needed here.
     await db.commit()
-    return FeedbackResponse(
-        rating=serialize_rating(row.rating),
-        comment=row.comment,
-        updated_at=row.updated_at,
-    )
+    await db.refresh(feedback)
+    return FeedbackResponse.model_validate(feedback)
 
 
 @router.delete(

@@ -4,38 +4,16 @@ Owner-side surface only — feedback is private between the session
 owner and the AI. Public share view is read-only and never sees the
 feedback column.
 
-Wire format uses ``"up"/"down"`` strings rather than the DB's numeric
-``1/-1`` because string enums are clearer in JSON and the translation
-is one helper away. ``serialize_rating`` / ``parse_rating`` keep the
-mapping in one place so the model layer never has to know about the
-wire shape and the wire layer never has to know about ``SmallInteger``.
+The wire shape uses the same :class:`FeedbackRating` enum the model
+column uses (``"UP" | "DOWN"`` strings), so there's no encoding
+boundary to translate at the endpoint.
 """
 
 from datetime import datetime
-from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-
-# ---- value-object helpers ------------------------------------------------
-
-Rating = Literal["up", "down"]
-
-_RATING_TO_INT = {"up": 1, "down": -1}
-_INT_TO_RATING: dict[int, Rating] = {1: "up", -1: "down"}
-
-
-def parse_rating(value: Rating) -> int:
-    """``"up" | "down"`` → ``1 | -1`` for DB storage."""
-    return _RATING_TO_INT[value]
-
-
-def serialize_rating(value: int) -> Rating:
-    """``1 | -1`` (from DB) → ``"up" | "down"`` for wire."""
-    return _INT_TO_RATING[value]
-
-
-# ---- request / response schemas -----------------------------------------
+from app.models.message_feedback import FeedbackRating
 
 
 class FeedbackUpsert(BaseModel):
@@ -44,11 +22,26 @@ class FeedbackUpsert(BaseModel):
     ``comment`` cap of 1000 chars matches the product brief — long
     enough for a paragraph of "what went wrong", short enough that we
     don't need pagination or truncation in any UI surface that shows
-    feedback back. Empty string is treated as ``None`` (use the
-    DELETE endpoint to clear, not an empty comment)."""
+    feedback back. ``min_length=1`` plus the validator below reject
+    empty *and* whitespace-only strings — clients should send ``null``
+    when there's no comment, and ``DELETE`` when revoking the entire
+    feedback. The validator also strips, so trailing whitespace from
+    the textarea doesn't leak into the DB."""
 
-    rating: Rating
-    comment: str | None = Field(default=None, max_length=1000)
+    rating: FeedbackRating
+    comment: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @field_validator("comment")
+    @classmethod
+    def _strip_or_reject_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(
+                "Comment cannot be blank — send null instead.",
+            )
+        return stripped
 
 
 class FeedbackResponse(BaseModel):
@@ -56,6 +49,8 @@ class FeedbackResponse(BaseModel):
     :class:`MessageResponse` so the session-detail GET round-trips
     everything the UI needs to render current state."""
 
-    rating: Rating
+    rating: FeedbackRating
     comment: str | None
     updated_at: datetime
+
+    model_config = {"from_attributes": True}
