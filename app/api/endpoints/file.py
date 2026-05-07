@@ -12,10 +12,11 @@ single ``session_files`` lookup) and lives in :mod:`session` alongside
 the rest of the owner-side surface.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.auth import authenticate_and_get_user
 from app.models.user import User
+from app.rate_limit import limiter
 from app.schemas.file import UploadUrlResponse
 from app.services import file_storage
 from app.services.file_storage import FileTooLargeError, UnsupportedFileTypeError
@@ -24,7 +25,9 @@ router = APIRouter(tags=["files"])
 
 
 @router.get("/files/upload-url", response_model=UploadUrlResponse)
+@limiter.limit("60/minute")
 async def get_upload_url(
+    request: Request,
     filename: str = Query(..., description="Name of the file to upload"),
     size_bytes: int = Query(..., ge=0, description="Declared file size in bytes"),
     _user: User = Depends(authenticate_and_get_user),

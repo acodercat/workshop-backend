@@ -128,7 +128,9 @@ async def _load_messages(
 
 
 @router.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("30/minute")
 async def create_session(
+    request: Request,
     body: SessionCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
@@ -363,8 +365,11 @@ async def list_messages(
 
 
 @router.post("/sessions/titles", response_model=TitleGenerateResponse)
+@limiter.limit("10/minute")
 async def generate_session_title(
+    request: Request,
     body: TitleGenerateRequest,
+    _user: User = Depends(authenticate_and_get_user),
 ) -> TitleGenerateResponse:
     """Stateless LLM-backed title generator for a conversation.
 
@@ -374,9 +379,10 @@ async def generate_session_title(
     exists. Splitting the two lets the sidebar show a real title as
     soon as the user hits send, without waiting for the agent turn.
 
-    Auth inherits the router-level ``authenticate_and_get_user``
-    dependency — any logged-in user can call it; no further scoping
-    is meaningful since there's no resource being read or written.
+    Auth: any logged-in user can call it. The ``_user`` dependency
+    is what enforces that — without it, an anonymous attacker could
+    burn the LLM's billing by spamming this endpoint. No further
+    scoping is meaningful since no resource is read or written.
     """
     try:
         title = await generate_title(body.content)
@@ -403,7 +409,9 @@ async def generate_session_title(
     response_model=ShareResponse,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit("10/minute")
 async def create_share(
+    request: Request,
     session_id: uuid.UUID,
     body: ShareCreate,
     db: AsyncSession = Depends(get_db),
@@ -489,7 +497,9 @@ async def delete_share(
     "/sessions/{session_id}/files/download-url",
     response_model=DownloadUrlResponse,
 )
+@limiter.limit("60/minute")
 async def get_download_url(
+    request: Request,
     session_id: uuid.UUID,
     file_key: Annotated[str, Query(description="OSS file key returned from the upload step")],
     filename: Annotated[str, Query(description="Filename for Content-Disposition")],

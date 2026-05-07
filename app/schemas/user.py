@@ -16,8 +16,15 @@ class UserResponse(BaseModel):
 
 
 class PasswordChange(BaseModel):
+    """Body for ``PUT /me/password``.
+
+    ``new_password`` is capped at 72 chars because bcrypt silently
+    truncates anything past 72 bytes — keeping the cap explicit means
+    the user can't end up in a state where the password they typed
+    differs from the prefix actually used at next login."""
+
     current_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6)
+    new_password: str = Field(..., min_length=6, max_length=72)
 
 
 __all__ = ["UserResponse", "PasswordChange"]

@@ -208,7 +208,9 @@ async def create_share_access_token(
     "/shares/{token}/files/download-url",
     response_model=DownloadUrlResponse,
 )
+@limiter.limit("60/minute")
 async def get_share_file_url(
+    request: Request,
     token: str,
     file_key: Annotated[str, Query(description="OSS file key returned from the upload step")],
     filename: Annotated[str, Query(description="Filename for Content-Disposition")],
