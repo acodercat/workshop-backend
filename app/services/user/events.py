@@ -11,11 +11,13 @@ sidebar's ``RUNNING`` indicator stays in sync regardless of which page
 the user is on.
 """
 
+import json
+import time
 from typing import AsyncIterator
 
 import redis.asyncio as aioredis
 
-from app.common.sse import event_to_sse
+from app.common.sse import event_to_sse, sse_event
 from app.services.redis import read_stream, user_events_key
 
 
@@ -36,6 +38,19 @@ async def stream_user_events(
     Reconnect: passing the browser's ``Last-Event-ID`` replays exactly
     the gap the disconnect created.
     """
+    # Handshake — fires once per (re)connect, before the XREAD loop.
+    # Mirrors ``session/streaming.py``'s ``session.ready``: distinguishes
+    # "connected, no traffic yet" from "broken connection" for any UI /
+    # ops surface that wants to react, and forces buffering proxies
+    # (nginx ``proxy_buffering on``, some CDNs) to flush bytes
+    # immediately instead of holding the response open until enough
+    # data accumulates. No Redis hop; no entry id (per-connection,
+    # never persisted to the stream).
+    yield sse_event(
+        "user.ready",
+        data=json.dumps({"ts": str(time.time())}),
+    )
+
     key = user_events_key(user_id)
     cursor = last_event_id or "$"
 
