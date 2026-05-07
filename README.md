@@ -21,8 +21,44 @@ uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
 
 ## Production
 
+Single-host manual deploy: use `scripts/deploy.sh`. Subcommand layout
+mirrors the frontend's `serve.sh` so muscle memory carries across
+the two services.
+
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8005 --workers 4
+# After ``git pull`` (handles deps + migrations + restart)
+bash scripts/deploy.sh deploy
+
+# Code-only restart (no ``uv sync`` / no ``alembic upgrade``)
+bash scripts/deploy.sh restart
+
+# Tail uvicorn output
+bash scripts/deploy.sh logs
+
+# Is :8005 bound? by whom?
+bash scripts/deploy.sh status
+```
+
+| command | behavior |
+|---|---|
+| `start` | start uvicorn on `:8005` (no-op if already running) |
+| `stop` | SIGTERM, escalate to SIGKILL after a 10s grace period |
+| `restart` | `stop` + `start` — no deps / migration sync |
+| `status` | report whether `:8005` is bound and by which PID(s) |
+| `logs` | `tail -f logs/uvicorn.log` |
+| `deploy` | `stop` + `uv sync` + `alembic upgrade head` + `start` |
+
+Truth source for "is it running" is `lsof -t -i:8005` rather than a
+PID file, so the script tolerates instances started outside of it
+(e.g., the legacy `nohup uv run uvicorn …` flow). uvicorn stdout/stderr
+appends to `logs/uvicorn.log`; application-level loguru output lives
+elsewhere under `logs/` per `app/logging_config.py`.
+
+For ad-hoc / non-default-port runs (or when the script's defaults
+don't fit, e.g. a custom SSL setup), the bare command still works:
+
+```bash
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --workers 4
 ```
 
 ## Project Structure
