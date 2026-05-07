@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     # would let SSE traffic starve the short-op path.
     redis_url: str = Field(description="Redis connection URL")
     redis_pool_size: int = Field(default=30, description="Max connections for short Redis ops")
-    redis_streaming_pool_size: int = Field(default=500, description="Max connections for SSE long-poll")
+    redis_streaming_pool_size: int = Field(default=100, description="Max connections for SSE long-poll (per worker process)")
     # Short-op pool uses BlockingConnectionPool: when full, callers wait
     # this long for a connection before raising. Trades a tail-latency
     # spike for fewer 5xx during traffic bursts.
