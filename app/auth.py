@@ -55,19 +55,19 @@ async def get_user_by_username(db: AsyncSession, username: str) -> models.User |
 async def authenticate_user(
     db: AsyncSession, username: str, password: str
 ) -> models.User | None:
-    """Return the user if credentials are valid AND the account is
-    ``ACTIVE``, otherwise None.
+    """Return the user iff the credentials are valid, regardless of
+    status.
 
-    ``DISABLED`` / ``SUSPENDED`` / ``PENDING`` accounts are treated the
-    same as wrong credentials at the login endpoint — same generic 401
-    so a probing client can't tell "wrong password" from "account
-    locked". Existing JWTs aren't revoked by a status change; bump
-    ``token_version`` separately if you need immediate force-logout.
+    Status checking is left to the calling endpoint so it can
+    distinguish ``PENDING`` (surface ``account_pending`` so the user
+    sees "awaiting admin approval") from ``DISABLED`` / ``SUSPENDED``
+    (collapse to a generic 401 indistinguishable from wrong creds —
+    admin-initiated lockouts shouldn't leak account state). Existing
+    JWTs aren't revoked by a status change; bump ``token_version``
+    separately if you need immediate force-logout.
     """
     user = await get_user_by_username(db, username)
     if user is None or not await verify_password(password, user.password_hash):
-        return None
-    if user.status != models.UserStatus.ACTIVE:
         return None
     return user
 

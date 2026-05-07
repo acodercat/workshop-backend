@@ -2,9 +2,12 @@
 
 Validates the email verification code (via
 :func:`app.services.auth.verification.verify_register_code`), then
-INSERTs the new user row with ``status=PENDING``. Any uniqueness
-collision (``username`` or ``email`` already taken) surfaces as
-:class:`RegisterError`.
+INSERTs the new user row. The email-OTP unified flow is the only
+supported entry today: caller supplies just ``email`` + ``code`` +
+``name``, this module generates a stable ``axon_${id}`` username and
+a random password placeholder (the user can set a real password
+later in settings if they want to use the username + password
+sign-in path).
 
 Lives in its own module so the endpoint stays thin and so the
 verification + insert path can be unit-tested without spinning up a
@@ -12,10 +15,11 @@ full FastAPI app.
 """
 
 import logging
+import secrets
 from typing import Final
 
 import redis.asyncio as aioredis
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,8 +33,8 @@ logger = logging.getLogger(__name__)
 class RegisterError(Exception):
     """Raised for register-time failures the caller should map to an
     HTTP error. ``reason`` is the machine-readable kind
-    (``"username_taken"`` / ``"email_taken"`` / ``"verification_*"``);
-    ``message`` is human-readable."""
+    (``"email_taken"`` / ``"verification_*"``); ``message`` is
+    human-readable."""
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
@@ -38,7 +42,6 @@ class RegisterError(Exception):
         self.message = message
 
 
-_USERNAME_TAKEN: Final = "username_taken"
 _EMAIL_TAKEN: Final = "email_taken"
 
 
@@ -48,35 +51,36 @@ async def register_user(
     *,
     email: str,
     code: str,
-    username: str,
     name: str,
-    password: str,
 ) -> User:
-    """Create a new user row.
+    """Create a new user via the email-OTP flow.
 
     Steps in order — fail-fast cheap checks first, expensive ones
-    last so a user picking a taken username doesn't burn a code:
+    last so a user with a taken email doesn't burn a code:
 
-    1. Pre-check ``username`` and ``email`` uniqueness.
+    1. Pre-check ``email`` uniqueness.
     2. Verify (and consume) the email verification code.
-    3. Hash password + INSERT (status=PENDING). Catches a race-
-       induced IntegrityError and turns it back into a clear 409.
+    3. Reserve the next user id from the sequence so the auto-
+       generated ``axon_${id}`` username is known *before* INSERT.
+    4. INSERT user with ``status=PENDING``. The email is verified
+       (proof of address), but access is gated on a separate admin
+       approval step — login endpoints surface ``account_pending``
+       and refuse to issue a JWT until an admin flips the status to
+       ``ACTIVE``. Random password hash acts as a placeholder; the
+       ``POST /auth/access-tokens`` form-grant login can't
+       authenticate them with this hash anyway, which is correct:
+       new accounts are email-OTP only until the user sets a real
+       password in settings.
     """
     # ---- pre-check uniqueness ---------------------------------------
-    # Two SELECTs: cheap, gives clean error messages before we burn
-    # the verification code. The code consumption in step 2 is the
-    # transactional pivot — if INSERT later races, we re-issue codes
-    # but no rows are created.
-    existing = await db.execute(
-        select(User.id, User.username, User.email).where(
-            (User.username == username) | (User.email == email)
-        )
-    )
-    for _id, existing_username, existing_email in existing.all():
-        if existing_username == username:
-            raise RegisterError(_USERNAME_TAKEN, "用户名已被占用")
-        if existing_email == email:
-            raise RegisterError(_EMAIL_TAKEN, "该邮箱已被注册")
+    # Single SELECT — only ``email`` is user-supplied here; the
+    # generated ``axon_${id}`` is unique by construction (id is from
+    # a sequence). The code consumption in step 2 is the transactional
+    # pivot — if INSERT later races on email, we re-issue codes but no
+    # rows are created.
+    existing = await db.execute(select(User.id).where(User.email == email))
+    if existing.first() is not None:
+        raise RegisterError(_EMAIL_TAKEN, "该邮箱已被注册")
 
     # ---- verify + consume code --------------------------------------
     try:
@@ -90,32 +94,35 @@ async def register_user(
         ) from exc
 
     # ---- create user ------------------------------------------------
+    # Reserve the id up-front so the username can encode it. ``nextval``
+    # bumps the sequence atomically; if the subsequent INSERT fails for
+    # any reason the id is "burned" (Postgres sequences don't roll back),
+    # which is fine — id values are dense-enough for this app's scale
+    # and gaps are harmless.
+    user_id = await _reserve_next_user_id(db)
+    username = f"axon_{user_id}"
+    placeholder_secret = secrets.token_urlsafe(32)
     user = User(
+        id=user_id,
         username=username,
         name=name,
         email=email,
-        password_hash=await get_password_hash(password),
+        password_hash=await get_password_hash(placeholder_secret),
         status=UserStatus.PENDING,
     )
     db.add(user)
     try:
         await db.commit()
     except IntegrityError as exc:
-        # Race window between pre-check and INSERT. Re-derive which
-        # column collided from psycopg's ``diag.constraint_name``
-        # (matches the unique index names defined in migration
-        # ``12dc6d69a9ad``). Reading the structured field rather than
-        # substring-matching the message text means future Postgres /
-        # driver upgrades can change message wording without breaking
-        # the recovery branch.
+        # Race window between the pre-check and INSERT on email — the
+        # only user-supplied unique field. ``ix_user_username`` could
+        # only fire if two registrations raced into the same sequence
+        # value, which the sequence itself prevents; treat it as a 500
+        # if it ever happens.
         await db.rollback()
         constraint = _violated_constraint_name(exc)
-        if constraint == "ix_user_username":
-            raise RegisterError(_USERNAME_TAKEN, "用户名已被占用") from exc
         if constraint == "ix_user_email":
             raise RegisterError(_EMAIL_TAKEN, "该邮箱已被注册") from exc
-        # Unknown unique-violation — let the global exception handler
-        # turn this into a 500 with full traceback in the logs.
         logger.error(
             "Unexpected IntegrityError on user INSERT: constraint=%r orig=%s",
             constraint,
@@ -131,6 +138,22 @@ async def register_user(
         user.email,
     )
     return user
+
+
+async def _reserve_next_user_id(db: AsyncSession) -> int:
+    """Allocate the next ``user.id`` value from its serial sequence.
+
+    Used so the auto-generated ``axon_${id}`` username can be set on
+    the same INSERT as everything else, instead of doing a flush +
+    UPDATE roundtrip with a placeholder username. ``pg_get_serial_
+    sequence`` resolves the sequence name from the ``id`` column's
+    metadata, so this stays correct even if the sequence is renamed
+    in a future migration.
+    """
+    result = await db.execute(
+        text("SELECT nextval(pg_get_serial_sequence('user', 'id'))")
+    )
+    return int(result.scalar_one())
 
 
 def _violated_constraint_name(exc: IntegrityError) -> str | None:

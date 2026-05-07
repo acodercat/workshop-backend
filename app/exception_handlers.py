@@ -36,13 +36,27 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Pydantic / FastAPI request-body validation failure.
+
+    The project's standard envelope is ``{error, message}`` with
+    ``message`` *always* a string — frontend's ``extractMessage``
+    pulls it straight into toasts / banners without parsing
+    structured data. The structured per-field breakdown (which
+    fields failed, what kind of failure) moves to an optional
+    ``details`` slot so callers that *do* want machine-readable
+    output can opt in.
+    """
     errors = [
         {"location": list(err["loc"]), "message": err["msg"], "type": err["type"]}
         for err in exc.errors()
     ]
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        content={"error": "Validation Error", "message": errors},
+        content={
+            "error": "Validation Error",
+            "message": "Request body failed validation.",
+            "details": {"errors": errors},
+        },
     )
 
 

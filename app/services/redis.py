@@ -50,6 +50,12 @@ CANCEL_CHANNEL_PREFIX = "cancel"
 # window. See :mod:`app.services.auth.verification`.
 EMAIL_VERIFY_PREFIX = "email_verify"
 
+# Per-(new-email) email-change verification code prefix. Same JSON
+# shape as the registration prefix, but namespaced separately so a
+# pending registration can't be hijacked by an email-change request
+# (or vice versa) targeting the same address.
+EMAIL_CHANGE_PREFIX = "email_change"
+
 
 def stream_key(prefix: str, entity_id: str) -> str:
     return f"{prefix}:{entity_id}"
@@ -60,6 +66,13 @@ def email_verify_key(email: str) -> str:
     for ``email``. Lowercased so casing variations of the same address
     can't be used to bypass the resend cooldown."""
     return f"{EMAIL_VERIFY_PREFIX}:{email.lower()}"
+
+
+def email_change_key(email: str) -> str:
+    """Redis key holding the pending email-change verification state
+    for the *new* address. Lowercased for the same reason as
+    :func:`email_verify_key`."""
+    return f"{EMAIL_CHANGE_PREFIX}:{email.lower()}"
 
 
 def user_events_key(user_id: int) -> str:

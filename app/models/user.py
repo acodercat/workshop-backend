@@ -50,6 +50,17 @@ class User(Base):
     # registrations always populate it. ``UNIQUE`` is partial (only
     # enforced on non-NULL rows) — see migration ``12dc6d69a9ad``.
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    # Avatar variant counter. ``0`` is the default look derived from
+    # ``id`` alone; each "shuffle" click in the settings UI bumps it
+    # by 1, picking a different deterministic variant. The renderer
+    # is pure client-side (``boring-avatars`` over ``id-r{revision}``
+    # as the seed string), so this column never holds image bytes /
+    # URLs — only the variant index. Using ``int`` instead of a
+    # free-form seed string means we can't trip a length cap no
+    # matter how many times the user shuffles.
+    avatar_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     # Default ``PENDING`` so a freshly inserted row is locked out by
     # default; promotion to ``ACTIVE`` is an explicit step (admin tool /
     # seed script). Existing rows were backfilled to ``ACTIVE`` in the

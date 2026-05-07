@@ -1,19 +1,22 @@
-"""Registration verification code lifecycle.
+"""Email verification code lifecycle.
 
-The contract between :func:`request_register_code` and
-:func:`verify_register_code`:
+Two flows share this module — they have the same wire shape (6-digit
+code, ``{code, sent_at, attempts}`` JSON in Redis with a TTL) but
+namespace their state under different prefixes so they can't collide:
 
-- A 6-digit code is stored in Redis under
-  ``email_verify:{email}`` with ``register_code_ttl_seconds`` TTL
-  (10 min default).
-- The value is JSON ``{code, sent_at, attempts}``. Resending before
-  the cooldown window expires raises :class:`CooldownError`;
-  resending past the cooldown invalidates the previous code and
-  starts fresh.
-- :func:`verify_register_code` matches the supplied code, increments
-  ``attempts`` on a miss, and consumes (deletes) the entry on a hit.
-  After ``register_code_max_attempts`` misses the code is
-  invalidated — the user must request a fresh one.
+- **Registration** (``email_verify:{email}``) — verifying a brand-new
+  email address belongs to the person creating the account.
+  See :func:`request_register_code` / :func:`verify_register_code`.
+- **Email change** (``email_change:{email}``) — verifying that an
+  already-authenticated user controls the *new* address they want to
+  switch to. See :func:`request_email_change_code` /
+  :func:`verify_email_change_code`.
+
+The two prefixes prevent cross-flow contamination: a pending
+registration on ``alice@example.com`` doesn't satisfy an email-change
+target of the same address (and vice versa). The TTL / cooldown /
+max-attempts come from the same ``register_code_*`` settings since
+the security envelope is identical.
 
 Why Redis instead of a DB table:
 
@@ -26,16 +29,18 @@ import json
 import logging
 import secrets
 import time
+from typing import Callable
 
 import redis.asyncio as aioredis
 
 from app.services.email import (
     EmailSendError,
+    render_email_change_verification,
     render_register_verification,
     send_html_email,
 )
 from app.services.email.templates import Locale
-from app.services.redis import email_verify_key
+from app.services.redis import email_change_key, email_verify_key
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -52,22 +57,32 @@ class VerificationError(Exception):
         self.message = message
 
 
+_RenderFn = Callable[..., tuple[str, str]]
+
+
 def _generate_code() -> str:
     """Cryptographically random 6-digit code, zero-padded."""
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-async def request_register_code(
-    redis: aioredis.Redis, *, email: str, locale: Locale = "zh-CN"
+async def _request_code(
+    redis: aioredis.Redis,
+    *,
+    key: str,
+    email: str,
+    locale: Locale,
+    render: _RenderFn,
+    log_label: str,
 ) -> None:
-    """Generate + send a verification code for ``email``.
+    """Generic "generate + send + persist" pipeline used by both the
+    register and email-change flows.
 
-    Refuses with :class:`VerificationError` (``reason="cooldown"``) if
-    a previous code was sent within the cooldown window. Refuses with
-    ``reason="email_send_failed"`` if Aliyun rejects the send (in
-    which case nothing is stored in Redis — the user can retry).
+    ``render`` produces the locale-aware ``(subject, html_body)``
+    pair; ``log_label`` differentiates log messages between flows.
+    Send-then-persist order matters: if Aliyun rejects, we don't want
+    a stale code blocking the user from retrying within the cooldown
+    window.
     """
-    key = email_verify_key(email)
     now = int(time.time())
 
     # Cooldown check: read prior state, reject if the previous send
@@ -88,15 +103,15 @@ async def request_register_code(
             )
 
     code = _generate_code()
-    subject, html_body = render_register_verification(code=code, locale=locale)
+    subject, html_body = render(code=code, locale=locale)
 
-    # Send first; only persist on success. Order matters: if Aliyun
-    # rejects, we don't want a stale code blocking the user from
-    # retrying within the cooldown window.
     try:
         await send_html_email(to=email, subject=subject, html_body=html_body)
     except EmailSendError as exc:
-        logger.warning("register code send failed: email=%s reason=%s", email, exc.message)
+        logger.warning(
+            "%s code send failed: email=%s reason=%s",
+            log_label, email, exc.message,
+        )
         raise VerificationError(
             reason="email_send_failed",
             message="验证码发送失败，请稍后重试",
@@ -108,22 +123,34 @@ async def request_register_code(
         json.dumps(payload),
         ex=settings.register_code_ttl_seconds,
     )
-    logger.info("register code issued: email=%s", email)
+    logger.info("%s code issued: email=%s", log_label, email)
 
 
-async def verify_register_code(
-    redis: aioredis.Redis, *, email: str, code: str
+async def _verify_code(
+    redis: aioredis.Redis,
+    *,
+    key: str,
+    email: str,
+    code: str,
+    log_label: str,
+    consume: bool = True,
 ) -> None:
-    """Verify and consume the pending code for ``email``.
+    """Generic verify-and-(optionally-)consume used by all email
+    verification flows. On a code match: deletes the entry when
+    ``consume=True`` (one-shot, the default), or leaves it untouched
+    when ``consume=False`` (peek mode — caller intends to consume in
+    a subsequent call).
 
-    Success → deletes the entry (one-shot). Mismatch → increments
-    ``attempts``; if it hits the cap the entry is deleted and future
-    verifies surface as ``reason="not_found"``. Returns ``None`` on
-    success; raises :class:`VerificationError` on every failure path
-    so the endpoint can map reasons to HTTP statuses uniformly.
+    Mismatch path is identical regardless of ``consume``:
+    increments ``attempts``; on exceeding the cap, deletes the entry
+    and raises ``too_many_attempts``. Peek mode never weakens the
+    brute-force defense.
+
+    ``email`` is taken alongside ``key`` purely so log lines can
+    record the human-readable address — the Redis key already
+    embeds the email but with a flow-specific prefix that's noise in
+    operational logs.
     """
-    key = email_verify_key(email)
-
     raw = await redis.get(key)
     if raw is None:
         raise VerificationError(
@@ -133,14 +160,16 @@ async def verify_register_code(
     state = json.loads(raw)
 
     if state["code"] == code:
-        await redis.delete(key)
+        if consume:
+            await redis.delete(key)
         return
 
     attempts = state["attempts"] + 1
     if attempts >= settings.register_code_max_attempts:
         await redis.delete(key)
         logger.info(
-            "register code locked after max attempts: email=%s",
+            "%s code locked after max attempts: email=%s",
+            log_label,
             email,
         )
         raise VerificationError(
@@ -156,4 +185,79 @@ async def verify_register_code(
     raise VerificationError(
         reason="mismatch",
         message="验证码错误",
+    )
+
+
+async def request_register_code(
+    redis: aioredis.Redis, *, email: str, locale: Locale = "zh-CN"
+) -> None:
+    """Generate + send a registration verification code for ``email``.
+
+    Refuses with :class:`VerificationError` (``reason="cooldown"``) if
+    a previous code was sent within the cooldown window. Refuses with
+    ``reason="email_send_failed"`` if Aliyun rejects the send.
+    """
+    await _request_code(
+        redis,
+        key=email_verify_key(email),
+        email=email,
+        locale=locale,
+        render=render_register_verification,
+        log_label="register",
+    )
+
+
+async def verify_register_code(
+    redis: aioredis.Redis,
+    *,
+    email: str,
+    code: str,
+    consume: bool = True,
+) -> None:
+    """Verify the pending registration code for ``email``.
+
+    By default consumes the code on success (one-shot). Pass
+    ``consume=False`` for peek mode, used by the unified email-OTP
+    login flow when the caller wants to check code validity before
+    deciding whether to log in (existing user) or hand off to the
+    register endpoint (new user). See :func:`_verify_code` for the
+    full failure-mode semantics.
+    """
+    await _verify_code(
+        redis,
+        key=email_verify_key(email),
+        email=email,
+        code=code,
+        log_label="register",
+        consume=consume,
+    )
+
+
+async def request_email_change_code(
+    redis: aioredis.Redis, *, email: str, locale: Locale = "zh-CN"
+) -> None:
+    """Generate + send an email-change verification code to ``email``
+    (the *new* address the user wants to switch to). Same failure
+    modes as :func:`request_register_code`."""
+    await _request_code(
+        redis,
+        key=email_change_key(email),
+        email=email,
+        locale=locale,
+        render=render_email_change_verification,
+        log_label="email_change",
+    )
+
+
+async def verify_email_change_code(
+    redis: aioredis.Redis, *, email: str, code: str
+) -> None:
+    """Verify and consume the pending email-change code for
+    ``email``. See :func:`_verify_code` for failure modes."""
+    await _verify_code(
+        redis,
+        key=email_change_key(email),
+        email=email,
+        code=code,
+        log_label="email_change",
     )
