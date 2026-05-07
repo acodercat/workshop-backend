@@ -36,9 +36,20 @@ class User(Base):
     __tablename__ = "user"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Display name shown in the UI. Distinct from ``username`` because
+    # the user can change their display name freely; ``username`` is
+    # the stable login identifier.
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
+    # Stable login identifier. ``UNIQUE`` enforced; case-sensitive
+    # storage but the registration validator caps to alphanumeric +
+    # ``_``/``-`` so casing collisions are unlikely in practice.
+    username: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
+    # Used for verification email + future contact. ``NULL`` for legacy
+    # users created before the email-verification flow existed; new
+    # registrations always populate it. ``UNIQUE`` is partial (only
+    # enforced on non-NULL rows) — see migration ``12dc6d69a9ad``.
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     # Default ``PENDING`` so a freshly inserted row is locked out by
     # default; promotion to ``ACTIVE`` is an explicit step (admin tool /
     # seed script). Existing rows were backfilled to ``ACTIVE`` in the

@@ -45,15 +45,15 @@ async def verify_password(plain_password: str, hashed_password: str) -> bool:
     return await asyncio.to_thread(_verify_password_sync, plain_password, hashed_password)
 
 
-async def get_user_by_phone(db: AsyncSession, phone: str) -> models.User | None:
-    """Look up a user by their phone number, which serves as the login identifier."""
-    stmt = select(models.User).where(models.User.phone == phone)
+async def get_user_by_username(db: AsyncSession, username: str) -> models.User | None:
+    """Look up a user by their username — the login identifier."""
+    stmt = select(models.User).where(models.User.username == username)
     result = await db.execute(stmt)
     return result.scalar()
 
 
 async def authenticate_user(
-    db: AsyncSession, phone: str, password: str
+    db: AsyncSession, username: str, password: str
 ) -> models.User | None:
     """Return the user if credentials are valid AND the account is
     ``ACTIVE``, otherwise None.
@@ -64,7 +64,7 @@ async def authenticate_user(
     locked". Existing JWTs aren't revoked by a status change; bump
     ``token_version`` separately if you need immediate force-logout.
     """
-    user = await get_user_by_phone(db, phone)
+    user = await get_user_by_username(db, username)
     if user is None or not await verify_password(password, user.password_hash):
         return None
     if user.status != models.UserStatus.ACTIVE:
@@ -166,12 +166,15 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
         # worst. Refuse without distinguishing the two.
         raise credentials_exception
 
-    phone: str | None = payload.get("sub")
+    # ``sub`` was previously the user's phone number; we backfilled
+    # pre-existing values into ``username`` 1:1, so old tokens keep
+    # working unchanged after the rename.
+    username: str | None = payload.get("sub")
     token_version: int = payload.get("token_version", 0)
-    if phone is None:
+    if username is None:
         raise credentials_exception
 
-    user = await get_user_by_phone(db, phone=phone)
+    user = await get_user_by_username(db, username=username)
     if user is None or user.token_version != token_version:
         raise credentials_exception
     return user

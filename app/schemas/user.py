@@ -1,14 +1,20 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class UserResponse(BaseModel):
+    """Public-facing user shape — what ``GET /me`` and registration
+    return. ``status`` is intentionally omitted: a logged-in caller is
+    by definition ``ACTIVE``, and exposing the field would just leak
+    an enum to the frontend that has no use for it."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    username: str
     name: str
-    phone: str | None
+    email: str | None
     last_login_at: datetime | None
     created_at: datetime
     updated_at: datetime

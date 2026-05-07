@@ -61,6 +61,32 @@ class Settings(BaseSettings):
         default="5/5minute",
         description="Per-IP share-unlock attempts (password brute-force guard)",
     )
+    rate_limit_register_code: str = Field(
+        default="5/hour",
+        description="Per-IP registration code-send attempts (mail-spam guard, on top of the per-email cooldown)",
+    )
+    rate_limit_register: str = Field(
+        default="20/hour",
+        description="Per-IP registration completion attempts",
+    )
+
+    # Registration / email verification — values picked to match
+    # mainstream consumer products (60s resend cooldown, 10min code
+    # TTL, 5 wrong-attempt cap before invalidation). Tweak to taste;
+    # all on one config knob avoids hardcoded magic numbers in service
+    # code.
+    register_code_ttl_seconds: int = Field(
+        default=600,
+        description="Registration verification code lifetime (s)",
+    )
+    register_code_resend_cooldown_seconds: int = Field(
+        default=60,
+        description="Min seconds between two send-code calls for the same email",
+    )
+    register_code_max_attempts: int = Field(
+        default=5,
+        description="Wrong code attempts allowed per code; exceeding invalidates the code",
+    )
 
     # Redis — two pools, sized differently because their workloads
     # don't mix safely. ``redis_pool_size`` serves short ops (XADD,
@@ -83,6 +109,28 @@ class Settings(BaseSettings):
     oss_access_key_secret: str = Field(description="OSS access key secret")
     oss_document_bucket_name: str = Field(default="metaseq-computer", description="OSS document bucket")
     oss_endpoint: str = Field(default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL")
+
+    # Alibaba Cloud DirectMail — used to send the registration
+    # verification code. Independent AK pair from OSS so the RAM
+    # subaccount can be locked down to ``AliyunDirectMailFullAccess``
+    # only. Defaults are empty strings (instead of required) so dev
+    # environments without DM access can still boot — calls that need
+    # DM will fail loudly with a clearer error than a Pydantic
+    # validation panic at import.
+    aliyun_dm_access_key_id: str = Field(default="", description="DirectMail RAM AccessKey ID")
+    aliyun_dm_access_key_secret: str = Field(default="", description="DirectMail RAM AccessKey Secret")
+    aliyun_dm_region: str = Field(
+        default="cn-hangzhou",
+        description="DirectMail service region; ``ap-southeast-1`` for the Singapore node",
+    )
+    aliyun_dm_account_name: str = Field(
+        default="",
+        description="Verified sender address (must be approved + SPF/DKIM passed in DM console)",
+    )
+    aliyun_dm_from_alias: str = Field(
+        default="AXON",
+        description="``发送人名称`` shown in the recipient's inbox; ≤30 chars",
+    )
 
     # LLM — used only for light-weight synchronous calls from the
     # backend itself (e.g. session-title generation). Agent turns run

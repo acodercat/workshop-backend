@@ -44,9 +44,22 @@ WORKER_NOTIFY_CHANNEL = "notify:worker"
 # session (if any) and fires :meth:`Agent.cancel` on its loop.
 CANCEL_CHANNEL_PREFIX = "cancel"
 
+# Per-email registration verification code prefix. Plain string keys
+# (not streams), one per pending registration. JSON value carries the
+# code + send timestamp + attempt counter; TTL controls the validity
+# window. See :mod:`app.services.auth.verification`.
+EMAIL_VERIFY_PREFIX = "email_verify"
+
 
 def stream_key(prefix: str, entity_id: str) -> str:
     return f"{prefix}:{entity_id}"
+
+
+def email_verify_key(email: str) -> str:
+    """Redis key holding the active registration verification state
+    for ``email``. Lowercased so casing variations of the same address
+    can't be used to bypass the resend cooldown."""
+    return f"{EMAIL_VERIFY_PREFIX}:{email.lower()}"
 
 
 def user_events_key(user_id: int) -> str:
