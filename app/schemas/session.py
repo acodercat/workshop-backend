@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.models.session import SessionStatus
+from app.schemas.message_feedback import FeedbackResponse
 
 
 class SessionCreate(BaseModel):
@@ -53,11 +54,19 @@ class MessageQueuedResponse(BaseModel):
 
 
 class MessageResponse(BaseModel):
-    """One message in the ``GET /sessions/{id}`` payload."""
+    """One message in the ``GET /sessions/{id}`` payload.
+
+    ``feedback`` is the *current user's* feedback on this message
+    (loaded by left-joining ``message_feedback`` filtered by the
+    requesting ``user_id``). ``None`` means the user hasn't voted —
+    not that no feedback exists in the table from anyone, since this
+    is owner-only and there's only ever one voter per session anyway.
+    Always ``None`` for user messages."""
     id: int
     role: str
     blocks: list[dict[str, Any]]
     created_at: datetime
+    feedback: FeedbackResponse | None = None
 
     model_config = {"from_attributes": True}
 

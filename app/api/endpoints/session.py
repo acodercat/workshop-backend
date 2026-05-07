@@ -23,7 +23,9 @@ import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from openai import OpenAIError
 import redis.asyncio as aioredis
+import sqlalchemy as sa
 from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -36,13 +38,20 @@ from app.auth import (
 from app.database import AsyncSessionLocal
 from config import settings
 from app.common.pagination import paginate
-from app.models.message import Message
+from app.models.message import Message, MessageRole
+from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
 from app.models.session_share import SessionShare
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.file import DownloadUrlResponse
+from app.schemas.message_feedback import (
+    FeedbackResponse,
+    FeedbackUpsert,
+    parse_rating,
+    serialize_rating,
+)
 from app.schemas.session import (
     MessageCreate,
     MessageQueuedResponse,
@@ -83,22 +92,47 @@ async def _get_or_404(
     return session
 
 
-async def _load_messages(db: AsyncSession, session_id: str) -> list[MessageResponse]:
-    """Load a session's messages, projected into the response shape."""
+async def _load_messages(
+    db: AsyncSession, session_id: str, user_id: int,
+) -> list[MessageResponse]:
+    """Load a session's messages, projected into the response shape.
+
+    LEFT JOINs ``message_feedback`` filtered by ``user_id`` so each
+    message ships with the current user's feedback (or ``None`` if
+    they haven't voted). The filter goes *into* the join condition,
+    not a WHERE clause — otherwise messages without a feedback row
+    would be dropped from the result.
+    """
     stmt = (
-        select(Message)
+        select(Message, MessageFeedback)
+        .outerjoin(
+            MessageFeedback,
+            sa.and_(
+                MessageFeedback.message_id == Message.id,
+                MessageFeedback.user_id == user_id,
+            ),
+        )
         .where(Message.session_id == session_id)
         .order_by(Message.created_at.asc())
     )
-    rows = (await db.execute(stmt)).scalars().all()
+    rows = (await db.execute(stmt)).all()
     return [
         MessageResponse(
-            id=row.id,
-            role=row.role.value,
-            blocks=row.blocks,
-            created_at=row.created_at,
+            id=message.id,
+            role=message.role.value,
+            blocks=message.blocks,
+            created_at=message.created_at,
+            feedback=(
+                FeedbackResponse(
+                    rating=serialize_rating(feedback.rating),
+                    comment=feedback.comment,
+                    updated_at=feedback.updated_at,
+                )
+                if feedback is not None
+                else None
+            ),
         )
-        for row in rows
+        for message, feedback in rows
     ]
 
 
@@ -167,7 +201,7 @@ async def get_session(
     the detail response is complete on its own.
     """
     session = await _get_or_404(db, session_id, current_user.id)
-    messages = await _load_messages(db, session_id)
+    messages = await _load_messages(db, session_id, current_user.id)
     return SessionDetailResponse(
         id=session.id,
         title=session.title,
@@ -334,7 +368,7 @@ async def list_messages(
 ):
     """Deprecated — use ``GET /sessions/{id}`` for the structured payload."""
     await _get_or_404(db, session_id, current_user.id)
-    return await _load_messages(db, session_id)
+    return await _load_messages(db, session_id, current_user.id)
 
 
 @router.post("/sessions/titles", response_model=TitleGenerateResponse)
@@ -495,3 +529,114 @@ async def get_download_url(
     return DownloadUrlResponse(
         download_url=url, file_key=file_key, expires_in=expires_in,
     )
+
+
+# ---- per-message feedback (thumbs up / down + optional comment) ----------
+#
+# One vote per user per message, enforced by ``UNIQUE(message_id,
+# user_id)``. PUT does upsert (rating + comment in one call); DELETE
+# clears the row. ``GET /sessions/{id}`` already round-trips the
+# current user's feedback via the LEFT JOIN in ``_load_messages``,
+# so there's no separate read endpoint.
+
+
+async def _resolve_assistant_message(
+    db: AsyncSession, session_id: uuid.UUID, message_id: int, user_id: int,
+) -> Message:
+    """Verify session ownership + the message belongs to it AND is
+    an assistant message. Two 404s and one 400 — the same shape we
+    use elsewhere so we don't leak existence of unrelated rows."""
+    await _get_or_404(db, session_id, user_id)
+    stmt = (
+        select(Message)
+        .where(Message.id == message_id, Message.session_id == session_id)
+    )
+    message = (await db.execute(stmt)).scalar_one_or_none()
+    if message is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if message.role != MessageRole.ASSISTANT:
+        raise HTTPException(
+            status_code=400,
+            detail="Feedback is only supported on assistant messages",
+        )
+    return message
+
+
+@router.put(
+    "/sessions/{session_id}/messages/{message_id}/feedback",
+    response_model=FeedbackResponse,
+)
+async def upsert_feedback(
+    session_id: uuid.UUID,
+    message_id: int,
+    body: FeedbackUpsert,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Upsert the caller's feedback on an assistant message.
+
+    PUT semantics — idempotent. Postgres ``ON CONFLICT`` on the
+    ``(message_id, user_id)`` UNIQUE does the upsert in one statement
+    so we never have a window where the row exists with a stale
+    rating; ``updated_at`` is bumped explicitly because ``onupdate``
+    only fires on a true UPDATE through the ORM, not on a raw INSERT
+    ON CONFLICT path.
+    """
+    await _resolve_assistant_message(
+        db, session_id, message_id, current_user.id,
+    )
+    rating_int = parse_rating(body.rating)
+    # Treat empty / whitespace-only comments as None — the wire
+    # contract is "use DELETE to clear", not "send an empty string".
+    comment = body.comment.strip() if body.comment else None
+    if comment == "":
+        comment = None
+
+    stmt = (
+        pg_insert(MessageFeedback)
+        .values(
+            message_id=message_id,
+            user_id=current_user.id,
+            rating=rating_int,
+            comment=comment,
+        )
+        .on_conflict_do_update(
+            constraint="uq_message_feedback_user",
+            set_={
+                "rating": rating_int,
+                "comment": comment,
+                "updated_at": func.now(),
+            },
+        )
+        .returning(MessageFeedback)
+    )
+    row = (await db.execute(stmt)).scalar_one()
+    await db.commit()
+    return FeedbackResponse(
+        rating=serialize_rating(row.rating),
+        comment=row.comment,
+        updated_at=row.updated_at,
+    )
+
+
+@router.delete(
+    "/sessions/{session_id}/messages/{message_id}/feedback",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_feedback(
+    session_id: uuid.UUID,
+    message_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Clear the caller's feedback. No-op if none exists."""
+    await _resolve_assistant_message(
+        db, session_id, message_id, current_user.id,
+    )
+    await db.execute(
+        delete(MessageFeedback).where(
+            MessageFeedback.message_id == message_id,
+            MessageFeedback.user_id == current_user.id,
+        )
+    )
+    await db.commit()
