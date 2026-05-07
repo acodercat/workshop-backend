@@ -205,17 +205,22 @@ async def create_share_access_token(
 
 
 @router.get(
-    "/shares/{token}/files/{file_key:path}",
+    "/shares/{token}/files/download-url",
     response_model=DownloadUrlResponse,
 )
 async def get_share_file_url(
     token: str,
-    file_key: str,
+    file_key: Annotated[str, Query(description="OSS file key returned from the upload step")],
     filename: Annotated[str, Query(description="Filename for Content-Disposition")],
     credentials: _ShareViewCredentials = None,
     db: AsyncSession = Depends(get_db),
 ) -> DownloadUrlResponse:
     """Mint a presigned download URL for a file the shared session owns.
+
+    URL is intentionally **not** ``/files/{file_key}``: the response is
+    a download-URL string, not the file's bytes. ``download-url`` is
+    the resource being minted; ``file_key`` and ``filename`` are
+    parameters to that minting.
 
     Authorization gate: same as :func:`get_share`. Additionally
     verifies via ``session_files`` that ``file_key`` is bound to

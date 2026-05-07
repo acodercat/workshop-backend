@@ -18,7 +18,7 @@ from app.auth import get_password_hash
 from config import settings
 
 USERS = [
-    ("gan", "gan20260506"),
+    ("de", "de20260506"),
     # ("andy", "andy123"),
     # ("zhou", "zhou123"),
     # ("jun", "jun123"),

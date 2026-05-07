@@ -169,7 +169,7 @@ async def test_document_generation_and_delivery(
     #    + key shape + presign path all line up.
     target = matching[0]
     resp = await http_client.get(
-        "/files/download-url",
+        f"/sessions/{session_id}/files/download-url",
         params={
             "file_key": target["file_key"],
             "filename": target["filename"],

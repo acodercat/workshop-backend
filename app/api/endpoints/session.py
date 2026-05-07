@@ -19,6 +19,7 @@ SSE streaming — lives in :mod:`app.services.session`.
 import logging
 import secrets
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from openai import OpenAIError
@@ -500,12 +501,19 @@ async def delete_share(
 )
 async def get_download_url(
     session_id: uuid.UUID,
-    file_key: str = Query(..., description="OSS file key returned from the upload step"),
-    filename: str = Query(..., description="Original filename for Content-Disposition"),
+    file_key: Annotated[str, Query(description="OSS file key returned from the upload step")],
+    filename: Annotated[str, Query(description="Filename for Content-Disposition")],
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
     """Mint a presigned GET URL for a file referenced by ``session_id``.
+
+    URL is intentionally **not** ``/files/{file_key}``: the response is
+    a download-URL string, not the file's bytes. Putting ``file_key``
+    in the path would advertise "GET this URI returns the file" which
+    is a lie — what we actually return is a presigned URL the caller
+    must follow. ``download-url`` is the resource being minted;
+    ``file_key`` and ``filename`` are parameters to that minting.
 
     Two-step authorization: ``_get_or_404`` verifies the caller owns
     the session, then a ``session_files`` lookup verifies the
@@ -586,11 +594,9 @@ async def upsert_feedback(
         db, session_id, message_id, current_user.id,
     )
     rating_int = parse_rating(body.rating)
-    # Treat empty / whitespace-only comments as None — the wire
-    # contract is "use DELETE to clear", not "send an empty string".
-    comment = body.comment.strip() if body.comment else None
-    if comment == "":
-        comment = None
+    # Schema validator already stripped + rejected blank — ``body.comment``
+    # is either ``None`` or a non-empty trimmed string here.
+    comment = body.comment
 
     stmt = (
         pg_insert(MessageFeedback)
