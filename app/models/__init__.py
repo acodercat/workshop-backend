@@ -17,11 +17,12 @@ from app.models.sandbox import Sandbox
 from app.models.session import Session
 from app.models.session_files import SessionFile
 from app.models.session_share import SessionShare
-from app.models.user import User
+from app.models.user import User, UserStatus
 
 __all__ = [
     "Base",
     "User",
+    "UserStatus",
     "Session",
     "SessionFile",
     "SessionShare",

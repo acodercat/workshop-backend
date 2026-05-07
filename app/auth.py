@@ -55,9 +55,19 @@ async def get_user_by_phone(db: AsyncSession, phone: str) -> models.User | None:
 async def authenticate_user(
     db: AsyncSession, phone: str, password: str
 ) -> models.User | None:
-    """Return the user if credentials are valid, otherwise None."""
+    """Return the user if credentials are valid AND the account is
+    ``ACTIVE``, otherwise None.
+
+    ``DISABLED`` / ``SUSPENDED`` / ``PENDING`` accounts are treated the
+    same as wrong credentials at the login endpoint — same generic 401
+    so a probing client can't tell "wrong password" from "account
+    locked". Existing JWTs aren't revoked by a status change; bump
+    ``token_version`` separately if you need immediate force-logout.
+    """
     user = await get_user_by_phone(db, phone)
     if user is None or not await verify_password(password, user.password_hash):
+        return None
+    if user.status != models.UserStatus.ACTIVE:
         return None
     return user
 

@@ -37,11 +37,14 @@ async def main() -> None:
                 continue
             # ``token_version`` is a Python-side default on the ORM
             # model; raw INSERT must pass it explicitly because the
-            # DB column has NOT NULL with no server default.
+            # DB column has NOT NULL with no server default. ``status``
+            # is set to ``ACTIVE`` explicitly so seeded dev accounts
+            # bypass the ``PENDING`` server default — they need to log
+            # in immediately.
             cur.execute(
                 'INSERT INTO "user" '
-                "(name, phone, password_hash, token_version) "
-                "VALUES (%s, %s, %s, 0) RETURNING id",
+                "(name, phone, password_hash, token_version, status) "
+                "VALUES (%s, %s, %s, 0, 'ACTIVE') RETURNING id",
                 (phone, phone, await get_password_hash(password)),
             )
             new_id = cur.fetchone()[0]
