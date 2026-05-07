@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,27 @@ from app.services.auth import (
     request_register_code,
 )
 from config import settings
+
+
+def _error_response(
+    *,
+    status_code: int,
+    error: str,
+    message: str,
+) -> JSONResponse:
+    """Build the project's standard ``{error, message}`` envelope with
+    a *specific* ``error`` reason code (e.g. ``"username_taken"``)
+    instead of the generic ``"HTTP Exception"`` the global
+    :func:`http_exception_handler` would emit.
+
+    Returning :class:`JSONResponse` directly bypasses the global
+    handler — used here so register / verification-code error paths
+    can carry a machine-readable reason the frontend branches on
+    without string-matching the ``message`` field."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": error, "message": message},
+    )
 
 router = APIRouter()
 
@@ -105,22 +127,25 @@ async def create_verification_code(
         )
     except VerificationError as exc:
         if exc.reason == "cooldown":
-            raise HTTPException(
+            return _error_response(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=exc.message,
-            ) from exc
+                error="cooldown",
+                message=exc.message,
+            )
         if exc.reason == "email_send_failed":
-            raise HTTPException(
+            return _error_response(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=exc.message,
-            ) from exc
+                error="email_send_failed",
+                message=exc.message,
+            )
         # Defensive: any other reason from this entry point is a
         # programmer error (verify path returns those reasons), not a
         # client-facing condition.
-        raise HTTPException(
+        return _error_response(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=exc.message,
-        ) from exc
+            error="bad_request",
+            message=exc.message,
+        )
 
 
 @router.post(
@@ -155,19 +180,26 @@ async def create_user(
         )
     except RegisterError as exc:
         if exc.reason in ("username_taken", "email_taken"):
-            raise HTTPException(
+            return _error_response(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=exc.message,
-            ) from exc
+                error=exc.reason,
+                message=exc.message,
+            )
         if exc.reason == "verification_too_many_attempts":
-            raise HTTPException(
+            return _error_response(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=exc.message,
-            ) from exc
-        # mismatch / not_found / anything else verification raised
-        raise HTTPException(
+                error=exc.reason,
+                message=exc.message,
+            )
+        # ``verification_mismatch`` / ``verification_not_found`` —
+        # collapsed to one client-facing reason (``invalid_code``)
+        # because the user-facing message and recovery action are the
+        # same. ``verification_email_send_failed`` shouldn't reach this
+        # branch (it's raised earlier from request_register_code).
+        return _error_response(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=exc.message,
-        ) from exc
+            error="invalid_code",
+            message=exc.message,
+        )
 
     return user

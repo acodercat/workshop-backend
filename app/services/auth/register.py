@@ -102,15 +102,25 @@ async def register_user(
         await db.commit()
     except IntegrityError as exc:
         # Race window between pre-check and INSERT. Re-derive which
-        # column collided so the client gets the right message.
+        # column collided from psycopg's ``diag.constraint_name``
+        # (matches the unique index names defined in migration
+        # ``12dc6d69a9ad``). Reading the structured field rather than
+        # substring-matching the message text means future Postgres /
+        # driver upgrades can change message wording without breaking
+        # the recovery branch.
         await db.rollback()
-        msg = str(exc.orig).lower() if exc.orig else ""
-        if "username" in msg:
+        constraint = _violated_constraint_name(exc)
+        if constraint == "ix_user_username":
             raise RegisterError(_USERNAME_TAKEN, "用户名已被占用") from exc
-        if "email" in msg:
+        if constraint == "ix_user_email":
             raise RegisterError(_EMAIL_TAKEN, "该邮箱已被注册") from exc
         # Unknown unique-violation — let the global exception handler
         # turn this into a 500 with full traceback in the logs.
+        logger.error(
+            "Unexpected IntegrityError on user INSERT: constraint=%r orig=%s",
+            constraint,
+            exc.orig,
+        )
         raise
 
     await db.refresh(user)
@@ -121,3 +131,15 @@ async def register_user(
         user.email,
     )
     return user
+
+
+def _violated_constraint_name(exc: IntegrityError) -> str | None:
+    """Pull the unique-constraint name out of an ``IntegrityError``.
+
+    psycopg surfaces ``diag.constraint_name`` on its native exception
+    (which SQLAlchemy wraps as ``exc.orig``). Drivers that don't
+    implement ``diag`` return ``None`` and the caller falls through to
+    the catch-all path."""
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    name = getattr(diag, "constraint_name", None)
+    return name if isinstance(name, str) else None
