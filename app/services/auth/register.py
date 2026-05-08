@@ -91,17 +91,6 @@ async def register_user(
     try:
         await db.commit()
     except IntegrityError as exc:
-        # Race window between the pre-check and INSERT. Email is the
-        # only user-supplied unique field; ``axon_${id}`` username is
-        # generated from a Postgres sequence and can't realistically
-        # collide. So any IntegrityError reaching this point is the
-        # email uniqueness pre-check losing a race — surface as
-        # ``EmailTakenError`` and let the user retry.
-        #
-        # Deliberately not introspecting ``exc.orig.diag.constraint_name``:
-        # alembic-generated index names (``ix_user_email`` etc.) are
-        # schema details that migrations may rename, and coupling
-        # business logic to them creates a silent-breakage risk.
         await db.rollback()
         logger.info("register race: email=%s", email)
         raise EmailTakenError("Email already registered") from exc
