@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Enum as SAEnum,
@@ -7,9 +8,12 @@ from sqlalchemy import (
     String,
     TIMESTAMP,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.user_feedback import UserFeedback
 
 
 class UserStatus(StrEnum):
@@ -87,6 +91,16 @@ class User(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False
+    )
+
+    # App-level feedback the user submitted to the admin team. Distinct
+    # from message-level thumbs ratings (``message_feedback``); see
+    # :mod:`app.models.user_feedback`.
+    feedback_submissions: Mapped[list["UserFeedback"]] = relationship(
+        back_populates="user",
+        cascade="save-update, merge",  # NOT delete-orphan: ``ON DELETE
+        # SET NULL`` on the FK preserves rows for audit when a user
+        # is deleted, so we don't want SQLAlchemy to cascade-delete.
     )
 
     def __repr__(self):

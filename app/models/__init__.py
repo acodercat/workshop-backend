@@ -18,6 +18,7 @@ from app.models.session import Session
 from app.models.session_files import SessionFile
 from app.models.session_share import SessionShare
 from app.models.user import User, UserStatus
+from app.models.user_feedback import FeedbackStatus, UserFeedback
 
 __all__ = [
     "Base",
@@ -29,4 +30,6 @@ __all__ = [
     "Sandbox",
     "Message",
     "MessageFeedback",
+    "UserFeedback",
+    "FeedbackStatus",
 ]
