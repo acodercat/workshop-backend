@@ -35,15 +35,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.errors import AppError
 
 
-def _envelope(
+def _error_envelope(
     *,
     type_: str,
     message: str,
     details: object | None = None,
 ) -> dict[str, Any]:
-    """Build the canonical error envelope. ``details`` is omitted from
-    the wire when ``None`` so callers don't litter responses with
-    nulls."""
+    """Build the canonical Stripe-style error envelope ::
+
+        {"error": {"type": ..., "message": ..., "details": ...}}
+
+    ``details`` is omitted from the wire when ``None`` so callers
+    don't litter responses with explicit nulls."""
     error: dict[str, Any] = {"type": type_, "message": message}
     if details is not None:
         error["details"] = details
@@ -64,7 +67,7 @@ def _phrase_to_type(code: int) -> str:
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
-        content=_envelope(type_=exc.error_type, message=exc.message),
+        content=_error_envelope(type_=exc.error_type, message=exc.message),
     )
 
 
@@ -74,7 +77,7 @@ async def integrity_error_handler(
     logger.warning(f"Integrity error: {exc}")
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
-        content=_envelope(
+        content=_error_envelope(
             type_="conflict",
             message="The request violates a database constraint.",
         ),
@@ -87,7 +90,7 @@ async def sqlalchemy_exception_handler(
     logger.error(f"Database error: {exc}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=_envelope(
+        content=_error_envelope(
             type_="database_error",
             message="An error occurred while processing your request.",
         ),
@@ -116,7 +119,7 @@ async def http_exception_handler(
     if isinstance(exc.detail, dict):
         return JSONResponse(
             status_code=exc.status_code,
-            content=_envelope(
+            content=_error_envelope(
                 type_=type_,
                 message=HTTPStatus(exc.status_code).phrase,
                 details=exc.detail,
@@ -125,7 +128,7 @@ async def http_exception_handler(
         )
     return JSONResponse(
         status_code=exc.status_code,
-        content=_envelope(type_=type_, message=str(exc.detail)),
+        content=_error_envelope(type_=type_, message=str(exc.detail)),
         headers=exc.headers,
     )
 
@@ -146,7 +149,7 @@ async def validation_exception_handler(
     ]
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        content=_envelope(
+        content=_error_envelope(
             type_="validation_error",
             message="Request body failed validation.",
             details=details,
@@ -160,7 +163,7 @@ async def general_exception_handler(
     logger.exception(f"Unexpected error: {exc}")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=_envelope(
+        content=_error_envelope(
             type_="internal_server_error",
             message="An unexpected error occurred.",
         ),
