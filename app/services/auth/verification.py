@@ -93,7 +93,7 @@ async def _request_code(
         if elapsed < cooldown:
             remaining = cooldown - elapsed
             raise CooldownError(
-                f"Please try again in {remaining} seconds"
+                f"Cooldown active; retry in {remaining} seconds"
             )
 
     code = _generate_code()
@@ -107,7 +107,7 @@ async def _request_code(
             log_label, email, exc.message,
         )
         raise EmailSendFailedError(
-            "Failed to send verification email; please try again later"
+            "Verification email send failed"
         ) from exc
 
     payload = {"code": code, "sent_at": now, "attempts": 0}
@@ -147,7 +147,7 @@ async def _verify_code(
     raw = await redis.get(key)
     if raw is None:
         raise InvalidVerificationCodeError(
-            "Verification code expired or not found; please request a new one"
+            "Verification code expired or not found"
         )
     state = json.loads(raw)
 
@@ -165,7 +165,7 @@ async def _verify_code(
             email,
         )
         raise TooManyVerificationAttemptsError(
-            "Too many incorrect attempts; please request a new code"
+            "Too many incorrect verification attempts"
         )
 
     # Update with new attempt count, preserving the original TTL — we
@@ -222,12 +222,18 @@ async def verify_register_code(
     )
 
 
-async def request_email_change_code(
+async def send_email_change_code(
     redis: aioredis.Redis, *, email: str, locale: Locale = "zh-CN"
 ) -> None:
     """Generate + send an email-change verification code to ``email``
     (the *new* address the user wants to switch to). Same failure
-    modes as :func:`request_register_code`."""
+    modes as :func:`request_register_code`.
+
+    Named ``send_*`` (rather than ``request_*``) so it doesn't
+    collide with :func:`app.services.auth.email_change.request_email_change_code`
+    — that one is the orchestrator (sudo + uniqueness pre-check + this
+    dispatch). The two were originally same-named with an import alias;
+    the rename here drops the alias."""
     await _request_code(
         redis,
         key=email_change_key(email),

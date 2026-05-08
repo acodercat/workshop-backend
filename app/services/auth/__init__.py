@@ -12,8 +12,8 @@ Sub-modules:
   authenticated user: sudo + verify code + bump ``token_version``.
 
 Email-change exports stay submodule-scoped (``from app.services.auth
-.email_change import ...``) to avoid shadowing the same-named
-``request_email_change_code`` in :mod:`.verification`.
+.email_change import ...``) — they're called from one endpoint each,
+so re-exporting at the package level adds noise without saving work.
 """
 
 from app.services.auth.register import register_user

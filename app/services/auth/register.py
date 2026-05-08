@@ -65,13 +65,9 @@ async def register_user(
     # rows are created.
     existing = await db.execute(select(User.id).where(User.email == email))
     if existing.first() is not None:
-        raise EmailTakenError("Email is already registered")
+        raise EmailTakenError("Email already registered")
 
     # ---- verify + consume code --------------------------------------
-    # ``verify_register_code`` raises typed ``AppError`` subclasses
-    # (``InvalidVerificationCodeError`` / ``TooManyVerificationAttemptsError``)
-    # that bubble up to the endpoint handler unchanged — no translation
-    # layer needed here.
     await verify_register_code(redis, email=email, code=code)
 
     # ---- create user ------------------------------------------------
@@ -103,7 +99,7 @@ async def register_user(
         await db.rollback()
         constraint = _violated_constraint_name(exc)
         if constraint == "ix_user_email":
-            raise EmailTakenError("Email is already registered") from exc
+            raise EmailTakenError("Email already registered") from exc
         logger.error(
             "Unexpected IntegrityError on user INSERT: constraint=%r orig=%s",
             constraint,

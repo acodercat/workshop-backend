@@ -55,7 +55,7 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     if user.status is UserStatus.PENDING:
-        raise AccountPendingError("Account is awaiting administrator approval")
+        raise AccountPendingError("Account awaiting administrator approval")
     if user.status is not UserStatus.ACTIVE:
         # ``DISABLED`` / ``SUSPENDED`` collapse to the same opaque 401
         # as wrong credentials so admin lockouts don't leak.
@@ -177,7 +177,7 @@ async def access_token_by_code(
         return EmailLoginNewUser()
 
     if existing.status is UserStatus.PENDING:
-        raise AccountPendingError("Account is awaiting administrator approval")
+        raise AccountPendingError("Account awaiting administrator approval")
     if existing.status is not UserStatus.ACTIVE:
         # ``DISABLED`` / ``SUSPENDED`` collapse to the same opaque 401
         # as wrong code so admin lockouts don't leak.

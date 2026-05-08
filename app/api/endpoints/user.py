@@ -6,7 +6,7 @@ keeping unused endpoints invites scope creep and security regressions
 admin UI, ideally with a dedicated search index instead of ``ilike``.
 """
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, Request, status
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -19,6 +19,7 @@ from app.auth import (
     revoke_user_tokens,
     verify_password,
 )
+from app.errors import IncorrectPasswordError, SamePasswordError
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.user import (
@@ -103,18 +104,11 @@ async def change_password(
     current_user: User = Depends(authenticate_and_get_user),
 ):
     if not await verify_password(data.current_password, current_user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect",
-        )
+        raise IncorrectPasswordError("Current password incorrect")
     # Refuse no-op changes: a same-password "update" would still bump
-    # ``token_version`` and kick the user out of every active session
-    # for nothing. Surface the no-op as a 400 instead.
+    # ``token_version`` and kick every active session out for nothing.
     if await verify_password(data.new_password, current_user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must differ from the current one",
-        )
+        raise SamePasswordError("New password matches current password")
     current_user.password_hash = await get_password_hash(data.new_password)
     # Bump the token version so previously issued JWTs stop validating.
     revoke_user_tokens(current_user)

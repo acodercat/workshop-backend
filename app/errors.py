@@ -1,18 +1,26 @@
 """Typed application error hierarchy.
 
-Wire shape (Stripe-style nested envelope):
+Wire shape (Stripe-style nested envelope)::
 
     {"error": {"type": "<snake_case_kind>", "message": "<english>"}}
 
-Service layer raises ``AppError`` subclasses directly. The endpoint
-layer lets them propagate; ``app_error_handler`` in
-:mod:`app.exception_handlers` serializes them.
+Service layer raises ``AppError`` subclasses directly; the endpoint
+layer **does not** catch them. ``app_error_handler`` in
+:mod:`app.exception_handlers` serializes any uncaught ``AppError``
+into the envelope above. The class attribute ``status_code`` decides
+the HTTP status — there is no reason → status translation table at
+the endpoint layer.
 
-``error_type`` is the **stable contract** with the frontend — clients
+``error_type`` is the **stable contract** with the frontend: clients
 read ``error.type`` and resolve localized copy from their own i18n
-catalog. ``message`` is an English fallback shown only when the
-client has no localized override; it is not the user-facing string in
-normal flows.
+catalog. ``message`` is an English developer-facing fallback —
+terse, declarative, no "please ..." imperatives — shown only when
+the client has no localized override.
+
+All subclasses today are auth-flow errors; the module is at
+``app/errors.py`` (not ``app/services/auth/errors.py``) so future
+non-auth domains (sessions, shares, files) can add typed errors here
+without a circular dependency.
 
 To add a new error kind:
 
@@ -83,3 +91,12 @@ class IncorrectPasswordError(AppError):
 class SameEmailError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "same_email"
+
+
+class SamePasswordError(AppError):
+    """Refused no-op: the new password matches the current one. A
+    silent accept would still bump ``token_version`` and log every
+    other session out for nothing."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "same_password"

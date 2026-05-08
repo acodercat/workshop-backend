@@ -23,6 +23,7 @@ Five handlers cover the surface:
 """
 
 from http import HTTPStatus
+from typing import Any
 
 from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
@@ -39,11 +40,11 @@ def _envelope(
     type_: str,
     message: str,
     details: object | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Build the canonical error envelope. ``details`` is omitted from
     the wire when ``None`` so callers don't litter responses with
     nulls."""
-    error: dict = {"type": type_, "message": message}
+    error: dict[str, Any] = {"type": type_, "message": message}
     if details is not None:
         error["details"] = details
     return {"error": error}
@@ -60,14 +61,16 @@ def _phrase_to_type(code: int) -> str:
         return "http_error"
 
 
-async def app_error_handler(request: Request, exc: AppError):
+async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content=_envelope(type_=exc.error_type, message=exc.message),
     )
 
 
-async def integrity_error_handler(request: Request, exc: IntegrityError):
+async def integrity_error_handler(
+    request: Request, exc: IntegrityError,
+) -> JSONResponse:
     logger.warning(f"Integrity error: {exc}")
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
@@ -78,7 +81,9 @@ async def integrity_error_handler(request: Request, exc: IntegrityError):
     )
 
 
-async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
+async def sqlalchemy_exception_handler(
+    request: Request, exc: SQLAlchemyError,
+) -> JSONResponse:
     logger.error(f"Database error: {exc}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -91,7 +96,7 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
 
 async def http_exception_handler(
     request: Request, exc: StarletteHTTPException,
-):
+) -> JSONResponse:
     """Serialize bare ``HTTPException`` into the envelope.
 
     ``exc.detail`` is treated two ways:
@@ -102,13 +107,12 @@ async def http_exception_handler(
       synthesize ``message`` from the status phrase.
     - **str / anything else** — used as ``message`` directly.
 
-    ``type`` is derived from the status code so 22+ call sites that
-    raise plain ``HTTPException`` get a meaningful reason code
-    automatically (``404`` → ``"not_found"``, ``401`` →
-    ``"unauthorized"``, etc.) without touching individual call sites.
+    ``type`` is derived from the status code so call sites that raise
+    plain ``HTTPException`` get a meaningful reason code automatically
+    (``404`` → ``"not_found"``, ``401`` → ``"unauthorized"``, etc.)
+    without touching the individual sites.
     """
     type_ = _phrase_to_type(exc.status_code)
-    headers = getattr(exc, "headers", None)
     if isinstance(exc.detail, dict):
         return JSONResponse(
             status_code=exc.status_code,
@@ -117,18 +121,18 @@ async def http_exception_handler(
                 message=HTTPStatus(exc.status_code).phrase,
                 details=exc.detail,
             ),
-            headers=headers,
+            headers=exc.headers,
         )
     return JSONResponse(
         status_code=exc.status_code,
         content=_envelope(type_=type_, message=str(exc.detail)),
-        headers=headers,
+        headers=exc.headers,
     )
 
 
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError,
-):
+) -> JSONResponse:
     """Pydantic / FastAPI request-body validation failure.
 
     Per-field breakdown lives at ``error.details`` (a flat list, not
@@ -150,7 +154,9 @@ async def validation_exception_handler(
     )
 
 
-async def general_exception_handler(request: Request, exc: Exception):
+async def general_exception_handler(
+    request: Request, exc: Exception,
+) -> JSONResponse:
     logger.exception(f"Unexpected error: {exc}")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

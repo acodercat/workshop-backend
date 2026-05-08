@@ -32,7 +32,7 @@ from app.errors import (
 )
 from app.models.user import User
 from app.services.auth.verification import (
-    request_email_change_code as send_email_change_code,
+    send_email_change_code,
     verify_email_change_code,
 )
 from app.services.email.templates import Locale
@@ -62,12 +62,12 @@ async def request_email_change_code(
     DB lookup gives an attacker who steals a session no extra signal.
     """
     if not await verify_password(current_password, user.password_hash):
-        raise IncorrectPasswordError("Current password is incorrect")
+        raise IncorrectPasswordError("Current password incorrect")
 
     # Refuse no-op changes — there's nothing to verify and the user
     # would just burn a code for no reason.
     if user.email is not None and user.email.lower() == new_email.lower():
-        raise SameEmailError("New email is the same as the current email")
+        raise SameEmailError("New email matches current email")
 
     # Uniqueness pre-check. ``UNIQUE`` partial index on ``user.email``
     # would catch a race at INSERT time too, but doing it here lets
@@ -76,11 +76,8 @@ async def request_email_change_code(
         select(User.id).where(User.email == new_email)
     )
     if existing.first() is not None:
-        raise EmailTakenError("Email is already in use")
+        raise EmailTakenError("Email already in use")
 
-    # ``send_email_change_code`` raises typed ``AppError`` subclasses
-    # (``CooldownError`` / ``EmailSendFailedError``) directly — they
-    # bubble up to the endpoint handler unchanged.
     await send_email_change_code(redis, email=new_email, locale=locale)
 
 
@@ -102,10 +99,6 @@ async def change_email(
     forces every active session, including this one, to re-login at
     the next request.
     """
-    # ``verify_email_change_code`` raises typed ``AppError`` subclasses
-    # directly (``InvalidVerificationCodeError`` /
-    # ``TooManyVerificationAttemptsError``); they bubble up to the
-    # endpoint handler.
     await verify_email_change_code(redis, email=new_email, code=code)
 
     user.email = new_email
@@ -122,7 +115,7 @@ async def change_email(
             user.id,
             new_email,
         )
-        raise EmailTakenError("Email is already in use") from exc
+        raise EmailTakenError("Email already in use") from exc
 
     await db.refresh(user)
     logger.info(
