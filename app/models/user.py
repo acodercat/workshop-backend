@@ -93,14 +93,13 @@ class User(Base):
         nullable=False
     )
 
-    # App-level feedback the user submitted to the admin team. Distinct
-    # from message-level thumbs ratings (``message_feedback``); see
-    # :mod:`app.models.user_feedback`.
+    # App-level feedback the user submitted to the admin team.
+    # Default cascade (``save-update, merge``) is correct here — the
+    # FK's ``ON DELETE SET NULL`` preserves feedback rows for audit
+    # when a user is deleted, so we deliberately don't add
+    # ``delete-orphan``.
     feedback_submissions: Mapped[list["UserFeedback"]] = relationship(
         back_populates="user",
-        cascade="save-update, merge",  # NOT delete-orphan: ``ON DELETE
-        # SET NULL`` on the FK preserves rows for audit when a user
-        # is deleted, so we don't want SQLAlchemy to cascade-delete.
     )
 
     def __repr__(self):

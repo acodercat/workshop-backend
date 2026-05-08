@@ -1,21 +1,8 @@
 """add user_feedback table
 
-App-level feedback (bug reports / suggestions) submitted by
-authenticated users to the admin team. Distinct from
-``message_feedback`` (per-AI-response thumbs ratings).
-
-- ``user_id`` ON DELETE SET NULL — feedback rows survive user
-  deletion for audit. Indexed for "feedback by this user" lookups.
-- ``message`` capped at 2000 chars to match the frontend's input
-  ceiling.
-- ``image_keys`` JSONB array of OSS file keys; pre-uploaded via the
-  standard presigned-OSS flow before this row is created. Default
-  ``'[]'::jsonb``.
-- ``status`` PG enum ``feedback_status`` with three values; default
-  ``OPEN`` so freshly submitted feedback shows up in the admin
-  review queue.
-- Composite index ``(status, created_at)`` powers the admin "open
-  queue" query (filter by status, sort newest first).
+Schema documentation lives in :mod:`app.models.user_feedback` —
+this migration only creates the table, ``feedback_status`` enum,
+and two indexes; it doesn't touch any existing rows.
 
 Revision ID: 712ad01e4590
 Revises: 470bec234c01
