@@ -91,21 +91,20 @@ async def register_user(
     try:
         await db.commit()
     except IntegrityError as exc:
-        # Race window between the pre-check and INSERT on email — the
-        # only user-supplied unique field. ``ix_user_username`` could
-        # only fire if two registrations raced into the same sequence
-        # value, which the sequence itself prevents; treat it as a 500
-        # if it ever happens.
+        # Race window between the pre-check and INSERT. Email is the
+        # only user-supplied unique field; ``axon_${id}`` username is
+        # generated from a Postgres sequence and can't realistically
+        # collide. So any IntegrityError reaching this point is the
+        # email uniqueness pre-check losing a race — surface as
+        # ``EmailTakenError`` and let the user retry.
+        #
+        # Deliberately not introspecting ``exc.orig.diag.constraint_name``:
+        # alembic-generated index names (``ix_user_email`` etc.) are
+        # schema details that migrations may rename, and coupling
+        # business logic to them creates a silent-breakage risk.
         await db.rollback()
-        constraint = _violated_constraint_name(exc)
-        if constraint == "ix_user_email":
-            raise EmailTakenError("Email already registered") from exc
-        logger.error(
-            "Unexpected IntegrityError on user INSERT: constraint=%r orig=%s",
-            constraint,
-            exc.orig,
-        )
-        raise
+        logger.info("register race: email=%s", email)
+        raise EmailTakenError("Email already registered") from exc
 
     await db.refresh(user)
     logger.info(
@@ -131,15 +130,3 @@ async def _reserve_next_user_id(db: AsyncSession) -> int:
         text("SELECT nextval(pg_get_serial_sequence('user', 'id'))")
     )
     return int(result.scalar_one())
-
-
-def _violated_constraint_name(exc: IntegrityError) -> str | None:
-    """Pull the unique-constraint name out of an ``IntegrityError``.
-
-    psycopg surfaces ``diag.constraint_name`` on its native exception
-    (which SQLAlchemy wraps as ``exc.orig``). Drivers that don't
-    implement ``diag`` return ``None`` and the caller falls through to
-    the catch-all path."""
-    diag = getattr(getattr(exc, "orig", None), "diag", None)
-    name = getattr(diag, "constraint_name", None)
-    return name if isinstance(name, str) else None
