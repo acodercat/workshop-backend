@@ -31,6 +31,8 @@ To add a new error kind:
    the same ``error_type`` key.
 """
 
+from typing import ClassVar
+
 from fastapi import status
 
 
@@ -39,10 +41,13 @@ class AppError(Exception):
 
     Subclasses set ``status_code`` and ``error_type`` as class
     attributes; the constructor takes only the English ``message``.
+    The :class:`ClassVar` annotations make this contract explicit to
+    type-checkers — these are class-level constants, not instance
+    state.
     """
 
-    status_code: int = status.HTTP_400_BAD_REQUEST
-    error_type: str = "bad_request"
+    status_code: ClassVar[int] = status.HTTP_400_BAD_REQUEST
+    error_type: ClassVar[str] = "bad_request"
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -75,12 +80,12 @@ class InvalidVerificationCodeError(AppError):
     the client two distinct codes would be needless complexity."""
 
     status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "invalid_code"
+    error_type = "invalid_verification_code"
 
 
 class TooManyVerificationAttemptsError(AppError):
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
-    error_type = "verification_too_many_attempts"
+    error_type = "too_many_verification_attempts"
 
 
 class IncorrectPasswordError(AppError):
