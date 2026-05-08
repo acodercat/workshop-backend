@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -6,7 +7,6 @@ import jwt
 from jwt.exceptions import InvalidTokenError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,8 @@ from app import models
 from app.api.dependencies import get_db
 from app.database import AsyncSessionLocal
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/access-tokens")
 
@@ -132,7 +134,7 @@ def decode_share_view_token(token: str) -> str | None:
             token, settings.secret_key, algorithms=[settings.algorithm]
         )
     except InvalidTokenError as exc:
-        logger.info(f"Rejected share-view token: {type(exc).__name__}: {exc}")
+        logger.info("Rejected share-view token: %s: %s", type(exc).__name__, exc)
         return None
     if payload.get("scope") != SHARE_VIEW_SCOPE:
         return None
@@ -157,7 +159,7 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
             token, settings.secret_key, algorithms=[settings.algorithm]
         )
     except InvalidTokenError as exc:
-        logger.info(f"Rejected token: {type(exc).__name__}: {exc}")
+        logger.info("Rejected token: %s: %s", type(exc).__name__, exc)
         raise credentials_exception
 
     if "scope" in payload:

@@ -22,17 +22,19 @@ Five handlers cover the surface:
 - :func:`general_exception_handler` — last-resort 500 catch.
 """
 
+import logging
 from http import HTTPStatus
 from typing import Any
 
 from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from loguru import logger
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.errors import AppError
+
+logger = logging.getLogger(__name__)
 
 
 def _error_envelope(
@@ -74,7 +76,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
 async def integrity_error_handler(
     request: Request, exc: IntegrityError,
 ) -> JSONResponse:
-    logger.warning(f"Integrity error: {exc}")
+    logger.warning("Integrity error: %s", exc)
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content=_error_envelope(
@@ -87,7 +89,7 @@ async def integrity_error_handler(
 async def sqlalchemy_exception_handler(
     request: Request, exc: SQLAlchemyError,
 ) -> JSONResponse:
-    logger.error(f"Database error: {exc}", exc_info=True)
+    logger.error("Database error: %s", exc, exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=_error_envelope(
@@ -160,7 +162,7 @@ async def validation_exception_handler(
 async def general_exception_handler(
     request: Request, exc: Exception,
 ) -> JSONResponse:
-    logger.exception(f"Unexpected error: {exc}")
+    logger.exception("Unexpected error: %s", exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=_error_envelope(

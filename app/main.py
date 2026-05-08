@@ -1,11 +1,11 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from loguru import logger
 from redis.asyncio import BlockingConnectionPool, ConnectionPool
 from redis.exceptions import RedisError
 from sqlalchemy import text
@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.logging_config import setup_logging
 
 setup_logging(log_dir="logs", level="INFO")
+logger = logging.getLogger(__name__)
 
 from app.api.endpoints import auth, file, session, share, user
 from app.database import engine
@@ -105,7 +106,7 @@ async def _ping_redis(
             if attempt == settings.startup_probe_attempts:
                 break
             logger.warning(
-                "Redis ping failed (attempt {}/{}): {} — retrying in {:.1f}s",
+                "Redis ping failed (attempt %s/%s): %s — retrying in %.1fs",
                 attempt, settings.startup_probe_attempts, exc, delay,
             )
             await asyncio.sleep(delay)
@@ -127,7 +128,7 @@ async def _ping_db(db_engine: AsyncEngine) -> None:
             if attempt == settings.startup_probe_attempts:
                 break
             logger.warning(
-                "DB ping failed (attempt {}/{}): {} — retrying in {:.1f}s",
+                "DB ping failed (attempt %s/%s): %s — retrying in %.1fs",
                 attempt, settings.startup_probe_attempts, exc, delay,
             )
             await asyncio.sleep(delay)
@@ -160,8 +161,8 @@ async def lifespan(app: FastAPI):
         blocking=False,
     )
     logger.info(
-        "Redis connected — short-op pool={} (blocking, timeout={}s), "
-        "streaming pool={} (fail-fast)",
+        "Redis connected — short-op pool=%s (blocking, timeout=%ss), "
+        "streaming pool=%s (fail-fast)",
         settings.redis_pool_size,
         settings.redis_pool_timeout_seconds,
         settings.redis_streaming_pool_size,

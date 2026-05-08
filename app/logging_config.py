@@ -1,27 +1,40 @@
-"""Logging configuration using Loguru."""
+"""Logging configuration using Loguru.
+
+App code uses stdlib ``logging`` (``logging.getLogger(__name__)``);
+the loguru-managed sinks (rotating files, colored stderr) ingest
+those records via :class:`InterceptHandler` configured below.
+"""
 import sys
 import logging
 from pathlib import Path
+
 from loguru import logger
 
 
 class InterceptHandler(logging.Handler):
-    """Intercept standard logging and redirect to loguru."""
+    """Forward stdlib ``logging`` records into loguru sinks."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        # Get corresponding Loguru level if it exists
         try:
-            level = logger.level(record.levelname).name
+            level: str | int = logger.level(record.levelname).name
         except ValueError:
             level = record.levelno
 
-        # Find caller from where originated the logged message
-        frame, depth = logging.currentframe(), 2
-        while frame.f_code.co_filename == logging.__file__:
+        # Walk back through stdlib ``logging`` frames so loguru's
+        # ``{name}`` placeholder resolves to the actual caller's
+        # module instead of stdlib internals (``callHandlers`` etc.).
+        # Starting depth 6 matches loguru's documented example —
+        # covers the ``emit`` → ``Handler.handle`` →
+        # ``Logger.callHandlers`` → ``Logger.handle`` →
+        # ``Logger._log`` → ``Logger.<level>`` chain.
+        frame, depth = sys._getframe(6), 6
+        while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
 
-        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+        logger.opt(depth=depth, exception=record.exc_info).log(
+            level, record.getMessage()
+        )
 
 
 def setup_logging(log_dir: str = "logs", level: str = "INFO"):
