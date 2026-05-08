@@ -33,6 +33,12 @@ from typing import Callable
 
 import redis.asyncio as aioredis
 
+from app.errors import (
+    CooldownError,
+    EmailSendFailedError,
+    InvalidVerificationCodeError,
+    TooManyVerificationAttemptsError,
+)
 from app.services.email import (
     EmailSendError,
     render_email_change_verification,
@@ -44,17 +50,6 @@ from app.services.redis import email_change_key, email_verify_key
 from config import settings
 
 logger = logging.getLogger(__name__)
-
-
-class VerificationError(Exception):
-    """Base for all verification-flow refusals. Carries a short
-    machine-readable ``reason`` plus a human-readable message; the
-    endpoint maps reason → HTTP status code."""
-
-    def __init__(self, reason: str, message: str) -> None:
-        super().__init__(message)
-        self.reason = reason
-        self.message = message
 
 
 _RenderFn = Callable[..., tuple[str, str]]
@@ -97,9 +92,8 @@ async def _request_code(
         cooldown = settings.register_code_resend_cooldown_seconds
         if elapsed < cooldown:
             remaining = cooldown - elapsed
-            raise VerificationError(
-                reason="cooldown",
-                message=f"请 {remaining} 秒后再试",
+            raise CooldownError(
+                f"Please try again in {remaining} seconds"
             )
 
     code = _generate_code()
@@ -112,9 +106,8 @@ async def _request_code(
             "%s code send failed: email=%s reason=%s",
             log_label, email, exc.message,
         )
-        raise VerificationError(
-            reason="email_send_failed",
-            message="验证码发送失败，请稍后重试",
+        raise EmailSendFailedError(
+            "Failed to send verification email; please try again later"
         ) from exc
 
     payload = {"code": code, "sent_at": now, "attempts": 0}
@@ -153,9 +146,8 @@ async def _verify_code(
     """
     raw = await redis.get(key)
     if raw is None:
-        raise VerificationError(
-            reason="not_found",
-            message="验证码已过期或不存在，请重新获取",
+        raise InvalidVerificationCodeError(
+            "Verification code expired or not found; please request a new one"
         )
     state = json.loads(raw)
 
@@ -172,9 +164,8 @@ async def _verify_code(
             log_label,
             email,
         )
-        raise VerificationError(
-            reason="too_many_attempts",
-            message="验证码错误次数过多，请重新获取",
+        raise TooManyVerificationAttemptsError(
+            "Too many incorrect attempts; please request a new code"
         )
 
     # Update with new attempt count, preserving the original TTL — we
@@ -182,10 +173,7 @@ async def _verify_code(
     ttl = await redis.ttl(key)
     state["attempts"] = attempts
     await redis.set(key, json.dumps(state), ex=max(ttl, 1))
-    raise VerificationError(
-        reason="mismatch",
-        message="验证码错误",
-    )
+    raise InvalidVerificationCodeError("Incorrect verification code")
 
 
 async def request_register_code(
@@ -193,9 +181,10 @@ async def request_register_code(
 ) -> None:
     """Generate + send a registration verification code for ``email``.
 
-    Refuses with :class:`VerificationError` (``reason="cooldown"``) if
-    a previous code was sent within the cooldown window. Refuses with
-    ``reason="email_send_failed"`` if Aliyun rejects the send.
+    Raises :class:`~app.errors.CooldownError` if a previous code was
+    sent within the cooldown window;
+    :class:`~app.errors.EmailSendFailedError` if Aliyun rejects the
+    send.
     """
     await _request_code(
         redis,

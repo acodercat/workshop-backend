@@ -16,16 +16,13 @@ Email-change exports stay submodule-scoped (``from app.services.auth
 ``request_email_change_code`` in :mod:`.verification`.
 """
 
-from app.services.auth.register import RegisterError, register_user
+from app.services.auth.register import register_user
 from app.services.auth.verification import (
-    VerificationError,
     request_register_code,
     verify_register_code,
 )
 
 __all__ = [
-    "RegisterError",
-    "VerificationError",
     "register_user",
     "request_register_code",
     "verify_register_code",

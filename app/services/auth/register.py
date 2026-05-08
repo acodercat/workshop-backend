@@ -16,7 +16,6 @@ full FastAPI app.
 
 import logging
 import secrets
-from typing import Final
 
 import redis.asyncio as aioredis
 from sqlalchemy import select, text
@@ -24,25 +23,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_password_hash
+from app.errors import EmailTakenError
 from app.models.user import User, UserStatus
-from app.services.auth.verification import VerificationError, verify_register_code
+from app.services.auth.verification import verify_register_code
 
 logger = logging.getLogger(__name__)
-
-
-class RegisterError(Exception):
-    """Raised for register-time failures the caller should map to an
-    HTTP error. ``reason`` is the machine-readable kind
-    (``"email_taken"`` / ``"verification_*"``); ``message`` is
-    human-readable."""
-
-    def __init__(self, reason: str, message: str) -> None:
-        super().__init__(message)
-        self.reason = reason
-        self.message = message
-
-
-_EMAIL_TAKEN: Final = "email_taken"
 
 
 async def register_user(
@@ -80,18 +65,14 @@ async def register_user(
     # rows are created.
     existing = await db.execute(select(User.id).where(User.email == email))
     if existing.first() is not None:
-        raise RegisterError(_EMAIL_TAKEN, "该邮箱已被注册")
+        raise EmailTakenError("Email is already registered")
 
     # ---- verify + consume code --------------------------------------
-    try:
-        await verify_register_code(redis, email=email, code=code)
-    except VerificationError as exc:
-        # Surface verification reasons as register reasons so the
-        # endpoint sees a single error type.
-        raise RegisterError(
-            reason=f"verification_{exc.reason}",
-            message=exc.message,
-        ) from exc
+    # ``verify_register_code`` raises typed ``AppError`` subclasses
+    # (``InvalidVerificationCodeError`` / ``TooManyVerificationAttemptsError``)
+    # that bubble up to the endpoint handler unchanged — no translation
+    # layer needed here.
+    await verify_register_code(redis, email=email, code=code)
 
     # ---- create user ------------------------------------------------
     # Reserve the id up-front so the username can encode it. ``nextval``
@@ -122,7 +103,7 @@ async def register_user(
         await db.rollback()
         constraint = _violated_constraint_name(exc)
         if constraint == "ix_user_email":
-            raise RegisterError(_EMAIL_TAKEN, "该邮箱已被注册") from exc
+            raise EmailTakenError("Email is already registered") from exc
         logger.error(
             "Unexpected IntegrityError on user INSERT: constraint=%r orig=%s",
             constraint,

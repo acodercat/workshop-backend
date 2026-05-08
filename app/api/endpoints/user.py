@@ -11,7 +11,6 @@ import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from app.api._response import error_response
 from app.api.dependencies import get_db, get_redis, get_redis_streaming
 from app.auth import (
     authenticate_and_get_user,
@@ -30,7 +29,6 @@ from app.schemas.user import (
     UserResponse,
 )
 from app.services.auth.email_change import (
-    EmailChangeError,
     change_email,
     request_email_change_code,
 )
@@ -134,25 +132,10 @@ async def change_password(
 #   PUT /me/email                      { new_email, code }
 #       → verify code, atomically swap user.email, bump token_version.
 #
-# Reason → status mapping mirrors auth.py registration so the frontend
-# error-display layer can branch uniformly.
-
-
-_EMAIL_CHANGE_CODE_REASON_STATUS = {
-    "incorrect_password": status.HTTP_400_BAD_REQUEST,
-    "same_email": status.HTTP_400_BAD_REQUEST,
-    "email_taken": status.HTTP_409_CONFLICT,
-    "cooldown": status.HTTP_429_TOO_MANY_REQUESTS,
-    "email_send_failed": status.HTTP_502_BAD_GATEWAY,
-}
-
-
-_EMAIL_CHANGE_REASON_STATUS = {
-    "verification_not_found": status.HTTP_400_BAD_REQUEST,
-    "verification_mismatch": status.HTTP_400_BAD_REQUEST,
-    "verification_too_many_attempts": status.HTTP_429_TOO_MANY_REQUESTS,
-    "email_taken": status.HTTP_409_CONFLICT,
-}
+# All failure paths raise typed ``AppError`` subclasses (defined in
+# :mod:`app.errors`); ``app_error_handler`` serializes them into the
+# ``{error: {type, message}}`` envelope. No translation table needed
+# at this layer.
 
 
 @router.post(
@@ -168,23 +151,14 @@ async def request_email_change_verification_code(
     current_user: User = Depends(authenticate_and_get_user),
 ):
     """Step 1: dispatch a verification code to the new email."""
-    try:
-        await request_email_change_code(
-            db,
-            redis,
-            user=current_user,
-            new_email=body.new_email,
-            current_password=body.current_password,
-            locale=body.locale,
-        )
-    except EmailChangeError as exc:
-        return error_response(
-            status_code=_EMAIL_CHANGE_CODE_REASON_STATUS.get(
-                exc.reason, status.HTTP_400_BAD_REQUEST
-            ),
-            error=exc.reason,
-            message=exc.message,
-        )
+    await request_email_change_code(
+        db,
+        redis,
+        user=current_user,
+        new_email=body.new_email,
+        current_password=body.current_password,
+        locale=body.locale,
+    )
 
 
 @router.put("/me/email", response_model=UserResponse)
@@ -197,27 +171,10 @@ async def update_email(
     current_user: User = Depends(authenticate_and_get_user),
 ):
     """Step 2: verify the code and apply the new email."""
-    try:
-        return await change_email(
-            db,
-            redis,
-            user=current_user,
-            new_email=body.new_email,
-            code=body.code,
-        )
-    except EmailChangeError as exc:
-        # ``verification_*`` reasons collapse to one client-facing
-        # ``invalid_code`` for the not_found / mismatch pair — same
-        # recovery path (ask for a fresh code).
-        client_reason = (
-            "invalid_code"
-            if exc.reason in ("verification_not_found", "verification_mismatch")
-            else exc.reason
-        )
-        return error_response(
-            status_code=_EMAIL_CHANGE_REASON_STATUS.get(
-                exc.reason, status.HTTP_400_BAD_REQUEST
-            ),
-            error=client_reason,
-            message=exc.message,
-        )
+    return await change_email(
+        db,
+        redis,
+        user=current_user,
+        new_email=body.new_email,
+        code=body.code,
+    )

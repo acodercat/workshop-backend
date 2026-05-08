@@ -22,12 +22,16 @@ limiter = Limiter(
 async def rate_limit_exceeded_handler(
     request: Request, exc: RateLimitExceeded
 ) -> JSONResponse:
-    """Match the project's `{error, message}` JSON envelope on 429."""
+    """Emit the project's nested ``{error: {type, message}}`` envelope
+    on 429 — keeps slowapi-driven rate limits indistinguishable from
+    application-driven errors at the wire level."""
     return JSONResponse(
         status_code=429,
         content={
-            "error": "Too Many Requests",
-            "message": f"Rate limit exceeded: {exc.detail}",
+            "error": {
+                "type": "rate_limited",
+                "message": f"Rate limit exceeded: {exc.detail}",
+            },
         },
         headers={"Retry-After": "60"},
     )

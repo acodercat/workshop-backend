@@ -25,27 +25,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import revoke_user_tokens, verify_password
+from app.errors import (
+    EmailTakenError,
+    IncorrectPasswordError,
+    SameEmailError,
+)
 from app.models.user import User
 from app.services.auth.verification import (
-    VerificationError,
     request_email_change_code as send_email_change_code,
     verify_email_change_code,
 )
 from app.services.email.templates import Locale
 
 logger = logging.getLogger(__name__)
-
-
-class EmailChangeError(Exception):
-    """Raised for email-change failures the caller should map to an
-    HTTP error. ``reason`` is the machine-readable kind
-    (``"incorrect_password"`` / ``"email_taken"`` /
-    ``"verification_*"``); ``message`` is human-readable."""
-
-    def __init__(self, reason: str, message: str) -> None:
-        super().__init__(message)
-        self.reason = reason
-        self.message = message
 
 
 async def request_email_change_code(
@@ -70,18 +62,12 @@ async def request_email_change_code(
     DB lookup gives an attacker who steals a session no extra signal.
     """
     if not await verify_password(current_password, user.password_hash):
-        raise EmailChangeError(
-            "incorrect_password",
-            "当前密码不正确",
-        )
+        raise IncorrectPasswordError("Current password is incorrect")
 
     # Refuse no-op changes — there's nothing to verify and the user
     # would just burn a code for no reason.
     if user.email is not None and user.email.lower() == new_email.lower():
-        raise EmailChangeError(
-            "same_email",
-            "新邮箱与当前邮箱相同",
-        )
+        raise SameEmailError("New email is the same as the current email")
 
     # Uniqueness pre-check. ``UNIQUE`` partial index on ``user.email``
     # would catch a race at INSERT time too, but doing it here lets
@@ -90,22 +76,12 @@ async def request_email_change_code(
         select(User.id).where(User.email == new_email)
     )
     if existing.first() is not None:
-        raise EmailChangeError("email_taken", "该邮箱已被使用")
+        raise EmailTakenError("Email is already in use")
 
-    try:
-        await send_email_change_code(redis, email=new_email, locale=locale)
-    except VerificationError as exc:
-        # ``send_email_change_code`` only fails with ``cooldown`` or
-        # ``email_send_failed`` — those are dispatch-side conditions,
-        # not verification proper, so we pass the reason through
-        # unprefixed (the endpoint maps cooldown → 429, send_failed →
-        # 502 directly). The ``verification_*`` prefix is reserved
-        # for :func:`change_email` where the failure is genuinely a
-        # token-mismatch / lockout.
-        raise EmailChangeError(
-            reason=exc.reason,
-            message=exc.message,
-        ) from exc
+    # ``send_email_change_code`` raises typed ``AppError`` subclasses
+    # (``CooldownError`` / ``EmailSendFailedError``) directly — they
+    # bubble up to the endpoint handler unchanged.
+    await send_email_change_code(redis, email=new_email, locale=locale)
 
 
 async def change_email(
@@ -126,13 +102,11 @@ async def change_email(
     forces every active session, including this one, to re-login at
     the next request.
     """
-    try:
-        await verify_email_change_code(redis, email=new_email, code=code)
-    except VerificationError as exc:
-        raise EmailChangeError(
-            reason=f"verification_{exc.reason}",
-            message=exc.message,
-        ) from exc
+    # ``verify_email_change_code`` raises typed ``AppError`` subclasses
+    # directly (``InvalidVerificationCodeError`` /
+    # ``TooManyVerificationAttemptsError``); they bubble up to the
+    # endpoint handler.
+    await verify_email_change_code(redis, email=new_email, code=code)
 
     user.email = new_email
     revoke_user_tokens(user)
@@ -148,7 +122,7 @@ async def change_email(
             user.id,
             new_email,
         )
-        raise EmailChangeError("email_taken", "该邮箱已被使用") from exc
+        raise EmailTakenError("Email is already in use") from exc
 
     await db.refresh(user)
     logger.info(

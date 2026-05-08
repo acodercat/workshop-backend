@@ -6,9 +6,9 @@ import redis.asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api._response import error_response
 from app.api.dependencies import get_db, get_redis
 from app.auth import authenticate_user, create_access_token
+from app.errors import AccountPendingError
 from app.models.user import User, UserStatus
 from app.rate_limit import limiter
 from app.schemas.auth import (
@@ -22,8 +22,6 @@ from app.schemas.auth import (
     RegisterResponse,
 )
 from app.services.auth import (
-    RegisterError,
-    VerificationError,
     register_user,
     request_register_code,
     verify_register_code,
@@ -57,11 +55,7 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     if user.status is UserStatus.PENDING:
-        return error_response(
-            status_code=status.HTTP_403_FORBIDDEN,
-            error="account_pending",
-            message="账号正在等待管理员审批",
-        )
+        raise AccountPendingError("Account is awaiting administrator approval")
     if user.status is not UserStatus.ACTIVE:
         # ``DISABLED`` / ``SUSPENDED`` collapse to the same opaque 401
         # as wrong credentials so admin lockouts don't leak.
@@ -96,18 +90,14 @@ async def login_for_access_token(
 # means step 3 is the single transactional pivot, while step 2 is
 # idempotent.
 #
-# Errors map to HTTP statuses by ``reason``:
-#   cooldown / too_many_attempts                       → 429
-#   email_send_failed                                  → 502
-#   verification_not_found / verification_mismatch     → 400 (invalid_code)
-#   email_taken                                        → 409
-#   account_pending                                    → 403 (login attempt
-#                                                            on a freshly
-#                                                            registered user)
+# All failure paths raise ``AppError`` subclasses (defined in
+# :mod:`app.errors`) that bubble up to ``app_error_handler`` —
+# ``status_code`` and ``error_type`` live on each subclass, so this
+# layer no longer carries a reason → status translation table.
 #
 # Status default for new users is ``PENDING``: email verification
 # proves the address but admin approval is the access gate. Login
-# endpoints surface ``account_pending`` so the frontend can show a
+# endpoints raise ``AccountPendingError`` so the frontend can show a
 # "thanks, awaiting approval" message; ``POST /users`` returns
 # ``kind="pending_approval"`` instead of a JWT for the same reason.
 
@@ -127,34 +117,15 @@ async def create_verification_code(
     happens at :func:`access_token_by_code` after the code is
     proven; until then, the endpoint is indistinguishable for new
     and returning users.
+
+    ``CooldownError`` / ``EmailSendFailedError`` from
+    ``request_register_code`` propagate to ``app_error_handler``.
     """
-    try:
-        await request_register_code(
-            redis,
-            email=body.email,
-            locale=body.locale,
-        )
-    except VerificationError as exc:
-        if exc.reason == "cooldown":
-            return error_response(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                error="cooldown",
-                message=exc.message,
-            )
-        if exc.reason == "email_send_failed":
-            return error_response(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                error="email_send_failed",
-                message=exc.message,
-            )
-        # Defensive: any other reason from this entry point is a
-        # programmer error (verify path returns those reasons), not a
-        # client-facing condition.
-        return error_response(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            error="bad_request",
-            message=exc.message,
-        )
+    await request_register_code(
+        redis,
+        email=body.email,
+        locale=body.locale,
+    )
 
 
 @router.post(
@@ -179,9 +150,11 @@ async def access_token_by_code(
       the frontend to collect a display name; the subsequent
       ``POST /users`` is the consume-pivot that turns the verified
       code into a row.
-    - Email maps to a non-ACTIVE user (DISABLED / SUSPENDED /
-      PENDING) → 401 indistinguishable from incorrect password,
-      same as :func:`login_for_access_token`.
+    - Email maps to a ``PENDING`` user → ``AccountPendingError``
+      (403). Distinguishable from wrong credentials so the user
+      knows the gate is admin approval, not the password.
+    - Email maps to ``DISABLED`` / ``SUSPENDED`` → 401 opaque, same
+      as :func:`login_for_access_token`.
 
     Why peek for the new-user case: the user might take 30 seconds
     typing their name. If we consumed here, an interrupt between
@@ -191,12 +164,9 @@ async def access_token_by_code(
     # Peek mode — checks code validity, increments attempts on
     # mismatch (so brute-force is still rate-limited), but doesn't
     # delete on success.
-    try:
-        await verify_register_code(
-            redis, email=body.email, code=body.code, consume=False
-        )
-    except VerificationError as exc:
-        return _map_verification_error_to_response(exc)
+    await verify_register_code(
+        redis, email=body.email, code=body.code, consume=False
+    )
 
     existing = (
         await db.execute(select(User).where(User.email == body.email))
@@ -207,11 +177,7 @@ async def access_token_by_code(
         return EmailLoginNewUser()
 
     if existing.status is UserStatus.PENDING:
-        return error_response(
-            status_code=status.HTTP_403_FORBIDDEN,
-            error="account_pending",
-            message="账号正在等待管理员审批",
-        )
+        raise AccountPendingError("Account is awaiting administrator approval")
     if existing.status is not UserStatus.ACTIVE:
         # ``DISABLED`` / ``SUSPENDED`` collapse to the same opaque 401
         # as wrong code so admin lockouts don't leak.
@@ -222,15 +188,13 @@ async def access_token_by_code(
         )
 
     # Existing ACTIVE user: now consume the code (commit to logging
-    # in) and issue the JWT. ``consume`` raises ``not_found`` if the
-    # code was somehow deleted between the peek and now; treat that
-    # as ``invalid_code`` for the client.
-    try:
-        await verify_register_code(
-            redis, email=body.email, code=body.code, consume=True
-        )
-    except VerificationError as exc:
-        return _map_verification_error_to_response(exc)
+    # in) and issue the JWT. If the code was somehow deleted between
+    # the peek and now, ``verify_register_code`` raises
+    # ``InvalidVerificationCodeError``, which the global handler
+    # serializes for the client.
+    await verify_register_code(
+        redis, email=body.email, code=body.code, consume=True
+    )
 
     existing.last_login_at = datetime.now(timezone.utc)
     access_token = create_access_token(
@@ -267,57 +231,20 @@ async def create_user(
     JWT is issued: a PENDING account can't access anything until an
     admin flips it to ``ACTIVE``, so the frontend pivots to a
     "thanks, awaiting approval" screen instead of the workspace.
-    """
-    try:
-        user = await register_user(
-            db,
-            redis,
-            email=body.email,
-            code=body.code,
-            name=body.name,
-        )
-    except RegisterError as exc:
-        if exc.reason in ("username_taken", "email_taken"):
-            return error_response(
-                status_code=status.HTTP_409_CONFLICT,
-                error=exc.reason,
-                message=exc.message,
-            )
-        if exc.reason == "verification_too_many_attempts":
-            return error_response(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                error=exc.reason,
-                message=exc.message,
-            )
-        # ``verification_mismatch`` / ``verification_not_found`` —
-        # collapsed to one client-facing reason (``invalid_code``)
-        # because the user-facing message and recovery action are the
-        # same.
-        return error_response(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            error="invalid_code",
-            message=exc.message,
-        )
 
+    ``register_user`` raises typed ``AppError`` subclasses
+    (``EmailTakenError``, ``InvalidVerificationCodeError``,
+    ``TooManyVerificationAttemptsError``) on any failure path; they
+    bubble straight up to ``app_error_handler``.
+    """
+    await register_user(
+        db,
+        redis,
+        email=body.email,
+        code=body.code,
+        name=body.name,
+    )
     # No ``last_login_at`` update or token issuance — the user is
     # ``PENDING`` and can't sign in yet. ``register_user`` already
     # committed the row.
     return RegisterResponse()
-
-
-def _map_verification_error_to_response(exc: VerificationError):
-    """Shared mapping used by the peek and consume paths in
-    :func:`access_token_by_code`. Mirrors the registration endpoint's
-    reason → status table so the frontend's error-display layer can
-    branch uniformly."""
-    if exc.reason == "too_many_attempts":
-        return error_response(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            error="verification_too_many_attempts",
-            message=exc.message,
-        )
-    return error_response(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        error="invalid_code",
-        message=exc.message,
-    )

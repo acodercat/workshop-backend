@@ -19,7 +19,9 @@ setup_logging(log_dir="logs", level="INFO")
 
 from app.api.endpoints import auth, file, session, share, user
 from app.database import engine
+from app.errors import AppError
 from app.exception_handlers import (
+    app_error_handler,
     general_exception_handler,
     http_exception_handler,
     integrity_error_handler,
@@ -184,6 +186,7 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+app.add_exception_handler(AppError, app_error_handler)
 app.add_exception_handler(IntegrityError, integrity_error_handler)
 app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
