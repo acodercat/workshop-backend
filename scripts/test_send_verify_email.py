@@ -19,7 +19,7 @@ preferred — keep secrets out of the committed file):
     smtp_username            # full sender email
     smtp_password            # app-specific password
     smtp_from_address        # From: header email (usually = smtp_username)
-    smtp_from_alias          # HKGAI
+    smtp_from_alias          # HKGAI AI Computer
 """
 
 import argparse
