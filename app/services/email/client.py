@@ -1,31 +1,37 @@
-"""Aliyun DirectMail ``SingleSendMail`` wrapper.
+"""SMTP client for transactional email (Lark Suite Mail).
 
 One async function (:func:`send_html_email`) that takes a recipient,
-subject, and HTML body and dispatches via the Aliyun SDK. All other
-modules in :mod:`app.services.email` go through this seam — the SDK
-isn't imported anywhere else.
+subject, and HTML body and dispatches via :mod:`aiosmtplib`. All other
+modules in :mod:`app.services.email` go through this seam — the SMTP
+library isn't imported anywhere else.
 
-Why a thin wrapper rather than calling the SDK directly from the
+Why a thin wrapper rather than calling ``aiosmtplib`` directly from the
 caller:
 
-- The SDK's request model is verbose (5+ required parameters) and
-  most are config-driven (``account_name``, ``from_alias``,
-  ``address_type``, ``reply_to_address``). Hiding those keeps the
-  call site readable.
-- ``TeaException`` is a foreign exception type. We surface it as
-  ``EmailSendError`` so callers can catch one specific exception
-  without depending on the SDK's exception taxonomy.
-- The endpoint construction (mainland vs ap-southeast-1) is fiddly
-  and was already hardcoded in the smoke-test script — collapse it
-  into one place.
+- MIME assembly (``EmailMessage`` + UTF-8 subject + alias-formatted
+  ``From``) is verbose and identical for every send; hide it behind
+  one call.
+- ``SMTPException`` (and TLS / DNS / socket errors) are foreign
+  exception types. We surface them all as :class:`EmailSendError` so
+  callers can ``except EmailSendError`` once.
+- Provider config (host / port / SSL-vs-STARTTLS / login) is centralised
+  in :mod:`config` — call sites stay clean.
+
+Upstream cap (Lark Suite SMTP): 200 sends / 100 s and 6000 sends /
+day per sender. The existing per-IP register-code rate limit
+(``rate_limit_register_code = 5/hour``) combined with the per-email
+60s cooldown keeps us comfortably under both, so no application-level
+throttle here.
 """
 
 import logging
+import smtplib
+import ssl
+import uuid
+from email.message import EmailMessage
+from email.utils import formataddr, make_msgid
 
-from alibabacloud_dm20151123 import models as dm_models
-from alibabacloud_dm20151123.client import Client as DmClient
-from alibabacloud_tea_openapi import models as openapi_models
-from Tea.exceptions import TeaException
+import aiosmtplib
 
 from config import settings
 
@@ -33,18 +39,18 @@ logger = logging.getLogger(__name__)
 
 
 class EmailSendError(Exception):
-    """Raised when Aliyun rejects or the network drops a send.
+    """Raised when the SMTP server rejects or the network drops a send.
 
-    Always carries a human-readable ``message``. ``code`` is the
-    Aliyun error code (e.g. ``InvalidAccessKeyId.NotFound``) when
-    available, ``None`` for transport errors. ``request_id`` is the
-    Aliyun trace id for log correlation."""
+    Always carries a human-readable ``message``. ``code`` is the SMTP
+    reply code (e.g. ``535`` for auth failure) when available, ``None``
+    for transport errors. ``request_id`` is the local Message-Id we
+    minted so logs on both sides can be correlated."""
 
     def __init__(
         self,
         message: str,
         *,
-        code: str | None = None,
+        code: int | str | None = None,
         request_id: str | None = None,
     ) -> None:
         super().__init__(message)
@@ -53,78 +59,101 @@ class EmailSendError(Exception):
         self.request_id = request_id
 
 
-def _make_client() -> DmClient:
-    if not settings.aliyun_dm_access_key_id or not settings.aliyun_dm_access_key_secret:
+def _check_settings() -> None:
+    if not settings.smtp_host:
         raise EmailSendError(
-            "Aliyun DM credentials missing — set "
-            "``aliyun_dm_access_key_id`` and ``aliyun_dm_access_key_secret``"
+            "SMTP host missing — set ``smtp_host`` (e.g. smtp.larksuite.com)"
         )
-    if not settings.aliyun_dm_account_name:
+    if not settings.smtp_username or not settings.smtp_password:
         raise EmailSendError(
-            "Aliyun DM sender address missing — set "
-            "``aliyun_dm_account_name`` (must be approved in DM console)"
+            "SMTP credentials missing — set ``smtp_username`` and ``smtp_password``"
+        )
+    if not settings.smtp_from_address:
+        raise EmailSendError(
+            "SMTP sender address missing — set ``smtp_from_address`` "
+            "(usually the same as ``smtp_username``)"
         )
 
-    # Aliyun DirectMail uses a unified endpoint ``dm.aliyuncs.com`` for
-    # mainland regions; only the Singapore overseas node has its own.
-    if settings.aliyun_dm_region == "ap-southeast-1":
-        endpoint = "dm.ap-southeast-1.aliyuncs.com"
-    else:
-        endpoint = "dm.aliyuncs.com"
 
-    config = openapi_models.Config(
-        access_key_id=settings.aliyun_dm_access_key_id,
-        access_key_secret=settings.aliyun_dm_access_key_secret,
+def _build_message(*, to: str, subject: str, html_body: str, message_id: str) -> EmailMessage:
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = formataddr((settings.smtp_from_alias, settings.smtp_from_address))
+    msg["To"] = to
+    msg["Message-ID"] = message_id
+    # Plain-text fallback first, then HTML alternative — keeps
+    # text-only clients (and spam filters that downgrade HTML-only
+    # mails) happy. The fallback is intentionally generic since the
+    # whole point of the HTML body is the formatted code.
+    msg.set_content(
+        "Your verification code is in the HTML version of this email."
     )
-    config.endpoint = endpoint
-    return DmClient(config)
+    msg.add_alternative(html_body, subtype="html")
+    return msg
 
 
 async def send_html_email(*, to: str, subject: str, html_body: str) -> str:
-    """Send one transactional HTML email. Returns the Aliyun
-    ``request_id`` on success; raises :class:`EmailSendError` on
-    failure.
+    """Send one transactional HTML email. Returns the Message-Id on
+    success; raises :class:`EmailSendError` on failure.
 
-    The SDK call is awaited via the SDK's own async variant
-    (``single_send_mail_async``) so the FastAPI event loop isn't
-    blocked.
+    Transport is SSL-on-connect (port 465) when ``smtp_use_ssl`` is
+    true, STARTTLS (port 587) otherwise. A fresh connection is opened
+    per send and torn down at QUIT — transactional volumes are too low
+    to make pooling worthwhile, and one-shot connects sidestep stale-
+    socket and idle-timeout edges entirely.
     """
-    client = _make_client()
-    request = dm_models.SingleSendMailRequest(
-        account_name=settings.aliyun_dm_account_name,
-        # ``address_type=1`` → use the verified sender at
-        # ``account_name``. ``=0`` is the deprecated random-virtual-
-        # sender path.
-        address_type=1,
-        from_alias=settings.aliyun_dm_from_alias,
-        reply_to_address=False,
-        to_address=to,
-        subject=subject,
-        html_body=html_body,
+    _check_settings()
+
+    # ``make_msgid`` needs a domain; derive it from the From address
+    # so the Message-Id matches the sending domain and doesn't trip
+    # reputation checks. Fall back to a random uuid if the address is
+    # malformed (the SMTP send will surface the real error).
+    domain = settings.smtp_from_address.split("@", 1)[-1] or uuid.uuid4().hex
+    message_id = make_msgid(domain=domain)
+    msg = _build_message(
+        to=to, subject=subject, html_body=html_body, message_id=message_id
     )
 
     try:
-        response = await client.single_send_mail_async(request)
-    except TeaException as exc:
-        request_id = exc.data.get("RequestId") if exc.data else None
+        if settings.smtp_use_ssl:
+            await aiosmtplib.send(
+                msg,
+                hostname=settings.smtp_host,
+                port=settings.smtp_port,
+                username=settings.smtp_username,
+                password=settings.smtp_password,
+                use_tls=True,
+                tls_context=ssl.create_default_context(),
+                timeout=settings.smtp_timeout_seconds,
+            )
+        else:
+            await aiosmtplib.send(
+                msg,
+                hostname=settings.smtp_host,
+                port=settings.smtp_port,
+                username=settings.smtp_username,
+                password=settings.smtp_password,
+                start_tls=True,
+                tls_context=ssl.create_default_context(),
+                timeout=settings.smtp_timeout_seconds,
+            )
+    except aiosmtplib.SMTPException as exc:
+        code = getattr(exc, "code", None)
         logger.warning(
-            "Aliyun DM send failed: code=%s message=%s request_id=%s to=%s",
-            exc.code,
-            exc.message,
-            request_id,
-            to,
+            "SMTP send failed: code=%s message=%s message_id=%s to=%s",
+            code, exc, message_id, to,
         )
         raise EmailSendError(
-            message=exc.message or "Aliyun DM rejected the send",
-            code=exc.code,
-            request_id=request_id,
+            message=str(exc) or "SMTP server rejected the send",
+            code=code,
+            request_id=message_id,
         ) from exc
-    except Exception as exc:
-        logger.exception("Aliyun DM transport failure to %s", to)
+    except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
+        logger.exception("SMTP transport failure to %s", to)
         raise EmailSendError(
-            message=f"Aliyun DM transport failure: {type(exc).__name__}: {exc}"
+            message=f"SMTP transport failure: {type(exc).__name__}: {exc}",
+            request_id=message_id,
         ) from exc
 
-    request_id = response.body.request_id
-    logger.info("Aliyun DM sent: request_id=%s to=%s", request_id, to)
-    return request_id
+    logger.info("SMTP sent: message_id=%s to=%s", message_id, to)
+    return message_id

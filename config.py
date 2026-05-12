@@ -110,26 +110,39 @@ class Settings(BaseSettings):
     oss_document_bucket_name: str = Field(default="metaseq-computer", description="OSS document bucket")
     oss_endpoint: str = Field(default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL")
 
-    # Alibaba Cloud DirectMail — used to send the registration
-    # verification code. Independent AK pair from OSS so the RAM
-    # subaccount can be locked down to ``AliyunDirectMailFullAccess``
-    # only. Defaults are empty strings (instead of required) so dev
-    # environments without DM access can still boot — calls that need
-    # DM will fail loudly with a clearer error than a Pydantic
+    # SMTP — used to send the registration / email-change verification
+    # codes. Lark Suite Mail by default (smtp.larksuite.com). Defaults
+    # are empty strings (instead of required) so dev environments
+    # without SMTP access can still boot — calls that need SMTP will
+    # fail loudly at send time with a clearer error than a Pydantic
     # validation panic at import.
-    aliyun_dm_access_key_id: str = Field(default="", description="DirectMail RAM AccessKey ID")
-    aliyun_dm_access_key_secret: str = Field(default="", description="DirectMail RAM AccessKey Secret")
-    aliyun_dm_region: str = Field(
-        default="cn-hangzhou",
-        description="DirectMail service region; ``ap-southeast-1`` for the Singapore node",
+    #
+    # Upstream cap (Lark Suite): 200 sends / 100 s and 6000 sends /
+    # day per sender. The existing per-IP register-code rate limit
+    # plus 60s per-email cooldown stay well under both — no extra
+    # app-level throttling needed.
+    smtp_host: str = Field(default="smtp.larksuite.com", description="SMTP server hostname")
+    smtp_port: int = Field(
+        default=465,
+        description="SMTP port; 465 for SSL-on-connect, 587 for STARTTLS",
     )
-    aliyun_dm_account_name: str = Field(
+    smtp_use_ssl: bool = Field(
+        default=True,
+        description="True → SSL-on-connect (port 465). False → STARTTLS (port 587).",
+    )
+    smtp_username: str = Field(default="", description="SMTP login (usually the full sender email address)")
+    smtp_password: str = Field(default="", description="SMTP password / app-specific password")
+    smtp_from_address: str = Field(
         default="",
-        description="Verified sender address (must be approved + SPF/DKIM passed in DM console)",
+        description="``From:`` header email — usually the same as ``smtp_username``",
     )
-    aliyun_dm_from_alias: str = Field(
+    smtp_from_alias: str = Field(
         default="AXON",
-        description="``发送人名称`` shown in the recipient's inbox; ≤30 chars",
+        description="Display name shown in the recipient's inbox; ≤30 chars recommended",
+    )
+    smtp_timeout_seconds: float = Field(
+        default=30.0,
+        description="Per-call socket timeout for connect / EHLO / DATA",
     )
 
     # LLM — used only for light-weight synchronous calls from the

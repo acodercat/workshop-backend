@@ -1,11 +1,11 @@
 """Email-sending layer.
 
-Aliyun DirectMail-backed. Two pieces:
+SMTP-backed (Lark Suite Mail by default). Two pieces:
 
-- :mod:`.client` — async Aliyun ``SingleSendMail`` wrapper, the only
-  module that talks to the SDK.
+- :mod:`.client` — async :mod:`aiosmtplib` wrapper, the only module
+  that talks to the SMTP library.
 - :mod:`.templates` — locale-aware subject + HTML body for each kind
-  of email we send (currently just registration verification).
+  of email we send (registration + email-change verification).
 """
 
 from app.services.email.client import EmailSendError, send_html_email

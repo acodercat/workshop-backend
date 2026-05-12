@@ -1,13 +1,9 @@
 """Locale-aware email templates.
 
 Each helper here returns ``(subject, html_body)`` ready to pass to
-:func:`app.services.email.client.send_html_email`. HTML mirrors the
-approved Aliyun templates ``axon_register_verify_zh`` /
-``axon_register_verify_en`` — kept in source so the registration
-flow doesn't depend on Aliyun's BatchSendMail-only template path.
-
-If you change wording / styling here, update the Aliyun templates
-in lockstep so any future migration to BatchSendMail stays seamless.
+:func:`app.services.email.client.send_html_email`. HTML is held in
+source (rather than fetched from an SMTP provider's template store)
+so the registration flow works identically across providers.
 """
 
 from typing import Literal

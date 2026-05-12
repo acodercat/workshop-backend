@@ -5,8 +5,8 @@ description = "MetaSeq Agent backend — REST API, auth, SSE streaming, Redis br
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiosmtplib>=3.0.2",
     "alembic>=1.18.4",
-    "alibabacloud-dm20151123>=1.9.2",
     "asyncpg>=0.31.0",
     "bcrypt>=5.0.0",
     "email-validator>=2.3.0",
