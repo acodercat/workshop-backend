@@ -13,6 +13,10 @@ class EventType(StrEnum):
     consumes the stream.
     """
     SESSION_READY = "session.ready"
+    # Synthesised by the SSE generator (not by the worker) at the
+    # Phase-1-replay → Phase-2-live boundary. Lets clients reliably tell
+    # "I've caught up to live events" without time-based heuristics.
+    SESSION_LIVE = "session.live"
     AGENT_MESSAGE_CHUNK = "agent.message_chunk"
     AGENT_THINKING_CHUNK = "agent.thinking_chunk"
     AGENT_MESSAGE = "agent.message"

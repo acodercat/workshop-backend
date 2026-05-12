@@ -74,6 +74,16 @@ async def stream_events(
         if event["type"] == EventType.AGENT_STOPPED:
             return
 
+    # Phase 1 drained without a terminal event — we're about to start
+    # following live entries. Emit a sentinel so the client knows it
+    # can flip from "still replaying history" into normal live mode
+    # without relying on a timing heuristic (events at the *end* of a
+    # running turn legitimately have fresh ts but are still history).
+    yield sse_event(
+        EventType.SESSION_LIVE.value,
+        data=json.dumps({"ts": str(time.time())}),
+    )
+
     while True:
         entries = await read_stream(redis, key, last_id)
         for _, messages in entries:
