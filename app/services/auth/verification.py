@@ -74,7 +74,7 @@ async def _request_code(
 
     ``render`` produces the locale-aware ``(subject, html_body)``
     pair; ``log_label`` differentiates log messages between flows.
-    Send-then-persist order matters: if Aliyun rejects, we don't want
+    Send-then-persist order matters: if SMTP rejects, we don't want
     a stale code blocking the user from retrying within the cooldown
     window.
     """
@@ -183,7 +183,7 @@ async def request_register_code(
 
     Raises :class:`~app.errors.CooldownError` if a previous code was
     sent within the cooldown window;
-    :class:`~app.errors.EmailSendFailedError` if Aliyun rejects the
+    :class:`~app.errors.EmailSendFailedError` if SMTP rejects the
     send.
     """
     await _request_code(
