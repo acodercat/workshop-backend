@@ -4,18 +4,24 @@ from enum import StrEnum
 
 
 class EventType(StrEnum):
-    """Wire-format event types on the worker → backend per-session stream
-    (``session_stream:{session_id}``).
+    """Wire-format event types on the per-session SSE stream.
 
-    Values must match the strings emitted by
-    ``agent_worker.emitter.SessionEventEmitter``. The backend keeps its
-    own enum so it has no runtime dependency on ``axon`` —  it only
-    consumes the stream.
+    Two categories share one enum because both end up as ``event:``
+    lines on the same channel:
+
+    - ``session.*`` — transport-layer handshakes synthesised by the
+      SSE generator (``app.services.session.streaming``) itself.
+      Never written to the Redis ``session_stream:{id}``; the worker
+      doesn't know about them.
+    - ``agent.*`` — produced by the worker and XADD'd to Redis.
+      Values must match the strings emitted by
+      ``agent_worker.wire.session_events.SessionEventEmitter``. The
+      backend keeps its own enum so it has no runtime dependency on
+      ``axon`` — it only consumes the stream.
     """
     SESSION_READY = "session.ready"
-    # Synthesised by the SSE generator (not by the worker) at the
-    # Phase-1-replay → Phase-2-live boundary. Lets clients reliably tell
-    # "I've caught up to live events" without time-based heuristics.
+    # Marks the Phase-1-replay → Phase-2-live boundary so clients can
+    # tell "I've caught up to live" without time-based heuristics.
     SESSION_LIVE = "session.live"
     AGENT_MESSAGE_CHUNK = "agent.message_chunk"
     AGENT_THINKING_CHUNK = "agent.thinking_chunk"

@@ -11,6 +11,13 @@ import httpx
 import pytest
 
 
+# Backend-synthesised SSE events that aren't part of the agent's
+# event stream — ``session.ready`` fires once per connection,
+# ``session.live`` marks the Phase-1 → Phase-2 boundary. Tests strip
+# them so assertions can target worker events directly.
+_TRANSPORT_HANDSHAKES = frozenset({"session.ready", "session.live"})
+
+
 async def consume_sse_until_stopped(
     client: httpx.AsyncClient,
     session_id: str,
@@ -53,9 +60,9 @@ async def consume_sse_until_stopped(
         )
         async for line in response.aiter_lines():
             if not line:
-                if current_event is not None and current_event not in (
-                    "session.ready",
-                    "session.live",
+                if (
+                    current_event is not None
+                    and current_event not in _TRANSPORT_HANDSHAKES
                 ):
                     payload = (
                         json.loads("\n".join(current_data))
@@ -103,7 +110,7 @@ def assert_event_envelope_clean(events: list[tuple[str, dict]]) -> None:
     assert events, "no events collected"
 
     worker_events = [
-        (t, p) for t, p in events if t not in ("session.ready", "session.live")
+        (t, p) for t, p in events if t not in _TRANSPORT_HANDSHAKES
     ]
     assert worker_events, "no worker-side events collected (only handshakes)"
 
