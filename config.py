@@ -137,7 +137,7 @@ class Settings(BaseSettings):
         description="``From:`` header email — usually the same as ``smtp_username``",
     )
     smtp_from_alias: str = Field(
-        default="AXON",
+        default="HKGAI",
         description="Display name shown in the recipient's inbox; ≤30 chars recommended",
     )
     smtp_timeout_seconds: float = Field(
