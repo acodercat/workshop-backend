@@ -54,17 +54,18 @@ def _psycopg_uri() -> str:
 def test_user() -> Iterator[dict]:
     """Provision a unique throwaway user; tear down everything they own.
 
-    Insert via raw psycopg because the only "create user" path in the
-    codebase is :mod:`scripts.seed_users` and the API has no public
-    registration endpoint by design. Cleanup cascades:
+    Insert via raw psycopg because the public registration endpoint
+    goes through email verification, which is not test-friendly.
+    ``status='ACTIVE'`` overrides the ``PENDING`` server default so the
+    seeded account can log in immediately — mirrors
+    :mod:`scripts.seed_users`.
 
-    - ``DELETE FROM "user"`` cascades to ``session`` (user_id FK) which
-      cascades to ``message`` and ``session_turn`` (session_id FK).
-    - ``sandbox`` rows have **no** FK to session (application-managed —
-      see ``app/models/sandbox.py``), so they need an explicit delete
-      keyed off any session that belonged to this user.
+    The test body is expected to ``DELETE`` any sessions it created
+    via the API; teardown sweeps any stragglers plus the user row.
+    The user FK on ``session.user_id`` has no ``ON DELETE CASCADE``,
+    so leftover sessions would otherwise block the user delete.
     """
-    phone = f"e2e-{secrets.token_hex(4)}"
+    username = f"e2e-{secrets.token_hex(4)}"
     password = "e2e-test-pw"
     password_hash = bcrypt.hashpw(
         password.encode("utf-8"),
@@ -75,18 +76,19 @@ def test_user() -> Iterator[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 'INSERT INTO "user" '
-                "(name, phone, password_hash, token_version) "
-                "VALUES (%s, %s, %s, 0) RETURNING id",
-                (phone, phone, password_hash),
+                "(name, username, password_hash, token_version, status) "
+                "VALUES (%s, %s, %s, 0, 'ACTIVE') RETURNING id",
+                (username, username, password_hash),
             )
             user_id = cur.fetchone()[0]
         conn.commit()
 
-    yield {"id": user_id, "phone": phone, "password": password}
+    yield {"id": user_id, "username": username, "password": password}
 
-    # Drop sandbox rows first (no CASCADE), then the user (CASCADEs into
-    # session → message + session_turn). Both in one transaction so a
-    # mid-teardown crash doesn't leave half-deleted state.
+    # Drop sandbox + session_files (no FK CASCADE from session/user),
+    # then any lingering session (CASCADEs into message + session_turn),
+    # then the user. One transaction so a teardown crash leaves no
+    # half-deleted state.
     with psycopg.connect(_psycopg_uri()) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -94,6 +96,12 @@ def test_user() -> Iterator[dict]:
                 '(SELECT id FROM session WHERE user_id = %s)',
                 (user_id,),
             )
+            cur.execute(
+                "DELETE FROM session_files WHERE session_id IN "
+                '(SELECT id FROM session WHERE user_id = %s)',
+                (user_id,),
+            )
+            cur.execute('DELETE FROM session WHERE user_id = %s', (user_id,))
             cur.execute('DELETE FROM "user" WHERE id = %s', (user_id,))
         conn.commit()
 
@@ -112,7 +120,7 @@ async def http_client(test_user: dict) -> AsyncIterator[httpx.AsyncClient]:
         resp = await client.post(
             "/auth/access-tokens",
             data={
-                "username": test_user["phone"],
+                "username": test_user["username"],
                 "password": test_user["password"],
             },
         )

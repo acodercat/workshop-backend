@@ -26,6 +26,11 @@ async def consume_sse_until_stopped(
     a second time (``files``, ``args``, ``usage``) stay as JSON
     strings; callers decode them on demand.
 
+    The backend's per-connection ``session.ready`` handshake is
+    dropped here — it's a transport-layer marker that fires on every
+    reconnect, not part of the agent's event stream. Surfacing it
+    would force every assertion to special-case it.
+
     Parses the three SSE line shapes the backend emits — ``event:``,
     ``data:``, ``id:`` — plus the spec-mandated blank dispatch line.
     Comment lines (``:keepalive``) are ignored.
@@ -47,7 +52,7 @@ async def consume_sse_until_stopped(
         )
         async for line in response.aiter_lines():
             if not line:
-                if current_event is not None:
+                if current_event is not None and current_event != "session.ready":
                     payload = (
                         json.loads("\n".join(current_data))
                         if current_data else {}
@@ -75,8 +80,12 @@ async def consume_sse_until_stopped(
 def assert_event_envelope_clean(events: list[tuple[str, dict]]) -> None:
     """Common shape contract every well-formed turn must satisfy.
 
-    - First event is the synthetic ``agent.status: started`` lifecycle
-      hook from the runner (always emitted before any agent work).
+    - The first **worker-side** event is the synthetic
+      ``agent.status: started`` lifecycle hook from the runner (always
+      emitted before any agent work). ``session.ready`` is a
+      per-connection backend handshake injected by the SSE endpoint
+      before the worker's stream even starts — skipped here, since
+      it's an artifact of the channel, not the agent lifecycle.
     - Last event is ``agent.stopped``.
     - The terminal event's ``stop_reason`` is not the error fallback —
       either an explicit happy reason (``"end_turn"``, ``"stop"``) or
@@ -88,15 +97,21 @@ def assert_event_envelope_clean(events: list[tuple[str, dict]]) -> None:
     a misleading downstream check.
     """
     assert events, "no events collected"
-    first_type, first_payload = events[0]
+
+    worker_events = [
+        (t, p) for t, p in events if t != "session.ready"
+    ]
+    assert worker_events, "no worker-side events collected (only handshakes)"
+
+    first_type, first_payload = worker_events[0]
     assert first_type == "agent.status", (
-        f"first event must be agent.status, got {first_type}"
+        f"first worker event must be agent.status, got {first_type}"
     )
     assert first_payload.get("status") == "started", (
         f"first agent.status must be 'started', got {first_payload}"
     )
 
-    last_type, last_payload = events[-1]
+    last_type, last_payload = worker_events[-1]
     assert last_type == "agent.stopped", (
         f"last event must be agent.stopped, got {last_type}"
     )

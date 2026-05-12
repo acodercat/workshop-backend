@@ -45,7 +45,7 @@ class FileRef(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str = Field(..., min_length=1, max_length=10000)
+    content: str = Field(..., min_length=1, max_length=100000)
     files: list[FileRef] = Field(default_factory=list)
 
 
@@ -87,7 +87,7 @@ class SessionDetailResponse(BaseModel):
 class TitleGenerateRequest(BaseModel):
     """Body for ``POST /sessions/titles`` — content of the user's
     first message."""
-    content: str = Field(..., min_length=1, max_length=10000)
+    content: str = Field(..., min_length=1, max_length=200000)
 
 
 class TitleGenerateResponse(BaseModel):

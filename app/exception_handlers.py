@@ -146,7 +146,12 @@ async def validation_exception_handler(
     toasts; forms that want field-level errors read ``error.details``.
     """
     details = [
-        {"location": list(err["loc"]), "message": err["msg"], "type": err["type"]}
+        {
+            "location": list(err["loc"]),
+            "message": err["msg"],
+            "type": err["type"],
+            **({"context": err["ctx"]} if "ctx" in err else {}),
+        }
         for err in exc.errors()
     ]
     return JSONResponse(
