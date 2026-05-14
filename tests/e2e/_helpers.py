@@ -11,6 +11,13 @@ import httpx
 import pytest
 
 
+# Backend-synthesised SSE events that aren't part of the agent's
+# event stream — ``session.ready`` fires once per connection,
+# ``session.live`` marks the Phase-1 → Phase-2 boundary. Tests strip
+# them so assertions can target worker events directly.
+_TRANSPORT_HANDSHAKES = frozenset({"session.ready", "session.live"})
+
+
 async def consume_sse_until_stopped(
     client: httpx.AsyncClient,
     session_id: str,
@@ -26,10 +33,11 @@ async def consume_sse_until_stopped(
     a second time (``files``, ``args``, ``usage``) stay as JSON
     strings; callers decode them on demand.
 
-    The backend's per-connection ``session.ready`` handshake is
-    dropped here — it's a transport-layer marker that fires on every
-    reconnect, not part of the agent's event stream. Surfacing it
-    would force every assertion to special-case it.
+    The backend's per-connection ``session.ready`` and ``session.live``
+    handshakes are dropped here — they're transport-layer markers
+    (connection open / Phase-1-replay-drained), not part of the
+    agent's event stream. Surfacing them would force every assertion
+    to special-case them.
 
     Parses the three SSE line shapes the backend emits — ``event:``,
     ``data:``, ``id:`` — plus the spec-mandated blank dispatch line.
@@ -52,7 +60,10 @@ async def consume_sse_until_stopped(
         )
         async for line in response.aiter_lines():
             if not line:
-                if current_event is not None and current_event != "session.ready":
+                if (
+                    current_event is not None
+                    and current_event not in _TRANSPORT_HANDSHAKES
+                ):
                     payload = (
                         json.loads("\n".join(current_data))
                         if current_data else {}
@@ -82,10 +93,10 @@ def assert_event_envelope_clean(events: list[tuple[str, dict]]) -> None:
 
     - The first **worker-side** event is the synthetic
       ``agent.status: started`` lifecycle hook from the runner (always
-      emitted before any agent work). ``session.ready`` is a
-      per-connection backend handshake injected by the SSE endpoint
-      before the worker's stream even starts — skipped here, since
-      it's an artifact of the channel, not the agent lifecycle.
+      emitted before any agent work). ``session.ready`` /
+      ``session.live`` are per-connection backend handshakes injected
+      by the SSE endpoint — skipped here, since they're artifacts of
+      the channel, not the agent lifecycle.
     - Last event is ``agent.stopped``.
     - The terminal event's ``stop_reason`` is not the error fallback —
       either an explicit happy reason (``"end_turn"``, ``"stop"``) or
@@ -99,7 +110,7 @@ def assert_event_envelope_clean(events: list[tuple[str, dict]]) -> None:
     assert events, "no events collected"
 
     worker_events = [
-        (t, p) for t, p in events if t != "session.ready"
+        (t, p) for t, p in events if t not in _TRANSPORT_HANDSHAKES
     ]
     assert worker_events, "no worker-side events collected (only handshakes)"
 
