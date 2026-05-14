@@ -163,6 +163,8 @@ class Settings(BaseSettings):
             "claude-opus-4-7",
             "claude-sonnet-4-6",
             "kimi-k2",
+            "HKGAI-V1",
+            "HKGAI-V3",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
     )
