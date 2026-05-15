@@ -1,16 +1,18 @@
 """Credits read endpoints.
 
-Two surfaces:
+Three surfaces (Stripe-style resource separation):
 
-- ``GET /credits`` — balance + raw ledger rows. Audit / debug.
-- ``GET /credits/transactions`` — balance + user-facing transactions
-  (turn-related 1-3 ledger rows collapsed into one). Drives the
-  settings UI and sidebar badge.
+- ``GET /credits`` — balance + raw ledger page. Audit / debug.
+- ``GET /credits/balance`` — just the spendable balance. Lean;
+  what the sidebar badge polls.
+- ``GET /credits/transactions`` — pure paginated user-facing
+  transactions (turn-related 1-3 ledger rows collapsed into one),
+  same shape as ``GET /sessions``. Drives the settings Activity tab.
 
-Both endpoints lazily sweep open reservations before reading so the
-returned balance reflects fully-closed turns. Sweep cost is bounded
-by the ``state='OPEN'`` partial index — typically 0 or 1 row per
-request.
+All three lazily sweep open reservations before reading so a
+just-finished turn is reflected (settled balance / non-pending
+rows). Sweep cost is bounded by the ``state='OPEN'`` partial
+index — typically 0 or 1 row per request.
 """
 
 import logging
@@ -121,7 +123,7 @@ async def get_credits_transactions(
     rows, total = await credits.list_transactions(
         db, user_id=current_user.id, page=page, page_size=page_size,
     )
-    await db.commit()
+    await db.commit()  # the sweep's writes need to land
 
     return PaginatedResponse(
         items=[
