@@ -61,16 +61,6 @@ class CreditsHistoryEntry(BaseModel):
     created_at: datetime
 
 
-class CreditsTransactionEntry(BaseModel):
-    """One user-facing transaction row (collapsed from 1-3 raw
-    ledger rows when turn-related, otherwise pass-through)."""
-
-    kind: TransactionKind
-    amount_credits: int
-    at: datetime
-    ref: dict[str, Any]
-
-
 class CreditsBalanceSnapshotResponse(BaseModel):
     """Top-level shape of ``GET /credits/balance``.
 
@@ -83,6 +73,16 @@ class CreditsBalanceSnapshotResponse(BaseModel):
     """
 
     balance_credits: int
+
+
+class CreditsTransactionEntry(BaseModel):
+    """One user-facing transaction row (collapsed from 1-3 raw
+    ledger rows when turn-related, otherwise pass-through)."""
+
+    kind: TransactionKind
+    amount_credits: int
+    at: datetime
+    ref: dict[str, Any]
 
 
 CreditsBalanceResponse.model_rebuild()
