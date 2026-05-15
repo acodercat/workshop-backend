@@ -15,8 +15,6 @@ rows). Sweep cost is bounded by the ``state='OPEN'`` partial
 index — typically 0 or 1 row per request.
 """
 
-import logging
-
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,8 +30,6 @@ from app.schemas.credits import (
 )
 from app.services import credits
 from app.services.credits.rates import credits_from_micro
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
