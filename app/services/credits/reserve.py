@@ -86,10 +86,16 @@ async def reserve_for_turn(
             "model_id": model_id,
         },
     )
-    # ``expires_at`` is informational in V1 (no janitor reads it yet —
-    # the lazy-sweep on user action handles abandoned reservations).
-    # 1h is a sensible upper bound for "a turn that hasn't settled yet
-    # is probably abandoned"; revisit when the V2 janitor lands.
+    # ``expires_at`` is the janitor's "worker probably died" cutoff
+    # (``credits_janitor`` refunds OPEN reservations past it whose
+    # session is still non-terminal). It MUST exceed the longest
+    # legitimate turn — a deep-research / long autonomous loop that
+    # genuinely runs past this window is indistinguishable from a
+    # dead worker and would be wrongly refunded mid-flight (the user
+    # then gets that turn for free). 4h is the conservative upper
+    # bound for current workloads; a heartbeat-based passive cancel
+    # (see docs/credits-future.md) is the real fix and removes the
+    # need for any fixed timeout.
     reservation = CreditReservation(
         user_id=user_id,
         kind=CreditReservationKind.TURN,
@@ -98,7 +104,7 @@ async def reserve_for_turn(
         reserved=reserved,
         rate_snapshot=dict(rate),  # JSONB stores the dict copy
         state=CreditReservationState.OPEN,
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=4),
     )
     db.add(reservation)
     await db.flush()  # populate reservation.id for downstream callers
