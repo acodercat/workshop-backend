@@ -15,16 +15,12 @@ transaction:
   ``welcome-`` are re-tagged as ``WELCOME_GRANT`` so the UI can
   surface the onboarding moment cleanly.
 
-**Pagination is cursor-based** (Stripe / OpenAI / GitHub pattern):
-caller passes ``before`` (an ISO timestamp) to fetch rows older than
-that point, and gets back ``next_cursor`` for the following page.
-This pattern beats LIMIT/OFFSET on three counts that matter as the
-log grows: deep-page reads stay O(log n) instead of O(offset),
-concurrent inserts can't shift the page window, and we drop the
-``SELECT count(*)`` round-trip entirely. The single ordering key
-``at DESC`` is unambiguous per user (microsecond-resolution
-timestamps + single-threaded writes per user — see callers in
-:mod:`app.services.credits`), so no tiebreaker column is needed.
+**Pagination is offset-based** (``page`` / ``page_size`` + ``total``),
+matching the project-wide convention used by ``GET /sessions`` and
+:mod:`app.common.pagination`. The activity list is bounded per user
+and read at human scroll speed, so the simplicity + a consistent
+``PaginatedResponse`` shape across the API outweighs deep-page
+offset cost here.
 
 The endpoint :func:`~app.api.endpoints.credits.get_credits_transactions`
 calls into here. The raw ``GET /credits`` endpoint still returns
@@ -76,21 +72,17 @@ class TransactionRow(NamedTuple):
     ref: dict[str, Any]
 
 
-# Two non-obvious bits below earn comments; the rest of the SQL
-# reads straight.
+# Offset pagination, matching the project convention (see
+# ``GET /sessions`` + ``app/common/pagination.py``): a count query
+# and a page query share the same filtered ``all_rows`` CTE so the
+# total can't drift from the page. The CTE body is defined once and
+# spliced into both statements rather than duplicated.
 #
-# 1. The ``welcome-%`` LIKE pattern retags ``apply_topup`` rows
-#    whose idempotency key starts with ``welcome-`` as
-#    ``WELCOME_GRANT`` — registration onboarding is the only
-#    producer of that prefix.
-#
-# 2. ``CAST(:before_at AS timestamptz)`` is load-bearing. Postgres
-#    can't infer the type of a NULL bind from
-#    ``$x IS NULL OR col < $x`` alone (``IS NULL`` is polymorphic,
-#    ``<`` is overloaded), so without the cast the first page
-#    (``before_at = None``) raises ``AmbiguousParameter``.
-_TRANSACTIONS_SQL = text(
-    """
+# The only non-obvious bit: the ``welcome-%`` LIKE pattern retags
+# ``apply_topup`` rows whose idempotency key starts with ``welcome-``
+# as ``WELCOME_GRANT`` — registration onboarding is the sole producer
+# of that prefix.
+_ROWS_CTE = """
     WITH reservation_rows AS (
         SELECT
             cr.created_at AS at,
@@ -116,8 +108,6 @@ _TRANSACTIONS_SQL = text(
             ) AS ref
         FROM credit_reservation cr
         WHERE cr.user_id = :user_id
-          AND (CAST(:before_at AS timestamptz) IS NULL
-               OR cr.created_at < CAST(:before_at AS timestamptz))
     ),
     direct_rows AS (
         SELECT
@@ -132,16 +122,25 @@ _TRANSACTIONS_SQL = text(
         FROM credit_ledger cl
         WHERE cl.user_id = :user_id
           AND cl.kind IN ('TOPUP', 'ADJUST')
-          AND (CAST(:before_at AS timestamptz) IS NULL
-               OR cl.created_at < CAST(:before_at AS timestamptz))
-    )
-    SELECT kind, amount, at, ref
-    FROM (
+    ),
+    all_rows AS (
         SELECT * FROM reservation_rows
         UNION ALL
         SELECT * FROM direct_rows
-    ) all_rows
+    )
+"""
+
+_TRANSACTIONS_COUNT_SQL = text(
+    _ROWS_CTE + " SELECT count(*) AS total FROM all_rows"
+)
+
+_TRANSACTIONS_PAGE_SQL = text(
+    _ROWS_CTE
+    + """
+    SELECT kind, amount, at, ref
+    FROM all_rows
     ORDER BY at DESC
+    OFFSET :offset
     LIMIT :limit
     """
 )
@@ -151,18 +150,27 @@ async def list_transactions(
     db: AsyncSession,
     *,
     user_id: int,
-    before_at: datetime | None,
-    limit: int,
-) -> list[TransactionRow]:
-    """Return one newest-first page of user-facing transactions.
+    page: int,
+    page_size: int,
+) -> tuple[list[TransactionRow], int]:
+    """Return one newest-first page of user-facing transactions plus
+    the total row count.
 
-    Pass ``before_at=None`` for the first page; pass the previous
-    page's oldest ``at`` for subsequent pages. The endpoint layer
-    shapes ``next_cursor`` from ``len(rows) == limit``.
+    Offset pagination mirroring ``app.common.pagination.paginate``:
+    page / page_size below 1 are clamped to 1. The count and page
+    queries share ``_ROWS_CTE`` so ``total`` is consistent with the
+    page even under concurrent writes.
     """
+    safe_page = max(page, 1)
+    safe_page_size = max(page_size, 1)
+    offset = (safe_page - 1) * safe_page_size
+
+    total = (
+        await db.execute(_TRANSACTIONS_COUNT_SQL, {"user_id": user_id})
+    ).scalar() or 0
     rows = (await db.execute(
-        _TRANSACTIONS_SQL,
-        {"user_id": user_id, "before_at": before_at, "limit": limit},
+        _TRANSACTIONS_PAGE_SQL,
+        {"user_id": user_id, "offset": offset, "limit": safe_page_size},
     )).all()
     return [
         TransactionRow(
@@ -172,4 +180,4 @@ async def list_transactions(
             ref=row.ref or {},
         )
         for row in rows
-    ]
+    ], total
