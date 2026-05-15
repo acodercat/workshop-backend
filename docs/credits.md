@@ -333,12 +333,47 @@ Path: `queue_user_message` → `credits.reserve_for_turn`.
                          reference={session_id, turn_id, model_id})
 6. INSERT credit_reservation (state='OPEN',
                               rate_snapshot=copy of rate row,
-                              expires_at=now() + 1h)
+                              expires_at=now() + 4h)
 7. caller commits
 ```
 
-The 1-hour `expires_at` is informational in V1 (no janitor was using
-it); V2+ the janitor uses it to detect worker-crash-mid-turn.
+`expires_at` (now() + 4h) is the janitor's "worker probably died"
+cutoff. It must exceed the longest legitimate turn, since a live
+long turn and a dead worker look identical to the janitor — see
+the *fixed-timeout vs. long turns* hazard in
+`docs/credits-future.md` (heartbeat-based passive cancel is the
+planned real fix).
+
+### 5.3.1 Transport model — there is no queue XADD
+
+A common misread (and an error in early commit messages): "credits
+are refunded if the XADD to the worker queue fails." **There is no
+XADD and no Redis Stream queue.** The whole enqueue is one DB
+transaction in `queue_user_message`:
+
+```
+BEGIN
+  lazy-sweep this user's stale OPEN reservations
+  INSERT session_turn (status='pending')        ← this row IS the queue item
+  reserve_for_turn(...)                          ← may raise 402
+  INSERT message (USER) + flip session.status='running'
+COMMIT
+publish_wake(redis)   ← best-effort pub/sub nudge, AFTER commit
+```
+
+- The worker discovers turns by **polling `session_turn`** (5s
+  fallback) plus an optional `notify:worker` pub/sub *wake* so an
+  idle worker doesn't wait a full poll cycle. The pub/sub carries
+  no payload and no queue semantics — losing it only delays pickup
+  by one poll interval.
+- Credit shortfall is **not** an "XADD failed → refund" path.
+  `reserve_for_turn` raising `InsufficientCreditsError` aborts the
+  single transaction, so the `RESERVE` ledger row, the
+  `session_turn`, and the user message are **never committed** —
+  there is nothing to refund. The user sees a 402 and no turn was
+  ever enqueued.
+- A failed `publish_wake` (after commit) is logged and ignored; the
+  poll fallback still picks the row up. It never triggers a refund.
 
 ### 5.4 Settle (after agent terminates)
 

@@ -33,15 +33,42 @@ balance under-counts by the reservation amount. Bounded loss
 (`<= reserved_amount` per orphan), recoverable by a one-shot rebuild
 script.
 
-**When to add.** First evidence of a real long-lived orphan in prod,
-or when product launches background-running agent flows where no
-user is expected to log back in promptly.
+**Status: SHIPPED.** `app/workers/credits_janitor.py` exists and
+runs as a sibling process (Postgres advisory lock `b"CREDJANI"`
+for multi-node single-runner coordination). The outline below is
+retained for history.
 
-**Implementation outline.** New file
-`app/workers/credits_janitor.py`; an `async def run_forever()` loop
-on `settings.credit_janitor_interval_seconds` (default 60). Started
-either from the FastAPI `lifespan` (single-process) or as a sibling
-process under the same deploy script.
+**Implementation outline.** `app/workers/credits_janitor.py`; an
+`async def run_forever()` loop on
+`settings.credit_janitor_interval_seconds` (default 60). Started as
+a sibling process under the same deploy script (not the FastAPI
+`lifespan`, so it restarts independently of the API).
+
+### Open hazard — fixed-timeout vs. long turns (heartbeat is the real fix)
+
+The janitor's "worker probably died" signal is
+`expires_at < now() AND session.status non-terminal`. There is **no
+liveness check** — a turn that legitimately runs past `expires_at`
+(deep-research, long autonomous loop) is indistinguishable from a
+dead worker, so the janitor refunds its OPEN reservation mid-flight.
+When the worker later finishes, `settle_turn` finds the reservation
+already `CANCELLED` and no-ops → the user consumed a turn for free
+(revenue leak, not a user-facing over-charge).
+
+V1 mitigation (shipped): `expires_at` bumped 1h → **4h** in
+`reserve.py`, sized above current worst-case turns. This only widens
+the window; it does not close it.
+
+**Real fix (V2): heartbeat-based passive cancel.** The worker writes
+a `last_heartbeat_at` (on `session_turn` or a side table) every
+N seconds while a turn is in flight. The janitor's refund predicate
+becomes `now() - last_heartbeat_at > k * heartbeat_interval` instead
+of a fixed `expires_at`. A live long turn keeps refreshing its
+heartbeat and is never reclaimed; a dead worker stops within one
+interval. This removes the need for any fixed per-turn timeout and
+eliminates the free-turn leak. Touch points: worker turn loop
+(emit heartbeat), `credits_janitor._process_one` (swap the
+`expires_at` predicate), one migration for the heartbeat column.
 
 ## V2 — Worker-side single-turn cost cap
 
