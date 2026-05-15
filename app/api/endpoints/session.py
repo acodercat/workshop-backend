@@ -325,6 +325,7 @@ async def cancel_session(
 
 
 @router.get("/sessions/{session_id}/stream")
+@limiter.exempt
 async def stream_session(
     session_id: str,
     redis: aioredis.Redis = Depends(get_redis_streaming),

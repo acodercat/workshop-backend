@@ -32,6 +32,7 @@ from app.exception_handlers import (
 from app.rate_limit import limiter, rate_limit_exceeded_handler
 from config import settings
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 ROUTERS = [
     auth.router,
@@ -208,6 +209,15 @@ app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
+# SlowAPIMiddleware makes ``limiter.default_limits`` an actual global
+# floor. Without it slowapi only enforces limits on endpoints carrying
+# an explicit ``@limiter.limit`` decorator — every other route is
+# completely unthrottled (the default 200/min is inert). Added BEFORE
+# CORS so CORS stays the outermost layer: a 429 response still gets
+# its ``Access-Control-Allow-Origin`` headers, otherwise the browser
+# would surface an opaque network error instead of the rate-limit JSON.
+app.add_middleware(SlowAPIMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -221,17 +231,23 @@ for router in ROUTERS:
 
 
 @app.get("/")
+@limiter.exempt
 async def root():
     return {"message": "Welcome to MetaSeq Agent API"}
 
 
+# Health probes are exempt: K8s liveness/readiness poll these every
+# few seconds per node — a per-IP 200/min cap would 429 the probe,
+# K8s would mark the pod unhealthy and kill it.
 @app.get("/health/live")
+@limiter.exempt
 async def health_live():
     """Liveness probe — process is up. Always 200 unless the loop is dead."""
     return {"status": "ok"}
 
 
 @app.get("/health/ready")
+@limiter.exempt
 async def health_ready():
     """Readiness probe — DB and Redis both reachable.
 
