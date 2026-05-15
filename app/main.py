@@ -18,7 +18,7 @@ from app.logging_config import setup_logging
 setup_logging(log_dir="logs", level="INFO")
 logger = logging.getLogger(__name__)
 
-from app.api.endpoints import auth, feedback, file, session, share, user
+from app.api.endpoints import auth, credits, feedback, file, session, share, user
 from app.database import engine
 from app.errors import AppError
 from app.exception_handlers import (
@@ -35,6 +35,7 @@ from slowapi.errors import RateLimitExceeded
 
 ROUTERS = [
     auth.router,
+    credits.router,
     feedback.router,
     file.router,
     session.router,
@@ -174,6 +175,12 @@ async def lifespan(app: FastAPI):
         settings.redis_pool_timeout_seconds,
         settings.redis_streaming_pool_size,
     )
+
+    # Credit-reservation janitor runs as a **sibling process**, not
+    # inside this event loop — see ``app/workers/run.py`` and
+    # ``scripts/deploy.sh janitor``. Web's lifespan is HTTP-only
+    # again: separating background sweeps from request handling lets
+    # each scale, restart, and fail independently.
 
     logger.info("API started")
     try:

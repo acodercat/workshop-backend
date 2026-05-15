@@ -3,10 +3,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    BigInteger,
     Enum as SAEnum,
+    ForeignKey,
     Integer,
     String,
     TIMESTAMP,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -81,6 +84,32 @@ class User(Base):
     )
     last_login_at: Mapped[datetime | None] = mapped_column(TIMESTAMP, nullable=True)
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # The user's current default organization (mirrors OpenAI's
+    # ``default_organization``). Set to the user's personal org at
+    # registration. The column is nullable purely because of the
+    # circular FK at row-creation time —
+    # :class:`~app.models.organization.Organization` requires a valid
+    # ``owner_user_id``, so the user has to exist first; we then
+    # create the org and UPDATE this column inside the same
+    # transaction. Every production code path treats it as NOT NULL
+    # after registration completes.
+    # ``ON DELETE RESTRICT`` keeps the cleanup of an org with linked
+    # users a deliberate ops step rather than a silent cascade.
+    organization_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("organization.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    # PAYG credit balance, in **µ-credits** (1 credit = 1_000_000 µ-credits;
+    # 1 credit ≈ $0.001 USD of LLM cost). Cached materialization of
+    # ``SUM(credit_ledger.amount WHERE user_id = self.id)``; the ledger
+    # is the source of truth. ``bigint`` keeps all arithmetic integer
+    # (the alternative ``numeric`` accumulates float-style errors over
+    # millions of rows). All writes go through
+    # :mod:`app.services.credits._internal` so the invariant holds.
+    credit_balance: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP,
         server_default=func.now(),

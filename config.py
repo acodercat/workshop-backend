@@ -150,8 +150,53 @@ class Settings(BaseSettings):
             "claude-opus-4-7",
             "claude-sonnet-4-6",
             "kimi-k2",
+            "HKGAI-V1",
+            "HKGAI-V3",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
+    )
+
+    # Credit / quota rate card. The peg is ``1 credit = $0.001 USD of
+    # cost``; one credit is split into 1_000_000 µ-credits at the storage
+    # layer so all arithmetic stays in ``bigint`` (see
+    # :mod:`app.services.credits`). One entry per model_id in
+    # ``supported_session_model_ids`` — missing entries make the reserve
+    # path raise loudly rather than silently charging zero.
+    #
+    # ``margin`` is multiplied into the cost; bake gross margin and FX
+    # buffer into one number. ``max_estimated_input_tokens`` is the
+    # upper bound assumed at reserve time when the actual input length
+    # isn't known yet (worker rebuilds context); pessimistic on purpose
+    # — settle multi-refunds the unused portion.
+    credit_rates: dict[str, dict[str, float]] = Field(
+        default_factory=lambda: {
+            "claude-opus-4-7":   {"in_per_1k_usd": 0.015, "out_per_1k_usd": 0.075, "margin": 1.3, "max_output_tokens": 4096},
+            "claude-opus-4-6":   {"in_per_1k_usd": 0.015, "out_per_1k_usd": 0.075, "margin": 1.3, "max_output_tokens": 4096},
+            "claude-sonnet-4-6": {"in_per_1k_usd": 0.003, "out_per_1k_usd": 0.015, "margin": 1.3, "max_output_tokens": 8192},
+            "kimi-k2":           {"in_per_1k_usd": 0.001, "out_per_1k_usd": 0.005, "margin": 1.3, "max_output_tokens": 8192},
+            "HKGAI-V1":          {"in_per_1k_usd": 0.001, "out_per_1k_usd": 0.005, "margin": 1.3, "max_output_tokens": 8192},
+            "HKGAI-V3":          {"in_per_1k_usd": 0.001, "out_per_1k_usd": 0.005, "margin": 1.3, "max_output_tokens": 8192},
+        },
+        description="Per-model rate card for credit billing. Snapshotted onto each credit_reservation at reserve time so a config change can't re-price open turns.",
+    )
+    # Pessimistic estimate for the prompt size at reserve time, used when
+    # we can't measure the worker's compacted context cheaply from the
+    # backend side. Real cost is settled from the worker's actual
+    # ``usage.prompt_tokens`` post-turn.
+    credit_reserve_max_input_tokens: int = Field(
+        default=16_000,
+        description="Upper bound on input tokens assumed at reserve time. Settle uses actual usage.",
+    )
+    # Auto-grant on registration. Sized at ~13 HKGAI-V1 turns of "try
+    # the product" headroom — large enough to feel useful, small
+    # enough that signup-farming is unprofitable. Set to 0 to disable
+    # (every new user starts at 0 balance, admin must top up). The
+    # grant uses a deterministic idempotency key
+    # ``welcome-{user_id}`` so a registration retry after partial
+    # failure can't double-grant.
+    credit_welcome_grant_credits: int = Field(
+        default=1_000,
+        description="Whole credits granted to every new user at registration. Set to 0 to disable.",
     )
 
 

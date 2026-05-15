@@ -17,8 +17,11 @@ from app.models import *  # noqa
 # this is the Alembic Config object
 config = context.config
 
-# Set database URL from settings
-config.set_main_option("sqlalchemy.url", settings.db_uri)
+# Set database URL from settings. ``%`` is doubled so alembic's
+# configparser-based storage doesn't interpret URL-encoded password
+# chars like ``%40`` as interpolation syntax; configparser
+# de-interpolates ``%%`` back to a literal ``%`` on read.
+config.set_main_option("sqlalchemy.url", settings.db_uri.replace("%", "%%"))
 
 # Interpret the config file for Python logging
 if config.config_file_name is not None:

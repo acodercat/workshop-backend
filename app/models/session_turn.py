@@ -23,6 +23,7 @@ from sqlalchemy import (
     Enum as SAEnum,
     ForeignKey,
     Index,
+    Integer,
     String,
     TIMESTAMP,
     Text,
@@ -71,6 +72,15 @@ class SessionTurn(Base):
     files: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
+    # Token usage as reported by axon's ``AgentStoppedEvent.usage``,
+    # written by the worker in the same fenced UPDATE that flips
+    # ``status`` to ``COMPLETE`` / ``CANCELLED`` (see
+    # ``agent_worker/infra/turn_repository.py::_terminate_turn``).
+    # Stays ``NULL`` on the ``FAILED`` path and on pre-V2 historical
+    # rows — backend's credit settle treats ``NULL`` as "refund the
+    # reservation": no value delivered, no charge.
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[SessionTurnStatus] = mapped_column(
         # ``values_callable`` keeps the Postgres enum holding the
         # ``.value`` strings (default would use Python member names,

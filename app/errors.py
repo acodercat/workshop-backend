@@ -105,3 +105,14 @@ class SamePasswordError(AppError):
 
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "same_password"
+
+
+class InsufficientCreditsError(AppError):
+    """User's credit balance is below the reservation estimate for
+    the requested turn. Surface 402 (the textbook code for "this
+    request needs payment to proceed") so a generic 4xx handler in
+    the frontend can route to the top-up flow without parsing the
+    body."""
+
+    status_code = status.HTTP_402_PAYMENT_REQUIRED
+    error_type = "insufficient_credits"

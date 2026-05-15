@@ -74,6 +74,10 @@ def test_user() -> Iterator[dict]:
 
     with psycopg.connect(_psycopg_uri()) as conn:
         with conn.cursor() as cur:
+            # User + personal organization + OWNER membership, mirroring
+            # the production registration flow (see
+            # :mod:`app.services.auth.register`). Done in one transaction
+            # so a teardown crash leaves no half-created state.
             cur.execute(
                 'INSERT INTO "user" '
                 "(name, username, password_hash, token_version, status) "
@@ -81,14 +85,38 @@ def test_user() -> Iterator[dict]:
                 (username, username, password_hash),
             )
             user_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO organization (name, kind, owner_user_id) "
+                "VALUES ('Personal', 'PERSONAL', %s) RETURNING id",
+                (user_id,),
+            )
+            organization_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO organization_member "
+                "(organization_id, user_id, role) "
+                "VALUES (%s, %s, 'OWNER')",
+                (organization_id, user_id),
+            )
+            cur.execute(
+                'UPDATE "user" SET organization_id = %s WHERE id = %s',
+                (organization_id, user_id),
+            )
         conn.commit()
 
-    yield {"id": user_id, "username": username, "password": password}
+    yield {
+        "id": user_id,
+        "username": username,
+        "password": password,
+        "organization_id": organization_id,
+    }
 
     # Drop sandbox + session_files (no FK CASCADE from session/user),
     # then any lingering session (CASCADEs into message + session_turn),
-    # then the user. One transaction so a teardown crash leaves no
-    # half-deleted state.
+    # then unlink + drop the personal org, then the user. One
+    # transaction so a teardown crash leaves no half-deleted state.
+    # ``organization_member`` cascades on user delete; ``organization``
+    # FK is ``ON DELETE RESTRICT`` so we drop the org explicitly after
+    # clearing the back-link.
     with psycopg.connect(_psycopg_uri()) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -102,6 +130,15 @@ def test_user() -> Iterator[dict]:
                 (user_id,),
             )
             cur.execute('DELETE FROM session WHERE user_id = %s', (user_id,))
+            # Clear the user→org back-link before deleting the org so
+            # the RESTRICT FK on ``user.organization_id`` doesn't block.
+            cur.execute(
+                'UPDATE "user" SET organization_id = NULL WHERE id = %s',
+                (user_id,),
+            )
+            cur.execute(
+                "DELETE FROM organization WHERE id = %s", (organization_id,),
+            )
             cur.execute('DELETE FROM "user" WHERE id = %s', (user_id,))
         conn.commit()
 

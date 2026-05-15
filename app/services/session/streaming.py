@@ -5,6 +5,21 @@ already on the Redis stream, then block-read new entries until the
 terminal ``agent.stopped`` event arrives. Fed straight into
 :class:`~sse_starlette.sse.EventSourceResponse` by the GET stream
 endpoint.
+
+**Pure UI rendering** — this module no longer participates in credit
+settle. V2 of the credit subsystem moved the source of truth for
+token usage onto ``session_turn.input_tokens`` / ``output_tokens``,
+written by the worker in the same fenced transaction that flips
+``session_turn.status`` to terminal. Settle is now driven by:
+
+- The lazy sweep on user-facing endpoints (``GET /credits``,
+  ``queue_user_message``) — covers the "user comes back" case.
+- The background janitor (:mod:`app.workers.credits_janitor`) — covers
+  the "user never comes back" case.
+
+The previous SSE eager-settle hook is gone with V2: it was a
+compensating mechanism for the Redis-stream race that V2's durable
+usage storage eliminates.
 """
 
 import json
