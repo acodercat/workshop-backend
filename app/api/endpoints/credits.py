@@ -21,12 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.models.user import User
-from app.schemas.collection_response import PaginationMeta
+from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.credits import (
     CreditsBalanceResponse,
+    CreditsBalanceSnapshotResponse,
     CreditsHistoryEntry,
     CreditsTransactionEntry,
-    CreditsTransactionsResponse,
 )
 from app.services import credits
 from app.services.credits.rates import credits_from_micro
@@ -77,30 +77,53 @@ async def get_credits(
 
 
 @router.get(
-    "/credits/transactions", response_model=CreditsTransactionsResponse,
+    "/credits/balance", response_model=CreditsBalanceSnapshotResponse,
+)
+async def get_credits_balance(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> CreditsBalanceSnapshotResponse:
+    """Return just ``current_user``'s spendable balance.
+
+    Stripe's ``GET /v1/balance`` analog — a lean snapshot, separate
+    from the transactions list, so the sidebar badge can poll it
+    cheaply. Same lazy-sweep as ``GET /credits``: any of this user's
+    open reservations whose session is already terminal get settled
+    first, so the number reflects fully-closed turns.
+    """
+    await credits.settle_open_for_user(db, current_user.id)
+    balance_micro = await credits.get_balance(db, current_user.id)
+    await db.commit()  # the sweep's writes need to land
+    return CreditsBalanceSnapshotResponse(
+        balance_credits=credits_from_micro(balance_micro),
+    )
+
+
+@router.get(
+    "/credits/transactions",
+    response_model=PaginatedResponse[CreditsTransactionEntry],
 )
 async def get_credits_transactions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-) -> CreditsTransactionsResponse:
-    """Return ``current_user``'s balance + an offset-paginated page
-    of user-facing transactions.
+) -> PaginatedResponse[CreditsTransactionEntry]:
+    """Return an offset-paginated page of ``current_user``'s
+    user-facing transactions.
 
-    Same ``page`` / ``page_size`` + ``meta`` shape as ``GET /sessions``
-    (see :class:`PaginatedResponse`). Same lazy-sweep behaviour as
-    ``GET /credits``.
+    Pure ``PaginatedResponse`` — identical shape to ``GET /sessions``
+    (``items`` + ``meta``), no balance mixed in (that's
+    ``GET /credits/balance``). Same lazy-sweep as ``GET /credits`` so
+    a just-finished turn shows as settled rather than pending.
     """
     await credits.settle_open_for_user(db, current_user.id)
-    balance_micro = await credits.get_balance(db, current_user.id)
     rows, total = await credits.list_transactions(
         db, user_id=current_user.id, page=page, page_size=page_size,
     )
     await db.commit()
 
-    return CreditsTransactionsResponse(
-        balance_credits=credits_from_micro(balance_micro),
+    return PaginatedResponse(
         items=[
             CreditsTransactionEntry(
                 kind=row.kind,
