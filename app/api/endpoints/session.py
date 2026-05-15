@@ -207,7 +207,9 @@ async def get_session(
 
 
 @router.patch("/sessions/{session_id}", response_model=SessionResponse)
+@limiter.limit("30/minute")
 async def update_session(
+    request: Request,
     session_id: str,
     body: SessionUpdate,
     db: AsyncSession = Depends(get_db),
@@ -222,7 +224,9 @@ async def update_session(
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("30/minute")
 async def delete_session(
+    request: Request,
     session_id: str,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
@@ -295,7 +299,9 @@ async def create_message(
     "/sessions/{session_id}/cancel",
     status_code=status.HTTP_202_ACCEPTED,
 )
+@limiter.limit("30/minute")
 async def cancel_session(
+    request: Request,
     session_id: str,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
@@ -469,7 +475,9 @@ async def get_session_share(
     "/sessions/{session_id}/share",
     status_code=status.HTTP_204_NO_CONTENT,
 )
+@limiter.limit("30/minute")
 async def delete_share(
+    request: Request,
     session_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
@@ -574,7 +582,9 @@ async def _resolve_assistant_message(
     "/sessions/{session_id}/messages/{message_id}/feedback",
     response_model=FeedbackResponse,
 )
+@limiter.limit("30/minute")
 async def upsert_feedback(
+    request: Request,
     session_id: uuid.UUID,
     message_id: int,
     body: FeedbackUpsert,
@@ -625,7 +635,9 @@ async def upsert_feedback(
     "/sessions/{session_id}/messages/{message_id}/feedback",
     status_code=status.HTTP_204_NO_CONTENT,
 )
+@limiter.limit("30/minute")
 async def delete_feedback(
+    request: Request,
     session_id: uuid.UUID,
     message_id: int,
     db: AsyncSession = Depends(get_db),
