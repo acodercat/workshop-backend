@@ -1,7 +1,7 @@
 """Enqueue a user message for the worker.
 
 One load-bearing function, :func:`queue_user_message`, sequences
-three steps in a specific order:
+the steps in a specific order:
 
 1. Lock the session row and reject if a live generation is in progress
    (:class:`GenerationInProgressError`). The lock serialises concurrent
@@ -10,9 +10,16 @@ three steps in a specific order:
 2. In one transaction:
    - DELETE the per-session output stream so the next turn's events
      don't tail onto stale history;
+   - Lazy-sweep this user's open credit reservations into terminal
+     state (catches reservations the SSE eager hook missed);
+   - INSERT the ``session_turn`` row (status=``pending``) — its
+     auto-generated id is the ``turn_id`` carried on the reservation;
+   - Reserve credits for this turn (debits ``user.credit_balance``,
+     inserts ``credit_ledger`` RESERVE row + ``credit_reservation``);
+     raises :class:`~app.errors.InsufficientCreditsError` if the
+     estimate would push the balance negative — the entire tx rolls
+     back, no message stored;
    - INSERT the user ``message`` row;
-   - INSERT the ``session_turn`` row (status=``pending``) — this is
-     what the worker's ``claim_next_turn`` will pick up;
    - flip ``session.status`` to ``running``.
 3. After the DB commits, ``PUBLISH notify:worker`` so an idle worker
    wakes immediately. Best-effort: a missed publish is recovered by
@@ -33,6 +40,7 @@ from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile
 from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.schemas.session import FileRef
+from app.services import credits
 from app.services.redis import (
     SESSION_STREAM_PREFIX,
     publish_wake,
@@ -60,24 +68,34 @@ async def queue_user_message(
        ``running``. PostgreSQL holds the lock until the transaction
        commits, so two racing requests pass through one at a time and
        the second sees the first's ``running`` status.
-    2. DELETE the previous turn's output stream (lingers post-
-       ``agent.stopped`` for late SSE replay; cleared so new events
-       don't tail onto stale history). Then insert the user message,
-       insert the ``session_turn`` (status=``pending``), and flip
-       ``session.status='RUNNING'`` — all in one commit so a refetch
-       between steps can't see a half-applied state.
-    3. ``publish_wake`` so an idle worker doesn't have to wait for its
-       poll cycle. **After commit** so the worker's claim sees the row.
-
-    No XADD failure path: there's no Redis input queue any more. The
-    Redis interaction is one async ``PUBLISH`` that is best-effort by
-    design (poll fallback covers it).
+    2. Lazy-sweep this user's open credit reservations into terminal
+       state (settle from the prior turn's stream tail, or refund if
+       the worker died). Runs **before** the DELETE so the sweep can
+       still read the prior turn's ``agent.stopped`` ``usage`` field.
+       Skipped on legacy sessions without a ``user_id``.
+    3. DELETE the previous turn's output stream so new events don't
+       tail onto stale history.
+    4. INSERT the ``session_turn`` (status=``pending``) and flush so
+       its auto-generated id is the ``turn_id`` carried on the new
+       reservation.
+    5. Reserve credits for this turn — raises
+       :class:`~app.errors.InsufficientCreditsError` (→ HTTP 402) if
+       the estimate would push the balance negative. The entire tx
+       rolls back; no message stored, no worker wake.
+    6. INSERT the user ``message`` row, bind uploaded files to the
+       session, flip ``session.status='RUNNING'`` — one commit so a
+       refetch between steps can't see a half-applied state.
+    7. ``publish_wake`` so an idle worker doesn't have to wait for
+       its poll cycle. **After commit** so the worker's claim sees
+       the row. Best-effort; poll fallback covers a publish failure.
 
     ``session.sandbox_id`` is ``None`` on the first turn — the worker
     creates a fresh container and writes the assigned id back.
 
     Raises:
         GenerationInProgressError: a turn is already streaming.
+        InsufficientCreditsError: user's balance is below the
+            estimated max cost.
     """
     session = await _lock_session(db, session.id)
     if session.status == SessionStatus.RUNNING:
@@ -85,29 +103,60 @@ async def queue_user_message(
             "A completion is already in progress for this session"
         )
 
-    # The previous turn's stream lingers post-``agent.stopped`` for
-    # late SSE replay; delete before the new run so new events don't
-    # tail onto stale history. ``DELETE`` is a no-op on missing keys.
+    # Lazy sweep: settle any of this user's reservations from prior
+    # turns whose session is already terminal. Source of truth is
+    # ``session_turn.input_tokens`` / ``output_tokens`` (V2 durable
+    # storage), so ordering against the Redis stream ``DELETE`` below
+    # doesn't matter. Sessions without a ``user_id`` are treated as
+    # system / legacy and don't bill; logged at WARNING so the case
+    # surfaces if it ever fires in prod (every production path stamps
+    # ``user_id`` at session creation).
+    if session.user_id is None:
+        logger.warning(
+            "queue_user_message: session %s has no user_id — skipping credit reserve",
+            session.id,
+        )
+    else:
+        await credits.settle_open_for_user(db, session.user_id)
+    # Prior stream lingers post-``agent.stopped`` for late SSE replay;
+    # clear before the new turn so new events don't tail onto stale
+    # history. ``DELETE`` is a no-op on missing keys.
     await redis.delete(stream_key(SESSION_STREAM_PREFIX, session.id))
 
     file_dicts = [f.model_dump() for f in files]
-    user_msg = Message(
-        session_id=session.id,
-        role=MessageRole.USER,
-        blocks=[{"type": "text", "content": content, "files": file_dicts}],
-    )
-    # ``user_id`` / ``model_id`` / ``sandbox_id`` are intentionally not
-    # cached on the run — the worker JOINs ``session`` to read them
-    # live, so the parent row is the single source of truth.
+    # Insert the session_turn first so we have a stable ``turn_id`` to
+    # attach to the credit reservation. The flush below populates
+    # ``session_turn.id`` without committing.
     session_turn = SessionTurn(
         session_id=session.id,
         query=content,
         files=file_dicts,
         status=SessionTurnStatus.PENDING,
     )
+    db.add(session_turn)
+    await db.flush()
+
+    # Reserve credits using the model_id stamped on the session.
+    # Raises InsufficientCreditsError if the estimate would push the
+    # balance negative — the whole transaction rolls back, including
+    # the session_turn we just inserted, so no message is stored and
+    # the worker never sees the turn.
+    if session.user_id is not None:
+        await credits.reserve_for_turn(
+            db,
+            user_id=session.user_id,
+            session_id=session.id,
+            turn_id=session_turn.id,
+            model_id=session.model_id,
+        )
+
+    user_msg = Message(
+        session_id=session.id,
+        role=MessageRole.USER,
+        blocks=[{"type": "text", "content": content, "files": file_dicts}],
+    )
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
-    db.add(session_turn)
     # Bind every uploaded file to this session in the same transaction
     # as the message that references it. Authoritative for download
     # authorization — the JSONB-blob copy in ``user_msg.blocks`` is

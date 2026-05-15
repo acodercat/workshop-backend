@@ -21,45 +21,111 @@ uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
 
 ## Production
 
-Single-host manual deploy: use `scripts/deploy.sh`. Subcommand layout
-mirrors the frontend's `serve.sh` so muscle memory carries across
-the two services.
+Single-host manual deploy: use `scripts/deploy.sh`. Two siblings are
+managed by the same script — **web** (uvicorn on `:8005`) and
+**credits-janitor** (background reconciliation process). Subcommand
+layout mirrors the frontend's `serve.sh` so muscle memory carries
+across services.
 
 ```bash
-# After ``git pull`` (handles deps + migrations + restart)
+# After ``git pull`` (handles deps + migrations + restart of both)
 bash scripts/deploy.sh deploy
 
-# Code-only restart (no ``uv sync`` / no ``alembic upgrade``)
-bash scripts/deploy.sh restart
+# Web-only commands
+bash scripts/deploy.sh restart       # code-only restart (no deps/migration)
+bash scripts/deploy.sh logs          # tail uvicorn.log
+bash scripts/deploy.sh status        # show state of BOTH web + janitor
 
-# Tail uvicorn output
-bash scripts/deploy.sh logs
-
-# Is :8005 bound? by whom?
-bash scripts/deploy.sh status
+# Janitor-only commands
+bash scripts/deploy.sh janitor start
+bash scripts/deploy.sh janitor stop
+bash scripts/deploy.sh janitor restart
+bash scripts/deploy.sh janitor status
+bash scripts/deploy.sh janitor logs  # tail janitor.log
 ```
 
 | command | behavior |
 |---|---|
 | `start` | start uvicorn on `:8005` (no-op if already running) |
-| `stop` | SIGTERM, escalate to SIGKILL after a 10s grace period |
+| `stop` | SIGTERM the web, escalate to SIGKILL after a 10s grace period |
 | `restart` | `stop` + `start` — no deps / migration sync |
-| `status` | report whether `:8005` is bound and by which PID(s) |
+| `status` | report state of **both** web (`:8005`) and credits-janitor |
 | `logs` | `tail -f logs/uvicorn.log` |
-| `deploy` | `stop` + `uv sync` + `alembic upgrade head` + `start` |
+| `deploy` | stop both + `uv sync` + `alembic upgrade head` + start both |
+| `janitor {start\|stop\|restart\|status\|logs}` | same lifecycle commands for the credits-janitor process (`logs/janitor.log`) |
 
-Truth source for "is it running" is `lsof -t -i:8005` rather than a
-PID file, so the script tolerates instances started outside of it
-(e.g., the legacy `nohup uv run uvicorn …` flow). uvicorn stdout/stderr
-appends to `logs/uvicorn.log`; application-level loguru output lives
-elsewhere under `logs/` per `app/logging_config.py`.
+Truth source for "is it running":
+- **web**: `lsof -t -i:8005` — tolerates instances started outside the
+  script (e.g., a legacy `nohup uv run uvicorn …`).
+- **janitor**: `pgrep -f 'app.workers.run'` — the janitor has no port;
+  the module path is specific enough not to collide.
+
+uvicorn stdout → `logs/uvicorn.log`; janitor stdout → `logs/janitor.log`;
+application-level loguru output lives elsewhere under `logs/` per
+`app/logging_config.py`.
 
 For ad-hoc / non-default-port runs (or when the script's defaults
-don't fit, e.g. a custom SSL setup), the bare command still works:
+don't fit, e.g. a custom SSL setup), the bare commands still work:
 
 ```bash
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --workers 4
+uv run python -m app.workers.run          # standalone credits-janitor
 ```
+
+### Credits-janitor (background reconciliation)
+
+Background process that sweeps **credit reservations** that the
+user-facing lazy sweep didn't catch — the "user never came back"
+case for abandoned sessions, API-only clients, and worker crashes
+between RESERVE and the fenced terminal write. Implementation in
+`app/workers/credits_janitor.py`; standalone entrypoint in
+`app/workers/run.py`.
+
+**Multi-node deployment**: every host should run a janitor. The
+sweepers coordinate across the cluster via a Postgres advisory lock
+(`pg_try_advisory_lock`); at each tick only one host actually
+scans, the others see a busy lock and skip. Connection close auto-
+releases the lock, so a crashed sweeper never strands it.
+
+```bash
+# Operationally — same lifecycle commands as web
+bash scripts/deploy.sh janitor start
+bash scripts/deploy.sh janitor status
+bash scripts/deploy.sh janitor logs
+```
+
+The janitor sweeps every 60 s by default (see
+`credits_janitor.run_forever`), processes at most 100 reservations
+per tick (capped to keep the advisory-lock hold time short), and
+exponentially backs off on consecutive failures.
+
+### Crediting users (admin top-up)
+
+Every new registration automatically receives the welcome grant
+configured by `settings.credit_welcome_grant_credits` (default
+1000 credits, set to 0 to disable). For everything else — refunds,
+business deals, accounts that pre-date the welcome grant — use
+`scripts/topup_credits.py`:
+
+```bash
+uv run python -m scripts.topup_credits \
+    --user-id=42 \
+    --credits=10000 \
+    --idempotency-key=manual-2026-05-15-acme \
+    --reason="prepaid contract Q2"
+```
+
+- `--credits` is whole credits (1 credit ≈ \$0.001 USD of LLM cost).
+- `--idempotency-key` is required and globally unique per logical
+  top-up. Re-running with the same key after a success exits
+  cleanly with "already applied" — safe to retry.
+- The script writes one `TOPUP` row to `credit_ledger` and bumps
+  `user.credit_balance` atomically. All credit-balance writes funnel
+  through this same code path (see `app/services/credits/_internal.py`).
+
+For signed corrections (clawbacks / promo credits / mistake fixes),
+import `app.services.credits.apply_adjust` directly — a CLI for it
+ships when there's a real ops need.
 
 ## Project Structure
 
