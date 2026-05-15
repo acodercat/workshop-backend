@@ -96,7 +96,7 @@ class User(Base):
     # ``ON DELETE RESTRICT`` keeps the cleanup of an org with linked
     # users a deliberate ops step rather than a silent cascade.
     organization_id: Mapped[int | None] = mapped_column(
-        BigInteger,
+        Integer,
         ForeignKey("organization.id", ondelete="RESTRICT"),
         nullable=True,
     )

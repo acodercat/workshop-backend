@@ -79,7 +79,12 @@ class Organization(Base):
 
     __tablename__ = "organization"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # Org cardinality is user-scoped — one auto-created personal org
+    # per user plus a handful of future team orgs — so it stays well
+    # inside the 2.1B Integer ceiling and matches the ``user.id`` /
+    # ``owner_user_id`` type. (High-volume append tables — ledger,
+    # session_turn, reservation — use BigInteger; identity tables don't.)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[OrganizationKind] = mapped_column(
         SAEnum(
@@ -131,7 +136,7 @@ class OrganizationMember(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     organization_id: Mapped[int] = mapped_column(
-        BigInteger,
+        Integer,
         ForeignKey("organization.id", ondelete="CASCADE"),
         nullable=False,
     )
