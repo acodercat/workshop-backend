@@ -14,7 +14,6 @@ request.
 """
 
 import logging
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.models.user import User
+from app.schemas.collection_response import PaginationMeta
 from app.schemas.credits import (
     CreditsBalanceResponse,
     CreditsHistoryEntry,
@@ -82,27 +82,26 @@ async def get_credits(
 async def get_credits_transactions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-    before: datetime | None = Query(
-        None,
-        description="Pass the previous response's ``next_cursor``. Omit for the first page.",
-    ),
-    limit: int = Query(20, ge=1, le=100),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
 ) -> CreditsTransactionsResponse:
-    """Return ``current_user``'s balance + a cursor-paginated page
-    of user-facing transactions. Same lazy-sweep behaviour as
+    """Return ``current_user``'s balance + an offset-paginated page
+    of user-facing transactions.
+
+    Same ``page`` / ``page_size`` + ``meta`` shape as ``GET /sessions``
+    (see :class:`PaginatedResponse`). Same lazy-sweep behaviour as
     ``GET /credits``.
     """
     await credits.settle_open_for_user(db, current_user.id)
     balance_micro = await credits.get_balance(db, current_user.id)
-    rows = await credits.list_transactions(
-        db, user_id=current_user.id, before_at=before, limit=limit,
+    rows, total = await credits.list_transactions(
+        db, user_id=current_user.id, page=page, page_size=page_size,
     )
     await db.commit()
 
-    next_cursor = rows[-1].at if len(rows) == limit else None
     return CreditsTransactionsResponse(
         balance_credits=credits_from_micro(balance_micro),
-        transactions=[
+        items=[
             CreditsTransactionEntry(
                 kind=row.kind,
                 amount_credits=credits_from_micro(row.amount),
@@ -111,5 +110,5 @@ async def get_credits_transactions(
             )
             for row in rows
         ],
-        next_cursor=next_cursor,
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

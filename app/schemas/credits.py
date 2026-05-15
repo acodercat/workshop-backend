@@ -25,6 +25,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from app.models.credit_ledger import CreditLedgerKind
+from app.schemas.collection_response import PaginationMeta
 from app.services.credits.transactions import TransactionKind
 
 
@@ -70,15 +71,16 @@ class CreditsTransactionEntry(BaseModel):
 class CreditsTransactionsResponse(BaseModel):
     """Top-level shape of ``GET /credits/transactions``.
 
-    ``balance_credits`` ships alongside the page so the sidebar
-    badge can populate from a single fetch. ``next_cursor`` is the
-    timestamp the client passes back as ``before`` to fetch older
-    rows — ``None`` means no more data.
+    Offset pagination matching the project convention: ``items`` +
+    ``meta`` are exactly the :class:`PaginatedResponse` shape (same
+    ``PaginationMeta`` reused, not redefined). ``balance_credits``
+    is an extra top-level field so the sidebar badge still populates
+    the balance from this single fetch without a second roundtrip.
     """
 
     balance_credits: int
-    transactions: list[CreditsTransactionEntry]
-    next_cursor: datetime | None
+    items: list[CreditsTransactionEntry]
+    meta: PaginationMeta
 
 
 CreditsBalanceResponse.model_rebuild()
