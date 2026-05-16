@@ -59,7 +59,7 @@ from app.schemas.session import (
     TitleGenerateResponse,
 )
 from app.schemas.session_share import ShareCreate, ShareResponse
-from app.services import file_storage
+from app.services import credits, file_storage
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import generate_title, queue_user_message, stream_events
 from app.services.session.exceptions import (
@@ -76,13 +76,24 @@ router = APIRouter(tags=["sessions"])
 async def _get_or_404(
     db: AsyncSession, session_id: str | uuid.UUID, user_id: int
 ) -> Session:
-    """Return the session row iff it exists AND the caller owns it.
+    """Return the session row iff it exists, is not soft-deleted, AND
+    the caller owns it.
 
     404 (not 403) on an ownership miss so the existence of other users'
-    session ids isn't leaked.
+    session ids isn't leaked. ``deleted_at IS NULL`` is folded into the
+    query so every endpoint funnelling through here treats a
+    soft-deleted session as gone.
     """
-    session = await db.get(Session, session_id)
-    if not session or session.user_id != user_id:
+    session = (
+        await db.execute(
+            select(Session).where(
+                Session.id == session_id,
+                Session.user_id == user_id,
+                Session.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
 
@@ -163,15 +174,21 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
+    # One shared clause applied to both the page query and its count
+    # so ``total`` can't drift from the rows (mirrors the precedent in
+    # app/services/credits/history.py). ``deleted_at IS NULL`` hides
+    # soft-deleted sessions.
+    filter_clause = sa.and_(
+        Session.user_id == current_user.id,
+        Session.deleted_at.is_(None),
+    )
     base = (
         select(Session)
-        .where(Session.user_id == current_user.id)
+        .where(filter_clause)
         .order_by(Session.updated_at.desc())
     )
     total = (
-        await db.execute(
-            select(func.count(Session.id)).where(Session.user_id == current_user.id)
-        )
+        await db.execute(select(func.count(Session.id)).where(filter_clause))
     ).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
@@ -232,16 +249,22 @@ async def delete_session(
     redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(authenticate_and_get_user),
 ):
-    """Delete a session. Refuses while a generation is in progress.
+    """Soft-delete a session (sets ``deleted_at``); 409 while RUNNING.
 
-    Deleting mid-turn would orphan the running worker (assistant INSERT
-    would hit a dangling FK) and leak the Redis output stream. Caller
-    must wait for ``status`` to leave ``running`` before retrying.
+    The row + children are retained (credit_reservation back-link
+    stays intact for billing/audit); the session just vanishes from
+    the user's list and 404s on direct access. RUNNING is refused to
+    avoid racing the worker — the caller retries once terminal.
 
-    DB is deleted first (it's the source of truth for the user-visible
-    session list); the Redis output stream is then cleaned up. A Redis
-    failure during cleanup is logged but does not fail the request —
-    the worker's ``expire_stream`` TTL will reap the orphan eventually.
+    Any still-``OPEN`` reservation (a rare janitor-lag artifact, since
+    the session is terminal here) is closed by
+    ``settle_open_for_session`` from durable ``session_turn`` usage —
+    settle if the turn was used, refund if not, atomic with the
+    tombstone. We do NOT blanket-refund: refunding a used turn just
+    because the user tidied their list would be a revenue bug.
+
+    Redis stream cleanup is best-effort; failure is logged, not
+    raised — the worker's ``expire_stream`` TTL reaps the orphan.
     """
     session = await _get_or_404(db, session_id, current_user.id)
     if session.status == SessionStatus.RUNNING:
@@ -249,7 +272,8 @@ async def delete_session(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot delete a session while a generation is in progress",
         )
-    await db.delete(session)
+    await credits.settle_open_for_session(db, session.id)
+    session.deleted_at = func.now()
     await db.commit()
 
     try:
