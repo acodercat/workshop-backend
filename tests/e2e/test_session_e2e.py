@@ -7,7 +7,8 @@ Drives a real session through the production pipeline:
 3. Subscribe to the per-session SSE stream (HTTP)
 4. Collect every event until the terminal ``agent.stopped``
 5. Verify the persisted final state via ``GET /sessions/{id}``
-6. Delete the session (HTTP) and confirm 404 on re-fetch
+6. Soft-delete the session (HTTP); confirm 404 on re-fetch and
+   absence from the list endpoint
 
 The ``test_user`` fixture provisions a throwaway user and tears down
 every row that user owns (cascade through session → message /
@@ -101,8 +102,16 @@ async def test_full_session_lifecycle(
     roles = [m["role"] for m in detail["messages"]]
     assert roles == ["USER", "ASSISTANT"], roles
 
-    # 6. Delete and confirm the row is gone.
+    # 6. Soft-delete: 204, then the session 404s on direct access AND
+    #    is absent from the user's list (transparent soft-delete — the
+    #    row is retained server-side but invisible to the user).
     resp = await http_client.delete(f"/sessions/{session_id}")
     assert resp.status_code == 204, resp.text
     resp = await http_client.get(f"/sessions/{session_id}")
     assert resp.status_code == 404, resp.text
+    resp = await http_client.get("/sessions", params={"page": 1, "page_size": 100})
+    assert resp.status_code == 200, resp.text
+    listed_ids = [s["id"] for s in resp.json()["items"]]
+    assert session_id not in listed_ids, (
+        f"soft-deleted session still listed: {session_id} in {listed_ids}"
+    )

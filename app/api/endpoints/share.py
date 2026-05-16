@@ -76,16 +76,21 @@ _ShareViewCredentials = Annotated[
 async def _resolve_share(
     db: AsyncSession, token: str
 ) -> tuple[SessionShare, Session]:
-    """Look up a share + its session in one query. 404 on miss.
+    """Look up a share + its non-deleted session in one query. 404 on miss.
 
-    Returns both rows so callers don't need a follow-up ``db.get`` —
-    the CASCADE FK keeps the pair in sync, and reading them together
-    closes the TOCTOU window where the session could be deleted
-    between two separate reads."""
+    Returns both rows so callers don't need a follow-up ``db.get``,
+    and reading them together closes the TOCTOU window where the
+    session could be deleted between two separate reads. The
+    ``deleted_at IS NULL`` predicate revokes public access the moment
+    the owner soft-deletes the session (soft-delete keeps the row, so
+    the join would otherwise still resolve)."""
     stmt = (
         select(SessionShare, Session)
         .join(Session, Session.id == SessionShare.session_id)
-        .where(SessionShare.token == token)
+        .where(
+            SessionShare.token == token,
+            Session.deleted_at.is_(None),
+        )
     )
     row = (await db.execute(stmt)).first()
     if row is None:

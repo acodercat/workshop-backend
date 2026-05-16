@@ -100,16 +100,28 @@ class Session(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    # Soft-delete tombstone. NULL = live; non-NULL = deleted (row kept
+    # for billing/audit, invisible to the user). Only ever tested
+    # ``IS NULL``; tz-aware because that's the correct default for new
+    # timestamp columns (created_at/updated_at predate this and use a
+    # naive TIMESTAMP — not worth a migration to fix retroactively).
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
 
     # Backs the hot ``GET /sessions`` query (filter by user_id, ORDER BY
     # updated_at DESC). Postgres does not auto-index foreign keys, so
     # without this both the page query and its count fall back to seq
-    # scans. Migration ``b74c1e2f9a30`` builds it CONCURRENTLY in prod.
+    # scans. Partial on ``deleted_at IS NULL`` — the only consumer is
+    # the active-sessions list, which always filters out soft-deleted
+    # rows. Migrations ``b74c1e2f9a30`` (original) and the soft-delete
+    # rev (partial swap) build it CONCURRENTLY in prod.
     __table_args__ = (
         Index(
             "ix_session_user_id_updated_at",
             "user_id",
             text("updated_at DESC"),
+            postgresql_where=text("deleted_at IS NULL"),
         ),
     )
 
