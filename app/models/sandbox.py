@@ -35,8 +35,9 @@ class Sandbox(Base):
 
     Cleanup is the reaper's responsibility — the worker never calls
     ``kill()``; it only ``close()``s the HTTP client, leaving the
-    container alive for the next turn. A separate process sweeps by
-    ``last_used_at`` / ``expires_at`` and kills long-idle containers.
+    container alive for the next turn. A separate reaper process kills
+    a container once it is idle past a threshold (by ``last_used_at``)
+    or its session is soft-deleted, then flips the row ``TERMINATED``.
 
     ``session_id`` is application-managed (no DB-level FK) — kept that
     way to avoid CASCADE footguns and constraint cost on the worker's
@@ -64,13 +65,6 @@ class Sandbox(Base):
     last_used_at: Mapped[datetime] = mapped_column(
         TIMESTAMP, server_default=func.now(), nullable=False,
     )
-    # Server-side TTL deadline as last reported to the OpenSandbox API
-    # (set at create, bumped on every per-turn renew). The reaper reads
-    # this to decide whether the container is past its TTL without
-    # round-tripping to OpenSandbox. Nullable because a transient renew
-    # failure leaves the column unchanged via ``COALESCE`` rather than
-    # nuking a still-valid prior deadline.
-    expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP, nullable=True)
 
     # Worker's ``claim_next_turn`` runs a per-claim subquery against
     # ``WHERE session_id = ? AND status <> 'TERMINATED' ORDER BY
