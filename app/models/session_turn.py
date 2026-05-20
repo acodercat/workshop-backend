@@ -113,6 +113,12 @@ class SessionTurn(Base):
         TIMESTAMP(timezone=True),
         server_default=func.now(), onupdate=func.now(), nullable=False,
     )
+    # Set to ``now()`` on the terminal write (COMPLETE / CANCELLED /
+    # FAILED); NULL while PENDING / RUNNING. Anchors duration math —
+    # distinct from ``updated_at``, which lease heartbeats also bump.
+    terminated_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
 
     __table_args__ = (
         # Partial index matching the migration — claim_next_turn scans
