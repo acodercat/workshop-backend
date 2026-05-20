@@ -5,11 +5,7 @@ V1 admin-gating is "you have shell access to the box / DB credentials"
 arrives when there's a real internal review tool to gate.
 
 Usage:
-    uv run python -m scripts.topup_credits \\
-        --user-id=42 \\
-        --credits=10000 \\
-        --idempotency-key=manual-2026-05-14-alice \\
-        --reason="trial grant for internal testing"
+    uv run python -m scripts.topup_credits --user-id=60 --credits=1000000 --idempotency-key=manual-2026-05-18-alice --reason="trial grant for internal testing"
 
 ``--credits`` is whole credits (1 credit = $0.001 USD of LLM cost).
 The script converts to µ-credits before persisting.

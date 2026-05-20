@@ -11,7 +11,8 @@ the steps in a specific order:
    - DELETE the per-session output stream so the next turn's events
      don't tail onto stale history;
    - Lazy-sweep this user's open credit reservations into terminal
-     state (catches reservations the SSE eager hook missed);
+      state (settles from durable ``session_turn`` usage, or refunds
+      if usage is missing);
    - INSERT the ``session_turn`` row (status=``pending``) — its
      auto-generated id is the ``turn_id`` carried on the reservation;
    - Reserve credits for this turn (debits ``user.credit_balance``,
@@ -69,10 +70,10 @@ async def queue_user_message(
        commits, so two racing requests pass through one at a time and
        the second sees the first's ``running`` status.
     2. Lazy-sweep this user's open credit reservations into terminal
-       state (settle from the prior turn's stream tail, or refund if
-       the worker died). Runs **before** the DELETE so the sweep can
-       still read the prior turn's ``agent.stopped`` ``usage`` field.
-       Skipped on legacy sessions without a ``user_id``.
+       state. Settle reads durable ``session_turn.input_tokens`` /
+       ``output_tokens`` / ``terminated_at`` written by the worker,
+       not the Redis stream. Skipped on legacy sessions without a
+       ``user_id``.
     3. DELETE the previous turn's output stream so new events don't
        tail onto stale history.
     4. INSERT the ``session_turn`` (status=``pending``) and flush so
@@ -89,8 +90,9 @@ async def queue_user_message(
        its poll cycle. **After commit** so the worker's claim sees
        the row. Best-effort; poll fallback covers a publish failure.
 
-    ``session.sandbox_id`` is ``None`` on the first turn — the worker
-    creates a fresh container and writes the assigned id back.
+    Sandbox ownership lives on ``sandbox.session_id``. The worker
+    resumes the latest non-TERMINATED sandbox for this session, or
+    creates a fresh one when none exists.
 
     Raises:
         GenerationInProgressError: a turn is already streaming.

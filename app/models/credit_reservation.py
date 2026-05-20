@@ -1,6 +1,6 @@
 """Open credit holds that the settle path closes out.
 
-One row = one "I might spend up to X µ-credits on this turn / sandbox"
+One row = one "I might spend up to X µ-credits on this turn"
 reservation. The row lives in three states (``OPEN`` → ``SETTLED`` |
 ``CANCELLED``); the lifecycle is the entire reason this table exists
 in addition to :class:`CreditLedger`:
@@ -14,9 +14,6 @@ in addition to :class:`CreditLedger`:
 - ``rate_snapshot`` (JSONB) freezes the price at reserve time. A
   config change between reserve and settle does not re-price the turn
   — important for any pricing change to remain customer-trust-safe.
-
-V1 only writes ``kind='TURN'`` rows. ``SANDBOX`` is in the enum so
-the V2 sandbox-seconds integration is purely additive (no migration).
 """
 
 import uuid
@@ -40,19 +37,6 @@ from sqlalchemy.sql import func
 from app.database import Base
 
 
-class CreditReservationKind(StrEnum):
-    """What's being held.
-
-    - ``TURN``    — a single LLM agent turn. ``session_id`` / ``turn_id``
-      populated; ``sandbox_id`` NULL.
-    - ``SANDBOX`` — reserved for V2; charge for sandbox container
-      runtime. ``sandbox_id`` populated; ``turn_id`` NULL.
-    """
-
-    TURN = "TURN"
-    SANDBOX = "SANDBOX"
-
-
 class CreditReservationState(StrEnum):
     """Closed three-state FSM: ``OPEN`` → ``SETTLED`` or ``CANCELLED``.
 
@@ -72,25 +56,18 @@ class CreditReservation(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("user.id", ondelete="RESTRICT"), nullable=False,
     )
-    kind: Mapped[CreditReservationKind] = mapped_column(
-        SAEnum(
-            CreditReservationKind,
-            name="credit_reservation_kind",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
-        ),
-        nullable=False,
-    )
     # ``SET NULL`` rather than ``CASCADE`` — if a session is deleted,
     # keep the reservation history for audit; it just loses the
     # session-back link.
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("session.id", ondelete="SET NULL"), nullable=True,
     )
-    # No FK on ``turn_id`` / ``sandbox_id`` — those tables ``CASCADE``
-    # delete from their parents (session / its own lifecycle), and a
-    # broken back-link is preferable to a deleted reservation row.
-    turn_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    sandbox_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # NOT NULL: every reservation is created for a specific turn by
+    # ``reserve_for_turn``. No FK on the column — ``session_turn``
+    # cascades from its parent ``session``, and a broken back-link is
+    # preferable to a deleted reservation row (we keep the row for
+    # audit even when the turn has been purged).
+    turn_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     reserved: Mapped[int] = mapped_column(BigInteger, nullable=False)
     rate_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     state: Mapped[CreditReservationState] = mapped_column(
@@ -129,19 +106,22 @@ class CreditReservation(Base):
             "user_id",
             postgresql_where=text("state = 'OPEN'"),
         ),
-        # Used by the SSE-side settle hook: "find the OPEN reservation
-        # for this session". Also partial — historical settled rows
-        # don't need to be indexed.
+        # DB backstop for the settle path: one session may have at most
+        # one OPEN reservation. Historical settled rows remain
+        # unconstrained, and NULL session reservations are not part of
+        # this session-scoped invariant.
         Index(
-            "ix_credit_reservation_open_session",
+            "uq_credit_reservation_open_session",
             "session_id",
-            postgresql_where=text("state = 'OPEN'"),
+            unique=True,
+            postgresql_where=text(
+                "state = 'OPEN' AND session_id IS NOT NULL"
+            ),
         ),
     )
 
     def __repr__(self) -> str:
         return (
             f"<CreditReservation(id={self.id}, user_id={self.user_id}, "
-            f"kind='{self.kind.value}', state='{self.state.value}', "
-            f"reserved={self.reserved})>"
+            f"state='{self.state.value}', reserved={self.reserved})>"
         )

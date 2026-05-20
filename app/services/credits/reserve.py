@@ -26,7 +26,6 @@ from app.errors import InsufficientCreditsError
 from app.models.credit_ledger import CreditLedgerKind
 from app.models.credit_reservation import (
     CreditReservation,
-    CreditReservationKind,
     CreditReservationState,
 )
 from app.services.credits._internal import (
@@ -98,7 +97,6 @@ async def reserve_for_turn(
     # need for any fixed timeout.
     reservation = CreditReservation(
         user_id=user_id,
-        kind=CreditReservationKind.TURN,
         session_id=session_id,
         turn_id=turn_id,
         reserved=reserved,

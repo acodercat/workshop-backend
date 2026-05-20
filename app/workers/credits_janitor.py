@@ -40,7 +40,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
@@ -134,6 +134,10 @@ async def _list_candidates(db: AsyncSession) -> list[tuple]:
     ``FOR UPDATE`` inside their own transactions, so a candidate that
     raced and got settled between list-time and process-time becomes
     a harmless no-op (settle is idempotent on terminal state).
+
+    Only rows the janitor can act on are selected. Leaving eligibility to
+    ``_process_one`` after ``LIMIT`` would let a large prefix of active,
+    not-yet-expired turns starve later terminal reservations forever.
     """
     rows = await db.execute(
         select(
@@ -143,7 +147,15 @@ async def _list_candidates(db: AsyncSession) -> list[tuple]:
             Session.status,
         )
         .join(Session, Session.id == CreditReservation.session_id, isouter=True)
-        .where(CreditReservation.state == CreditReservationState.OPEN)
+        .where(
+            CreditReservation.state == CreditReservationState.OPEN,
+            or_(
+                CreditReservation.session_id.is_(None),
+                Session.status.notin_(_NON_TERMINAL),
+                CreditReservation.expires_at < func.now(),
+            ),
+        )
+        .order_by(CreditReservation.created_at.asc(), CreditReservation.id.asc())
         .limit(_SWEEP_BATCH)
     )
     return list(rows.all())
