@@ -41,7 +41,11 @@ from app.models.credit_reservation import (
 from app.models.session import Session, SessionStatus
 from app.models.session_turn import SessionTurn
 from app.services.credits._internal import insert_ledger_and_bump_balance
-from app.services.credits.rates import RateSnapshot, cost_micro_credits
+from app.services.credits.rates import (
+    RateSnapshot,
+    _normalize_rate_snapshot,
+    cost_micro_credits,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,33 +73,45 @@ async def _load_reservation_for_update(
     return result.scalar_one_or_none()
 
 
-async def _read_usage_from_session_turn(
-    db: AsyncSession, turn_id: int | None,
-) -> tuple[int, int] | None:
-    """Pull persisted ``(input_tokens, output_tokens)`` for ``turn_id``.
+async def _read_usage_and_duration_from_session_turn(
+    db: AsyncSession, turn_id: int,
+) -> tuple[int, int, float] | None:
+    """Pull settle inputs for ``turn_id``:
+    ``(input_tokens, output_tokens, turn_seconds)``.
 
     Returns ``None`` when:
 
-    - ``turn_id`` is ``None`` (sandbox reservations have no turn —
-      different settle path, not yet implemented for V1);
     - the turn row no longer exists (cascade delete);
     - the row exists but tokens are ``NULL`` (worker died before the
       fenced terminal write, or the row is from the FAILED path where
       we leave tokens NULL deliberately).
 
-    All three cases route to refund — the user shouldn't pay for a
-    turn whose cost we can't measure.
+    Both cases route to refund — the user shouldn't pay for a turn
+    whose cost we can't measure.
+
+    ``turn_seconds`` is ``terminated_at - created_at`` when
+    ``terminated_at`` is set; ``0.0`` for legacy rows that pre-date
+    the ``terminated_at`` migration (they get charged for tokens
+    only — no infra-occupancy fee on grandfathered turns).
     """
-    if turn_id is None:
-        return None
     result = await db.execute(
-        select(SessionTurn.input_tokens, SessionTurn.output_tokens)
+        select(
+            SessionTurn.input_tokens,
+            SessionTurn.output_tokens,
+            SessionTurn.created_at,
+            SessionTurn.terminated_at,
+        )
         .where(SessionTurn.id == turn_id)
     )
     row = result.one_or_none()
     if row is None or row[0] is None or row[1] is None:
         return None
-    return int(row[0]), int(row[1])
+    in_tokens, out_tokens, created_at, terminated_at = row
+    turn_seconds = (
+        (terminated_at - created_at).total_seconds()
+        if terminated_at is not None else 0.0
+    )
+    return int(in_tokens), int(out_tokens), turn_seconds
 
 
 async def settle_turn(
@@ -104,14 +120,16 @@ async def settle_turn(
     reservation_id: int,
     actual_input_tokens: int,
     actual_output_tokens: int,
+    turn_seconds: float,
 ) -> None:
-    """Close ``reservation_id`` with the actual cost from worker usage.
+    """Close ``reservation_id`` with the actual three-factor cost.
 
     Posts **two** ledger rows in one transaction (under the user-row
     lock used by the internal helper):
 
     1. ``+reserved`` reversing the original RESERVE.
-    2. ``-actual``  debiting real cost computed from rate_snapshot.
+    2. ``-actual``  debiting real cost computed from the snapshot
+       (tokens + duration + model fee).
 
     Net balance delta: ``+reserved - actual`` (typically positive —
     the user gets the over-reserved difference back).
@@ -130,11 +148,12 @@ async def settle_turn(
         )
         return
 
-    rate: RateSnapshot = reservation.rate_snapshot  # type: ignore[assignment]
+    rate: RateSnapshot = _normalize_rate_snapshot(reservation.rate_snapshot)
     actual = cost_micro_credits(
         rate,
         input_tokens=actual_input_tokens,
         output_tokens=actual_output_tokens,
+        turn_seconds=turn_seconds,
     )
 
     # Two paired rows. The sign + ``kind=SETTLE`` already
@@ -158,6 +177,7 @@ async def settle_turn(
             "actual": {
                 "input_tokens": actual_input_tokens,
                 "output_tokens": actual_output_tokens,
+                "turn_seconds": turn_seconds,
             },
         },
     )
@@ -242,7 +262,9 @@ async def settle_open_for_session(
     if reservation is None:
         return  # nothing to settle
 
-    usage = await _read_usage_from_session_turn(db, reservation.turn_id)
+    usage = await _read_usage_and_duration_from_session_turn(
+        db, reservation.turn_id,
+    )
     if usage is None:
         await refund_reservation(
             db,
@@ -250,12 +272,13 @@ async def settle_open_for_session(
             reason={"cause": "usage_missing_from_session_turn"},
         )
         return
-    actual_in, actual_out = usage
+    actual_in, actual_out, turn_seconds = usage
     await settle_turn(
         db,
         reservation_id=reservation.id,
         actual_input_tokens=actual_in,
         actual_output_tokens=actual_out,
+        turn_seconds=turn_seconds,
     )
 
 
@@ -311,7 +334,7 @@ async def settle_open_for_user(
         if not _is_session_terminal(session_status):
             continue  # turn still running — leave reservation open
 
-        usage = await _read_usage_from_session_turn(db, turn_id)
+        usage = await _read_usage_and_duration_from_session_turn(db, turn_id)
         if usage is None:
             await refund_reservation(
                 db,
@@ -322,10 +345,11 @@ async def settle_open_for_user(
                 },
             )
             continue
-        actual_in, actual_out = usage
+        actual_in, actual_out, turn_seconds = usage
         await settle_turn(
             db,
             reservation_id=reservation_id,
             actual_input_tokens=actual_in,
             actual_output_tokens=actual_out,
+            turn_seconds=turn_seconds,
         )

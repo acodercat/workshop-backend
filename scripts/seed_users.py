@@ -26,8 +26,9 @@ from app.auth import get_password_hash
 from config import settings
 
 USERS = [
-    ("caiwu", "caiwu20260515"),
-    # ("yonggang", "yonggang20260514"),
+    # ("tianlan", "tianlan20260518"),
+    ("sunwei", "sunwei20260520"),
+    # ("andy", "andy123"),
     # ("zhou", "zhou123"),
     # ("jun", "jun123"),
     # ("yuting", "yuting123"),
@@ -38,7 +39,7 @@ USERS = [
 # registration default (``settings.credit_welcome_grant_credits``).
 # Kept as a script-local constant so dev seeding isn't coupled to
 # whatever an admin might change the production setting to.
-WELCOME_CREDITS = 1_000
+WELCOME_CREDITS = 20000000
 _MICRO_PER_CREDIT = 1_000_000
 
 

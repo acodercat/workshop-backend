@@ -201,10 +201,8 @@ the net delta.
 CREATE TABLE credit_reservation (
     id            bigserial PRIMARY KEY,
     user_id       integer NOT NULL REFERENCES "user"(id) ON DELETE RESTRICT,
-    kind          credit_reservation_kind NOT NULL,  -- enum
     session_id    uuid REFERENCES session(id) ON DELETE SET NULL,
     turn_id       bigint,
-    sandbox_id    bigint,                            -- unused; V4
     reserved      bigint NOT NULL,
     rate_snapshot jsonb NOT NULL,
     state         credit_reservation_state NOT NULL DEFAULT 'OPEN',
@@ -217,6 +215,10 @@ CREATE TABLE credit_reservation (
 -- archive data and don't need to be indexed for the hot path
 CREATE INDEX ix_credit_reservation_open_user
     ON credit_reservation (user_id) WHERE state = 'OPEN';
+
+CREATE UNIQUE INDEX uq_credit_reservation_open_session
+    ON credit_reservation (session_id)
+    WHERE state = 'OPEN' AND session_id IS NOT NULL;
 ```
 
 #### State machine
@@ -265,9 +267,9 @@ note is short because the org concept here is identity-only for V3.
 | **settle** | The pair of ledger rows that close out a reservation with the actual cost. State → SETTLED. |
 | **refund** | Closing out a reservation with zero actual cost (worker died, session deleted, usage missing). State → CANCELLED. |
 | **rate snapshot** | The frozen copy of the rate-card row stored on the reservation. Settle uses this, not the live `settings.credit_rates`. |
-| **rate card** | `settings.credit_rates`: per-model `{in_per_1k_usd, out_per_1k_usd, margin, max_output_tokens}`. |
-| **margin** | Multiplier baked into rates: covers gross margin + FX volatility. Default 1.3×. |
-| **welcome grant** | One-time TOPUP at registration. `settings.credit_welcome_grant_credits`, default 1000. |
+| **rate card** | `settings.credit_rates`: per-model `{in_per_1k_usd, out_per_1k_usd, token_markup, model_fee_credits, reserve_max_output_tokens}` plus global `credit_per_second_credits`. |
+| **token markup** | Multiplier on token provider cost only. Covers gross margin + FX volatility for the LLM-cost component. |
+| **welcome grant** | One-time TOPUP at registration. `settings.credit_welcome_grant_credits`, default 100_000. |
 | **invariant** | `user.credit_balance == SUM(credit_ledger.amount)`. Always. Cron-checkable. |
 
 ---
@@ -323,10 +325,15 @@ Path: `queue_user_message` → `credits.reserve_for_turn`.
    (raises KeyError if model is unpriced — surfaces as 500; rate
    misconfiguration is an ops bug, not a user error)
 3. compute max-cost estimate:
-     reserved = ceil((max_in × in_rate + max_out × out_rate)
-                     × margin × 1e9)
+     token_micro    = ((max_in/1000 × in_rate
+                       + max_out/1000 × out_rate)
+                       × token_markup × 1e9)
+     duration_micro = credit_reserve_max_turn_seconds
+                      × credit_per_second_credits × 1_000_000
+     fee_micro      = model_fee_credits × 1_000_000
+     reserved       = ceil(token_micro + duration_micro + fee_micro)
    max_in = settings.credit_reserve_max_input_tokens (default 16000)
-   max_out = rate.max_output_tokens
+   max_out = rate.reserve_max_output_tokens
 4. if balance < reserved:
      raise InsufficientCreditsError → HTTP 402
 5. INSERT credit_ledger (amount=-reserved, kind=RESERVE,
@@ -393,17 +400,21 @@ removed it after we moved usage storage from the Redis stream
 1. SELECT credit_reservation WHERE state='OPEN'
    AND user_id=X (lazy) OR id=Y (janitor)
    FOR UPDATE
-2. read session_turn.input_tokens / output_tokens
+2. read session_turn.input_tokens / output_tokens and
+   turn_seconds = session_turn.terminated_at - session_turn.created_at
 3. if either is NULL:
      refund the reservation (zero actual cost, state → CANCELLED)
      stop here
-4. compute actual cost using the FROZEN rate_snapshot, not live config
+4. compute actual cost using the FROZEN rate_snapshot, not live config:
+     ceil(token_cost × token_markup
+          + turn_seconds × credit_per_second_credits × 1_000_000
+          + model_fee_credits × 1_000_000)
 5. INSERT credit_ledger (amount=+reservation.reserved, kind=SETTLE,
                          reference={reservation_id})
                                                      ← reverse reserve
 6. INSERT credit_ledger (amount=-actual_micro, kind=SETTLE,
                          reference={reservation_id, turn_id,
-                                    actual: {in, out}})
+                                    actual: {in, out, turn_seconds}})
                                                      ← debit actual
 7. UPDATE credit_reservation SET state='SETTLED', settled_at=now()
 8. caller commits
@@ -534,7 +545,8 @@ once they realize they don't need Redlock for a single-DB workload.
 | Two concurrent requests from the same user attempt to reserve | `SELECT … FOR UPDATE` on the user row serialises them; one sees the updated balance |
 | Welcome grant fails post-registration | Registration succeeds; user has 0 balance; loud log; admin tops up manually |
 | Janitor process killed mid-sweep | Advisory lock auto-released on connection close. Next tick (or next host's janitor) picks up; settle is idempotent so re-doing the same reservation is safe |
-| Migration applied but new worker not deployed yet | Old worker doesn't write the new columns → backend settle reads NULL → refunds the reservation (user gets a free turn until worker upgrades). See `credits-future.md` for the deployment-order convention |
+| Token-usage migration applied but old worker not deployed yet | Old worker doesn't write `input_tokens` / `output_tokens` → backend settle reads NULL → refunds the reservation (user gets a free turn until worker upgrades). See `credits-future.md` for the deployment-order convention |
+| Duration billing enabled but worker does not write `terminated_at` yet | Backend settles with `turn_seconds = 0.0` → token cost and model fee are charged, but β duration is not. Deploy the worker terminal-write change before turning β above 0 |
 
 ---
 
@@ -652,8 +664,6 @@ clearly-named `--idempotency-key=backfill-welcome-{user_id}`.
 
 See [`credits-future.md`](credits-future.md) for the design of each:
 
-- **Sandbox-seconds billing** — schema has the `SANDBOX` reservation
-  kind reserved; no code path writes it yet.
 - **Worker-side cost cap** — physical circuit breaker that stops a
   runaway turn before it can exceed `balance × 1.2`. Compensates for
   the pre-deduct estimate being an upper bound rather than a hard
@@ -676,10 +686,11 @@ See [`credits-future.md`](credits-future.md) for the design of each:
 |---|---|
 | **V1** | Initial design: `credit_ledger`, `credit_reservation`, `user.credit_balance`. Reserve / settle / refund / topup / adjust primitives. Lazy sweep on user actions. Settle source = Redis stream tail. SSE eager-settle hook. |
 | **V1.5 cleanup** | `align unique indexes as constraints` migration (cosmetic — DB layout aligned with model declarations) |
-| **V2** | Durable token usage on `session_turn.input_tokens/output_tokens`, written by the worker in its fenced terminal transaction. Backend settle reads from there, no longer from the ephemeral Redis stream. SSE eager-settle hook removed (Redis was the only reason it existed). |
+| **V2** | Durable usage on `session_turn.input_tokens/output_tokens/terminated_at`, written by the worker in its fenced terminal transaction. Backend settle reads from there, no longer from the ephemeral Redis stream. SSE eager-settle hook removed (Redis was the only reason it existed). |
 | **V2 → sibling-process** | Janitor extracted from the FastAPI lifespan into a standalone process (`app/workers/run.py`), deployed via `deploy.sh janitor`. Web returns to pure HTTP responsibility. Multi-node coordinated via Postgres advisory lock. |
-| **V3** | Organization concept (mirrors OpenAI). Personal org auto-created at registration. Welcome grant config (default 1000 credits) — runs as a separate, best-effort transaction after the user/org/member commit. Note: billing still attaches to `user_id`; org-level billing is a V4 migration documented in `credits-future.md`. |
-| **V4 (planned)** | One of: sandbox-seconds billing, multi-tier org billing, payment integration. Driven by business need. |
+| **V2 billing cleanup** | Open reservation uniqueness is enforced with `uq_credit_reservation_open_session`; unused `credit_reservation.kind` / `sandbox_id` were removed after turn-level three-factor billing made the reserved sandbox variant obsolete. |
+| **V3** | Organization concept (mirrors OpenAI). Personal org auto-created at registration. Welcome grant config (default 100_000 credits) — runs as a separate, best-effort transaction after the user/org/member commit. Note: billing still attaches to `user_id`; org-level billing is a V4 migration documented in `credits-future.md`. |
+| **V4 (planned)** | One of: worker-side cost cap, multi-tier org billing, payment integration. Driven by business need. |
 
 ---
 

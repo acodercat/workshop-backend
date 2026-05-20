@@ -176,21 +176,46 @@ class Settings(BaseSettings):
     # ``supported_session_model_ids`` — missing entries make the reserve
     # path raise loudly rather than silently charging zero.
     #
-    # ``margin`` is multiplied into the cost; bake gross margin and FX
-    # buffer into one number. ``max_estimated_input_tokens`` is the
-    # upper bound assumed at reserve time when the actual input length
-    # isn't known yet (worker rebuilds context); pessimistic on purpose
-    # — settle multi-refunds the unused portion.
+    # Three-factor billing per turn (see :mod:`app.services.credits.rates`):
+    #   cost = α·tokens_cost + β·turn_seconds + γ·model_fee
+    # Per-model knobs here:
+    #   - ``in_per_1k_usd`` / ``out_per_1k_usd``: provider COGS in USD.
+    #   - ``token_markup`` (α): multiplier on top of token COGS. Bakes
+    #     gross margin + FX buffer for the LLM-cost portion only.
+    #   - ``model_fee_credits`` (γ): per-turn fixed fee charged for
+    #     choosing this model; applies even on a near-zero-token turn.
+    #     0 disables the fee for that model.
+    #   - ``reserve_max_output_tokens``: pessimistic upper bound on
+    #     output, used at reserve time. Settle multi-refunds the unused
+    #     portion from actual usage.
+    # The per-second knob (β) is global, not per-model — see
+    # ``credit_per_second_credits`` below.
     credit_rates: dict[str, dict[str, float]] = Field(
         default_factory=lambda: {
-            "claude-opus-4-7":   {"in_per_1k_usd": 0.015, "out_per_1k_usd": 0.075, "margin": 1.3, "max_output_tokens": 4096},
-            "claude-opus-4-6":   {"in_per_1k_usd": 0.015, "out_per_1k_usd": 0.075, "margin": 1.3, "max_output_tokens": 4096},
-            "claude-sonnet-4-6": {"in_per_1k_usd": 0.003, "out_per_1k_usd": 0.015, "margin": 1.3, "max_output_tokens": 8192},
-            "kimi-k2":           {"in_per_1k_usd": 0.001, "out_per_1k_usd": 0.005, "margin": 1.3, "max_output_tokens": 8192},
-            "HKGAI-V1":          {"in_per_1k_usd": 0.001, "out_per_1k_usd": 0.005, "margin": 1.3, "max_output_tokens": 8192},
-            "HKGAI-V3":          {"in_per_1k_usd": 0.001, "out_per_1k_usd": 0.005, "margin": 1.3, "max_output_tokens": 8192},
+            "claude-opus-4-7":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096},
+            "claude-opus-4-6":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096},
+            "claude-sonnet-4-6": {"in_per_1k_usd": 0.003,   "out_per_1k_usd": 0.015,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
         },
         description="Per-model rate card for credit billing. Snapshotted onto each credit_reservation at reserve time so a config change can't re-price open turns.",
+    )
+    # β (per-second infrastructure occupancy fee). Whole credits per
+    # second of ``terminated_at - created_at``. Global, not per-model
+    # — sandbox/worker capacity doesn't care which LLM is running.
+    # Default 0.0 keeps day-1 behavior unchanged; calibrate from real
+    # ``turn_seconds`` distribution before turning on.
+    credit_per_second_credits: float = Field(
+        default=0.0, ge=0.0,
+        description="Credits per second of turn duration (β). 0 = disabled.",
+    )
+    # Pessimistic upper bound on ``turn_seconds`` used at reserve time
+    # so the hold covers a fully-occupied worker. Matches the worker's
+    # ``max_execution_time`` (1800s) + its hard timeout buffer (~60s).
+    credit_reserve_max_turn_seconds: int = Field(
+        default=1860, gt=0,
+        description="Upper bound on turn_seconds assumed at reserve time. Settle uses actual.",
     )
     # Pessimistic estimate for the prompt size at reserve time, used when
     # we can't measure the worker's compacted context cheaply from the
@@ -200,15 +225,17 @@ class Settings(BaseSettings):
         default=16_000,
         description="Upper bound on input tokens assumed at reserve time. Settle uses actual usage.",
     )
-    # Auto-grant on registration. Sized at ~13 HKGAI-V1 turns of "try
-    # the product" headroom — large enough to feel useful, small
-    # enough that signup-farming is unprofitable. Set to 0 to disable
+    # Auto-grant on registration. At the current rate card (token_markup
+    # 3.0, β=γ=0) 100k credits is ~500+ HKGAI-V1 turns of headroom — generous "try
+    # the product" allowance; note this is large enough that
+    # signup-farming abuse is a real consideration (gate behind
+    # email/phone verification + rate limits). Set to 0 to disable
     # (every new user starts at 0 balance, admin must top up). The
     # grant uses a deterministic idempotency key
     # ``welcome-{user_id}`` so a registration retry after partial
     # failure can't double-grant.
     credit_welcome_grant_credits: int = Field(
-        default=1_000,
+        default=100_000,
         description="Whole credits granted to every new user at registration. Set to 0 to disable.",
     )
 
