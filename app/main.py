@@ -177,11 +177,11 @@ async def lifespan(app: FastAPI):
         settings.redis_streaming_pool_size,
     )
 
-    # Credit-reservation janitor runs as a **sibling process**, not
-    # inside this event loop — see ``app/workers/run.py`` and
-    # ``scripts/deploy.sh janitor``. Web's lifespan is HTTP-only
-    # again: separating background sweeps from request handling lets
-    # each scale, restart, and fail independently.
+    # Background-settle process (sweeper + subscriber) runs as a
+    # **sibling**, not inside this event loop — see ``app/workers/run.py``
+    # and ``scripts/deploy.sh settle``. Web's lifespan is HTTP-only
+    # again: separating background settle work from request handling
+    # lets each scale, restart, and fail independently.
 
     logger.info("API started")
     try:

@@ -13,7 +13,8 @@ PAYG credit ledger sitting in front of the LLM turn pipeline:
 - :func:`settle_open_for_user` is the lazy sweep called from
   user-facing endpoints (``GET /credits``, ``queue_user_message``).
   :func:`settle_open_for_session` is the per-session variant used by
-  the background janitor (see :mod:`app.workers.credits_janitor`).
+  the background sweeper (:mod:`app.workers.settle_sweeper`) and the
+  pub/sub subscriber (:mod:`app.workers.settle_subscriber`).
 
 The double-entry invariant
 ``user.credit_balance == SUM(credit_ledger.amount)`` is preserved by

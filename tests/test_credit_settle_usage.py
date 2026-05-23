@@ -1,5 +1,10 @@
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
+import pytest
+
+from app.models.session import SessionStatus
 from app.services.credits import settle
 
 
@@ -50,3 +55,90 @@ async def test_read_usage_returns_none_when_tokens_are_missing() -> None:
     assert usage is None
 
 
+# ── settle_open_for_session: pre-terminal safety ────────────────────────────
+
+
+class _RoutingDb:
+    """Stand-in DB for the routing test. ``settle_open_for_session``
+    calls ``db.execute`` once (the join SELECT); ``_read_usage_...`` would
+    call it a second time. We track every execute so the test can
+    assert that the second call never happens on the safety branch."""
+
+    def __init__(self, first_row) -> None:
+        self._first_row = first_row
+        self.execute_calls = 0
+
+    async def execute(self, statement):
+        self.execute_calls += 1
+        # Only the first call (the join SELECT) is exercised in the
+        # safety-branch test. If a second call sneaks in, the test
+        # will assert against ``execute_calls`` and surface it.
+        return _Result(self._first_row)
+
+
+@pytest.fixture(autouse=True)
+def _spy_settle_and_refund(monkeypatch):
+    """Replace the two terminal handlers with AsyncMocks so the routing
+    test can verify they were NOT awaited on the non-terminal path,
+    without needing a real DB session for ``settle_turn`` /
+    ``refund_reservation`` to operate on."""
+    settle_spy = AsyncMock()
+    refund_spy = AsyncMock()
+    monkeypatch.setattr(settle, "settle_turn", settle_spy)
+    monkeypatch.setattr(settle, "refund_reservation", refund_spy)
+    return settle_spy, refund_spy
+
+
+async def test_settle_open_for_session_skips_when_session_not_terminal(
+    _spy_settle_and_refund,
+) -> None:
+    """The defining safety check: a premature trigger (worker bug,
+    errant manual publish) arrives while the session is still RUNNING.
+    ``settle_open_for_session`` must NOT refund — leaving the
+    reservation OPEN for the legitimate later trigger.
+
+    Without this guard a stray ``settle:notify`` publish would refund
+    the user mid-turn, after which the real terminal write would
+    settle into a CANCELLED reservation (no-op) and the platform
+    eats the LLM cost silently.
+    """
+    settle_spy, refund_spy = _spy_settle_and_refund
+    open_reservation = MagicMock(id=42, turn_id=99)
+    db = _RoutingDb((open_reservation, SessionStatus.RUNNING))
+
+    await settle.settle_open_for_session(db, uuid4())
+
+    settle_spy.assert_not_awaited()
+    refund_spy.assert_not_awaited()
+    # Exactly one execute fired (the routing SELECT). If a usage
+    # lookup had run, count would be 2.
+    assert db.execute_calls == 1
+
+
+async def test_settle_open_for_session_no_op_when_no_reservation(
+    _spy_settle_and_refund,
+) -> None:
+    settle_spy, refund_spy = _spy_settle_and_refund
+    db = _RoutingDb(None)
+
+    await settle.settle_open_for_session(db, uuid4())
+
+    settle_spy.assert_not_awaited()
+    refund_spy.assert_not_awaited()
+    assert db.execute_calls == 1
+
+
+async def test_settle_open_for_session_skips_when_session_row_missing(
+    _spy_settle_and_refund,
+) -> None:
+    """Outer join surfaces a non-existent session row as ``status=None``.
+    Treated as non-terminal → no-op (sweeper's expires_at branch will
+    eventually refund this corrupted reservation)."""
+    settle_spy, refund_spy = _spy_settle_and_refund
+    open_reservation = MagicMock(id=42, turn_id=99)
+    db = _RoutingDb((open_reservation, None))
+
+    await settle.settle_open_for_session(db, uuid4())
+
+    settle_spy.assert_not_awaited()
+    refund_spy.assert_not_awaited()

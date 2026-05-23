@@ -1,25 +1,34 @@
-"""Background sweep for credit reservations missed by the user-facing
-lazy sweep.
+"""Periodic poll-based settle: backstop for the user-facing lazy sweep.
 
 The user-facing endpoints (``GET /credits``, ``queue_user_message``)
 already settle this user's open reservations on every hit — that
-covers any user who comes back. The janitor is the **safety net** for
-the "user never comes back" case: API-only clients, abandoned
+covers any user who comes back. The sweeper is the **safety net**
+for the "user never comes back" case: API-only clients, abandoned
 sessions, worker crashes between RESERVE and the fenced terminal
 write.
 
-Process model: the janitor runs as a **standalone sibling process**
-to the web server, not inside the FastAPI lifespan — see
-``app/workers/run.py`` and ``scripts/deploy.sh janitor``. Web and
-janitor are deployed, restarted, and observed independently.
+Sibling to :mod:`app.workers.settle_subscriber` — both run in the
+same background-settle process (see ``app/workers/run.py``). They're
+the **pull and push** halves of the same settle responsibility:
+
+- sweeper polls the DB every 60s — correctness backstop;
+- subscriber listens on ``settle:notify`` pub/sub — latency optimization.
+
+Both call the same shared helpers (``settle_open_for_session`` /
+``refund_reservation``); behaviour stays identical to the lazy sweep
+on user endpoints.
+
+Process model: standalone sibling process to the web server, not
+inside the FastAPI lifespan — see ``app/workers/run.py`` and
+``scripts/deploy.sh settle``. Web and background-settle are deployed,
+restarted, and observed independently.
 
 Concurrency: every host in a multi-node deployment runs its own
-janitor process. Postgres advisory locks
-(:func:`pg_try_advisory_lock`) ensure only one process actually
-sweeps per tick across the entire cluster — the rest see a busy
-lock and skip. Connection loss = automatic release, so a crashed
-sweeper (SIGKILL, OOM, hardware failure) never strands the lock;
-the next tick's first survivor picks it up.
+sweeper. Postgres advisory locks (:func:`pg_try_advisory_lock`) ensure
+only one process actually sweeps per tick across the entire cluster
+— the rest see a busy lock and skip. Connection loss = automatic
+release, so a crashed sweeper (SIGKILL, OOM, hardware failure) never
+strands the lock; the next tick's first survivor picks it up.
 
 Sweep eligibility (per reservation row, ``state='OPEN'``):
 
@@ -31,9 +40,6 @@ Sweep eligibility (per reservation row, ``state='OPEN'``):
 - ``expires_at`` has passed AND session not terminal (worker died
   between RESERVE and terminal flip) → refund.
 - Otherwise (turn still running, not yet expired) → leave open.
-
-The janitor is a **trigger** for the shared settle helper, not a
-parallel implementation — behaviour stays identical to the lazy sweep.
 """
 
 import asyncio
@@ -51,16 +57,16 @@ from app.services import credits
 logger = logging.getLogger(__name__)
 
 
-# 64-bit key for Postgres advisory lock. Bytes ``b"CREDJANI"`` so
+# 64-bit key for Postgres advisory lock. Bytes ``b"STLSWEEP"`` so
 # ``pg_locks`` rows are easy to spot in debugging.
-_LOCK_KEY = 0x4352454447414e49
+_LOCK_KEY = 0x53544c5357454550
 
 # Max reservations inspected per tick. A bound prevents one
 # pathological run (e.g. mass worker crash) from holding the advisory
 # lock for minutes; the next tick picks up the rest.
 _SWEEP_BATCH = 100
 
-# Session statuses where the turn is still in flight; janitor leaves
+# Session statuses where the turn is still in flight; sweeper leaves
 # their reservations alone unless ``expires_at`` has passed.
 _NON_TERMINAL = (SessionStatus.IDLE, SessionStatus.RUNNING)
 
@@ -73,13 +79,13 @@ async def run_forever(*, interval_seconds: int = 60) -> None:
             processed = await _tick()
             consecutive_failures = 0
             if processed:
-                logger.info("janitor tick: processed=%d", processed)
+                logger.info("sweeper tick: processed=%d", processed)
         except asyncio.CancelledError:
             raise
         except Exception:
             consecutive_failures += 1
             logger.exception(
-                "janitor tick failed (consecutive_failures=%d)",
+                "sweeper tick failed (consecutive_failures=%d)",
                 consecutive_failures,
             )
         # Exponential backoff (capped at 10 min) — protects the DB
@@ -94,7 +100,7 @@ async def run_forever(*, interval_seconds: int = 60) -> None:
 
 
 async def _tick() -> int:
-    """One sweep cycle. Returns the number of reservations the janitor
+    """One sweep cycle. Returns the number of reservations the sweeper
     actually touched (0 when another process held the advisory lock).
 
     Two distinct session lifetimes here, deliberately separated so a
@@ -135,7 +141,7 @@ async def _list_candidates(db: AsyncSession) -> list[tuple]:
     raced and got settled between list-time and process-time becomes
     a harmless no-op (settle is idempotent on terminal state).
 
-    Only rows the janitor can act on are selected. Leaving eligibility to
+    Only rows the sweeper can act on are selected. Leaving eligibility to
     ``_process_one`` after ``LIMIT`` would let a large prefix of active,
     not-yet-expired turns starve later terminal reservations forever.
     """
@@ -169,7 +175,7 @@ async def _release_lock(db: AsyncSession) -> None:
             text("SELECT pg_advisory_unlock(:key)"), {"key": _LOCK_KEY}
         )
     except Exception:
-        logger.exception("janitor: pg_advisory_unlock failed (connection-close fallback will release)")
+        logger.exception("sweeper: pg_advisory_unlock failed (connection-close fallback will release)")
 
 
 async def _process_one(candidate: tuple) -> bool:
@@ -177,7 +183,7 @@ async def _process_one(candidate: tuple) -> bool:
 
     Returns ``True`` if the row was actually touched (settled or
     refunded), ``False`` if it was skipped (not eligible) or failed.
-    Per-row exceptions are caught and logged — the janitor must
+    Per-row exceptions are caught and logged — the sweeper must
     survive a single bad reservation to keep processing the batch.
     """
     reservation_id, session_id, expires_at, session_status = candidate
@@ -187,7 +193,7 @@ async def _process_one(candidate: tuple) -> bool:
                 # Session was deleted; refund.
                 await credits.refund_reservation(
                     db, reservation_id=reservation_id,
-                    reason={"cause": "janitor_session_deleted"},
+                    reason={"cause": "sweeper_session_deleted"},
                 )
                 await db.commit()
                 return True
@@ -206,7 +212,7 @@ async def _process_one(candidate: tuple) -> bool:
                 # on session_turn. Refund.
                 await credits.refund_reservation(
                     db, reservation_id=reservation_id,
-                    reason={"cause": "janitor_expired_no_terminal"},
+                    reason={"cause": "sweeper_expired_no_terminal"},
                 )
                 await db.commit()
                 return True
@@ -214,6 +220,6 @@ async def _process_one(candidate: tuple) -> bool:
             return False
     except Exception:
         logger.exception(
-            "janitor: failed to process reservation %s", reservation_id,
+            "sweeper: failed to process reservation %s", reservation_id,
         )
         return False

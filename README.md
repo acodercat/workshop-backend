@@ -23,7 +23,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
 
 Single-host manual deploy: use `scripts/deploy.sh`. Two siblings are
 managed by the same script — **web** (uvicorn on `:8005`) and
-**credits-janitor** (background reconciliation process). Subcommand
+**background-settle** (sweeper + subscriber, see below). Subcommand
 layout mirrors the frontend's `serve.sh` so muscle memory carries
 across services.
 
@@ -34,14 +34,14 @@ bash scripts/deploy.sh deploy
 # Web-only commands
 bash scripts/deploy.sh restart       # code-only restart (no deps/migration)
 bash scripts/deploy.sh logs          # tail uvicorn.log
-bash scripts/deploy.sh status        # show state of BOTH web + janitor
+bash scripts/deploy.sh status        # show state of BOTH web + background-settle
 
-# Janitor-only commands
-bash scripts/deploy.sh janitor start
-bash scripts/deploy.sh janitor stop
-bash scripts/deploy.sh janitor restart
-bash scripts/deploy.sh janitor status
-bash scripts/deploy.sh janitor logs  # tail janitor.log
+# background-settle-only commands
+bash scripts/deploy.sh settle start
+bash scripts/deploy.sh settle stop
+bash scripts/deploy.sh settle restart
+bash scripts/deploy.sh settle status
+bash scripts/deploy.sh settle logs   # tail settle.log
 ```
 
 | command | behavior |
@@ -49,53 +49,69 @@ bash scripts/deploy.sh janitor logs  # tail janitor.log
 | `start` | start uvicorn on `:8005` (no-op if already running) |
 | `stop` | SIGTERM the web, escalate to SIGKILL after a 10s grace period |
 | `restart` | `stop` + `start` — no deps / migration sync |
-| `status` | report state of **both** web (`:8005`) and credits-janitor |
+| `status` | report state of **both** web (`:8005`) and background-settle |
 | `logs` | `tail -f logs/uvicorn.log` |
 | `deploy` | stop both + `uv sync` + `alembic upgrade head` + start both |
-| `janitor {start\|stop\|restart\|status\|logs}` | same lifecycle commands for the credits-janitor process (`logs/janitor.log`) |
+| `settle {start\|stop\|restart\|status\|logs}` | same lifecycle commands for the background-settle process (`logs/settle.log`) |
 
 Truth source for "is it running":
 - **web**: `lsof -t -i:8005` — tolerates instances started outside the
   script (e.g., a legacy `nohup uv run uvicorn …`).
-- **janitor**: `pgrep -f 'app.workers.run'` — the janitor has no port;
-  the module path is specific enough not to collide.
+- **background-settle**: `pgrep -f 'app.workers.run'` — no port; the
+  module path is specific enough not to collide.
 
-uvicorn stdout → `logs/uvicorn.log`; janitor stdout → `logs/janitor.log`;
-application-level loguru output lives elsewhere under `logs/` per
-`app/logging_config.py`.
+uvicorn stdout → `logs/uvicorn.log`; background-settle stdout →
+`logs/settle.log`; application-level loguru output lives elsewhere
+under `logs/` per `app/logging_config.py`.
 
 For ad-hoc / non-default-port runs (or when the script's defaults
 don't fit, e.g. a custom SSL setup), the bare commands still work:
 
 ```bash
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --workers 4
-uv run python -m app.workers.run          # standalone credits-janitor
+uv run python -m app.workers.run          # standalone background-settle
 ```
 
-### Credits-janitor (background reconciliation)
+### Background-settle (sweeper + subscriber)
 
-Background process that sweeps **credit reservations** that the
-user-facing lazy sweep didn't catch — the "user never came back"
-case for abandoned sessions, API-only clients, and worker crashes
-between RESERVE and the fenced terminal write. Implementation in
-`app/workers/credits_janitor.py`; standalone entrypoint in
-`app/workers/run.py`.
+Closes out **credit reservations** that the user-facing lazy sweep
+didn't catch — the "user never came back" case for abandoned
+sessions, API-only clients, and worker crashes between RESERVE and
+the fenced terminal write. One process, two concurrent tasks (see
+`app/workers/run.py`):
 
-**Multi-node deployment**: every host should run a janitor. The
-sweepers coordinate across the cluster via a Postgres advisory lock
-(`pg_try_advisory_lock`); at each tick only one host actually
-scans, the others see a busy lock and skip. Connection close auto-
-releases the lock, so a crashed sweeper never strands it.
+- `app/workers/settle_sweeper.py` — periodic 60s poll over OPEN
+  reservations. Correctness backstop, coordinated across hosts via a
+  Postgres advisory lock so only one node sweeps per tick.
+- `app/workers/settle_subscriber.py` — Redis `settle:notify` pub/sub
+  subscriber. The worker publishes the session_id immediately after
+  committing a terminal `session_turn`, so settle happens within
+  sub-second instead of waiting for the next sweep tick.
+
+The two are push and pull halves of the same settle responsibility —
+the subscriber is a latency optimization, the sweeper is the
+correctness path. Both call the same shared helpers
+(`settle_open_for_session` / `refund_reservation`); behaviour stays
+identical to the on-endpoint lazy sweep.
+
+**Multi-node deployment**: every host should run a background-settle.
+Sweepers coordinate across the cluster via the Postgres advisory
+lock (`pg_try_advisory_lock`); at each tick only one host actually
+scans, the others see a busy lock and skip. Connection close
+auto-releases the lock, so a crashed process never strands it.
+The subscriber broadcasts to every host's listener; concurrent
+settles serialize on the reservation's `FOR UPDATE` lock and the
+state-machine no-op handles the loser.
 
 ```bash
 # Operationally — same lifecycle commands as web
-bash scripts/deploy.sh janitor start
-bash scripts/deploy.sh janitor status
-bash scripts/deploy.sh janitor logs
+bash scripts/deploy.sh settle start
+bash scripts/deploy.sh settle status
+bash scripts/deploy.sh settle logs
 ```
 
-The janitor sweeps every 60 s by default (see
-`credits_janitor.run_forever`), processes at most 100 reservations
+The sweeper polls every 60 s by default (see
+`settle_sweeper.run_forever`), processes at most 100 reservations
 per tick (capped to keep the advisory-lock hold time short), and
 exponentially backs off on consecutive failures.
 

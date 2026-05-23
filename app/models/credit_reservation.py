@@ -80,9 +80,9 @@ class CreditReservation(Base):
         default=CreditReservationState.OPEN,
         server_default=text("'OPEN'::credit_reservation_state"),
     )
-    # Informational in V1 — no janitor sweeps on this column yet. V2's
-    # cleanup loop will use it to find abandoned reservations from
-    # worker crashes. ``timezone=True`` keeps the tz-aware datetime
+    # Used by the sweeper to find abandoned reservations from worker
+    # crashes (``expires_at < now() AND session non-terminal`` →
+    # refund). ``timezone=True`` keeps the tz-aware datetime
     # written by reserve.py round-trip correctly (the bare ``TIMESTAMP``
     # type silently strips tz on write and yields naive on read, which
     # breaks any Python-side comparison against ``datetime.now(utc)``).

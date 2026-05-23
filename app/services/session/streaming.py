@@ -14,7 +14,8 @@ written by the worker in the same fenced transaction that flips
 
 - The lazy sweep on user-facing endpoints (``GET /credits``,
   ``queue_user_message``) — covers the "user comes back" case.
-- The background janitor (:mod:`app.workers.credits_janitor`) — covers
+- The background sweeper (:mod:`app.workers.settle_sweeper`) and
+  pub/sub subscriber (:mod:`app.workers.settle_subscriber`) — cover
   the "user never comes back" case.
 
 The previous SSE eager-settle hook is gone with V2: it was a

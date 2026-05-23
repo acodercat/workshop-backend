@@ -44,6 +44,15 @@ WORKER_NOTIFY_CHANNEL = "notify:worker"
 # session (if any) and fires :meth:`Agent.cancel` on its loop.
 CANCEL_CHANNEL_PREFIX = "cancel"
 
+# Pub/Sub channel the worker publishes to after committing a terminal
+# ``session_turn`` write (COMPLETE / FAILED). Payload is the session_id
+# string. Mirrored in ``agent-worker/agent_worker/wire/keys.py``. The
+# subscriber lives in :mod:`app.workers.settle_subscriber` and triggers
+# ``settle_open_for_session`` for sub-second settle latency. Pub/sub is
+# fire-and-forget on purpose — ``settle_sweeper``'s 60s poll backstops
+# any message lost to a disconnect.
+SETTLE_NOTIFY_CHANNEL = "settle:notify"
+
 # Per-email registration verification code prefix. Plain string keys
 # (not streams), one per pending registration. JSON value carries the
 # code + send timestamp + attempt counter; TTL controls the validity

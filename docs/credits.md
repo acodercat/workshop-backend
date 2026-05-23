@@ -1,9 +1,10 @@
 # Credits & Billing — Architecture and Operations
 
 This is the single-source design doc for the credit / quota system.
-Code lives under `app/services/credits/`, `app/workers/credits_janitor.py`,
-and the relevant alembic migrations. Deferred work and forward-looking
-plans live in [`credits-future.md`](credits-future.md).
+Code lives under `app/services/credits/`, `app/workers/settle_sweeper.py`
++ `app/workers/settle_subscriber.py`, and the relevant alembic
+migrations. Deferred work and forward-looking plans live in
+[`credits-future.md`](credits-future.md).
 
 ---
 
@@ -19,12 +20,15 @@ plans live in [`credits-future.md`](credits-future.md).
 - **Worker doesn't know about credits.** It only writes
   `session_turn.input_tokens` / `output_tokens` in its existing
   fenced terminal transaction; the backend reads from there.
-- **Two settlement triggers** keep reservations from leaking:
-  - lazy sweep on every user-facing endpoint hit;
-  - background `credits-janitor` process for the "user never comes
-    back" case.
+- **Three settlement triggers** keep reservations from leaking:
+  - lazy sweep on every user-facing endpoint hit (active user);
+  - Redis `settle:notify` subscriber for sub-second latency on
+    completed turns (`settle_subscriber`);
+  - 60s background sweeper for the "user never comes back" case
+    (`settle_sweeper`).
 - **Multi-node ready** via Postgres advisory locks — only one
-  janitor sweeps per tick across the cluster.
+  sweeper polls per tick across the cluster; subscribers serialize
+  via the per-reservation `FOR UPDATE` lock.
 - **Every user has an Organization** (mirrors OpenAI). Personal org
   is auto-created at registration; B2B teams layer on top later
   without schema migration.
@@ -183,7 +187,7 @@ CREATE INDEX ix_credit_ledger_user_created
 |---|---|---|---|
 | `TOPUP` | admin script / welcome grant / payment webhook | + | money in |
 | `RESERVE` | `queue_user_message` at turn start | − | hold pessimistic max cost |
-| `SETTLE` | settle path (lazy sweep / janitor) | both | two rows: reverse-reserve + actual debit |
+| `SETTLE` | settle path (lazy sweep / sweeper) | both | two rows: reverse-reserve + actual debit |
 | `REFUND` | settle path on missing usage / session delete / expired | + | full refund |
 | `ADJUST` | admin (no CLI yet; call service directly) | either | manual correction |
 
@@ -206,7 +210,7 @@ CREATE TABLE credit_reservation (
     reserved      bigint NOT NULL,
     rate_snapshot jsonb NOT NULL,
     state         credit_reservation_state NOT NULL DEFAULT 'OPEN',
-    expires_at    timestamptz NOT NULL,              -- janitor sweep cue
+    expires_at    timestamptz NOT NULL,              -- sweeper sweep cue
     created_at    timestamptz NOT NULL DEFAULT now(),
     settled_at    timestamptz
 );
@@ -243,7 +247,7 @@ ALTER TABLE "user"
 ```
 
 The cache. Always equal to `SUM(credit_ledger.amount WHERE user_id =
-X)` — see §6 invariant check.
+X)` — see §9 invariant check.
 
 ### `organization` + `organization_member` — V3 identity
 
@@ -274,14 +278,159 @@ note is short because the org concept here is identity-only for V3.
 
 ---
 
-## 5. Flows
+## 5. Cost formula
+
+The math used at both reserve and settle. Two callers, one helper
+(`rates.cost_micro_credits`):
+
+- **reserve** plugs in pessimistic upper bounds for each input so
+  the hold covers the worst plausible turn.
+- **settle** plugs in actual measurements from `session_turn` so the
+  user pays for what they used.
+
+Same formula, different inputs.
+
+### Unit system
+
+```
+1 credit          = 1_000_000 µ-credits     ≈ $0.001 USD of LLM cost
+1 USD             = 1_000_000_000 µ-credits  (the conversion peg)
+```
+
+All ledger amounts are stored as µ-credit `bigint`. `ceil` happens
+exactly once, at the µ-credit boundary, so sub-µ-credit fractions
+always round in the operator's favor (billing-safe rounding).
+
+### Three-factor formula
+
+```
+cost  =  α · tokens_cost(model)   ← per-model token COGS × markup
+       + β · turn_seconds          ← global infrastructure occupancy fee
+       + γ · model_fee(model)      ← per-model fixed per-turn premium
+```
+
+Expanded into µ-credit arithmetic — this is what
+`cost_micro_credits` does literally:
+
+```
+token_micro     = ( input_tokens  / 1000 · in_per_1k_usd
+                  + output_tokens / 1000 · out_per_1k_usd )
+                · token_markup            ← α
+                · 1_000_000_000           ← USD → µ-credits
+
+duration_micro  = max(0, turn_seconds)
+                · per_second_credits      ← β
+                · 1_000_000               ← credits → µ-credits
+
+fee_micro       = model_fee_credits       ← γ
+                · 1_000_000
+
+cost_micro      = ceil(token_micro + duration_micro + fee_micro)
+```
+
+### Reserve vs settle — same call, different inputs
+
+| input            | reserve                                                | settle                                            |
+|------------------|--------------------------------------------------------|---------------------------------------------------|
+| `input_tokens`   | `credit_reserve_max_input_tokens` (16_000)             | `session_turn.input_tokens`                       |
+| `output_tokens`  | `rate.reserve_max_output_tokens` (per-model: 4096/8192)| `session_turn.output_tokens`                      |
+| `turn_seconds`   | `credit_reserve_max_turn_seconds` (1860)               | `session_turn.terminated_at - session_turn.created_at` |
+| `rate snapshot`  | live config row at reserve time                        | the snapshot frozen on the reservation            |
+
+At settle the rate snapshot comes from
+`credit_reservation.rate_snapshot` (JSONB, frozen at reserve time)
+— `cost_micro_credits` never reads live config. A price change
+between reserve and settle does **not** re-price the open turn:
+the cost shown at start is the cost actually charged.
+
+### Rate card (`config.Settings.credit_rates`)
+
+Per-model:
+
+| model_id          | in_per_1k_usd | out_per_1k_usd | α (token_markup) | γ (model_fee_credits) | reserve_max_output_tokens |
+|-------------------|--------------:|---------------:|-----------------:|----------------------:|--------------------------:|
+| claude-opus-4-7   | 0.005         | 0.025          | 3.0              | 0                     | 4096                      |
+| claude-opus-4-6   | 0.005         | 0.025          | 3.0              | 0                     | 4096                      |
+| claude-sonnet-4-6 | 0.003         | 0.015          | 3.0              | 0                     | 8192                      |
+| kimi-k2           | 0.00055       | 0.0022         | 3.0              | 0                     | 8192                      |
+| HKGAI-V1          | 0.001         | 0.005          | 3.0              | 0                     | 8192                      |
+| HKGAI-V3          | 0.001         | 0.005          | 3.0              | 0                     | 8192                      |
+
+Global (not per-model):
+
+| knob                                | default | meaning                                          |
+|-------------------------------------|---------|--------------------------------------------------|
+| `credit_per_second_credits` (β)     | **0.0** | per-second infrastructure occupancy fee          |
+| `credit_reserve_max_turn_seconds`   | 1860    | reserve-time upper bound on duration (31 min)    |
+| `credit_reserve_max_input_tokens`   | 16_000  | reserve-time upper bound on input                |
+| `credit_welcome_grant_credits`      | 100_000 | auto-grant at registration                       |
+
+`token_markup` (α) is per-model so promotional pricing on a single
+model is one number change. β / γ default 0 keeps day-1 behavior
+at "tokens only" — see *Day-1 collapse* below.
+
+### Day-1 collapse — currently a tokens-only formula
+
+Because β and γ are both 0 in the default config, the formula
+currently reduces to:
+
+```
+cost_credits  ≈  ( in_tokens/1000 · in_per_1k_usd
+                 + out_tokens/1000 · out_per_1k_usd )
+              · token_markup
+              · 1000           ← USD → credits ($1 = 1000 credits)
+```
+
+Worked example. `claude-opus-4-7` turn with 5 000 input / 2 000
+output tokens:
+
+```
+= ( 5 · 0.005 + 2 · 0.025 ) · 3.0 · 1000
+= ( 0.025 + 0.050 ) · 3 000
+= 225 credits
+```
+
+Turning on β before the `terminated_at` distribution has stabilized
+in production is intentionally avoided — see §8 *Failure modes*
+("Duration billing enabled but worker does not write
+`terminated_at` yet").
+
+### Reserve sizing — why it can over-hold
+
+Reserve uses the very upper end of every input: `max_input × max_output × max_turn_seconds`. For an average claude-opus-4-7 turn at default config the reserve is:
+
+```
+16 000 in × $0.005/k = $0.080
++ 4 096 out × $0.025/k = $0.102
+= $0.182 token COGS
+× 3.0 markup × 1000 credits/$  → 547 credits reserved
+```
+
+Settling that with the 225-credit example above refunds 322
+credits. Customers see a transient hold ≈ 2.4× the typical
+settled cost; this is intentional headroom — the cost of not
+blocking on per-stream cost estimation mid-turn.
+
+### Code map
+
+| concern                    | file:func                                                                       |
+|----------------------------|---------------------------------------------------------------------------------|
+| formula                    | `app/services/credits/rates.py::cost_micro_credits`                             |
+| reserve                    | `app/services/credits/rates.py::reserve_micro_credits`                          |
+| snapshot                   | `app/services/credits/rates.py::snapshot_rate`                                  |
+| legacy snapshot fallback   | `app/services/credits/rates.py::_normalize_rate_snapshot`                       |
+| rate card + β              | `backend/config.py::Settings.credit_rates`, `credit_per_second_credits`         |
+
+---
+
+## 6. Flows
 
 The system has five core operations. All run inside the caller's
 transaction unless otherwise noted; the `_internal.insert_ledger_
 and_bump_balance` helper takes care of the `SELECT … FOR UPDATE` on
 the user row so concurrent ops never race the balance.
 
-### 5.1 Top-up (admin)
+### 6.1 Top-up (admin)
 
 Path: `scripts/topup_credits.py` → `credits.apply_topup` →
 `_internal.insert_ledger_and_bump_balance`.
@@ -302,7 +451,7 @@ duplicate. `apply_topup` catches the `IntegrityError`, rolls back
 its own work, and raises `TopupAlreadyApplied`. The script treats
 that as success and prints the current balance.
 
-### 5.2 Welcome grant (auto, post-registration)
+### 6.2 Welcome grant (auto, post-registration)
 
 Path: `app/services/auth/register.register_user` → `credits.apply_topup`.
 
@@ -315,7 +464,7 @@ Failure of the welcome grant logs loudly but does **not** fail
 registration. The user is created with 0 balance; admin tops up
 manually.
 
-### 5.3 Reserve (at turn start)
+### 6.3 Reserve (at turn start)
 
 Path: `queue_user_message` → `credits.reserve_for_turn`.
 
@@ -344,14 +493,14 @@ Path: `queue_user_message` → `credits.reserve_for_turn`.
 7. caller commits
 ```
 
-`expires_at` (now() + 4h) is the janitor's "worker probably died"
+`expires_at` (now() + 4h) is the sweeper's "worker probably died"
 cutoff. It must exceed the longest legitimate turn, since a live
-long turn and a dead worker look identical to the janitor — see
+long turn and a dead worker look identical to the sweeper — see
 the *fixed-timeout vs. long turns* hazard in
 `docs/credits-future.md` (heartbeat-based passive cancel is the
 planned real fix).
 
-### 5.3.1 Transport model — there is no queue XADD
+### 6.3.1 Transport model — there is no queue XADD
 
 A common misread (and an error in early commit messages): "credits
 are refunded if the XADD to the worker queue fails." **There is no
@@ -382,7 +531,7 @@ publish_wake(redis)   ← best-effort pub/sub nudge, AFTER commit
 - A failed `publish_wake` (after commit) is logged and ignored; the
   poll fallback still picks the row up. It never triggers a refund.
 
-### 5.4 Settle (after agent terminates)
+### 6.4 Settle (after agent terminates)
 
 Trigger paths (any of these can fire; all delegate to the same
 `settle_open_for_session` / `settle_open_for_user` helpers):
@@ -390,7 +539,8 @@ Trigger paths (any of these can fire; all delegate to the same
 | trigger | source | when it fires |
 |---|---|---|
 | lazy sweep | `queue_user_message` (next turn) / `GET /credits` | user takes any action after their turn finished |
-| janitor | `app/workers/credits_janitor.run_forever` | every 60 s, regardless of user activity |
+| subscriber | `app/workers/settle_subscriber.run_forever` | within ~1 s of worker committing a terminal `session_turn` (worker publishes on `settle:notify` post-commit) |
+| sweeper | `app/workers/settle_sweeper.run_forever` | every 60 s, regardless of user activity |
 
 There **is no eager-on-SSE settlement** anymore. V1 had one; V2
 removed it after we moved usage storage from the Redis stream
@@ -398,7 +548,7 @@ removed it after we moved usage storage from the Redis stream
 
 ```
 1. SELECT credit_reservation WHERE state='OPEN'
-   AND user_id=X (lazy) OR id=Y (janitor)
+   AND user_id=X (lazy) OR id=Y (sweeper)
    FOR UPDATE
 2. read session_turn.input_tokens / output_tokens and
    turn_seconds = session_turn.terminated_at - session_turn.created_at
@@ -423,7 +573,7 @@ removed it after we moved usage storage from the Redis stream
 Idempotent via the `state = 'OPEN'` predicate. A second call sees
 the reservation in a terminal state and returns immediately.
 
-### 5.5 Refund (zero actual cost)
+### 6.5 Refund (zero actual cost)
 
 Trigger: same paths as settle. Routes when:
 
@@ -443,7 +593,7 @@ Trigger: same paths as settle. Routes when:
 4. caller commits
 ```
 
-### 5.6 Adjust (manual correction)
+### 6.6 Adjust (manual correction)
 
 Service-only path (`credits.apply_adjust`). Same shape as TOPUP but
 allows signed amounts and requires a non-empty `reason`. Used for:
@@ -457,7 +607,7 @@ deterministic `idempotency_key` (e.g. `incident-2026-05-12`).
 
 ---
 
-## 6. Settlement triggers and multi-node coordination
+## 7. Settlement triggers and multi-node coordination
 
 Three things drive settlement, in decreasing latency:
 
@@ -467,14 +617,19 @@ Three things drive settlement, in decreasing latency:
 │ (milliseconds)              ↓                                │
 │                             settle their open reservations   │
 │                                                             │
-│ no user activity, 60 s    → background janitor              │
+│ worker commits a terminal → settle subscriber via            │
+│ session_turn (~1 s)         settle:notify pub/sub            │
+│                             ↓                                │
+│                             settle that specific session     │
+│                                                             │
+│ no signal arrives, 60 s   → background sweeper              │
 │ (seconds)                   ↓                                │
 │                             scan all OPEN reservations,      │
 │                             settle/refund the eligible ones  │
 │                                                             │
-│ janitor process crashes   → Postgres connection close       │
+│ sweeper process crashes   → Postgres connection close       │
 │ (no recovery needed)        auto-releases the advisory lock  │
-│                             next host's janitor picks it up  │
+│                             next host's sweeper picks it up  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -492,17 +647,20 @@ Two entry points:
 Each visits at most a handful of OPEN reservations per call
 (partial index keeps the lookup cheap).
 
-### Janitor (background process)
+### Background-settle process (sweeper + subscriber)
 
-Implementation: `app/workers/credits_janitor.run_forever`.
-Standalone entrypoint: `app/workers/run.py`. Lifecycle commands:
-`bash scripts/deploy.sh janitor {start|stop|restart|status|logs}`.
+One process, two concurrent async tasks (`app/workers/run.py` with
+an `asyncio.TaskGroup`). Standalone entrypoint:
+`uv run python -m app.workers.run`. Lifecycle commands:
+`bash scripts/deploy.sh settle {start|stop|restart|status|logs}`.
 
-Per tick:
+#### Sweeper (`app/workers/settle_sweeper.run_forever`)
 
-1. Try `pg_try_advisory_lock(0x4352454447414e49)` — bytes
-   `b"CREDJANI"` interpreted as bigint, easy to spot in `pg_locks`.
-2. If another janitor holds it: skip this tick.
+The polling backstop. Per tick:
+
+1. Try `pg_try_advisory_lock(0x53544c5357454550)` — bytes
+   `b"STLSWEEP"` interpreted as bigint, easy to spot in `pg_locks`.
+2. If another sweeper holds it: skip this tick.
 3. Otherwise: list up to 100 OPEN reservations whose session is
    terminal, deleted, or whose `expires_at` has passed.
 4. For each candidate, open its own session (so one row's DB error
@@ -513,6 +671,20 @@ Per tick:
 Per-row session isolation is load-bearing: SQLAlchemy doesn't
 auto-rollback on flush error inside a transaction, so a single bad
 row would otherwise poison the whole tick.
+
+#### Subscriber (`app/workers/settle_subscriber.run_forever`)
+
+The push half. Subscribes to Redis `settle:notify`; the worker
+publishes the session_id immediately after committing a terminal
+`session_turn`. On each message: parse the UUID, open a session,
+call `settle_open_for_session`, commit. Per-message try/except keeps
+a single bad message from killing the loop; an outer reconnect loop
+recovers from pub/sub disconnects with a 1 s backoff.
+
+Pub/sub is fire-and-forget on purpose — a lost message (subscriber
+restarting, network blip) is caught by the sweeper on its next 60 s
+tick. The subscriber is a latency optimization, not a correctness
+path.
 
 ### Multi-node coordination
 
@@ -532,25 +704,25 @@ once they realize they don't need Redlock for a single-DB workload.
 
 ---
 
-## 7. Failure modes (and what catches them)
+## 8. Failure modes (and what catches them)
 
 | Scenario | How the system reacts |
 |---|---|
 | User has 0 balance, sends message | Reserve fails → 402 → user sees "insufficient credits" |
-| Reserve passes, worker runs normally, then user closes tab | Lazy sweep on next user action OR janitor (≤60 s later) settles |
-| Reserve passes, worker crashes mid-turn | `session.status` stays RUNNING, `session_turn.input_tokens/output_tokens` stay NULL. Janitor sees `expires_at < now()` → refund |
-| Reserve passes, worker finishes, session deleted before settle | FK SET NULL clears `reservation.session_id`. Janitor sees `session_id IS NULL` → refund |
+| Reserve passes, worker runs normally, then user closes tab | Lazy sweep on next user action OR sweeper (≤60 s later) settles |
+| Reserve passes, worker crashes mid-turn | `session.status` stays RUNNING, `session_turn.input_tokens/output_tokens` stay NULL. Sweeper sees `expires_at < now()` → refund |
+| Reserve passes, worker finishes, session deleted before settle | FK SET NULL clears `reservation.session_id`. Sweeper sees `session_id IS NULL` → refund |
 | Worker writes 0 in / 0 out (legitimately empty turn) | Both columns are 0 (not NULL) → cost = 0 → settles as +reserved / -0 (full refund of reservation; user pays nothing) |
-| Settle interrupted by DB blip | Per-row isolation in janitor + state-machine idempotency → next tick retries |
+| Settle interrupted by DB blip | Per-row isolation in sweeper + state-machine idempotency → next tick retries |
 | Two concurrent requests from the same user attempt to reserve | `SELECT … FOR UPDATE` on the user row serialises them; one sees the updated balance |
 | Welcome grant fails post-registration | Registration succeeds; user has 0 balance; loud log; admin tops up manually |
-| Janitor process killed mid-sweep | Advisory lock auto-released on connection close. Next tick (or next host's janitor) picks up; settle is idempotent so re-doing the same reservation is safe |
+| Sweeper process killed mid-sweep | Advisory lock auto-released on connection close. Next tick (or next host's sweeper) picks up; settle is idempotent so re-doing the same reservation is safe |
 | Token-usage migration applied but old worker not deployed yet | Old worker doesn't write `input_tokens` / `output_tokens` → backend settle reads NULL → refunds the reservation (user gets a free turn until worker upgrades). See `credits-future.md` for the deployment-order convention |
 | Duration billing enabled but worker does not write `terminated_at` yet | Backend settles with `turn_seconds = 0.0` → token cost and model fee are charged, but β duration is not. Deploy the worker terminal-write change before turning β above 0 |
 
 ---
 
-## 8. Operational runbook
+## 9. Operational runbook
 
 ### Check the invariant
 
@@ -615,7 +787,7 @@ asyncio.run(main())
 "
 ```
 
-### See current `pg_locks` advisory locks (debugging the janitor)
+### See current `pg_locks` advisory locks (debugging the sweeper)
 
 ```sql
 SELECT pid, classid, objid, granted, mode
@@ -623,23 +795,23 @@ FROM pg_locks
 WHERE locktype = 'advisory';
 ```
 
-`objid = 4779392619432882761` (= `0x4352454447414e49`) is the
-credits-janitor lock.
+`objid = 6004508124021867856` (= `0x53544c5357454550`, bytes
+`b"STLSWEEP"`) is the background-settle lock.
 
-### Run the janitor manually
+### Run the sweeper manually
 
 ```bash
 # As a one-shot tick from a Python REPL:
 uv run python -c "
 import asyncio
-from app.workers.credits_janitor import _tick
+from app.workers.settle_sweeper import _tick
 print(asyncio.run(_tick()), 'reservations processed')
 "
 
 # As the long-running process:
 uv run python -m app.workers.run
 # or via the deploy script:
-bash scripts/deploy.sh janitor start
+bash scripts/deploy.sh settle start
 ```
 
 ### Find users who never got the welcome grant
@@ -660,7 +832,7 @@ clearly-named `--idempotency-key=backfill-welcome-{user_id}`.
 
 ---
 
-## 9. What's not implemented (deferred)
+## 10. What's not implemented (deferred)
 
 See [`credits-future.md`](credits-future.md) for the design of each:
 
@@ -676,25 +848,25 @@ See [`credits-future.md`](credits-future.md) for the design of each:
 - **Multiplier system** — group / model / promo multipliers like
   OneAPI uses. Requires real operational pressure to justify.
 - **Auto reconciliation cron** — daily SQL invariant check with an
-  alert. Currently a manual `uv run python -c …` (see §8).
+  alert. Currently a manual `uv run python -c …` (see §9).
 
 ---
 
-## 10. Version history
+## 11. Version history
 
 | Version | What landed |
 |---|---|
 | **V1** | Initial design: `credit_ledger`, `credit_reservation`, `user.credit_balance`. Reserve / settle / refund / topup / adjust primitives. Lazy sweep on user actions. Settle source = Redis stream tail. SSE eager-settle hook. |
 | **V1.5 cleanup** | `align unique indexes as constraints` migration (cosmetic — DB layout aligned with model declarations) |
 | **V2** | Durable usage on `session_turn.input_tokens/output_tokens/terminated_at`, written by the worker in its fenced terminal transaction. Backend settle reads from there, no longer from the ephemeral Redis stream. SSE eager-settle hook removed (Redis was the only reason it existed). |
-| **V2 → sibling-process** | Janitor extracted from the FastAPI lifespan into a standalone process (`app/workers/run.py`), deployed via `deploy.sh janitor`. Web returns to pure HTTP responsibility. Multi-node coordinated via Postgres advisory lock. |
+| **V2 → sibling-process** | Sweeper extracted from the FastAPI lifespan into a standalone process (`app/workers/run.py`), deployed via `deploy.sh settle`. Web returns to pure HTTP responsibility. Multi-node coordinated via Postgres advisory lock. |
 | **V2 billing cleanup** | Open reservation uniqueness is enforced with `uq_credit_reservation_open_session`; unused `credit_reservation.kind` / `sandbox_id` were removed after turn-level three-factor billing made the reserved sandbox variant obsolete. |
 | **V3** | Organization concept (mirrors OpenAI). Personal org auto-created at registration. Welcome grant config (default 100_000 credits) — runs as a separate, best-effort transaction after the user/org/member commit. Note: billing still attaches to `user_id`; org-level billing is a V4 migration documented in `credits-future.md`. |
 | **V4 (planned)** | One of: worker-side cost cap, multi-tier org billing, payment integration. Driven by business need. |
 
 ---
 
-## 11. Where to look in the code
+## 12. Where to look in the code
 
 | Concept | File |
 |---|---|
@@ -706,8 +878,9 @@ See [`credits-future.md`](credits-future.md) for the design of each:
 | Adjust | `app/services/credits/adjust.py` |
 | Read balance / history | `app/services/credits/balance.py`, `history.py` |
 | Rate card + cost math | `app/services/credits/rates.py` |
-| Janitor (sweep loop) | `app/workers/credits_janitor.py` |
-| Janitor process entry | `app/workers/run.py` |
+| Sweeper (poll loop) | `app/workers/settle_sweeper.py` |
+| Subscriber (push, `settle:notify`) | `app/workers/settle_subscriber.py` |
+| Background-settle process entry | `app/workers/run.py` |
 | Lazy-sweep call site (enqueue) | `app/services/session/enqueue.py::queue_user_message` |
 | Lazy-sweep call site (read) | `app/api/endpoints/credits.py` |
 | Welcome grant call site | `app/services/auth/register.py::register_user` |

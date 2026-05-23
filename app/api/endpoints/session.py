@@ -256,7 +256,7 @@ async def delete_session(
     the user's list and 404s on direct access. RUNNING is refused to
     avoid racing the worker — the caller retries once terminal.
 
-    Any still-``OPEN`` reservation (a rare janitor-lag artifact, since
+    Any still-``OPEN`` reservation (a rare sweeper-lag artifact, since
     the session is terminal here) is closed by
     ``settle_open_for_session`` from durable ``session_turn`` usage —
     settle if the turn was used, refund if not, atomic with the
