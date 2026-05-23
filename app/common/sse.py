@@ -171,12 +171,12 @@ class AgentStatusEvent(_EventBase):
 class AgentErrorEvent(_EventBase):
     """``agent.error`` — a non-fatal error message.
 
-    Two producers: axon's ``AgentErrorEvent`` (message only), and the
-    runner's ``emitter.emit_error(...)`` which can attach a Python
+    Two producers: axon's ``AgentErrorEvent`` (``content`` only), and
+    the runner's ``emitter.emit_error(...)`` which can attach a Python
     ``traceback`` for crash paths.
     """
     type: Literal["agent.error"]
-    message: str
+    content: str
     traceback: NotRequired[str]
 
 
