@@ -152,6 +152,9 @@ class Settings(BaseSettings):
             "kimi-k2",
             "HKGAI-V1",
             "HKGAI-V3",
+            "qwen3.7-max",
+            "deepseek-v4-pro",
+            "glm-5.1",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
     )
@@ -185,6 +188,17 @@ class Settings(BaseSettings):
             "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            # DashScope-hosted models. USD COGS derived from Aliyun 百炼 pricing pages
+            # (CNY converted at ~1 USD = 7.2 CNY). Conservative: glm-5.1 uses the
+            # <32K-context tier; longer turns nominally cost ~33% more on the wire
+            # but the 3× ``token_markup`` more than absorbs that gap. qwen3.7-max
+            # uses Qwen3.6-Max-Preview rates as proxy (3.7 preview pricing not yet
+            # officially published, expected ≤3.6's). deepseek-v4-pro uses post-promo
+            # standard rates ($1.74/$3.48 per M) to avoid charging below COGS once
+            # the 2026-05-31 promo expires.
+            "qwen3.7-max":       {"in_per_1k_usd": 0.0013,  "out_per_1k_usd": 0.0078, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "deepseek-v4-pro":   {"in_per_1k_usd": 0.00174, "out_per_1k_usd": 0.00348,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
         },
         description="Per-model rate card for credit billing. Snapshotted onto each credit_reservation at reserve time so a config change can't re-price open turns.",
     )
