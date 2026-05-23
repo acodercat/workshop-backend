@@ -1,6 +1,6 @@
 from sqlalchemy.dialects import postgresql
 
-from app.workers import credits_janitor
+from app.workers import settle_sweeper
 
 
 class _Result:
@@ -20,7 +20,7 @@ class _CapturingDb:
 async def test_list_candidates_filters_before_limit() -> None:
     db = _CapturingDb()
 
-    await credits_janitor._list_candidates(db)
+    await settle_sweeper._list_candidates(db)
 
     assert db.statement is not None
     sql = str(

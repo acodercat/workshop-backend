@@ -8,8 +8,8 @@ Entry points:
 - :func:`refund_reservation` — full refund (zero actual cost). Used
   for crashed / cancelled / lost-worker turns.
 - :func:`settle_open_for_session` — settle the single OPEN reservation
-  for one session, if any. Called by the janitor when it sees a
-  terminal session.
+  for one session, if any. Called by the background sweeper (poll)
+  and subscriber (push) when a terminal session is detected.
 - :func:`settle_open_for_user` — lazy sweep called from user-facing
   endpoints (``GET /credits``, ``queue_user_message``) to catch any of
   this user's open reservations whose sessions are already terminal.
@@ -247,20 +247,37 @@ async def settle_open_for_session(
 ) -> None:
     """Close the OPEN reservation for ``session_id``, if any.
 
+    **Self-contained safety**: verifies the session is in a terminal
+    state before settling/refunding. A premature trigger (e.g. an
+    errant ``settle:notify`` publish, a mistaken manual call, a
+    future producer that fires before the worker's terminal commit)
+    is a no-op rather than a wrong refund — the next legitimate
+    trigger (sweeper poll, real terminal publish, lazy sweep) picks
+    the reservation up once the session is genuinely terminal.
+
     Reads usage from ``session_turn`` (durable) — never touches Redis.
-    Idempotent: if the reservation is already terminal, returns.
-    Does **not** commit — caller owns the transaction.
+    Idempotent: if no OPEN reservation matches, returns. Does **not**
+    commit — caller owns the transaction.
     """
     result = await db.execute(
-        select(CreditReservation)
+        select(CreditReservation, Session.status)
+        .join(Session, Session.id == CreditReservation.session_id, isouter=True)
         .where(
             CreditReservation.session_id == session_id,
             CreditReservation.state == CreditReservationState.OPEN,
         )
     )
-    reservation = result.scalar_one_or_none()
-    if reservation is None:
-        return  # nothing to settle
+    row = result.one_or_none()
+    if row is None:
+        return  # nothing to settle — no OPEN reservation for this session
+    reservation, session_status = row
+
+    if not _is_session_terminal(session_status):
+        # Turn still running (or session row missing, which the
+        # outer join surfaces as NULL status). A premature trigger
+        # lands here — leave the reservation OPEN for the legitimate
+        # trigger to settle once the worker actually commits terminal.
+        return
 
     usage = await _read_usage_and_duration_from_session_turn(
         db, reservation.turn_id,
@@ -290,7 +307,7 @@ async def settle_open_for_user(
     session is already terminal (or deleted).
 
     Called from user-facing endpoints (``GET /credits``,
-    ``queue_user_message``). The janitor uses a similar but
+    ``queue_user_message``). The sweeper uses a similar but
     user-agnostic scan path.
 
     Routing:

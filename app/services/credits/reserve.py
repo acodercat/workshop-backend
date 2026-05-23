@@ -85,8 +85,8 @@ async def reserve_for_turn(
             "model_id": model_id,
         },
     )
-    # ``expires_at`` is the janitor's "worker probably died" cutoff
-    # (``credits_janitor`` refunds OPEN reservations past it whose
+    # ``expires_at`` is the sweeper's "worker probably died" cutoff
+    # (``settle_sweeper`` refunds OPEN reservations past it whose
     # session is still non-terminal). It MUST exceed the longest
     # legitimate turn — a deep-research / long autonomous loop that
     # genuinely runs past this window is indistinguishable from a

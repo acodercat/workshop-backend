@@ -5,21 +5,27 @@ Current billing is turn-scoped PAYG:
 - reserve at turn enqueue;
 - worker writes durable usage to
   `session_turn.input_tokens` / `output_tokens` / `terminated_at`;
+- worker `PUBLISH`es the session_id on `settle:notify` post-commit
+  so the backend settles within ~1 s (push path);
+- 60s background sweeper closes anything the push path missed
+  (pull path);
 - backend settles from `session_turn` and the frozen
-  `credit_reservation.rate_snapshot`;
-- background janitor closes abandoned `OPEN` reservations.
+  `credit_reservation.rate_snapshot`.
 
 This doc tracks what is still intentionally deferred. It should not
 be read as a schema promise: recent billing work added
 `session_turn.terminated_at`, added a partial unique index for one
-OPEN reservation per session, and removed unused
-`credit_reservation.kind` / `sandbox_id`.
+OPEN reservation per session, removed unused
+`credit_reservation.kind` / `sandbox_id`, and added the
+`settle_subscriber` push path alongside the existing `settle_sweeper`
+poll.
 
-## Shipped — Reservation janitor
+## Shipped — Background-settle process
 
-`app/workers/credits_janitor.py` runs as a sibling process, coordinated
-across hosts by a Postgres advisory lock (`b"CREDJANI"`). It scans
-only actionable `OPEN` reservations:
+Both `app/workers/settle_sweeper.py` and `settle_subscriber.py` run
+together as one sibling process (see `app/workers/run.py`), coordinated
+across hosts by a Postgres advisory lock (`b"STLSWEEP"`) on the
+sweeper side. The sweeper scans only actionable `OPEN` reservations:
 
 ```sql
 state = 'OPEN'
@@ -30,7 +36,7 @@ AND (
 )
 ```
 
-Routing:
+Routing (same shape for both push and pull):
 
 - `session_id IS NULL` → refund;
 - terminal session → `credits.settle_open_for_session`, which reads
@@ -38,12 +44,17 @@ Routing:
 - expired non-terminal session → refund;
 - otherwise leave the reservation open.
 
-The janitor no longer reads Redis stream tails. Redis SSE streams are
-UI transport only; billing source of truth is Postgres.
+The subscriber listens on `settle:notify`; the worker publishes the
+session_id immediately after committing its terminal `session_turn`
+write, so settle happens within sub-second. Pub/sub is
+fire-and-forget — a lost message is caught by the next sweeper tick.
+
+Billing source of truth is Postgres; Redis SSE streams remain UI
+transport only.
 
 ### Open hazard — fixed timeout vs. long turns
 
-The janitor's dead-worker signal is still fixed-time based:
+The sweeper's dead-worker signal is still fixed-time based:
 `expires_at < now() AND session.status non-terminal`. A legitimate
 turn that runs past `expires_at` is indistinguishable from a dead
 worker, so it can be refunded mid-flight. When the worker later
@@ -55,7 +66,7 @@ widens the window but does not close it.
 
 Real fix: add a worker-produced liveness signal for billing cleanup,
 for example `session_turn.last_heartbeat_at` or a side-table row
-updated while the turn is in flight. The janitor refund predicate
+updated while the turn is in flight. The sweeper refund predicate
 then becomes heartbeat-staleness based instead of fixed reservation
 expiry.
 
@@ -129,5 +140,6 @@ translation.
 | Rate card and cost math | `app/services/credits/rates.py` |
 | Reserve integration | `app/services/session/enqueue.py::queue_user_message` |
 | Lazy sweep | `app/services/credits/settle.py::settle_open_for_user` |
-| Janitor | `app/workers/credits_janitor.py` |
+| Sweeper (poll) | `app/workers/settle_sweeper.py` |
+| Subscriber (push) | `app/workers/settle_subscriber.py` |
 | Admin top-up | `scripts/topup_credits.py` |
