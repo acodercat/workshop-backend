@@ -31,6 +31,7 @@ compacted context file.
 """
 
 import logging
+from uuid import UUID
 
 import redis.asyncio as aioredis
 from sqlalchemy import select
@@ -47,7 +48,10 @@ from app.services.redis import (
     publish_wake,
     stream_key,
 )
-from app.services.session.exceptions import GenerationInProgressError
+from app.services.session.exceptions import (
+    FileNotInSessionError,
+    GenerationInProgressError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,15 +163,7 @@ async def queue_user_message(
     )
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
-    # Bind every uploaded file to this session in the same transaction
-    # as the message that references it. Authoritative for download
-    # authorization — the JSONB-blob copy in ``user_msg.blocks`` is
-    # presentation-only. Same file referenced by a future message is
-    # silently no-op'd via ON CONFLICT in the worker / migration paths;
-    # here a duplicate would be a bug worth surfacing, so we don't
-    # swallow it.
-    for file_ref in files:
-        db.add(SessionFile(session_id=session.id, file_key=file_ref.file_key))
+    await _bind_session_files(db, session_id=session.id, files=files)
     await db.commit()  # releases the FOR UPDATE lock + makes session_turn visible
 
     # Wake any idle worker — fire-and-forget; if it fails the worker's
@@ -197,3 +193,43 @@ async def _lock_session(db: AsyncSession, session_id: str) -> Session:
         select(Session).where(Session.id == session_id).with_for_update()
     )
     return result.scalar_one()
+
+
+async def _bind_session_files(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    files: list[FileRef],
+) -> None:
+    """Bind uploaded file keys to this session exactly once.
+
+    Reusing a file already bound to this same session is idempotent.
+    Reusing a file bound to a different session is rejected: otherwise
+    a caller could reference someone else's ``file_key`` in a message
+    and rely on the JSONB copy even though download authorization would
+    later fail.
+    """
+    unique_file_keys = list(
+        dict.fromkeys(file_ref.file_key for file_ref in files)
+    )
+    if not unique_file_keys:
+        return
+
+    rows = await db.execute(
+        select(SessionFile.file_key, SessionFile.session_id)
+        .where(SessionFile.file_key.in_(unique_file_keys))
+    )
+    existing = {
+        file_key: owner_session_id for file_key, owner_session_id in rows.all()
+    }
+
+    for file_key in unique_file_keys:
+        owner_session_id = existing.get(file_key)
+        if owner_session_id is None:
+            db.add(SessionFile(session_id=session_id, file_key=file_key))
+            continue
+        if owner_session_id == session_id:
+            continue
+        raise FileNotInSessionError(
+            f"file_key {file_key!r} is already bound to another session"
+        )

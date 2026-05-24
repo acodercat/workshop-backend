@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.common.email import NormalizedEmail
 
 
 class UserResponse(BaseModel):
@@ -59,7 +61,7 @@ class EmailChangeCodeRequest(BaseModel):
     before sending a code to the new address. ``locale`` controls the
     language of the email body, mirroring registration."""
 
-    new_email: EmailStr
+    new_email: NormalizedEmail
     current_password: str = Field(..., min_length=1)
     locale: str = Field(default="zh-CN", max_length=16)
 
@@ -71,7 +73,7 @@ class EmailChangeRequest(BaseModel):
     step 1; here they prove possession of the *new* email by quoting
     back the 6-digit verification code that was sent there."""
 
-    new_email: EmailStr
+    new_email: NormalizedEmail
     code: str = Field(..., pattern=r"^\d{6}$")
 
 

@@ -2,8 +2,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.common.file_limits import MAX_FILE_BYTES, MAX_MESSAGE_FILES
+from app.common.filenames import validate_input_filename
 from app.models.session import SessionStatus
 from app.schemas.message_feedback import FeedbackResponse
 
@@ -41,12 +43,24 @@ class FileRef(BaseModel):
     file_key: str = Field(..., min_length=1, max_length=512)
     filename: str = Field(..., min_length=1, max_length=255)
     mime_type: str | None = None
-    size_bytes: int | None = Field(default=None, ge=0)
+    size_bytes: int | None = Field(default=None, ge=0, le=MAX_FILE_BYTES)
+
+    @field_validator("filename")
+    @classmethod
+    def _filename_is_safe_basename(cls, value: str) -> str:
+        return validate_input_filename(value)
 
 
 class MessageCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=100000)
-    files: list[FileRef] = Field(default_factory=list)
+    files: list[FileRef] = Field(default_factory=list, max_length=MAX_MESSAGE_FILES)
+
+    @field_validator("files")
+    @classmethod
+    def _files_have_declared_sizes(cls, value: list[FileRef]) -> list[FileRef]:
+        if any(file_ref.size_bytes is None for file_ref in value):
+            raise ValueError("Each file must include size_bytes")
+        return value
 
 
 class MessageQueuedResponse(BaseModel):

@@ -18,7 +18,7 @@ from app.logging_config import setup_logging
 setup_logging(log_dir="logs", level="INFO")
 logger = logging.getLogger(__name__)
 
-from app.api.endpoints import auth, credits, feedback, file, session, share, user
+from app.api.endpoints import auth, credits, feedback, file, session, share, user, user_skill
 from app.database import engine
 from app.errors import AppError
 from app.exception_handlers import (
@@ -42,6 +42,7 @@ ROUTERS = [
     session.router,
     share.router,
     user.router,
+    user_skill.router,
 ]
 
 

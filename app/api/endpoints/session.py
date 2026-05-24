@@ -316,6 +316,10 @@ async def create_message(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc),
         )
+    except FileNotInSessionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
+        )
     return MessageQueuedResponse()
 
 

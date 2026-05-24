@@ -19,6 +19,7 @@ from app.models.session_files import SessionFile
 from app.models.session_share import SessionShare
 from app.models.user import User, UserStatus
 from app.models.user_feedback import FeedbackStatus, UserFeedback
+from app.models.user_skill import UserSkill
 
 __all__ = [
     "Base",
@@ -32,4 +33,5 @@ __all__ = [
     "MessageFeedback",
     "UserFeedback",
     "FeedbackStatus",
+    "UserSkill",
 ]

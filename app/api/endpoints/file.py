@@ -15,6 +15,7 @@ the rest of the owner-side surface.
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.auth import authenticate_and_get_user
+from app.common.filenames import InvalidFilenameError
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.file import UploadUrlResponse
@@ -42,7 +43,7 @@ async def get_upload_url(
         return file_storage.generate_upload_url(
             filename=filename, size_bytes=size_bytes,
         )
-    except UnsupportedFileTypeError as exc:
+    except (InvalidFilenameError, UnsupportedFileTypeError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except FileTooLargeError as exc:
         raise HTTPException(
