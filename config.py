@@ -154,6 +154,7 @@ class Settings(BaseSettings):
             "HKGAI-V3",
             "qwen3.7-max",
             "deepseek-v4-pro",
+            "deepseek-v4-flash",
             "glm-5.1",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
@@ -198,6 +199,10 @@ class Settings(BaseSettings):
             # the 2026-05-31 promo expires.
             "qwen3.7-max":       {"in_per_1k_usd": 0.0013,  "out_per_1k_usd": 0.0078, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "deepseek-v4-pro":   {"in_per_1k_usd": 0.00174, "out_per_1k_usd": 0.00348,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            # deepseek-v4-flash budget tier — permanent ¥1/¥2 per M
+            # tokens (≈$0.14/$0.28 per M), no promo expiry. Cheaper than
+            # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
+            "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
         },
         description="Per-model rate card for credit billing. Snapshotted onto each credit_reservation at reserve time so a config change can't re-price open turns.",
