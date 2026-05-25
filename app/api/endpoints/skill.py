@@ -4,7 +4,7 @@ Flow mirrors the documents upload pattern: a presigned PUT URL goes
 to OSS, the client PUTs bytes directly, then comes back with the
 ``bundle_key`` to register metadata. Backend fetches the just-
 uploaded zip once to extract picker name + description from SKILL.md
-and writes the ``user_skill`` row.
+and writes the ``skill`` row.
 
 The bundle itself is **immutable** through this surface — edits to a
 skill require a new upload (gives the worker a clean cache key and
@@ -24,25 +24,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.common.filenames import InvalidFilenameError
+from app.models.skill import Skill
 from app.models.user import User
-from app.models.user_skill import UserSkill
 from app.rate_limit import limiter
 from app.schemas.file import UploadUrlResponse
-from app.schemas.user_skill import (
-    UserSkillCreate,
-    UserSkillResponse,
-    UserSkillUpdate,
+from app.schemas.skill import (
+    SkillCreate,
+    SkillResponse,
+    SkillUpdate,
 )
-from app.services import file_storage
-from app.services.file_storage import (
-    FileTooLargeError,
-    SKILL_BUNDLE_MAX_BYTES,
-    UnsupportedFileTypeError,
-    delete_skill_bundle,
-    download_skill_bundle,
-    head_skill_bundle_size,
-)
+from app.services import skill_storage
+from app.services.file_storage import FileTooLargeError, UnsupportedFileTypeError
 from app.services.skill_bundle import InvalidSkillBundleError, parse_bundle
+from app.services.skill_storage import SKILL_BUNDLE_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +60,7 @@ async def get_skill_upload_url(
     without throttling normal use.
     """
     try:
-        return file_storage.generate_skill_upload_url(
+        return skill_storage.generate_upload_url(
             filename=filename,
             size_bytes=size_bytes,
             user_id=current_user.id,
@@ -84,62 +78,57 @@ async def get_skill_upload_url(
 
 @router.post(
     "/skills",
-    response_model=UserSkillResponse,
+    response_model=SkillResponse,
     status_code=status.HTTP_201_CREATED,
 )
 @limiter.limit("30/minute")
 async def register_skill(
     request: Request,
-    body: UserSkillCreate,
+    body: SkillCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-) -> UserSkill:
+) -> Skill:
     """Register a previously-uploaded bundle. Backend pulls the zip
     from OSS, parses SKILL.md, validates structure, and writes the
-    ``user_skill`` row.
+    ``skill`` row.
 
     400 if the zip is malformed, lacks SKILL.md, or has unsafe entries.
     409 if the extracted skill name collides with one this user
         already has — the user must rename in their SKILL.md and
         re-upload (the name uniqueness is per-user, not global).
     """
-    # Authorize: the bundle_key the client passes must be one this user
-    # could have uploaded. Keys are minted as
-    # ``user_skills/{user_id}/{uuid}/...`` so a prefix check is the
-    # whole story — no DB lookup needed because we haven't written
-    # the row yet (chicken-and-egg avoidance).
-    expected_prefix = f"user_skills/{current_user.id}/"
-    if not body.bundle_key.startswith(expected_prefix):
+    # Authorize: the bundle_key the client passes must be one this
+    # user could have uploaded. A prefix check is sufficient — the
+    # OSS key shape (``{user_key_prefix}{uuid}/{filename}``) bakes
+    # user_id in at upload time, so no DB lookup is required at this
+    # stage (we haven't even written the row yet).
+    if not body.bundle_key.startswith(skill_storage.user_key_prefix(current_user.id)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="bundle_key does not belong to the authenticated user",
         )
 
-    # head_object → size sanity check (defends against a client that
-    # lied at upload-URL time and PUT more bytes than declared).
     try:
         actual_size = await asyncio.to_thread(
-            head_skill_bundle_size, body.bundle_key,
+            skill_storage.head_bundle_size, body.bundle_key,
         )
     except Exception as exc:
-        # OSS 404 looks like NoSuchKey from the SDK; treat any retrieval
-        # failure as "bundle not actually uploaded" to keep the surface
-        # small (an actually-transient OSS error → user re-tries).
+        # OSS NoSuchKey and any other retrieval failure are both treated
+        # as "bundle not actually uploaded" — a real transient OSS error
+        # is rare enough that asking the user to retry is the cheapest
+        # recovery vs. burning a 5xx surface area on a distinguishing case.
         logger.warning("skill register: OSS head failed for %s: %s", body.bundle_key, exc)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="bundle not found in storage; upload it first",
         )
     if actual_size > SKILL_BUNDLE_MAX_BYTES:
-        # OSS doesn't honor signed Content-Length so a misbehaving
-        # client can PUT past the upload-URL cap — re-check at register
-        # time before we read bytes into memory.
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"bundle is {actual_size} bytes; limit is {SKILL_BUNDLE_MAX_BYTES}",
         )
 
-    data = await asyncio.to_thread(download_skill_bundle, body.bundle_key)
+    data = await asyncio.to_thread(skill_storage.download_bundle, body.bundle_key)
     try:
         parsed = parse_bundle(data)
     except InvalidSkillBundleError as exc:
@@ -147,7 +136,7 @@ async def register_skill(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
         )
 
-    skill = UserSkill(
+    skill = Skill(
         user_id=current_user.id,
         name=parsed.name,
         description=parsed.description,
@@ -175,32 +164,32 @@ async def register_skill(
     return skill
 
 
-@router.get("/skills", response_model=list[UserSkillResponse])
+@router.get("/skills", response_model=list[SkillResponse])
 async def list_skills(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-) -> list[UserSkill]:
+) -> list[Skill]:
     """Return all skills owned by the authenticated user, newest first.
 
     Unpaginated — per-user skill count is expected to be small (tens
     at most); add pagination only if real workloads hit that.
     """
     stmt = (
-        select(UserSkill)
-        .where(UserSkill.user_id == current_user.id)
-        .order_by(UserSkill.created_at.desc())
+        select(Skill)
+        .where(Skill.user_id == current_user.id)
+        .order_by(Skill.created_at.desc())
     )
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
 
-@router.patch("/skills/{skill_id}", response_model=UserSkillResponse)
+@router.patch("/skills/{skill_id}", response_model=SkillResponse)
 async def update_skill(
     skill_id: int,
-    body: UserSkillUpdate,
+    body: SkillUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-) -> UserSkill:
+) -> Skill:
     """Edit picker-visible metadata or flip the enable toggle. The
     bundle itself is immutable — re-upload for content changes."""
     skill = await _get_owned_skill(db, skill_id, current_user.id)
@@ -212,20 +201,19 @@ async def update_skill(
     if body.enabled is not None:
         skill.enabled = body.enabled
 
-    # Only the ``(user_id, name)`` unique constraint can fire here,
-    # and only when ``body.name`` is set — let other IntegrityErrors
-    # surface as 500 (they'd indicate a genuine bug, not user input).
-    if body.name is not None:
-        try:
-            await db.commit()
-        except IntegrityError:
-            await db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"a skill named {body.name!r} already exists for this user",
-            )
-    else:
+    try:
         await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # The ``(user_id, name)`` unique constraint is the only one
+        # that can fire on this update, and only when name was being
+        # changed; any other IntegrityError is a bug — re-raise as 500.
+        if body.name is None:
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"a skill named {body.name!r} already exists for this user",
+        )
     await db.refresh(skill)
     return skill
 
@@ -250,7 +238,7 @@ async def delete_skill(
     await db.commit()
 
     try:
-        await asyncio.to_thread(delete_skill_bundle, bundle_key)
+        await asyncio.to_thread(skill_storage.delete_bundle, bundle_key)
     except Exception as exc:
         # Don't fail the request — the DB row is gone, which is the
         # user-visible state. Leftover OSS object is cleanup-cron's job.
@@ -265,7 +253,7 @@ async def delete_skill(
 
 async def _get_owned_skill(
     db: AsyncSession, skill_id: int, user_id: int,
-) -> UserSkill:
+) -> Skill:
     """Fetch a skill and assert it belongs to ``user_id``.
 
     Combining the lookup with the ownership check on one round-trip
@@ -273,8 +261,8 @@ async def _get_owned_skill(
     but belongs to someone else" — denies the existence-oracle attack
     vector by default.
     """
-    stmt = select(UserSkill).where(
-        UserSkill.id == skill_id, UserSkill.user_id == user_id,
+    stmt = select(Skill).where(
+        Skill.id == skill_id, Skill.user_id == user_id,
     )
     result = await db.execute(stmt)
     skill = result.scalar_one_or_none()

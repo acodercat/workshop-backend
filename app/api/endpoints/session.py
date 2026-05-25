@@ -37,6 +37,7 @@ from app.auth import (
 )
 from app.database import AsyncSessionLocal
 from config import settings
+from app.common.filenames import InvalidFilenameError
 from app.common.pagination import paginate
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
@@ -45,8 +46,13 @@ from app.models.session_share import SessionShare
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.schemas.file import DownloadUrlResponse
+from app.schemas.file import DownloadUrlResponse, UploadUrlResponse
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
+from app.services import file_storage
+from app.services.file_storage import (
+    FileTooLargeError,
+    UnsupportedFileTypeError,
+)
 from app.schemas.session import (
     MessageCreate,
     MessageQueuedResponse,
@@ -195,6 +201,41 @@ async def list_sessions(
         items=list(rows),
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
+
+
+# Must register BEFORE ``/sessions/{session_id}`` — Starlette matches
+# routes in registration order, and ``{session_id}`` is typed ``str``
+# so without this line first the literal ``upload-url`` would be
+# accepted as a session_id and dispatch to ``get_session`` (which then
+# 404s on the DB lookup) instead of reaching this handler.
+@router.get("/sessions/upload-url", response_model=UploadUrlResponse)
+@limiter.limit("60/minute")
+async def get_session_upload_url(
+    request: Request,
+    filename: str = Query(..., description="Name of the file to upload"),
+    size_bytes: int = Query(..., ge=0, description="Declared file size in bytes"),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> UploadUrlResponse:
+    """Mint a presigned PUT URL for an attachment the user is about to
+    send with a session message.
+
+    Validates filename extension (whitelist in
+    :mod:`app.services.file_storage`) and rejects oversize requests
+    before the URL is issued. The eventual file→session binding happens
+    when the message is enqueued (``services/session/enqueue.py``
+    inserts the ``session_files`` row); this endpoint is purely the
+    "get me a presigned URL" step.
+    """
+    try:
+        return file_storage.generate_upload_url(
+            filename=filename, size_bytes=size_bytes,
+        )
+    except (InvalidFilenameError, UnsupportedFileTypeError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except FileTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc),
+        )
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
@@ -525,9 +566,8 @@ async def delete_share(
 # Authorization is a single ``session_files`` lookup —
 # ``(session_id, file_key)`` is the FK invariant set up at write time
 # (user uploads in ``services/session/enqueue.py``, tool outputs in
-# the worker before its SSE emit). Upload (session-agnostic — the
-# frontend may collect a file_key before knowing which session will
-# reference it) lives in :mod:`app.api.endpoints.file`.
+# the worker before its SSE emit). Upload (``/sessions/upload-url``)
+# lives at the top of this module.
 
 
 @router.get(

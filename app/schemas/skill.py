@@ -5,7 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class UserSkillResponse(BaseModel):
+class SkillResponse(BaseModel):
     """One row of the user's skill list rendered for the picker.
 
     ``bundle_key`` (the internal OSS path) is deliberately omitted —
@@ -24,7 +24,7 @@ class UserSkillResponse(BaseModel):
     updated_at: datetime
 
 
-class UserSkillCreate(BaseModel):
+class SkillCreate(BaseModel):
     """Body of ``POST /api/skills`` — register a previously-uploaded
     bundle. The backend pulls the zip from OSS, parses SKILL.md to
     extract the picker name + description, and persists the row.
@@ -34,7 +34,7 @@ class UserSkillCreate(BaseModel):
     )
 
 
-class UserSkillUpdate(BaseModel):
+class SkillUpdate(BaseModel):
     """Body of ``PATCH /api/skills/{id}`` — all fields optional; the
     bundle itself is immutable (re-upload to change it)."""
 

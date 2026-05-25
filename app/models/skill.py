@@ -1,4 +1,4 @@
-"""UserSkill — per-user uploaded SKILL.md bundle (ZIP) metadata.
+"""Skill — per-user uploaded SKILL.md bundle (ZIP) metadata.
 
 The bundle itself lives in OSS at ``bundle_key``; this row carries
 the rendering metadata (``name`` / ``description``) the picker shows
@@ -33,8 +33,8 @@ from sqlalchemy.sql import func
 from app.database import Base
 
 
-class UserSkill(Base):
-    __tablename__ = "user_skill"
+class Skill(Base):
+    __tablename__ = "skill"
 
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True,
@@ -68,8 +68,8 @@ class UserSkill(Base):
         # index this creates also serves ``WHERE user_id = ?`` queries
         # (picker list, per-session staging) and the FK CASCADE — no
         # separate ``user_id`` index needed.
-        UniqueConstraint("user_id", "name", name="uq_user_skill_user_id_name"),
+        UniqueConstraint("user_id", "name", name="uq_skill_user_id_name"),
     )
 
     def __repr__(self) -> str:
-        return f"<UserSkill(id={self.id}, user_id={self.user_id}, name={self.name!r})>"
+        return f"<Skill(id={self.id}, user_id={self.user_id}, name={self.name!r})>"

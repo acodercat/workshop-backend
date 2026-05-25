@@ -1,9 +1,15 @@
-"""OSS presigned-URL service — mints short-lived upload/download URLs.
+"""OSS presigned-URL service for **user-uploaded session documents**.
 
 The frontend uploads bytes directly to OSS using a presigned PUT URL
 issued here, then posts only the resulting ``file_key`` back to
 ``/sessions/{id}/messages``. Downloads follow the same pattern in
 reverse. The backend never proxies file bytes.
+
+Skill-bundle storage lives in :mod:`app.services.skill_storage` — same
+OSS infrastructure (the bucket factory + URL TTL + the error classes
+defined below are imported and reused), but a different bucket /
+content-type whitelist / size cap / key prefix that wouldn't survive
+being folded into one ``generate_upload_url`` function.
 """
 
 import os
@@ -45,10 +51,16 @@ class FileTooLargeError(ValueError):
         )
 
 
-# Hard upload cap. Frontend echoes a friendlier message before issuing the
-# request; this is the server-side guard against forged calls. 100 MiB =
-# 100 * 1024 * 1024 to match the canonical "binary MB" used by browsers.
+# Hard upload cap for documents. Frontend echoes a friendlier message
+# before issuing the request; this is the server-side guard against
+# forged calls. 100 MiB to match the canonical "binary MB" browsers use.
 MAX_UPLOAD_BYTES = MAX_FILE_BYTES
+
+
+# Presigned URL lifetimes — fixed server-side. We don't let the client
+# pick because a long-lived URL is a token the user can't revoke.
+UPLOAD_URL_TTL_SECONDS = 15 * 60
+_DOWNLOAD_URL_TTL_SECONDS = 60 * 60
 
 
 # Extension → content-type whitelist for user document uploads.
@@ -97,24 +109,11 @@ _DOCUMENT_CONTENT_TYPES: dict[str, str] = {
 }
 
 _DOCUMENT_OSS_PREFIX = "documents"
-_USER_SKILLS_OSS_PREFIX = "user_skills"
-
-# Presigned URL lifetimes — fixed server-side. We don't let the client
-# pick because a long-lived URL is a token the user can't revoke.
-_UPLOAD_URL_TTL_SECONDS = 15 * 60
-_DOWNLOAD_URL_TTL_SECONDS = 60 * 60
-
-# Skill bundles are .zip only. The cap is much tighter than documents
-# (5 MiB vs 100 MiB) because a skill is supposed to be a manifest +
-# small helper scripts; big assets should ride as session inputs, not
-# get baked into a skill.
-SKILL_BUNDLE_MAX_BYTES = 5 * 1024 * 1024
-_SKILL_BUNDLE_CONTENT_TYPE = "application/zip"
-_SKILL_BUNDLE_EXTENSION = ".zip"
 
 
-# Lazy-initialized one ``oss2.Bucket`` per logical bucket per process —
-# the SDK object is thread-safe and expensive to rebuild on every
+# ── Shared OSS bucket factory ────────────────────────────────────────────
+# Lazy-initialized one ``oss2.Bucket`` per logical bucket per process.
+# The SDK object is thread-safe and expensive to rebuild on every
 # request. Documents and user skills live in separate buckets so a
 # leaked credential / lifecycle policy on one doesn't blast-radius
 # the other.
@@ -122,7 +121,7 @@ _buckets: dict[str, oss2.Bucket] = {}
 _buckets_lock = threading.Lock()
 
 
-def _get_bucket(bucket_name: str) -> oss2.Bucket:
+def get_bucket(bucket_name: str) -> oss2.Bucket:
     bucket = _buckets.get(bucket_name)
     if bucket is None:
         with _buckets_lock:
@@ -138,11 +137,10 @@ def _get_bucket(bucket_name: str) -> oss2.Bucket:
 
 
 def _documents_bucket() -> oss2.Bucket:
-    return _get_bucket(settings.oss_document_bucket_name)
+    return get_bucket(settings.oss_document_bucket_name)
 
 
-def _user_skills_bucket() -> oss2.Bucket:
-    return _get_bucket(settings.oss_user_skill_bucket_name)
+# ── Documents: presigned PUT / GET ──────────────────────────────────────
 
 
 def generate_upload_url(filename: str, size_bytes: int) -> UploadUrlResponse:
@@ -164,14 +162,14 @@ def generate_upload_url(filename: str, size_bytes: int) -> UploadUrlResponse:
     upload_url = _documents_bucket().sign_url(
         "PUT",
         file_key,
-        expires=_UPLOAD_URL_TTL_SECONDS,
+        expires=UPLOAD_URL_TTL_SECONDS,
         headers={"Content-Type": content_type},
     )
     return UploadUrlResponse(
         upload_url=upload_url,
         file_key=file_key,
         content_type=content_type,
-        expires_in=_UPLOAD_URL_TTL_SECONDS,
+        expires_in=UPLOAD_URL_TTL_SECONDS,
     )
 
 
@@ -213,66 +211,3 @@ def _content_type_for(filename: str) -> str:
     if content_type is None:
         raise UnsupportedFileTypeError(ext, sorted(_DOCUMENT_CONTENT_TYPES))
     return content_type
-
-
-# ── Skill bundles ─────────────────────────────────────────────────────────
-# Separate code path from the documents flow because the validation
-# surface is different (zip-only, tighter cap, user-scoped key prefix
-# for audit / cleanup) — folding it into ``generate_upload_url`` would
-# need three new optional params and obscure both call sites.
-
-
-def generate_skill_upload_url(
-    filename: str, size_bytes: int, user_id: int,
-) -> UploadUrlResponse:
-    """Mint a presigned PUT URL for a user-uploaded skill bundle (.zip).
-
-    ``user_id`` is baked into the OSS key for audit + per-user cleanup;
-    UUID inside ensures concurrent uploads of identical filenames don't
-    collide. Caller must already have authenticated the user (this fn
-    trusts ``user_id`` as-given).
-    """
-    if size_bytes > SKILL_BUNDLE_MAX_BYTES:
-        raise FileTooLargeError(size_bytes, SKILL_BUNDLE_MAX_BYTES)
-    filename = validate_input_filename(filename)
-    ext = os.path.splitext(filename)[1].lower()
-    if ext != _SKILL_BUNDLE_EXTENSION:
-        raise UnsupportedFileTypeError(ext, [_SKILL_BUNDLE_EXTENSION])
-
-    file_key = f"{_USER_SKILLS_OSS_PREFIX}/{user_id}/{uuid.uuid4()}/{filename}"
-    upload_url = _user_skills_bucket().sign_url(
-        "PUT",
-        file_key,
-        expires=_UPLOAD_URL_TTL_SECONDS,
-        headers={"Content-Type": _SKILL_BUNDLE_CONTENT_TYPE},
-    )
-    return UploadUrlResponse(
-        upload_url=upload_url,
-        file_key=file_key,
-        content_type=_SKILL_BUNDLE_CONTENT_TYPE,
-        expires_in=_UPLOAD_URL_TTL_SECONDS,
-    )
-
-
-# Sync OSS ops below — caller wraps in ``asyncio.to_thread`` from an
-# async context to avoid blocking the event loop on the network round-trip.
-
-
-def download_skill_bundle(file_key: str) -> bytes:
-    """Read a skill bundle's bytes into memory for SKILL.md parsing."""
-    return _user_skills_bucket().get_object(file_key).read()
-
-
-def head_skill_bundle_size(file_key: str) -> int:
-    """Actual byte size of an uploaded skill bundle in OSS.
-
-    Used at register time to re-check the cap — OSS doesn't honor a
-    signed ``Content-Length`` so the upload-URL size declaration is
-    advisory; a misbehaving client can PUT more bytes than declared.
-    """
-    return int(_user_skills_bucket().head_object(file_key).content_length)
-
-
-def delete_skill_bundle(file_key: str) -> None:
-    """Best-effort delete; OSS treats missing keys as no-ops on DELETE."""
-    _user_skills_bucket().delete_object(file_key)

@@ -42,7 +42,7 @@ def test_file_ref_rejects_unsafe_filename(filename):
 
 
 def test_generate_upload_url_rejects_unsafe_filename_before_bucket_access():
-    with patch("app.services.file_storage._get_bucket") as get_bucket:
+    with patch("app.services.file_storage.get_bucket") as get_bucket:
         with pytest.raises(InvalidFilenameError):
             file_storage.generate_upload_url("../evil.pdf", 1)
 
@@ -53,7 +53,7 @@ def test_generate_upload_url_uses_sanitized_basename_in_key():
     bucket = MagicMock()
     bucket.sign_url.return_value = "https://oss/upload"
 
-    with patch("app.services.file_storage._get_bucket", return_value=bucket):
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
         response = file_storage.generate_upload_url("report.pdf", 1)
 
     assert response.file_key.startswith("documents/")

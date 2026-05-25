@@ -7,7 +7,7 @@ the common "github download" wrapper) plus optional ``scripts/`` /
 
 This module is the **registration-time** validator: it answers
 "is this zip a legal skill bundle and what's its name + description?"
-so :mod:`app.api.endpoints.user_skill` can decide to write the row.
+so :mod:`app.api.endpoints.skill` can decide to write the row.
 Asset content is **not** scanned here — the worker stages files into
 the sandbox at session start and any per-file issue surfaces there.
 
@@ -36,7 +36,7 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)---\s*\n?", re.DOTALL)
 _SKILL_FILENAME = "SKILL.md"
 
 # Picker label budgets — match the DB column lengths in
-# :class:`app.models.user_skill.UserSkill`. We truncate (silently, with
+# :class:`app.models.skill.Skill`. We truncate (silently, with
 # an ellipsis) rather than reject so a verbose description doesn't
 # block registration on a one-line cosmetic issue.
 _MAX_NAME_CHARS = 64

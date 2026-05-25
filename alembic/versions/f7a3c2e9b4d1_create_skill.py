@@ -1,4 +1,4 @@
-"""user_skill: per-user uploaded SKILL.md bundle metadata
+"""skill: per-user uploaded SKILL.md bundle metadata
 
 Backs the upload-your-own-skill feature. The bundle itself (.zip)
 lives in OSS at ``bundle_key``; this row carries the picker metadata
@@ -23,7 +23,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     op.create_table(
-        "user_skill",
+        "skill",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("user_id", sa.Integer(), nullable=False),
         sa.Column("name", sa.String(length=64), nullable=False),
@@ -49,13 +49,13 @@ def upgrade() -> None:
             ["user_id"], ["user.id"], ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("bundle_key", name="uq_user_skill_bundle_key"),
+        sa.UniqueConstraint("bundle_key", name="uq_skill_bundle_key"),
         # Composite unique covers ``WHERE user_id = ?`` queries (picker
         # list, per-session staging) AND the FK CASCADE — no separate
         # ``user_id`` index needed.
-        sa.UniqueConstraint("user_id", "name", name="uq_user_skill_user_id_name"),
+        sa.UniqueConstraint("user_id", "name", name="uq_skill_user_id_name"),
     )
 
 
 def downgrade() -> None:
-    op.drop_table("user_skill")
+    op.drop_table("skill")

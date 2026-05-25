@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     oss_access_key_id: str = Field(description="OSS access key id")
     oss_access_key_secret: str = Field(description="OSS access key secret")
     oss_document_bucket_name: str = Field(default="metaseq-computer", description="OSS document bucket")
-    oss_user_skill_bucket_name: str = Field(default="axon-skills", description="OSS bucket for user-uploaded SKILL.md bundles")
+    oss_skill_bucket_name: str = Field(default="axon-skills", description="OSS bucket for user-uploaded SKILL.md bundles")
     oss_endpoint: str = Field(default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL")
 
     # Alibaba Cloud DirectMail — used to send the registration
