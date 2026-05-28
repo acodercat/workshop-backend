@@ -23,8 +23,6 @@ view.
 import json
 from typing import Literal, NotRequired, TypedDict
 
-from app.common.event_types import EventType
-
 
 class _EventBase(TypedDict):
     """Fields every wire event has."""

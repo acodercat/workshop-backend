@@ -155,7 +155,7 @@ class Settings(BaseSettings):
         description="Per-file upload size cap (bytes)",
     )
     max_session_files_per_user: int = Field(
-        default=500,
+        default=1000,
         description="Total session-file rows allowed per user across all sessions",
     )
 
