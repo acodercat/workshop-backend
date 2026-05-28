@@ -48,7 +48,8 @@ class SessionFile(Base):
         nullable=False,
     )
     # OSS keys are globally unique by construction (user uploads use
-    # ``documents/{uuid4}/...``, tool outputs use
+    # ``session-files/{uuid4}/...`` — older rows still have the
+    # legacy ``documents/...`` prefix; tool outputs use
     # ``outputs/{session_uuid}/{tool_use_id}/{idx}_{filename}``). The
     # UNIQUE constraint enforces that and gives us the read-path index
     # for free.

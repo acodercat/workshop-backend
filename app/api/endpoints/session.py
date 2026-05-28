@@ -37,16 +37,25 @@ from app.auth import (
 )
 from app.database import AsyncSessionLocal
 from config import settings
+from app.common.filenames import InvalidFilenameError
 from app.common.pagination import paginate
+from app.errors import SessionFileQuotaExceededError
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
+from app.models.session_files import SessionFile
 from app.models.session_share import SessionShare
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.schemas.file import DownloadUrlResponse
+from app.schemas.file import DownloadUrlResponse, UploadUrlRequest, UploadUrlResponse
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
+from app.services import file_storage
+from app.services.file_storage import (
+    SESSION_FILE_POLICY,
+    FileTooLargeError,
+    UnsupportedFileTypeError,
+)
 from app.schemas.session import (
     MessageCreate,
     MessageQueuedResponse,
@@ -138,14 +147,14 @@ async def _load_messages(
     ]
 
 
-@router.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/sessions", status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/minute")
 async def create_session(
     request: Request,
     body: SessionCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-):
+) -> SessionResponse:
     model_id = body.model_id or settings.default_session_model_id
     if model_id not in settings.supported_session_model_ids:
         raise HTTPException(
@@ -156,28 +165,21 @@ async def create_session(
         title=body.title,
         user_id=current_user.id,
         model_id=model_id,
-        # Explicit IDLE — the model carries no default, so omitting
-        # this would IntegrityError on INSERT. IDLE is the honest
-        # initial state (vs the previous misleading default of COMPLETE).
         status=SessionStatus.IDLE,
     )
     db.add(session)
     await db.commit()
     await db.refresh(session)
-    return session
+    return SessionResponse.model_validate(session)
 
 
-@router.get("/sessions", response_model=PaginatedResponse[SessionResponse])
+@router.get("/sessions")
 async def list_sessions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-):
-    # One shared clause applied to both the page query and its count
-    # so ``total`` can't drift from the rows (mirrors the precedent in
-    # app/services/credits/history.py). ``deleted_at IS NULL`` hides
-    # soft-deleted sessions.
+) -> PaginatedResponse[SessionResponse]:
     filter_clause = sa.and_(
         Session.user_id == current_user.id,
         Session.deleted_at.is_(None),
@@ -192,9 +194,47 @@ async def list_sessions(
     ).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
-        items=list(rows),
+        items=[SessionResponse.model_validate(s) for s in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
+
+
+# Must register BEFORE ``/sessions/{session_id}`` — Starlette matches
+# routes in registration order, and ``{session_id}`` is typed ``str``
+# so without this line first the literal ``upload-url`` would be
+# accepted as a session_id and dispatch to ``get_session`` (which then
+# 404s on the DB lookup) instead of reaching this handler.
+@router.post("/sessions/upload-url")
+@limiter.limit("60/minute")
+async def create_session_upload_url(
+    request: Request,
+    body: UploadUrlRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> UploadUrlResponse:
+    """Mint a presigned PUT URL for an attachment the user is about to
+    send with a session message.
+
+    Validates filename extension (whitelist in
+    :mod:`app.services.file_storage`) and rejects oversize requests
+    before the URL is issued. Also enforces a per-user file count
+    cap so a single account can't squat OSS by accumulating files
+    across sessions. The eventual file→session binding happens when
+    the message is enqueued (``services/session/enqueue.py`` inserts
+    the ``session_files`` row); this endpoint is purely the "mint me
+    a presigned URL" step.
+    """
+    await _enforce_session_file_quota(db, current_user.id)
+    try:
+        return file_storage.generate_upload_url(
+            body.filename, body.size_bytes, SESSION_FILE_POLICY,
+        )
+    except (InvalidFilenameError, UnsupportedFileTypeError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except FileTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc),
+        )
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
@@ -223,7 +263,7 @@ async def get_session(
     )
 
 
-@router.patch("/sessions/{session_id}", response_model=SessionResponse)
+@router.patch("/sessions/{session_id}")
 @limiter.limit("30/minute")
 async def update_session(
     request: Request,
@@ -231,13 +271,13 @@ async def update_session(
     body: SessionUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-):
+) -> SessionResponse:
     session = await _get_or_404(db, session_id, current_user.id)
     if body.title is not None:
         session.title = body.title
     await db.commit()
     await db.refresh(session)
-    return session
+    return SessionResponse.model_validate(session)
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -311,10 +351,15 @@ async def create_message(
     try:
         await queue_user_message(
             db, redis, session, content=body.content, files=body.files,
+            skills=body.skills,
         )
     except GenerationInProgressError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc),
+        )
+    except FileNotInSessionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
         )
     return MessageQueuedResponse()
 
@@ -437,7 +482,6 @@ async def generate_session_title(
 
 @router.post(
     "/sessions/{session_id}/share",
-    response_model=ShareResponse,
     status_code=status.HTTP_201_CREATED,
 )
 @limiter.limit("10/minute")
@@ -447,7 +491,7 @@ async def create_share(
     body: ShareCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-):
+) -> ShareResponse:
     """Create or rotate the share for ``session_id``.
 
     Idempotent at the URL level (the resource at
@@ -474,18 +518,15 @@ async def create_share(
     db.add(share)
     await db.commit()
     await db.refresh(share)
-    return share
+    return ShareResponse.model_validate(share)
 
 
-@router.get(
-    "/sessions/{session_id}/share",
-    response_model=ShareResponse,
-)
+@router.get("/sessions/{session_id}/share")
 async def get_session_share(
     session_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-):
+) -> ShareResponse:
     """Return the session's current share, or 404 if there isn't one."""
     await _get_or_404(db, session_id, current_user.id)
 
@@ -493,7 +534,7 @@ async def get_session_share(
     share = (await db.execute(stmt)).scalar_one_or_none()
     if share is None:
         raise HTTPException(status_code=404, detail="Share not found")
-    return share
+    return ShareResponse.model_validate(share)
 
 
 @router.delete(
@@ -521,9 +562,8 @@ async def delete_share(
 # Authorization is a single ``session_files`` lookup —
 # ``(session_id, file_key)`` is the FK invariant set up at write time
 # (user uploads in ``services/session/enqueue.py``, tool outputs in
-# the worker before its SSE emit). Upload (session-agnostic — the
-# frontend may collect a file_key before knowing which session will
-# reference it) lives in :mod:`app.api.endpoints.file`.
+# the worker before its SSE emit). Upload (``/sessions/upload-url``)
+# lives at the top of this module.
 
 
 @router.get(
@@ -565,7 +605,7 @@ async def get_download_url(
             detail="File is not part of this session",
         )
     url, expires_in = file_storage.generate_download_url(
-        file_key=file_key, filename=filename,
+        file_storage.SESSION_FILE_POLICY, file_key, filename,
     )
     return DownloadUrlResponse(
         download_url=url, file_key=file_key, expires_in=expires_in,
@@ -679,3 +719,29 @@ async def delete_feedback(
         )
     )
     await db.commit()
+
+
+async def _enforce_session_file_quota(db: AsyncSession, user_id: int) -> None:
+    """Reject the upload-url mint if the user is at the per-user file cap.
+
+    Counts all ``session_files`` rows for the user — both files the
+    user uploaded directly and files LLM tool calls produced into
+    their sessions. Both occupy OSS storage on the user's behalf, so
+    a single combined cap is what bounds account-level OSS cost.
+
+    Joined to non-soft-deleted sessions only — deleting a session
+    frees up quota. Race-acceptable: two concurrent mints at the
+    boundary could both succeed, leaving the user one over. Not worth
+    a row lock for a soft policy limit.
+    """
+    count = await db.scalar(
+        select(func.count(SessionFile.id))
+        .join(Session, Session.id == SessionFile.session_id)
+        .where(Session.user_id == user_id)
+        .where(Session.deleted_at.is_(None))
+    ) or 0
+    if count >= settings.max_session_files_per_user:
+        raise SessionFileQuotaExceededError(
+            f"user already has {count} session files; "
+            f"per-user limit is {settings.max_session_files_per_user}"
+        )

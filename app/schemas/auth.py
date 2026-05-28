@@ -1,7 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from app.common.email import NormalizedEmail
 from app.schemas.user import UserResponse
 
 
@@ -23,7 +24,7 @@ class RegisterCodeRequest(BaseModel):
     """Body for ``POST /auth/verification-codes`` — request a
     verification code be sent to ``email``."""
 
-    email: EmailStr
+    email: NormalizedEmail
     locale: Literal["zh-CN", "en-US"] = "zh-CN"
 
 
@@ -31,7 +32,7 @@ class RegisterRequest(BaseModel):
     """Body for ``POST /users`` — complete registration via the
     email-OTP flow."""
 
-    email: EmailStr
+    email: NormalizedEmail
     code: str = Field(..., pattern=r"^\d{6}$")
     name: str = Field(..., min_length=1, max_length=255)
 
@@ -49,7 +50,7 @@ class RegisterRequest(BaseModel):
 class EmailLoginRequest(BaseModel):
     """Body for ``POST /auth/access-tokens-by-code``."""
 
-    email: EmailStr
+    email: NormalizedEmail
     code: str = Field(..., pattern=r"^\d{6}$")
 
 

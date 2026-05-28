@@ -17,19 +17,24 @@ from app.models.sandbox import Sandbox
 from app.models.session import Session
 from app.models.session_files import SessionFile
 from app.models.session_share import SessionShare
+from app.models.skill import Skill, SkillOrigin
 from app.models.user import User, UserStatus
 from app.models.user_feedback import FeedbackStatus, UserFeedback
+from app.models.user_skill_preference import UserSkillPreference
 
 __all__ = [
     "Base",
-    "User",
-    "UserStatus",
+    "FeedbackStatus",
+    "Message",
+    "MessageFeedback",
+    "Sandbox",
     "Session",
     "SessionFile",
     "SessionShare",
-    "Sandbox",
-    "Message",
-    "MessageFeedback",
+    "Skill",
+    "SkillOrigin",
+    "User",
     "UserFeedback",
-    "FeedbackStatus",
+    "UserSkillPreference",
+    "UserStatus",
 ]

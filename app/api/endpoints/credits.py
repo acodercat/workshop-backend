@@ -1,18 +1,17 @@
 """Credits read endpoints.
 
-Three surfaces (Stripe-style resource separation):
+Two surfaces (Stripe-style resource separation):
 
-- ``GET /credits`` — balance + raw ledger page. Audit / debug.
 - ``GET /credits/balance`` — just the spendable balance. Lean;
-  what the sidebar badge polls.
+  drives the sidebar pill and settings balance card.
 - ``GET /credits/transactions`` — pure paginated user-facing
   transactions (turn-related 1-3 ledger rows collapsed into one),
   same shape as ``GET /sessions``. Drives the settings Activity tab.
 
-All three lazily sweep open reservations before reading so a
-just-finished turn is reflected (settled balance / non-pending
-rows). Sweep cost is bounded by the ``state='OPEN'`` partial
-index — typically 0 or 1 row per request.
+Both lazily sweep open reservations before reading so a just-
+finished turn is reflected (settled balance / non-pending rows).
+Sweep cost is bounded by the ``state='OPEN'`` partial index —
+typically 0 or 1 row per request.
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -23,55 +22,13 @@ from app.auth import authenticate_and_get_user
 from app.models.user import User
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.credits import (
-    CreditsBalanceResponse,
     CreditsBalanceSnapshotResponse,
-    CreditsHistoryEntry,
     CreditsTransactionEntry,
 )
 from app.services import credits
 from app.services.credits.rates import credits_from_micro
 
 router = APIRouter()
-
-
-@router.get("/credits", response_model=CreditsBalanceResponse)
-async def get_credits(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(authenticate_and_get_user),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-) -> CreditsBalanceResponse:
-    """Return ``current_user``'s balance + raw ledger page.
-
-    Sweep-then-read: settle stale reservations first so the balance
-    reported here reflects fully-closed turns. The sweep happens in
-    the same request transaction, so a failure rolls everything back
-    and surfaces — better than silently serving a stale balance.
-    """
-    await credits.settle_open_for_user(db, current_user.id)
-    balance_micro = await credits.get_balance(db, current_user.id)
-    rows, total = await credits.list_history(
-        db, user_id=current_user.id, page=page, page_size=page_size,
-    )
-    await db.commit()  # the sweep's writes need to land
-
-    history = [
-        CreditsHistoryEntry(
-            id=row.id,
-            amount_credits=credits_from_micro(row.amount),
-            kind=row.kind,
-            reference=row.reference,
-            created_at=row.created_at,
-        )
-        for row in rows
-    ]
-    return CreditsBalanceResponse(
-        balance_credits=credits_from_micro(balance_micro),
-        history=history,
-        history_total=total,
-        history_page=page,
-        history_page_size=page_size,
-    )
 
 
 @router.get(
@@ -84,10 +41,10 @@ async def get_credits_balance(
     """Return just ``current_user``'s spendable balance.
 
     Stripe's ``GET /v1/balance`` analog — a lean snapshot, separate
-    from the transactions list, so the sidebar badge can poll it
-    cheaply. Same lazy-sweep as ``GET /credits``: any of this user's
-    open reservations whose session is already terminal get settled
-    first, so the number reflects fully-closed turns.
+    from the transactions list, so each surface is a clean single
+    resource. Lazy-sweeps any of this user's open reservations whose
+    session is already terminal so the number reflects fully-closed
+    turns.
     """
     await credits.settle_open_for_user(db, current_user.id)
     balance_micro = await credits.get_balance(db, current_user.id)
@@ -112,8 +69,8 @@ async def get_credits_transactions(
 
     Pure ``PaginatedResponse`` — identical shape to ``GET /sessions``
     (``items`` + ``meta``), no balance mixed in (that's
-    ``GET /credits/balance``). Same lazy-sweep as ``GET /credits`` so
-    a just-finished turn shows as settled rather than pending.
+    ``GET /credits/balance``). Lazy-sweeps open reservations so a
+    just-finished turn shows as settled rather than pending.
     """
     await credits.settle_open_for_user(db, current_user.id)
     rows, total = await credits.list_transactions(

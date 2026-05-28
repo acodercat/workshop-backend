@@ -116,3 +116,49 @@ class InsufficientCreditsError(AppError):
 
     status_code = status.HTTP_402_PAYMENT_REQUIRED
     error_type = "insufficient_credits"
+
+
+
+class InvalidSkillBundleError(AppError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invalid_skill_bundle"
+
+
+class InvalidSkillNameError(AppError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invalid_skill_name"
+
+
+class SkillNameConflictError(AppError):
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "skill_name_conflict"
+
+
+class SkillBundleTooLargeError(AppError):
+    status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    error_type = "skill_bundle_too_large"
+
+
+class SkillQuotaExceededError(AppError):
+    """User already has the maximum allowed number of CUSTOM skills.
+
+    Distinct from :class:`SkillBundleTooLargeError`: the individual
+    bundle would have been accepted, but the user has hit the count
+    cap on uploads.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "skill_quota_exceeded"
+
+
+class SessionFileQuotaExceededError(AppError):
+    """User already has the maximum allowed number of session files.
+
+    Matches the ``SessionFile`` DB model name. Distinct from
+    :class:`FileTooLargeError`: the individual file would have been
+    accepted, but the user has hit the count cap. The per-file size
+    cap is enforced separately in ``file_storage``.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "session_file_quota_exceeded"

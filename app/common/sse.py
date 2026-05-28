@@ -23,8 +23,6 @@ view.
 import json
 from typing import Literal, NotRequired, TypedDict
 
-from app.common.event_types import EventType
-
 
 class _EventBase(TypedDict):
     """Fields every wire event has."""
@@ -137,14 +135,18 @@ class AgentToolResultEvent(_EventBase):
     ``output`` is the textual result (already a string in axon's
     ``ToolResult.output``). ``files`` is a JSON-encoded list of
     :class:`~agent_worker.storage.FileAsset` dicts; empty list if the
-    tool produced no files. Errors also land here — the error message
-    is in ``output``; there's no discriminator field.
+    tool produced no files. ``is_error`` mirrors axon's
+    ``ToolResult.is_error`` discriminator; absent / ``"false"`` on
+    success, ``"true"`` when the tool errored (``output`` then carries
+    the error message). The worker omits the field on success to keep
+    payloads lean.
     """
     type: Literal["agent.tool_result"]
     tool: str
     tool_use_id: str
     output: str
     files: str
+    is_error: NotRequired[str]
 
 
 class AgentStatusEvent(_EventBase):

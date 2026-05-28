@@ -1,6 +1,12 @@
 """Schemas for the file-upload / download presigned-URL endpoints."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class UploadUrlRequest(BaseModel):
+    """Body for POST endpoints that mint presigned upload URLs."""
+    filename: str = Field(..., description="Name of the file to upload")
+    size_bytes: int = Field(..., ge=0, description="Declared file size in bytes")
 
 
 class UploadUrlResponse(BaseModel):

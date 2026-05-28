@@ -108,6 +108,7 @@ class Settings(BaseSettings):
     oss_access_key_id: str = Field(description="OSS access key id")
     oss_access_key_secret: str = Field(description="OSS access key secret")
     oss_document_bucket_name: str = Field(default="metaseq-computer", description="OSS document bucket")
+    oss_skill_bucket_name: str = Field(default="axon-skills", description="OSS bucket for user-uploaded SKILL.md bundles")
     oss_endpoint: str = Field(default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL")
 
     # SMTP — used to send the registration / email-change verification
@@ -152,6 +153,25 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(description="LLM API key")
     llm_model: str = Field(default="qwen3.5-397b-a17b", description="Default chat model")
 
+    # File limits — per-message attachment count, per-file byte cap,
+    # and per-user total session-file accumulation. Tuned for typical
+    # human use; raise when a clear case (e.g. enterprise workloads)
+    # appears. The byte cap also bounds OSS upload presign size and is
+    # baked into the per-file ``size_bytes`` Pydantic validator on
+    # ``MessageCreate``.
+    max_message_files: int = Field(
+        default=30,
+        description="Max attachments per single user message",
+    )
+    max_file_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        description="Per-file upload size cap (bytes)",
+    )
+    max_session_files_per_user: int = Field(
+        default=1000,
+        description="Total session-file rows allowed per user across all sessions",
+    )
+
     # Sessions
     default_session_model_id: str = Field(
         default="claude-opus-4-6",
@@ -165,6 +185,11 @@ class Settings(BaseSettings):
             "kimi-k2",
             "HKGAI-V1",
             "HKGAI-V3",
+            "qwen3.7-max",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "glm-5.1",
+            "MiniMax/MiniMax-M2.7",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
     )
@@ -198,6 +223,25 @@ class Settings(BaseSettings):
             "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            # DashScope-hosted models. USD COGS derived from Aliyun 百炼 pricing pages
+            # (CNY converted at ~1 USD = 7.2 CNY). Conservative: glm-5.1 uses the
+            # <32K-context tier; longer turns nominally cost ~33% more on the wire
+            # but the 3× ``token_markup`` more than absorbs that gap. qwen3.7-max
+            # uses Qwen3.6-Max-Preview rates as proxy (3.7 preview pricing not yet
+            # officially published, expected ≤3.6's). deepseek-v4-pro uses post-promo
+            # standard rates ($1.74/$3.48 per M) to avoid charging below COGS once
+            # the 2026-05-31 promo expires.
+            "qwen3.7-max":       {"in_per_1k_usd": 0.0013,  "out_per_1k_usd": 0.0078, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "deepseek-v4-pro":   {"in_per_1k_usd": 0.00174, "out_per_1k_usd": 0.00348,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            # deepseek-v4-flash budget tier — permanent ¥1/¥2 per M
+            # tokens (≈$0.14/$0.28 per M), no promo expiry. Cheaper than
+            # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
+            "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
+            # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
+            # ¥0.42/M not separately tracked here; settle uses uncached rate.
+            "MiniMax/MiniMax-M2.7": {"in_per_1k_usd": 0.000292, "out_per_1k_usd": 0.00117, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
         },
         description="Per-model rate card for credit billing. Snapshotted onto each credit_reservation at reserve time so a config change can't re-price open turns.",
     )
@@ -235,7 +279,7 @@ class Settings(BaseSettings):
     # ``welcome-{user_id}`` so a registration retry after partial
     # failure can't double-grant.
     credit_welcome_grant_credits: int = Field(
-        default=100_000,
+        default=5_000,
         description="Whole credits granted to every new user at registration. Set to 0 to disable.",
     )
 

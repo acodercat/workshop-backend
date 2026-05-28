@@ -1,0 +1,357 @@
+"""Skill bundle validation + SKILL.md frontmatter extraction.
+
+A skill bundle is a .zip whose contents follow the axon SKILL convention:
+a ``SKILL.md`` at root (or at the single top-level directory's root —
+the common "github download" wrapper) plus optional ``scripts/`` /
+``references/`` / ``assets/`` siblings.
+
+This module is the **registration-time** validator: it answers
+"is this zip a legal skill bundle and what's its name + description?"
+so :mod:`app.api.endpoints.skill` can decide to write the row.
+Asset content is **not** scanned here — the worker stages files into
+the sandbox at session start and any per-file issue surfaces there.
+
+Threats this layer is responsible for:
+- path traversal in zip entries (``..`` or absolute paths)
+- symlink entries (refuse — Python's ``zipfile`` doesn't follow them,
+  but staging code might)
+- missing or unparseable ``SKILL.md`` (would silently produce a
+  no-op skill the LLM can never use)
+- absurd nesting / oversized inner files (caller already enforces
+  the wrapped zip's overall size cap at upload time)
+"""
+
+from __future__ import annotations
+
+import io
+import re
+import zipfile
+from dataclasses import dataclass
+
+# Mirrors :func:`axon.skills._parse_frontmatter` — flat ``key: value``
+# lines only between the leading and trailing ``---`` fences. Anything
+# fancier is silently dropped (kept consistent with axon's behavior
+# so what backend extracts == what worker eventually re-discovers).
+_FRONTMATTER_RE = re.compile(r"^---[ \t]*\r?\n(.*?)^---[ \t]*\r?\n?", re.DOTALL | re.MULTILINE)
+_SKILL_FILENAME = "SKILL.md"
+
+# Picker label budgets — match the DB column lengths in
+# :class:`app.models.skill.Skill`. Skill names are identifiers, so reject
+# invalid values. Descriptions are display text, so a verbose value is clipped.
+_MAX_NAME_CHARS = 64
+_MAX_DESCRIPTION_CHARS = 1024
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+# Zip-bomb defenses. The wrapper zip itself is already capped at upload
+# time (``SKILL_POLICY.max_bytes``); these bound what comes out *after*
+# decompression. A real skill bundle of ours has uncompressed
+# < 1 MiB (single SKILL.md + a few scripts); 10× headroom is plenty
+# for legitimate cases while shutting down pathological archives.
+#
+# A bundle is rejected if it fails ANY of: per-entry uncompressed size,
+# total uncompressed size, or compression ratio. The ratio check
+# catches "many small entries each just under the per-entry cap" that
+# would otherwise sneak past — a real bundle compresses ~3-10×, so
+# anything over 100× is structurally suspicious.
+_MAX_UNCOMPRESSED_PER_ENTRY = 10 * 1024 * 1024  # 10 MiB
+_MAX_UNCOMPRESSED_TOTAL = 50 * 1024 * 1024      # 50 MiB
+_MAX_COMPRESSION_RATIO = 100
+
+
+class InvalidSkillBundleError(ValueError):
+    """Bundle failed validation — the endpoint maps this to HTTP 400.
+
+    Message is operator-facing and end-user-presentable (the frontend
+    surfaces it in a toast), so phrase reasons concretely (e.g.
+    "SKILL.md not found in bundle") rather than as stack-trace fragments.
+    """
+
+
+@dataclass(frozen=True)
+class ParsedSkill:
+    """Metadata extracted from a validated bundle's ``SKILL.md``."""
+    name: str
+    description: str
+
+
+def validate_zip_structure(data: bytes) -> None:
+    """Reject malformed / hostile archives before any decompression.
+
+    Run this **first**, before :func:`normalize_bundle` or
+    :func:`parse_bundle` — both of those touch entry bytes (the former
+    by repacking, the latter by reading SKILL.md), so an unguarded
+    zip-bomb here would let the attacker inflate memory before the
+    structural checks fire.
+
+    Pure header-only inspection — reads the central directory, never
+    a compressed stream. Raises :class:`InvalidSkillBundleError` on
+    bad-zip / path-traversal / symlink / zip-bomb signals.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise InvalidSkillBundleError(f"not a valid zip file: {exc}") from exc
+
+    with zf:
+        _reject_unsafe_entries(zf)
+        _reject_zip_bomb(zf)
+
+
+def parse_bundle(data: bytes) -> ParsedSkill:
+    """Extract metadata from a structurally-validated skill bundle.
+
+    Pre-condition: caller has already run :func:`validate_zip_structure`.
+    Raises :class:`InvalidSkillBundleError` if SKILL.md is missing or
+    malformed. Does **not** persist anything — pure function over bytes.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise InvalidSkillBundleError(f"not a valid zip file: {exc}") from exc
+
+    with zf:
+        skill_md_path = _locate_skill_md(zf)
+        try:
+            raw = zf.read(skill_md_path).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise InvalidSkillBundleError(
+                f"SKILL.md is not valid UTF-8: {exc}",
+            ) from exc
+
+    meta, body = _split_frontmatter(raw)
+
+    # Per the Agent Skills spec, ``name`` is required in frontmatter.
+    name = meta.get("name")
+    if not name:
+        raise InvalidSkillBundleError(
+            "SKILL.md frontmatter must include a 'name' field "
+            "(e.g. `name: my-skill`)."
+        )
+    _validate_skill_name(name)
+    # ``description`` falls back to the first non-empty body line if
+    # omitted from frontmatter — stricter enforcement isn't worth the
+    # UX cost since many real SKILL.md files rely on body-as-description.
+    description = _clip(
+        meta.get("description") or _first_nonempty_line(body) or name,
+        _MAX_DESCRIPTION_CHARS,
+    )
+    return ParsedSkill(name=name, description=description)
+
+
+def normalize_bundle(data: bytes) -> bytes | None:
+    """If the zip has a single wrapper directory, repack with SKILL.md at root.
+
+    Pre-condition: caller has already run :func:`validate_zip_structure`.
+    This function decompresses every entry to repack it; calling it on
+    an unvalidated archive would let a zip bomb inflate memory before
+    any size check ran.
+
+    Returns the repacked bytes if flattened, or ``None`` if the bundle
+    is already in root-level format (no re-upload needed). This ensures
+    all bundles in OSS have a consistent layout regardless of how the
+    user zipped them, so the worker and frontend never need to handle
+    wrapper dirs.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return None
+
+    with zf:
+        # Check if SKILL.md is already at root
+        if _SKILL_FILENAME in zf.namelist():
+            return None
+
+        # Detect single wrapper directory
+        top_levels = {n.split("/", 1)[0] for n in zf.namelist() if "/" in n}
+        top_levels = {t for t in top_levels if t}
+        root_files = {n for n in zf.namelist() if "/" not in n}
+        if len(top_levels) != 1 or root_files:
+            return None
+
+        wrapper = next(iter(top_levels))
+        prefix = f"{wrapper}/"
+
+        # Repack: strip the wrapper prefix from all entries
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as out:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                new_name = info.filename.removeprefix(prefix)
+                out.writestr(new_name, zf.read(info.filename))
+
+    return buf.getvalue()
+
+
+def parse_skill_md(data: bytes) -> ParsedSkill:
+    """Validate ``data`` as a bare SKILL.md file and return its metadata.
+
+    Same validation as the zip path (name required + format check) but
+    without any archive handling — the bytes ARE the SKILL.md content.
+    """
+    try:
+        raw = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InvalidSkillBundleError(
+            f"SKILL.md is not valid UTF-8: {exc}",
+        ) from exc
+
+    meta, body = _split_frontmatter(raw)
+
+    name = meta.get("name")
+    if not name:
+        raise InvalidSkillBundleError(
+            "SKILL.md frontmatter must include a 'name' field "
+            "(e.g. `name: my-skill`)."
+        )
+    _validate_skill_name(name)
+    description = _clip(
+        meta.get("description") or _first_nonempty_line(body) or name,
+        _MAX_DESCRIPTION_CHARS,
+    )
+    return ParsedSkill(name=name, description=description)
+
+
+def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
+    """Reject archives that would expand to unreasonable sizes.
+
+    Uses the per-entry uncompressed size reported by the zip directory
+    — that's what an unzipper allocates before reading the stream, so
+    rejecting on it shuts down the attack without ever decompressing
+    a byte. The compression-ratio check catches the case where many
+    small entries each stay under the per-entry cap but cumulatively
+    explode.
+
+    Industry-standard three-layer defense (see
+    https://codingtechroom.com/question/safeguard-against-zip-bombs):
+    per-entry cap, total cap, ratio cap.
+    """
+    total_compressed = 0
+    total_uncompressed = 0
+    for info in zf.infolist():
+        if info.file_size > _MAX_UNCOMPRESSED_PER_ENTRY:
+            raise InvalidSkillBundleError(
+                f"entry too large when uncompressed: {info.filename!r} "
+                f"({info.file_size} bytes)"
+            )
+        total_compressed += info.compress_size
+        total_uncompressed += info.file_size
+        if total_uncompressed > _MAX_UNCOMPRESSED_TOTAL:
+            raise InvalidSkillBundleError(
+                f"bundle exceeds {_MAX_UNCOMPRESSED_TOTAL} bytes when uncompressed"
+            )
+    if (
+        total_compressed > 0
+        and total_uncompressed / total_compressed > _MAX_COMPRESSION_RATIO
+    ):
+        raise InvalidSkillBundleError(
+            "bundle compression ratio is suspiciously high "
+            "(refusing to decompress a possible zip bomb)"
+        )
+
+
+def _reject_unsafe_entries(zf: zipfile.ZipFile) -> None:
+    """Guard against path traversal and symlinks.
+
+    Symlinks are encoded in zip's external attrs (Unix file type bits);
+    Python's ``zipfile`` extracts them as regular files but downstream
+    consumers (the worker's staging step) may invoke an unzip CLI that
+    DOES follow them — reject defensively here so the contract is
+    consistent regardless of who does the actual extraction later.
+    """
+    for info in zf.infolist():
+        # Path traversal: ``..`` segments or absolute paths
+        name = info.filename
+        if not name or name.startswith("/") or "\\" in name:
+            raise InvalidSkillBundleError(
+                f"refused unsafe path in bundle: {name!r}",
+            )
+        # Normalize and check for parent escapes
+        parts = name.split("/")
+        if any(p == ".." for p in parts):
+            raise InvalidSkillBundleError(
+                f"refused parent-traversal path: {name!r}",
+            )
+        # Symlink detection: Unix file type S_IFLNK = 0o120000 in upper
+        # 16 bits of external_attr when ``create_system == 3`` (Unix).
+        if info.create_system == 3 and (info.external_attr >> 16) & 0o170000 == 0o120000:
+            raise InvalidSkillBundleError(
+                f"refused symlink entry in bundle: {name!r}",
+            )
+
+
+def _locate_skill_md(zf: zipfile.ZipFile) -> str:
+    """Find ``SKILL.md`` at the archive root or inside a single wrapper dir.
+
+    Accepts the GitHub-download pattern where everything sits under one
+    top-level directory (``repo-main/SKILL.md``). The worker's staging
+    step flattens the wrapper after unzip so both layouts end up with
+    ``SKILL.md`` at base_dir root. Rejects archives with multiple
+    top-level SKILL.md files (ambiguous — one bundle must be one skill).
+    """
+    names = zf.namelist()
+
+    if _SKILL_FILENAME in names:
+        return _SKILL_FILENAME
+
+    # Wrapper-dir case: the archive must have exactly ONE top-level
+    # directory, and that directory must contain SKILL.md. Reject if
+    # there are multiple top-level entries (files or dirs) — otherwise
+    # the worker's flatten step (``find -type d | head -1``) could
+    # pick the wrong directory.
+    top_levels = {n.split("/", 1)[0] for n in names if "/" in n}
+    top_levels = {t for t in top_levels if t}
+    # Also count root-level files (entries without "/") as top-level items
+    root_files = {n for n in names if "/" not in n}
+    if len(top_levels) == 1 and not root_files:
+        wrapper = next(iter(top_levels))
+        candidate = f"{wrapper}/{_SKILL_FILENAME}"
+        if candidate in names:
+            return candidate
+
+    raise InvalidSkillBundleError(
+        f"{_SKILL_FILENAME} not found in bundle. The zip must contain "
+        f"SKILL.md either at its root or inside a single top-level directory."
+    )
+
+
+def _split_frontmatter(content: str) -> tuple[dict[str, str], str]:
+    """Parse YAML frontmatter between ``---`` fences.
+
+    Uses ``yaml.safe_load`` to handle multiline scalars (``>-``, ``|``,
+    etc.) that real-world SKILL.md files use for long descriptions.
+    """
+    import yaml
+
+    match = _FRONTMATTER_RE.match(content)
+    if not match:
+        return {}, content
+    try:
+        raw = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        raw = None
+    if not isinstance(raw, dict):
+        return {}, content[match.end():]
+    meta = {str(k): str(v) for k, v in raw.items() if v is not None}
+    return meta, content[match.end():]
+
+
+def _first_nonempty_line(body: str) -> str:
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _validate_skill_name(name: str) -> None:
+    if len(name) > _MAX_NAME_CHARS or not _SKILL_NAME_RE.fullmatch(name):
+        raise InvalidSkillBundleError(
+            "invalid skill name: use 1-64 lowercase letters, numbers, "
+            "and single hyphens; do not start or end with a hyphen"
+        )
+
+
+def _clip(value: str, limit: int) -> str:
+    return value if len(value) <= limit else value[: limit - 1] + "…"
