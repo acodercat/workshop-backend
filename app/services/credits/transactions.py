@@ -23,8 +23,7 @@ and read at human scroll speed, so the simplicity + a consistent
 offset cost here.
 
 The endpoint :func:`~app.api.endpoints.credits.get_credits_transactions`
-calls into here. The raw ``GET /credits`` endpoint still returns
-unprocessed ledger rows for audit / debugging.
+calls into here.
 """
 
 from datetime import datetime

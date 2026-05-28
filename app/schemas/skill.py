@@ -16,7 +16,9 @@ class SkillResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    origin: str
     name: str
+    display_name: str
     description: str
     bundle_size: int
     enabled: bool
@@ -24,20 +26,14 @@ class SkillResponse(BaseModel):
     updated_at: datetime
 
 
-class SkillCreate(BaseModel):
-    """Body of ``POST /api/skills`` — register a previously-uploaded
-    bundle. The backend pulls the zip from OSS, parses SKILL.md to
-    extract the picker name + description, and persists the row.
-    """
-    bundle_key: str = Field(
-        ..., description="OSS key returned by POST /api/skills/upload-url",
-    )
-
-
 class SkillUpdate(BaseModel):
-    """Body of ``PATCH /api/skills/{id}`` — all fields optional; the
-    bundle itself is immutable (re-upload to change it)."""
+    """Body of ``PATCH /api/skills/{id}`` — mutable picker metadata only.
 
-    name: str | None = Field(default=None, min_length=1, max_length=64)
-    description: str | None = Field(default=None, min_length=1, max_length=512)
+    ``name`` is immutable (derived from the bundle's SKILL.md frontmatter;
+    change it by re-uploading). ``display_name``, ``description``, and
+    ``enabled`` are editable without touching the bundle.
+    """
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, min_length=1, max_length=1024)
     enabled: bool | None = None

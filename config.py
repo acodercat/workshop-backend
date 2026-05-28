@@ -140,6 +140,25 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(description="LLM API key")
     llm_model: str = Field(default="qwen3.5-397b-a17b", description="Default chat model")
 
+    # File limits — per-message attachment count, per-file byte cap,
+    # and per-user total session-file accumulation. Tuned for typical
+    # human use; raise when a clear case (e.g. enterprise workloads)
+    # appears. The byte cap also bounds OSS upload presign size and is
+    # baked into the per-file ``size_bytes`` Pydantic validator on
+    # ``MessageCreate``.
+    max_message_files: int = Field(
+        default=30,
+        description="Max attachments per single user message",
+    )
+    max_file_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        description="Per-file upload size cap (bytes)",
+    )
+    max_session_files_per_user: int = Field(
+        default=500,
+        description="Total session-file rows allowed per user across all sessions",
+    )
+
     # Sessions
     default_session_model_id: str = Field(
         default="claude-opus-4-6",
@@ -247,7 +266,7 @@ class Settings(BaseSettings):
     # ``welcome-{user_id}`` so a registration retry after partial
     # failure can't double-grant.
     credit_welcome_grant_credits: int = Field(
-        default=100_000,
+        default=5_000,
         description="Whole credits granted to every new user at registration. Set to 0 to disable.",
     )
 

@@ -247,7 +247,7 @@ async def get_share_file_url(
         )
 
     url, expires_in = file_storage.generate_download_url(
-        file_key=file_key, filename=filename,
+        file_storage.SESSION_FILE_POLICY, file_key, filename,
     )
     return DownloadUrlResponse(
         download_url=url, file_key=file_key, expires_in=expires_in,

@@ -34,13 +34,15 @@ import logging
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.message import Message, MessageRole
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile
 from app.models.session_turn import SessionTurn, SessionTurnStatus
+from app.models.skill import Skill, SkillOrigin
+from app.models.user_skill_preference import UserSkillPreference
 from app.schemas.session import FileRef
 from app.services import credits
 from app.services.redis import (
@@ -63,6 +65,7 @@ async def queue_user_message(
     *,
     content: str,
     files: list[FileRef],
+    skills: list[str] | None = None,
 ) -> None:
     """Persist the user message + session_turn, flip status, wake worker.
 
@@ -93,6 +96,12 @@ async def queue_user_message(
     7. ``publish_wake`` so an idle worker doesn't have to wait for
        its poll cycle. **After commit** so the worker's claim sees
        the row. Best-effort; poll fallback covers a publish failure.
+
+    ``files`` are bound to the session at step 6; ``skills`` (the
+    composer's per-turn selection) is persisted on the ``session_turn``
+    row at step 4 and rides along to the worker through the claim
+    query — no separate binding needed (skill rows are already
+    user-scoped, the worker re-checks ownership at lookup time).
 
     Sandbox ownership lives on ``sandbox.session_id``. The worker
     resumes the latest non-TERMINATED sandbox for this session, or
@@ -129,6 +138,15 @@ async def queue_user_message(
     # history. ``DELETE`` is a no-op on missing keys.
     await redis.delete(stream_key(SESSION_STREAM_PREFIX, session.id))
 
+    # Reject ``skills`` the user can't actually invoke — visible to
+    # them AND effective-enabled. Without this check, a client could
+    # POST ``skills: ["some-disabled-name"]`` and the worker's
+    # ``extra_names`` bypass would happily load it, defeating the
+    # toggle's "off means off" semantics.
+    accepted_skills = await _filter_invokable_skills(
+        db, session.user_id, skills or [],
+    )
+
     file_dicts = [f.model_dump() for f in files]
     # Insert the session_turn first so we have a stable ``turn_id`` to
     # attach to the credit reservation. The flush below populates
@@ -137,6 +155,7 @@ async def queue_user_message(
         session_id=session.id,
         query=content,
         files=file_dicts,
+        skills=accepted_skills,
         status=SessionTurnStatus.PENDING,
     )
     db.add(session_turn)
@@ -233,3 +252,68 @@ async def _bind_session_files(
         raise FileNotInSessionError(
             f"file_key {file_key!r} is already bound to another session"
         )
+
+
+async def _filter_invokable_skills(
+    db: AsyncSession, user_id: int | None, requested: list[str],
+) -> list[dict[str, str | int]]:
+    """Return immutable snapshots of the skills the user can invoke this turn.
+
+    Each element is ``{"id", "name", "bundle_key"}`` — pinned to the
+    skill row that existed at enqueue time so the worker loads the
+    exact bundle bytes the user picked, even if the row is later
+    mutated (delete / re-upload / a same-named CUSTOM appearing and
+    overriding a BUILTIN). The ``id`` pins the lineage; the
+    ``bundle_key`` pins the bytes; ``name`` rides along for log and
+    LLM-reminder display.
+
+    A skill is invokable when it's visible to the user (their own
+    CUSTOM, or any BUILTIN) AND its effective enabled state — the
+    per-user preference override taking precedence over the skill's
+    default — is true. Unknown / hidden / disabled names are silently
+    dropped rather than raising; the user's intent (a free-text
+    composer prompt) is still useful even if one chip was stale, and
+    surfacing a 4xx mid-conversation would be a worse UX than gracefully
+    proceeding without that skill.
+
+    Slug collisions between CUSTOM + BUILTIN resolve CUSTOM-wins, matching
+    the worker repo's ``ORDER BY (user_id IS NULL) ASC`` rule. Order is
+    preserved from the request so the worker's reminder lists skills in
+    the order the user picked them.
+    """
+    if not requested or user_id is None:
+        return []
+    # De-duplicate while preserving order — duplicates would noise both
+    # the snapshot list and the LLM reminder.
+    requested_unique = list(dict.fromkeys(requested))
+
+    # Effective enabled = ``COALESCE(pref.enabled, skill.enabled)`` —
+    # mirrors the same expression used by the worker repo and the
+    # ``GET /skills`` endpoint so all three reads of "is this skill
+    # active for this user" agree.
+    pref_enabled = UserSkillPreference.enabled
+    stmt = (
+        select(Skill.id, Skill.name, Skill.bundle_key, Skill.user_id)
+        .outerjoin(
+            UserSkillPreference,
+            and_(
+                UserSkillPreference.skill_id == Skill.id,
+                UserSkillPreference.user_id == user_id,
+            ),
+        )
+        .where(
+            Skill.name.in_(requested_unique),
+            (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.BUILTIN),
+            (pref_enabled.is_(True)) | (pref_enabled.is_(None) & Skill.enabled),
+        )
+    )
+    result = await db.execute(stmt)
+    # CUSTOM-wins: keep the row owned by this user when both a CUSTOM
+    # and a BUILTIN of the same name pass the filter.
+    by_name: dict[str, dict[str, str | int]] = {}
+    for skill_id, name, bundle_key, row_user_id in result.all():
+        snapshot = {"id": skill_id, "name": name, "bundle_key": bundle_key}
+        existing = by_name.get(name)
+        if existing is None or row_user_id is not None:
+            by_name[name] = snapshot
+    return [by_name[name] for name in requested_unique if name in by_name]

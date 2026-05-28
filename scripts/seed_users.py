@@ -9,9 +9,10 @@ email (legacy bypass — public registration goes through
 
 Each seeded user gets a personal organization auto-created and a
 :data:`WELCOME_CREDITS`-credit welcome grant, same as the regular
-registration flow (see :mod:`app.services.auth.register`). Done
-here in raw SQL because this script bypasses the service layer to
-keep psycopg-only deps.
+registration flow (see :mod:`app.services.auth.register`). User/org
+creation stays raw SQL because this is a seed script; credit writes
+go through :mod:`app.services.credits` so the ledger/balance invariant
+uses the same path as production top-ups.
 
 Usage:
     uv run python -m scripts.seed_users
@@ -20,14 +21,17 @@ Usage:
 import asyncio
 
 import psycopg
-from psycopg.types.json import Jsonb
 
 from app.auth import get_password_hash
+from app.database import AsyncSessionLocal
+from app.services import credits
+from app.services.credits import TopupAlreadyApplied
+from app.services.credits.rates import micro_from_credits
 from config import settings
 
 USERS = [
     # ("tianlan", "tianlan20260518"),
-    ("sunwei", "sunwei20260520"),
+    ("huilong", "huilong20260526"),
     # ("andy", "andy123"),
     # ("zhou", "zhou123"),
     # ("jun", "jun123"),
@@ -37,10 +41,7 @@ USERS = [
 
 # Whole credits granted to every freshly seeded user. Matches the
 # registration default (``settings.credit_welcome_grant_credits``).
-# Kept as a script-local constant so dev seeding isn't coupled to
-# whatever an admin might change the production setting to.
-WELCOME_CREDITS = 20000000
-_MICRO_PER_CREDIT = 1_000_000
+WELCOME_CREDITS = settings.credit_welcome_grant_credits
 
 
 def _create_user_with_personal_org(
@@ -80,31 +81,28 @@ def _create_user_with_personal_org(
     return user_id
 
 
-def _grant_welcome_credits(cur: psycopg.Cursor, *, user_id: int) -> None:
-    """Mirror the registration welcome grant in raw SQL.
+async def _grant_welcome_credits(*, user_id: int) -> None:
+    """Mirror the registration welcome grant through the credit service.
 
-    Inserts a ``TOPUP`` ledger row and bumps ``user.credit_balance``
-    in the caller's transaction. The ``welcome-{user_id}``
-    idempotency key is what tags the row as ``WELCOME_GRANT`` in
-    the user-facing transaction view (see
-    :mod:`app.services.credits.transactions`).
+    The ``welcome-{user_id}`` idempotency key is what tags the row as
+    ``WELCOME_GRANT`` in the user-facing transaction view. Using
+    ``credits.apply_topup`` keeps seeded accounts on the same
+    ledger/balance write path as production registration.
     """
-    amount_micro = WELCOME_CREDITS * _MICRO_PER_CREDIT
-    cur.execute(
-        "INSERT INTO credit_ledger "
-        "(user_id, amount, kind, reference, idempotency_key) "
-        "VALUES (%s, %s, 'TOPUP', %s, %s)",
-        (
-            user_id,
-            amount_micro,
-            Jsonb({"reason": "welcome grant", "admin_id": None, "source": "admin"}),
-            f"welcome-{user_id}",
-        ),
-    )
-    cur.execute(
-        'UPDATE "user" SET credit_balance = credit_balance + %s WHERE id = %s',
-        (amount_micro, user_id),
-    )
+    if WELCOME_CREDITS <= 0:
+        return
+    async with AsyncSessionLocal() as db:
+        try:
+            await credits.apply_topup(
+                db,
+                user_id=user_id,
+                amount_micro=micro_from_credits(WELCOME_CREDITS),
+                idempotency_key=f"welcome-{user_id}",
+                reason="welcome grant",
+            )
+            await db.commit()
+        except TopupAlreadyApplied:
+            pass
 
 
 async def main() -> None:
@@ -127,9 +125,9 @@ async def main() -> None:
                 username=username,
                 password_hash=await get_password_hash(password),
             )
-            _grant_welcome_credits(cur, user_id=new_id)
+            conn.commit()
+            await _grant_welcome_credits(user_id=new_id)
             print(f"added {username} (id={new_id}, +{WELCOME_CREDITS} credits)")
-        conn.commit()
 
 
 if __name__ == "__main__":

@@ -119,7 +119,7 @@ exponentially backs off on consecutive failures.
 
 Every new registration automatically receives the welcome grant
 configured by `settings.credit_welcome_grant_credits` (default
-1000 credits, set to 0 to disable). For everything else — refunds,
+100,000 credits, set to 0 to disable). For everything else — refunds,
 business deals, accounts that pre-date the welcome grant — use
 `scripts/topup_credits.py`:
 

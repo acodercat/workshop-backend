@@ -39,21 +39,21 @@ from config import settings
 router = APIRouter()
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me")
 async def get_current_user(
     current_user: User = Depends(authenticate_and_get_user),
-):
-    return current_user
+) -> UserResponse:
+    return UserResponse.model_validate(current_user)
 
 
-@router.patch("/me", response_model=UserResponse)
+@router.patch("/me")
 @limiter.limit("10/minute")
 async def update_profile(
     request: Request,
     data: ProfileUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-):
+) -> UserResponse:
     """Partial update of the caller's own profile.
 
     All fields in :class:`ProfileUpdate` are optional. ``model_dump
@@ -67,7 +67,7 @@ async def update_profile(
         setattr(current_user, field, value)
     await db.commit()
     await db.refresh(current_user)
-    return current_user
+    return UserResponse.model_validate(current_user)
 
 
 @router.get("/me/events")
@@ -95,14 +95,14 @@ async def stream_current_user_events(
     )
 
 
-@router.put("/me/password", response_model=UserResponse)
+@router.put("/me/password")
 @limiter.limit("5/minute")
 async def change_password(
     request: Request,
     data: PasswordChange,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
-):
+) -> UserResponse:
     if not await verify_password(data.current_password, current_user.password_hash):
         raise IncorrectPasswordError("Current password incorrect")
     # Refuse no-op changes: a same-password "update" would still bump
@@ -114,7 +114,7 @@ async def change_password(
     revoke_user_tokens(current_user)
     await db.commit()
     await db.refresh(current_user)
-    return current_user
+    return UserResponse.model_validate(current_user)
 
 
 # ---- email change ---------------------------------------------------------
@@ -155,7 +155,7 @@ async def request_email_change_verification_code(
     )
 
 
-@router.put("/me/email", response_model=UserResponse)
+@router.put("/me/email")
 @limiter.limit("5/minute")
 async def update_email(
     request: Request,
@@ -163,7 +163,7 @@ async def update_email(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(authenticate_and_get_user),
-):
+) -> UserResponse:
     """Step 2: verify the code and apply the new email."""
     return await change_email(
         db,

@@ -4,10 +4,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.common.file_limits import MAX_FILE_BYTES, MAX_MESSAGE_FILES
 from app.common.filenames import validate_input_filename
 from app.models.session import SessionStatus
 from app.schemas.message_feedback import FeedbackResponse
+from config import settings
 
 
 class SessionCreate(BaseModel):
@@ -43,7 +43,7 @@ class FileRef(BaseModel):
     file_key: str = Field(..., min_length=1, max_length=512)
     filename: str = Field(..., min_length=1, max_length=255)
     mime_type: str | None = None
-    size_bytes: int | None = Field(default=None, ge=0, le=MAX_FILE_BYTES)
+    size_bytes: int | None = Field(default=None, ge=0, le=settings.max_file_bytes)
 
     @field_validator("filename")
     @classmethod
@@ -53,7 +53,10 @@ class FileRef(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=100000)
-    files: list[FileRef] = Field(default_factory=list, max_length=MAX_MESSAGE_FILES)
+    files: list[FileRef] = Field(
+        default_factory=list, max_length=settings.max_message_files,
+    )
+    skills: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("files")
     @classmethod

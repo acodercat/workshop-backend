@@ -3,10 +3,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from app.common.file_limits import MAX_FILE_BYTES, MAX_MESSAGE_FILES
 from app.common.filenames import InvalidFilenameError, validate_input_filename
 from app.schemas.session import FileRef, MessageCreate
 from app.services import file_storage
+from config import settings
 
 
 @pytest.mark.parametrize(
@@ -44,7 +44,7 @@ def test_file_ref_rejects_unsafe_filename(filename):
 def test_generate_upload_url_rejects_unsafe_filename_before_bucket_access():
     with patch("app.services.file_storage.get_bucket") as get_bucket:
         with pytest.raises(InvalidFilenameError):
-            file_storage.generate_upload_url("../evil.pdf", 1)
+            file_storage.generate_upload_url("../evil.pdf", 1, file_storage.SESSION_FILE_POLICY)
 
     get_bucket.assert_not_called()
 
@@ -54,9 +54,9 @@ def test_generate_upload_url_uses_sanitized_basename_in_key():
     bucket.sign_url.return_value = "https://oss/upload"
 
     with patch("app.services.file_storage.get_bucket", return_value=bucket):
-        response = file_storage.generate_upload_url("report.pdf", 1)
+        response = file_storage.generate_upload_url("report.pdf", 1, file_storage.SESSION_FILE_POLICY)
 
-    assert response.file_key.startswith("documents/")
+    assert response.file_key.startswith("session-files/")
     assert response.file_key.endswith("/report.pdf")
     bucket.sign_url.assert_called_once()
 
@@ -66,7 +66,7 @@ def test_file_ref_rejects_declared_size_above_cap():
         FileRef(
             file_key="documents/key",
             filename="report.pdf",
-            size_bytes=MAX_FILE_BYTES + 1,
+            size_bytes=settings.max_file_bytes + 1,
         )
 
 
@@ -77,7 +77,7 @@ def test_message_create_rejects_more_than_max_files():
             filename="report.pdf",
             size_bytes=1,
         )
-        for index in range(MAX_MESSAGE_FILES + 1)
+        for index in range(settings.max_message_files + 1)
     ]
 
     with pytest.raises(ValidationError):
@@ -90,3 +90,20 @@ def test_message_create_requires_declared_file_sizes():
             content="hello",
             files=[FileRef(file_key="documents/key", filename="report.pdf")],
         )
+
+
+def test_message_create_skills_defaults_to_empty_list():
+    """Omitting ``skills`` is the common case (no chips in the composer);
+    it must not raise and must produce ``[]`` so the worker's reminder
+    gate stays off."""
+    assert MessageCreate(content="hello").skills == []
+
+
+def test_message_create_accepts_skills_list():
+    body = MessageCreate(content="hi", skills=["deploy", "pdf-processing"])
+    assert body.skills == ["deploy", "pdf-processing"]
+
+
+def test_message_create_rejects_too_many_skills():
+    with pytest.raises(ValidationError):
+        MessageCreate(content="hi", skills=[f"skill-{i}" for i in range(21)])

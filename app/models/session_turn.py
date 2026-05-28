@@ -72,6 +72,17 @@ class SessionTurn(Base):
     files: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
+    # Per-turn skill selection. Each element is a snapshot
+    # ``{"id": int, "name": str, "bundle_key": str}`` taken at enqueue
+    # time so the worker loads the exact bundle the user picked, even
+    # if the row is later mutated (delete / re-upload / a same-named
+    # CUSTOM overriding a BUILTIN). The ``id`` pins the lineage; the
+    # ``bundle_key`` pins the bytes; ``name`` is kept for log / reminder
+    # display so we don't need an extra JOIN to render the LLM-facing
+    # message.
+    skills: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+    )
     # Token usage as reported by axon's ``AgentStoppedEvent.usage``,
     # written by the worker in the same fenced UPDATE that flips
     # ``status`` to ``COMPLETE`` / ``CANCELLED`` (see

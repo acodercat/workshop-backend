@@ -9,9 +9,10 @@ PAYG credit ledger sitting in front of the LLM turn pipeline:
   :func:`refund_reservation` zeros the hold on crash / cancel.
 - :func:`apply_topup` is the admin-only path to add credit balance.
 - :func:`apply_adjust` is the signed correction primitive.
-- :func:`get_balance` / :func:`list_history` are the read surface.
+- :func:`get_balance` + :func:`list_transactions` are the read surface.
 - :func:`settle_open_for_user` is the lazy sweep called from
-  user-facing endpoints (``GET /credits``, ``queue_user_message``).
+  user-facing endpoints (``GET /credits/balance``,
+  ``GET /credits/transactions``, ``queue_user_message``).
   :func:`settle_open_for_session` is the per-session variant used by
   the background sweeper (:mod:`app.workers.settle_sweeper`) and the
   pub/sub subscriber (:mod:`app.workers.settle_subscriber`).
@@ -29,7 +30,6 @@ billing).
 
 from app.services.credits.adjust import AdjustmentAlreadyApplied, apply_adjust
 from app.services.credits.balance import get_balance
-from app.services.credits.history import list_history
 from app.services.credits.reserve import reserve_for_turn
 from app.services.credits.settle import (
     refund_reservation,
@@ -52,7 +52,6 @@ __all__ = [
     "apply_adjust",
     "apply_topup",
     "get_balance",
-    "list_history",
     "list_transactions",
     "refund_reservation",
     "reserve_for_turn",
