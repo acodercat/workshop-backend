@@ -51,6 +51,12 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
     # Remove default handler
     logger.remove()
 
+    # Default ``request_id`` so the ``{extra[request_id]}`` field below
+    # renders for logs emitted outside a request (startup, shutdown,
+    # background tasks). The request-id middleware overrides it per
+    # request via ``logger.contextualize``.
+    logger.configure(extra={"request_id": "-"})
+
     # Intercept standard logging
     logging.basicConfig(handlers=[InterceptHandler()], level=logging.DEBUG, force=True)
 
@@ -62,14 +68,14 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
     logger.add(
         sys.stderr,
         level=level,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <magenta>{extra[request_id]}</magenta> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
     )
 
     # Main log file (with rotation)
     logger.add(
         f"{log_dir}/app.log",
         level=level,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[request_id]} | {name}:{function}:{line} - {message}",
         rotation="10 MB",
         retention="7 days",
         compression="gz",
@@ -79,7 +85,7 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
     logger.add(
         f"{log_dir}/error.log",
         level="ERROR",
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[request_id]} | {name}:{function}:{line} - {message}",
         rotation="10 MB",
         retention="30 days",
         compression="gz",

@@ -3,18 +3,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 import redis.asyncio as aioredis
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db, get_redis
-from app.auth import authenticate_user, create_access_token
-from app.errors import AccountPendingError
-from app.models.user import User, UserStatus
+from app.auth import assert_user_active, authenticate_user, create_access_token
 from app.rate_limit import limiter
 from app.schemas.auth import (
     AccessTokenResponse,
-    EmailLoginExisting,
-    EmailLoginNewUser,
     EmailLoginRequest,
     EmailLoginResponse,
     RegisterCodeRequest,
@@ -22,9 +17,9 @@ from app.schemas.auth import (
     RegisterResponse,
 )
 from app.services.auth import (
+    login_by_code,
     register_user,
     request_register_code,
-    verify_register_code,
 )
 from config import settings
 
@@ -54,16 +49,9 @@ async def login_for_access_token(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if user.status is UserStatus.PENDING:
-        raise AccountPendingError("Account awaiting administrator approval")
-    if user.status is not UserStatus.ACTIVE:
-        # ``DISABLED`` / ``SUSPENDED`` collapse to the same opaque 401
-        # as wrong credentials so admin lockouts don't leak.
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    # Inactive accounts reuse the wrong-credentials message so a disabled
+    # account is indistinguishable from a bad password.
+    assert_user_active(user, inactive_detail="Incorrect username or password")
 
     user.last_login_at = datetime.now(timezone.utc)
     access_token = create_access_token(
@@ -161,52 +149,7 @@ async def access_token_by_code(
     this call and ``POST /users`` would leave them with a verified
     intent but no way to actually finish without a fresh code.
     """
-    # Peek mode — checks code validity, increments attempts on
-    # mismatch (so brute-force is still rate-limited), but doesn't
-    # delete on success.
-    await verify_register_code(
-        redis, email=body.email, code=body.code, consume=False
-    )
-
-    existing = (
-        await db.execute(select(User).where(User.email == body.email))
-    ).scalar_one_or_none()
-    if existing is None:
-        # New user — frontend should now show the "what should we call
-        # you?" step and POST /users with the same code.
-        return EmailLoginNewUser()
-
-    if existing.status is UserStatus.PENDING:
-        raise AccountPendingError("Account awaiting administrator approval")
-    if existing.status is not UserStatus.ACTIVE:
-        # ``DISABLED`` / ``SUSPENDED`` collapse to the same opaque 401
-        # as wrong code so admin lockouts don't leak.
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Account is not active",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # Existing ACTIVE user: now consume the code (commit to logging
-    # in) and issue the JWT. If the code was somehow deleted between
-    # the peek and now, ``verify_register_code`` raises
-    # ``InvalidVerificationCodeError``, which the global handler
-    # serializes for the client.
-    await verify_register_code(
-        redis, email=body.email, code=body.code, consume=True
-    )
-
-    existing.last_login_at = datetime.now(timezone.utc)
-    access_token = create_access_token(
-        data={"sub": existing.username, "token_version": existing.token_version},
-    )
-    await db.commit()
-    await db.refresh(existing)
-    return EmailLoginExisting(
-        access_token=access_token,
-        token_type="bearer",
-        user=existing,
-    )
+    return await login_by_code(db, redis, email=body.email, code=body.code)
 
 
 @router.post(

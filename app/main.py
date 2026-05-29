@@ -29,6 +29,7 @@ from app.exception_handlers import (
     sqlalchemy_exception_handler,
     validation_exception_handler,
 )
+from app.observability import install_observability
 from app.rate_limit import limiter, rate_limit_exceeded_handler
 from config import settings
 from slowapi.errors import RateLimitExceeded
@@ -213,9 +214,12 @@ app.add_exception_handler(Exception, general_exception_handler)
 # floor. Without it slowapi only enforces limits on endpoints carrying
 # an explicit ``@limiter.limit`` decorator — every other route is
 # completely unthrottled (the default 200/min is inert). Added BEFORE
-# CORS so CORS stays the outermost layer: a 429 response still gets
-# its ``Access-Control-Allow-Origin`` headers, otherwise the browser
-# would surface an opaque network error instead of the rate-limit JSON.
+# CORS so CORS wraps it: a 429 response still gets its
+# ``Access-Control-Allow-Origin`` headers, otherwise the browser would
+# surface an opaque network error instead of the rate-limit JSON. (The
+# request-id middleware, added in ``install_observability`` below, then
+# wraps CORS as the outermost layer — it only tags the request, so the
+# CORS-wraps-SlowAPI guarantee is unaffected.)
 app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
@@ -224,7 +228,16 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # So the browser can read the correlation id off a response and put
+    # it in a bug report / error toast.
+    expose_headers=["X-Request-ID"],
 )
+
+# Sentry + Prometheus /metrics + the request-id middleware. Installed
+# after CORS so the request-id layer is outermost (correlation id bound
+# before anything inner logs); CORS stays inside it, still wrapping the
+# routes so error responses keep their CORS headers.
+install_observability(app)
 
 for router in ROUTERS:
     app.include_router(router)

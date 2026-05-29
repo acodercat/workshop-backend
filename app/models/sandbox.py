@@ -1,6 +1,6 @@
-import enum
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import Enum as SAEnum, Index, String, TIMESTAMP, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
@@ -9,7 +9,7 @@ from sqlalchemy.sql import func
 from app.database import Base
 
 
-class SandboxStatus(str, enum.Enum):
+class SandboxStatus(StrEnum):
     """Sandbox lifecycle state.
 
     - ``RUNNING`` — default after ``create``; the container is up.

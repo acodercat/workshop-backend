@@ -14,12 +14,10 @@ description) and the enable toggle.
 import asyncio
 import logging
 import os
-import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy import and_, func, or_, select, update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
@@ -32,27 +30,9 @@ from app.schemas.file import DownloadUrlResponse
 from app.schemas.skill import SkillResponse, SkillUpdate
 from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
-from app.errors import (
-    InvalidSkillBundleError,
-    SkillBundleTooLargeError,
-    SkillNameConflictError,
-    SkillQuotaExceededError,
-)
-from app.services.skill_bundle import (
-    InvalidSkillBundleError as ServiceInvalidSkillBundleError,
-    normalize_bundle,
-    parse_bundle,
-    parse_skill_md,
-    validate_zip_structure,
-)
+from app.services.skill_registration import register_skill_bundle
 
 logger = logging.getLogger(__name__)
-
-# Per-user CUSTOM skill count cap. Bounds account-level abuse (a real
-# user has a handful of skills; 20 is comfortable headroom). Paired
-# with the per-bundle ``SKILL_POLICY.max_bytes`` cap so total OSS
-# storage per user is implicitly bounded too.
-_MAX_SKILLS_PER_USER = 20
 
 router = APIRouter(tags=["skills"])
 
@@ -77,82 +57,11 @@ async def register_skill(
     409 if the extracted skill name collides with one this user
         already has.
     """
-    filename = file.filename or "skill.zip"
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in SKILL_POLICY.allowed_types:
-        raise InvalidSkillBundleError(
-            f"unsupported file extension {ext!r}; "
-            f"allowed: {', '.join(sorted(SKILL_POLICY.allowed_types))}"
-        )
-    is_zip = ext == ".zip"
-    bundle_bytes = await file.read()
-
-    if len(bundle_bytes) > SKILL_POLICY.max_bytes:
-        raise SkillBundleTooLargeError(
-            f"file is {len(bundle_bytes)} bytes; limit is {SKILL_POLICY.max_bytes}"
-        )
-
-    # Validate structure (zip-bomb, path traversal, symlinks) **before**
-    # any path that decompresses entry bytes. ``normalize_bundle``
-    # repacks the archive and ``parse_bundle`` reads SKILL.md — both
-    # would let a malicious wrapper inflate memory if we let them run
-    # on an unvalidated input.
-    try:
-        if is_zip:
-            validate_zip_structure(bundle_bytes)
-            normalized = normalize_bundle(bundle_bytes)
-            if normalized is not None:
-                bundle_bytes = normalized
-            parsed = parse_bundle(bundle_bytes)
-        else:
-            parsed = parse_skill_md(bundle_bytes)
-    except ServiceInvalidSkillBundleError as exc:
-        raise InvalidSkillBundleError(str(exc)) from exc
-
-    await _enforce_user_quota(db, current_user.id)
-
-    # Upload to OSS under a user-scoped key, then INSERT the row in a
-    # try/except that compensates the upload if the INSERT fails (DB
-    # constraint, race, transient error). Without this an
-    # ``IntegrityError`` would leave an orphan bundle paying OSS storage
-    # forever.
-    #
-    # The filename segment of the key is **derived** from the parsed
-    # skill name + canonical (lowercased) extension — NOT the user's
-    # original filename. The user-supplied filename was only inspected
-    # to decide the ``is_zip`` branch; reusing it verbatim in the key
-    # would leak case (``MySkill.ZIP``) and odd characters through to
-    # every consumer that dispatches on ``bundle_key.endsWith(".zip")``.
-    bundle_filename = f"{parsed.name}{ext}"
-    bundle_key = f"{SKILL_POLICY.key_prefix}/{current_user.id}/{uuid.uuid4()}/{bundle_filename}"
-    await asyncio.to_thread(
-        file_storage.upload, SKILL_POLICY, bundle_key, bundle_bytes,
-    )
-    skill = Skill(
+    skill = await register_skill_bundle(
+        db,
         user_id=current_user.id,
-        origin=SkillOrigin.CUSTOM,
-        name=parsed.name,
-        display_name=parsed.name,
-        description=parsed.description,
-        bundle_key=bundle_key,
-        bundle_size=len(bundle_bytes),
-    )
-    db.add(skill)
-    try:
-        await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        await _best_effort_delete_oss(bundle_key)
-        if isinstance(exc, IntegrityError):
-            raise SkillNameConflictError(
-                f"a skill named {parsed.name!r} already exists for this user"
-            ) from exc
-        raise
-
-    await db.refresh(skill)
-    logger.info(
-        "skill registered: id=%s user_id=%s name=%r size=%d",
-        skill.id, current_user.id, skill.name, skill.bundle_size,
+        filename=file.filename or "skill.zip",
+        data=await file.read(),
     )
     return SkillResponse.model_validate(skill)
 
@@ -379,38 +288,3 @@ async def _upsert_preference(
         )
     )
     await db.execute(stmt)
-
-
-async def _enforce_user_quota(db: AsyncSession, user_id: int) -> None:
-    """Reject the upload if the user is at the per-user skill count cap.
-
-    Counts the user's CUSTOM rows only — BUILTIN rows have
-    ``user_id IS NULL`` so they don't count. Race-acceptable: two
-    concurrent uploads at the boundary could both succeed, leaving
-    the user one over. Not worth a row lock for a soft policy limit.
-    """
-    used = await db.scalar(
-        select(func.count(Skill.id)).where(Skill.user_id == user_id)
-    ) or 0
-    if used >= _MAX_SKILLS_PER_USER:
-        raise SkillQuotaExceededError(
-            f"user already has {used} skills; "
-            f"per-user limit is {_MAX_SKILLS_PER_USER}"
-        )
-
-
-async def _best_effort_delete_oss(bundle_key: str) -> None:
-    """Compensating delete after a failed register_skill DB write.
-
-    Failures here are logged and swallowed — the DB rolled back, so
-    the user-visible state is "upload didn't happen"; an orphan OSS
-    object is only a storage-cost issue and should be picked up by a
-    bucket lifecycle rule.
-    """
-    try:
-        await asyncio.to_thread(file_storage.delete, SKILL_POLICY, bundle_key)
-    except Exception as exc:
-        logger.warning(
-            "skill upload rollback: OSS cleanup failed for %s: %s",
-            bundle_key, exc,
-        )

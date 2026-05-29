@@ -16,8 +16,8 @@ layer caps the length at 1000 chars; the column is plain ``TEXT`` to
 avoid a column-widening migration if the cap moves.
 """
 
-import enum
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     Enum as SAEnum,
@@ -34,7 +34,7 @@ from sqlalchemy.sql import func
 from app.database import Base
 
 
-class FeedbackRating(str, enum.Enum):
+class FeedbackRating(StrEnum):
     UP = "UP"
     DOWN = "DOWN"
 

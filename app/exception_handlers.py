@@ -26,6 +26,7 @@ import logging
 from http import HTTPStatus
 from typing import Any
 
+import sentry_sdk
 from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -90,6 +91,8 @@ async def sqlalchemy_exception_handler(
     request: Request, exc: SQLAlchemyError,
 ) -> JSONResponse:
     logger.error("Database error: %s", exc, exc_info=True)
+    # 5xx — a real server fault. Report to Sentry (no-op without a DSN).
+    sentry_sdk.capture_exception(exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=_error_envelope(
@@ -168,6 +171,8 @@ async def general_exception_handler(
     request: Request, exc: Exception,
 ) -> JSONResponse:
     logger.exception("Unexpected error: %s", exc)
+    # Last-resort 500 — always report (no-op without a Sentry DSN).
+    sentry_sdk.capture_exception(exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=_error_envelope(

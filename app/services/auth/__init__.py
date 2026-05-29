@@ -16,6 +16,7 @@ Email-change exports stay submodule-scoped (``from app.services.auth
 so re-exporting at the package level adds noise without saving work.
 """
 
+from app.services.auth.login import login_by_code
 from app.services.auth.register import register_user
 from app.services.auth.verification import (
     request_register_code,
@@ -23,6 +24,7 @@ from app.services.auth.verification import (
 )
 
 __all__ = [
+    "login_by_code",
     "register_user",
     "request_register_code",
     "verify_register_code",
