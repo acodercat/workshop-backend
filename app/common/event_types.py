@@ -25,6 +25,7 @@ class EventType(StrEnum):
     SESSION_LIVE = "session.live"
     AGENT_MESSAGE_CHUNK = "agent.message_chunk"
     AGENT_THINKING_CHUNK = "agent.thinking_chunk"
+    AGENT_THINKING = "agent.thinking"
     AGENT_MESSAGE = "agent.message"
     AGENT_TOOL_USE_STARTED = "agent.tool_use_started"
     AGENT_TOOL_USE_ARGS_CHUNK = "agent.tool_use_args_chunk"

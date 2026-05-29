@@ -102,6 +102,15 @@ class Settings(BaseSettings):
     # spike for fewer 5xx during traffic bursts.
     redis_pool_timeout_seconds: float = Field(default=3.0, description="Wait N seconds for a short-op connection before failing")
 
+    # Observability. Sentry stays a no-op until ``sentry_dsn`` is set, so
+    # dev boxes boot without it (same pattern as the DirectMail creds);
+    # the Prometheus ``/metrics`` endpoint has no external dependency, so
+    # it defaults on.
+    sentry_dsn: str = Field(default="", description="Sentry DSN; empty disables error tracking")
+    sentry_environment: str = Field(default="", description="Sentry environment tag (e.g. production, staging)")
+    sentry_traces_sample_rate: float = Field(default=0.0, description="Fraction of requests traced by Sentry performance monitoring")
+    metrics_enabled: bool = Field(default=True, description="Expose Prometheus metrics at /metrics")
+
     # Alibaba Cloud OSS — credentials required from the environment; no
     # defaults, so a forgotten ``.env`` fails loudly at startup instead
     # of falling back to baked-in keys.

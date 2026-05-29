@@ -10,6 +10,7 @@ SMTP-backed (Lark Suite Mail by default). Two pieces:
 
 from app.services.email.client import EmailSendError, send_html_email
 from app.services.email.templates import (
+    render_account_activated,
     render_email_change_verification,
     render_register_verification,
 )
@@ -17,6 +18,7 @@ from app.services.email.templates import (
 __all__ = [
     "EmailSendError",
     "send_html_email",
+    "render_account_activated",
     "render_register_verification",
     "render_email_change_verification",
 ]

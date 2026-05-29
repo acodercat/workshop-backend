@@ -1,6 +1,6 @@
-import enum
 import uuid
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import Enum as SAEnum, Integer, ForeignKey, TIMESTAMP, Uuid, text
@@ -11,7 +11,7 @@ from sqlalchemy.sql import func
 from app.database import Base
 
 
-class MessageRole(str, enum.Enum):
+class MessageRole(StrEnum):
     USER = "USER"
     ASSISTANT = "ASSISTANT"
 

@@ -68,7 +68,7 @@ from app.schemas.session import (
     TitleGenerateResponse,
 )
 from app.schemas.session_share import ShareCreate, ShareResponse
-from app.services import credits, file_storage
+from app.services import credits
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import generate_title, queue_user_message, stream_events
 from app.services.session.exceptions import (

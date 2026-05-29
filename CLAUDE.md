@@ -15,14 +15,22 @@ uv sync
 # Dev server (API on :8005, root_path="/api/v1")
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
 
+# Background-settle process (separate from the web server; closes out
+# open credit reservations). Run alongside the API in its own terminal:
+uv run python -m app.workers.run
+
 # Production — single-host manual deploy via scripts/deploy.sh
-bash scripts/deploy.sh deploy       # stop + uv sync + alembic upgrade + start
-bash scripts/deploy.sh restart      # code-only restart (no deps / no migration)
-bash scripts/deploy.sh status       # is :8005 bound? by whom?
+bash scripts/deploy.sh deploy       # web: stop + uv sync + alembic upgrade + start
+bash scripts/deploy.sh restart      # web: code-only restart (no deps / no migration)
+bash scripts/deploy.sh status       # report state of BOTH web (:8005) and settle
 bash scripts/deploy.sh logs         # tail -f logs/uvicorn.log
-# Truth source is ``lsof -t -i:8005``, not a PID file, so it tolerates
-# instances started outside the script. uvicorn stdout → logs/uvicorn.log;
-# loguru/stdlib app logs go elsewhere under logs/ per app/logging_config.py.
+bash scripts/deploy.sh settle start|stop|restart|status|logs   # the settle sibling process
+# Web truth source is ``lsof -t -i:8005``; settle's is ``pgrep -f 'app.workers.run'``
+# (no port). Neither uses a PID file, so both tolerate instances started
+# outside the script. uvicorn stdout → logs/uvicorn.log, settle stdout →
+# logs/settle.log; loguru/stdlib app logs go elsewhere under logs/ per
+# app/logging_config.py. Multi-node: run both processes on every host —
+# the sweeper self-elects one active poller via a Postgres advisory lock.
 
 # HTTPS / custom port — script's defaults won't fit; use uvicorn directly:
 uv run uvicorn app.main:app --host 0.0.0.0 --port 9090 --workers 1 \
@@ -86,7 +94,8 @@ Redis key names (`SESSION_QUEUE`, `SESSION_STREAM_PREFIX`, `WORKER_NOTIFY_CHANNE
 - **DB is rendering state.** `message.blocks` (JSONB) holds the structured block list the frontend renders. USER rows are inserted in `queue_user_message`; ASSISTANT rows are projected from worker events (the worker writes them — backend does not synthesize assistant rows).
 - **Worker owns LLM state.** Conversation history / compacted context lives on the worker side. The backend enqueues only `{session_id, query, files}` — it deliberately does **not** send history.
 - `session.status ∈ {running, complete, failed}` is set by the backend the moment a turn is enqueued (`running`), and flipped to a terminal value by the worker atomically with the assistant insert. The frontend uses this to decide whether to open the SSE stream.
-- `session.model_id` is stamped at session creation from `settings.default_session_model_id` and never mutated. It's an audit field — the worker selects its actual LLM via its own config, not from this column. If we later want per-session model selection, `model_id` is the join point: have the worker read `session.model_id` instead of (or as override over) its own `llm_model`.
+- `session.model_id` is stamped at session creation (from the `POST /sessions` body, validated against `settings.supported_session_model_ids`, defaulting to `settings.default_session_model_id`) and never mutated. The worker still selects its actual LLM via its own config, **but** the backend now reads `model_id` to look up the credit rate card at reserve time (`app/services/credits/rates.py`) — a `model_id` absent from `settings.credit_rates` makes the reserve fail, so the column is no longer purely an audit field.
+- **Soft-delete**: `DELETE /sessions/{id}` sets `session.deleted_at` rather than removing rows (returns 409 while `status == running`). Every read folds `deleted_at IS NULL` into its `session_id`-scoped filter, so a soft-deleted session reads as gone (and its id isn't leaked) while child rows + the credit_reservation back-link are retained. The delete handler settles the session's open reservation first.
 
 ### SSE streaming (`app/services/session/streaming.py`)
 
@@ -138,6 +147,33 @@ Two tables, two shapes. `user_feedback` is freeform product feedback. `message_f
 
 Frontend uploads/downloads directly to/from Alibaba OSS via presigned URLs. The backend **never proxies file bytes** — `FileStorage` only mints URLs. Upload URLs validate the extension against `_DOCUMENT_CONTENT_TYPES`; download URLs embed a ``response-content-disposition`` override so the cross-origin OSS response forces a save-as with the real filename. Authorization is JWT-only: the file_key itself is UUID-backed and unguessable, and the presigned URL carries its own short TTL — no per-key ownership table.
 
+### Credits / billing (`app/services/credits/`, `app/workers/`)
+
+PAYG credit ledger in front of the LLM turn pipeline. **Every write to `credit_ledger` / `user.credit_balance` funnels through `credits/_internal.py`** — nothing else touches them directly — which preserves the double-entry invariant `user.credit_balance == SUM(credit_ledger.amount)`. Storage unit is **µ-credits** (1 credit = 1_000_000 µ-credits ≈ $0.001 USD).
+
+Per-turn lifecycle:
+1. **Reserve** (`reserve_for_turn`, called inside `queue_user_message`): locks the user row, snapshots the model's rate card onto a `credit_reservation`, debits a pessimistic max-estimate, raises `InsufficientCreditsError` if the balance can't cover it. The rate is **frozen on the reservation** so a config change between reserve and settle never re-prices an open turn (customer-trust property: charged cost == cost shown at start).
+2. **Settle** (`settle_turn`): posts the actual cost from `session_turn.input_tokens`/`output_tokens` — written by the worker in the same fenced transaction as its terminal status flip, so settle reads durable billing-grade storage, **not** the TTL'd Redis stream (a V1 race that's been removed). Idempotent. `refund_reservation` zeros the hold on crash/cancel/lost-worker.
+3. Cost is three additive factors carried in the snapshot: `α·token_cost + β·turn_seconds + γ·model_fee` (`token_markup`, `credit_per_second_credits`, `model_fee_credits`).
+
+Two trigger paths for settle, push + pull halves of one responsibility:
+- **Lazy sweep** (`settle_open_for_user`): user-facing endpoints (`GET /credits/*`, `queue_user_message`) settle that user's open reservations on every hit — covers any user who comes back.
+- **Background-settle process** (`python -m app.workers.run`, deployed as the `settle` sibling): the `settle_sweeper` polls every 60s (correctness backstop for users who never return — API clients, abandoned sessions, workers that crashed between reserve and the terminal write), and `settle_subscriber` listens on the `settle:notify` pub/sub channel (latency optimization — worker publishes on terminal write, settle fires sub-second). Pub/sub loss is expected and harmless; the sweeper backstops it. The sweeper uses a Postgres advisory lock so exactly one host polls per tick in a multi-node deploy; connection loss auto-releases it.
+
+`apply_topup` (admin-only) and `apply_adjust` (signed correction) are the only balance-increase paths; both are idempotent on a caller-supplied key. See `docs/credits-future.md` for deferred work.
+
+### Skills (`app/api/endpoints/skill.py`, `app/services/skill_bundle.py`, `skill` + `user_skill_preference` tables)
+
+A skill is an uploaded `SKILL.md` bundle (`.zip`, axon SKILL convention) the worker stages into the sandbox at session start so axon's `use_skill` tool can surface it. Two origins: `BUILTIN` (platform-shipped, `user_id IS NULL`, visible to all, operator/seed-managed) and `CUSTOM` (user-uploaded, owner-scoped, managed via `/api/skills`).
+
+- **Upload** is one multipart POST; `skill_bundle.py` is the registration-time validator (rejects path traversal, symlinks, missing/unparseable `SKILL.md`, zip bombs) and extracts name + description from frontmatter, mirroring `axon.skills._parse_frontmatter` so backend-extracted metadata matches what the worker rediscovers. Bundles are **immutable** through this surface — editing means re-uploading (clean worker cache key). PATCH only touches picker metadata (name/description) and the enable toggle.
+- **Enable toggle**: CUSTOM skills carry `enabled` on the row (owner flips directly). BUILTIN rows are platform-wide, so a per-user toggle lives in `user_skill_preference` (`(user_id, skill_id)` → `enabled`), where effective enabled = `COALESCE(pref.enabled, skill.enabled)`. That same COALESCE expression is the single source of truth for "is this skill on" across `GET /skills`, the toggle, and turn-time filtering.
+- **Per-turn selection**: `POST /sessions/{id}/messages` carries `skills: [name, ...]`. `queue_user_message._filter_invokable_skills` drops any the user can't actually invoke (not visible, or disabled via the COALESCE rule) and snapshots the invokable rows (id/name/bundle_key) so the worker loads exactly what existed at enqueue time, request order preserved for the worker's reminder list.
+
+### Organizations (`app/models/organization.py`)
+
+Identity layer only, not yet the billing layer. Registration auto-creates a `PERSONAL` org per user (`OWNER` role). `TEAM` kind and `ADMIN`/`MEMBER` roles exist in the enums so future B2B multi-member work drops in without a migration, but are unused today — the credit ledger still attaches to `user_id`. Keep these two tables (`organization`, `organization_member`) narrow; new concerns (plans, SSO, avatars) get their own tables when actually needed.
+
 ### `message.blocks` shape
 
 JSONB list of discriminated blocks. Block types: `text` (USER has `files[]`, ASSISTANT has plain text), `tool_use`, `tool_result` (paired by `tool_use_id`), `error`. Blocks are **immutable** after insert; there are no status/is_error discriminators — a `tool_use` without a matching `tool_result` means the tool never returned (cancelled, crashed, or session died). See `README.md` for the full schema and edge cases.
@@ -151,4 +187,6 @@ JSONB list of discriminated blocks. Block types: `text` (USER has `files[]`, ASS
 
 ## Environment variables
 
-Required in `backend/.env`: `db_uri` (PostgreSQL, `postgresql+psycopg://...`), `secret_key` (JWT), `redis_url`, `llm_base_url`, `llm_api_key`, `oss_access_key_id`, `oss_access_key_secret`. `default_session_model_id` (the value written to `session.model_id` on creation) and `supported_session_model_ids` (the whitelist `POST /sessions` validates against) have defaults in `config.py` — keep `supported_session_model_ids` in sync with `agent-worker/models.toml`, since a mismatch surfaces as a worker-side `ValueError` on the next turn rather than at session creation. SMTP creds (`smtp_*`) default to empty strings so dev boxes without SMTP access still boot — Lark Suite Mail is the default provider (`smtp_host=smtp.larksuite.com`, port 465 SSL). See `config.py` for the full `Settings` model.
+Required in `backend/.env`: `db_uri` (PostgreSQL, `postgresql+psycopg://...`), `secret_key` (JWT), `redis_url`, `llm_base_url`, `llm_api_key`, `oss_access_key_id`, `oss_access_key_secret`. `default_session_model_id` (the value written to `session.model_id` on creation) and `supported_session_model_ids` (the whitelist `POST /sessions` validates against) have defaults in `config.py` — keep `supported_session_model_ids` in sync with `agent-worker/models.toml`, since a mismatch surfaces as a worker-side `ValueError` on the next turn rather than at session creation. SMTP creds (`smtp_*`) default to empty strings so dev boxes without SMTP access still boot — Lark Suite Mail is the default provider (`smtp_host=smtp.larksuite.com`, port 465 SSL).
+
+Credit/quota knobs (all defaulted in `config.py`, edit-and-restart for V1): `credit_rates` (per-model rate card — one entry per `supported_session_model_ids` model, else reserve fails for that model), `credit_per_second_credits` (β infra fee), `credit_reserve_max_turn_seconds` / `credit_reserve_max_input_tokens` (pessimistic reserve-time upper bounds; settle uses actuals), `credit_welcome_grant_credits` (auto-grant on registration). Skills use `oss_skill_bucket_name` (separate OSS bucket for bundles). See `config.py` for the full `Settings` model.

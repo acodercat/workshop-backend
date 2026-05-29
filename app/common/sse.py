@@ -20,8 +20,9 @@ the worker writes, read that. This file documents the consumer-side
 view.
 """
 
-import json
 from typing import Literal, NotRequired, TypedDict
+
+import orjson
 
 
 class _EventBase(TypedDict):
@@ -55,6 +56,18 @@ class AgentThinkingChunkEvent(_EventBase):
     """
     type: Literal["agent.thinking_chunk"]
     content: str
+
+
+class AgentThinkingEvent(_EventBase):
+    """``agent.thinking`` — a completed thinking segment.
+
+    ``duration_ms`` is authoritative: measured at the source (axon) as the
+    span from the first reasoning token to the moment reasoning stops. The
+    frontend displays it directly instead of diffing event timestamps,
+    which over-counts across recovery gaps / stalls / tool execution.
+    """
+    type: Literal["agent.thinking"]
+    duration_ms: int
 
 
 class AgentMessageEvent(_EventBase):
@@ -216,6 +229,7 @@ StreamEvent = (
     SessionReadyEvent
     | AgentMessageChunkEvent
     | AgentThinkingChunkEvent
+    | AgentThinkingEvent
     | AgentMessageEvent
     | AgentToolUseStartedEvent
     | AgentToolUseArgsChunkEvent
@@ -273,5 +287,5 @@ def event_to_sse(event: StreamEvent, entry_id: str) -> SSEMessage:
     """
     event_type = event["type"]
     fields = {k: v for k, v in event.items() if k not in _INTERNAL_FIELDS}
-    data = json.dumps(fields, ensure_ascii=False) if fields else None
+    data = orjson.dumps(fields).decode() if fields else None
     return sse_event(event_type, data, entry_id)

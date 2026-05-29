@@ -15,6 +15,7 @@ from app.models.message import Message  # re-exports for convenience
 from app.models.message_feedback import MessageFeedback
 from app.models.sandbox import Sandbox
 from app.models.session import Session
+from app.models.session_context import SessionContext
 from app.models.session_files import SessionFile
 from app.models.session_share import SessionShare
 from app.models.skill import Skill, SkillOrigin
@@ -29,6 +30,7 @@ __all__ = [
     "MessageFeedback",
     "Sandbox",
     "Session",
+    "SessionContext",
     "SessionFile",
     "SessionShare",
     "Skill",
