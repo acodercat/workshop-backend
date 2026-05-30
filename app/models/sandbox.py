@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Enum as SAEnum, Index, String, TIMESTAMP, Uuid
+from sqlalchemy import Enum as SAEnum, Index, String, TIMESTAMP, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -69,8 +69,21 @@ class Sandbox(Base):
     # Worker's ``claim_next_turn`` runs a per-claim subquery against
     # ``WHERE session_id = ? AND status <> 'TERMINATED' ORDER BY
     # created_at DESC LIMIT 1`` — index keeps that fast even at scale.
+    #
+    # The sandbox reaper's ``select_reapable`` scans the other axis:
+    # ``WHERE status <> 'TERMINATED' AND last_used_at < ... ORDER BY
+    # last_used_at``. A *partial* index on the live set keeps that cheap
+    # as ``TERMINATED`` rows accumulate unbounded (they're never deleted):
+    # only non-terminal rows are indexed — a tiny fraction — and it serves
+    # the predicate, the range, and the ordering in one. Built
+    # ``CONCURRENTLY`` in the migration so it doesn't lock the hot insert.
     __table_args__ = (
         Index("ix_sandbox_session_id", "session_id"),
+        Index(
+            "ix_sandbox_reapable",
+            "last_used_at",
+            postgresql_where=text("status <> 'TERMINATED'"),
+        ),
     )
 
     def __repr__(self) -> str:
