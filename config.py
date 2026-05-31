@@ -169,10 +169,6 @@ class Settings(BaseSettings):
     )
 
     # Sessions
-    default_session_model_id: str = Field(
-        default="claude-opus-4-6",
-        description="Model id stamped on a new session when the client doesn't pick one explicitly. Recorded on session.model_id at creation time and immutable for the rest of the session.",
-    )
     supported_session_model_ids: frozenset[str] = Field(
         default=frozenset({
             "claude-opus-4-6",
@@ -188,6 +184,20 @@ class Settings(BaseSettings):
             "MiniMax/MiniMax-M2.7",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
+    )
+    # Capability tiers shown in the UI → the concrete model_id each resolves
+    # to. The client picks a ``tier`` (FAST / STANDARD / ADVANCED); the model
+    # name is never sent over the wire. ``create_session`` looks the tier up
+    # here and stamps the resolved id on ``session.model_id``. Every value
+    # must be in ``supported_session_model_ids`` above and priced in
+    # ``credit_rates`` below — ``create_session`` re-checks the whitelist.
+    session_tier_models: dict[str, str] = Field(
+        default_factory=lambda: {
+            "FAST": "deepseek-v4-flash",
+            "STANDARD": "kimi-k2",
+            "ADVANCED": "qwen3.7-max",
+        },
+        description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
     )
 
     # Credit / quota rate card. The peg is ``1 credit = $0.001 USD of

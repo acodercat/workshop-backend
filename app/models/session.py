@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    Boolean,
     Enum as SAEnum,
     ForeignKey,
     Index,
@@ -57,6 +58,43 @@ class SessionStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class AgentType(StrEnum):
+    """Which kind of agent a session runs.
+
+    - ``FULL`` — sandbox-backed agent (code execution, file tools, skills).
+    - ``LITE`` — sandbox-free Q&A + web search.
+
+    Stamped at ``create_session``, never mutated; the worker reads it at
+    claim time to pick the agent harness. Member values match the
+    Postgres ``agent_type`` enum and the worker's
+    ``agent_worker.infra.database.AgentType`` — a closed Python / DB
+    contract. UPPERCASE matches the ``session_status`` / ``sandbox_status``
+    convention.
+    """
+
+    FULL = "FULL"
+    LITE = "LITE"
+
+
+class Tier(StrEnum):
+    """Capability tier the user picks for a session — the product-facing
+    "how powerful" choice, decoupled from any vendor model name.
+
+    - ``FAST`` — quick responses for everyday chat / light tasks.
+    - ``STANDARD`` — balanced speed and capability (the default).
+    - ``ADVANCED`` — strongest reasoning / long-task capability.
+
+    Stamped at ``create_session`` alongside the resolved ``model_id``
+    (``settings.session_tier_models[tier]``); the tier round-trips to the
+    UI while ``model_id`` stays the server-side execution / billing truth.
+    UPPERCASE matches the ``agent_type`` / ``session_status`` convention.
+    """
+
+    FAST = "FAST"
+    STANDARD = "STANDARD"
+    ADVANCED = "ADVANCED"
+
+
 class Session(Base):
     __tablename__ = "session"
 
@@ -69,12 +107,46 @@ class Session(Base):
     # ``WHERE session_id=? AND status<>'TERMINATED' ORDER BY created_at
     # DESC LIMIT 1`` (worker's ``claim_next_turn`` does exactly that).
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Model id used for this session's agent turns. Stamped at creation
-    # time from ``settings.default_session_model_id``; never mutated. No
-    # Python-side ``default=`` — the endpoint passes it explicitly so
-    # forgetting to wire config surfaces as an IntegrityError immediately
-    # rather than silently writing a stale model name.
+    # Model id used for this session's agent turns. Resolved at creation
+    # from the picked ``tier`` via ``settings.session_tier_models``; never
+    # mutated. No Python-side ``default=`` — the endpoint passes it
+    # explicitly so forgetting to wire config surfaces as an IntegrityError
+    # immediately rather than silently writing a stale model name. Read by
+    # the worker (agent build) and credits (billing); the UI never sees it.
     model_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Capability tier the user picked (FAST / STANDARD / ADVANCED). Stamped
+    # at creation like ``model_id`` and round-tripped to the UI for the
+    # session badge; ``model_id`` above is the tier resolved through
+    # ``settings.session_tier_models``. No Python-side ``default=`` —
+    # ``create_session`` sets it explicitly (migration backfilled existing
+    # rows to STANDARD).
+    tier: Mapped[Tier] = mapped_column(
+        SAEnum(
+            Tier,
+            name="session_tier",
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
+        nullable=False,
+    )
+    # Whether the agent's thinking is on for this session (surfaced to users
+    # as "deep think"). Stamped at creation from the composer toggle (default
+    # on); the worker reads it at claim time to toggle the model's thinking
+    # config. No Python-side ``default=`` — ``create_session`` sets it
+    # explicitly (the migration backfilled existing rows to FALSE).
+    thinking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # Which agent kind this session runs (FULL = sandbox agent, LITE =
+    # Q&A + web search). Stamped at creation like ``model_id``, never
+    # mutated; the worker reads it at claim time (JOINed onto the turn) to
+    # pick the harness. No Python-side ``default=`` — ``create_session``
+    # sets it explicitly (the migration backfilled existing rows to FULL).
+    agent_type: Mapped[AgentType] = mapped_column(
+        SAEnum(
+            AgentType,
+            name="agent_type",
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
+        nullable=False,
+    )
     # No ``default=`` / ``server_default=`` — every INSERT site has to
     # set status explicitly. There is exactly one INSERT site
     # (``create_session``) and it picks ``IDLE``. A fresh-session

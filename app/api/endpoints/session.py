@@ -155,16 +155,21 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SessionResponse:
-    model_id = body.model_id or settings.default_session_model_id
-    if model_id not in settings.supported_session_model_ids:
+    # The client picks a capability tier; resolve it to the concrete model
+    # the worker / credits use. ``model_id`` is never sent over the wire.
+    model_id = settings.session_tier_models.get(body.tier)
+    if model_id is None or model_id not in settings.supported_session_model_ids:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"Unsupported model_id: {model_id!r}",
+            f"Unconfigured tier: {body.tier!r}",
         )
     session = Session(
         title=body.title,
         user_id=current_user.id,
         model_id=model_id,
+        tier=body.tier,
+        agent_type=body.agent_type,
+        thinking_enabled=body.thinking_enabled,
         status=SessionStatus.IDLE,
     )
     db.add(session)
@@ -256,7 +261,8 @@ async def get_session(
         id=session.id,
         title=session.title,
         status=session.status,
-        model_id=session.model_id,
+        tier=session.tier,
+        agent_type=session.agent_type,
         created_at=session.created_at,
         updated_at=session.updated_at,
         messages=messages,
