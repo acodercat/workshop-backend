@@ -31,7 +31,7 @@ from config import settings
 
 USERS = [
     # ("tianlan", "tianlan20260518"),
-    ("libinbin", "libinbin20260526"),
+    ("hewei", "hewei20260530"),
     # ("andy", "andy123"),
     # ("zhou", "zhou123"),
     # ("jun", "jun123"),
