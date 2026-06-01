@@ -50,8 +50,8 @@ async def test_full_session_lifecycle(
 ) -> None:
     """Happy-path round-trip: create → message → SSE → verify → delete."""
 
-    # 1. Create the session. Default model_id is stamped from
-    #    ``settings.default_session_model_id`` server-side.
+    # 1. Create the session. No tier sent → defaults to STANDARD, which the
+    #    server resolves to a model_id via ``settings.session_tier_models``.
     resp = await http_client.post(
         "/sessions",
         json={"title": "E2E test session"},
@@ -63,6 +63,9 @@ async def test_full_session_lifecycle(
     # yet). The first POST to /messages flips it to RUNNING; one of
     # three terminals replaces RUNNING when the agent stops.
     assert session["status"] == "IDLE", session
+    # No tier sent → STANDARD default, round-tripped on the response
+    # (the resolved model_id stays server-side and is not exposed).
+    assert session["tier"] == "STANDARD", session
 
     # 2. Enqueue a user message. Backend flips status to RUNNING and
     #    publishes the wake notification before this returns.

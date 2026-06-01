@@ -102,6 +102,24 @@ SESSION_FILE_POLICY = UploadPolicy(
         ".svg": "image/svg+xml",
         ".heic": "image/heic",
         ".heif": "image/heif",
+        # video
+        ".webm": "video/webm",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".m4v": "video/x-m4v",
+        ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo",
+        # audio
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".ogg": "audio/ogg",
+        ".oga": "audio/ogg",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".opus": "audio/opus",
+        ".weba": "audio/webm",
+        ".wma": "audio/x-ms-wma",
     },
 )
 

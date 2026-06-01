@@ -41,8 +41,9 @@ uv run alembic upgrade head
 uv run alembic revision --autogenerate -m "description"
 
 # Tests (pytest; asyncio_mode is project-level "auto" — no @pytest.mark.asyncio needed)
-uv run pytest tests/                       # currently only tests/e2e/ — there is no unit suite
-uv run pytest tests/e2e/test_session_e2e.py::test_name
+uv run pytest tests/                       # ~80 offline unit tests (tests/*.py) — no DB/Redis/network
+uv run pytest tests/test_credit_settle_usage.py::test_name
+# tests/*.py (unit) run with no external deps; tests/e2e/ is opt-in (see below)
 
 # Full-pipeline E2E (opt-in; needs backend + worker + Redis + Postgres + sandbox running)
 RUN_E2E_TESTS=1 uv run pytest tests/e2e/ -v
@@ -63,9 +64,10 @@ Preconditions before running:
 - Backend dev server up on `:8005` (or override via `BACKEND_BASE_URL`).
 - Agent worker running (`cd ../agent-worker && uv run python -m agent_worker`).
 - Postgres + Redis + OpenSandbox reachable per the worker's `.env`.
-- Worker's `models.toml` has the model id the test creates sessions
-  with — defaults to `settings.default_session_model_id`
-  (`claude-opus-4-6`); change in the test if your env doesn't carry it.
+- Worker's `models.toml` has the model id the test's tier resolves to —
+  the e2e test creates a session with the default `STANDARD` tier, which
+  `settings.session_tier_models` maps to a concrete model id; make sure
+  that id exists in `models.toml`, or adjust the tier map.
 
 The `test_user` fixture in `tests/conftest.py` provisions a unique
 throwaway user via raw psycopg (no public registration endpoint exists
@@ -94,7 +96,7 @@ Redis key names (`SESSION_QUEUE`, `SESSION_STREAM_PREFIX`, `WORKER_NOTIFY_CHANNE
 - **DB is rendering state.** `message.blocks` (JSONB) holds the structured block list the frontend renders. USER rows are inserted in `queue_user_message`; ASSISTANT rows are projected from worker events (the worker writes them — backend does not synthesize assistant rows).
 - **Worker owns LLM state.** Conversation history / compacted context lives on the worker side. The backend enqueues only `{session_id, query, files}` — it deliberately does **not** send history.
 - `session.status ∈ {running, complete, failed}` is set by the backend the moment a turn is enqueued (`running`), and flipped to a terminal value by the worker atomically with the assistant insert. The frontend uses this to decide whether to open the SSE stream.
-- `session.model_id` is stamped at session creation (from the `POST /sessions` body, validated against `settings.supported_session_model_ids`, defaulting to `settings.default_session_model_id`) and never mutated. The worker still selects its actual LLM via its own config, **but** the backend now reads `model_id` to look up the credit rate card at reserve time (`app/services/credits/rates.py`) — a `model_id` absent from `settings.credit_rates` makes the reserve fail, so the column is no longer purely an audit field.
+- A new session carries four creation-time, immutable columns. The client picks a **capability tier** (`tier ∈ {FAST, STANDARD, ADVANCED}`, default `STANDARD`) — never a model name; `create_session` resolves it to `session.model_id` via `settings.session_tier_models` (validated against `settings.supported_session_model_ids`). It also stamps `agent_type ∈ {FULL, LITE}` (sandbox agent vs Q&A+web-search, default `FULL`) and `thinking` (extended-reasoning toggle, default on; shown to users as "deep think"). `tier` / `agent_type` round-trip to the UI; `thinking` and `model_id` do not. The worker selects its actual LLM from its own config keyed by `model_id`, **and** the backend reads `model_id` for the credit rate card at reserve time (`app/services/credits/rates.py`) — a `model_id` absent from `settings.credit_rates` makes the reserve fail, so the column is load-bearing, not an audit field.
 - **Soft-delete**: `DELETE /sessions/{id}` sets `session.deleted_at` rather than removing rows (returns 409 while `status == running`). Every read folds `deleted_at IS NULL` into its `session_id`-scoped filter, so a soft-deleted session reads as gone (and its id isn't leaked) while child rows + the credit_reservation back-link are retained. The delete handler settles the session's open reservation first.
 
 ### SSE streaming (`app/services/session/streaming.py`)
@@ -111,6 +113,14 @@ Two pools, intentionally separate (see `_make_redis_client`):
 Sharing a single pool would let SSE long-polls starve short-op traffic. Both pools probe checked-out connections on the 30s `health_check_interval` so a silently-dropped socket surfaces promptly.
 
 Startup uses `_ping_db` / `_ping_redis` with exponential backoff (`startup_probe_*` settings) so a few-second dependency race at boot doesn't crash-loop the pod. Liveness (`/health/live`) is always 200; readiness (`/health/ready`) returns 503 when DB or Redis are unreachable so K8s stops routing to the pod without restarting it.
+
+### Observability (`app/observability.py`)
+
+`install_observability(app)` (called once in `app/main.py`) wires three additive, backend-optional concerns — all no-ops until their backend is configured:
+
+- **Request-id correlation** — `RequestIDMiddleware` reuses a sane inbound `X-Request-ID` (validated against `_REQUEST_ID_RE`, else minted) and binds it into the loguru context so every log line carries `request_id`, echoing it back in the response header. Implemented as **raw ASGI, not `BaseHTTPMiddleware`**, because the latter buffers the response body and would break SSE streaming — this wrapper only touches the response-start message.
+- **Sentry** — no-op until `sentry_dsn` is set (`sentry_environment`, `sentry_traces_sample_rate` knobs).
+- **Prometheus** — `/metrics` endpoint (gated by `metrics_enabled`, default on) via `prometheus-fastapi-instrumentator`, with `/metrics` + both health probes excluded from its own histograms.
 
 ### Enqueue ordering (`app/services/session/enqueue.py`)
 
@@ -133,7 +143,7 @@ There is no open `POST /register`. The flow is: `POST /auth/send-register-code` 
 
 ### Rate limiting (`app/rate_limit.py`)
 
-slowapi, keyed on client IP. Limits are config knobs (`rate_limit_*` in `config.py`): `login` 5/min, `message_create` 30/min, `share_unlock` 5/5min, `register_code` 5/hour, `register` 20/hour, default 200/min. `RateLimitExceeded` is registered as an exception handler in `app/main.py`. If abuse appears, raise the limits behind authenticated identity rather than the per-IP key (NAT'd corp networks otherwise hit the cap collectively).
+slowapi, keyed on client IP, **counters stored in Redis** (`storage_uri=settings.redis_url`) so the limit is a true cluster-wide ceiling rather than per-uvicorn-worker (an in-memory store would make `5/minute` effectively `5 × workers` and reset on restart). Degrades gracefully if Redis is down — `in_memory_fallback_enabled` keeps counting locally and `swallow_errors` ensures a storage blip never 500s a request. Limits are config knobs (`rate_limit_*` in `config.py`): `login` 5/min, `message_create` 30/min, `share_unlock` 5/5min, `register_code` 5/hour, `register` 20/hour, default 200/min. `RateLimitExceeded` is registered as an exception handler in `app/main.py`. If abuse appears, raise the limits behind authenticated identity rather than the per-IP key (NAT'd corp networks otherwise hit the cap collectively).
 
 ### Sharing (`app/api/endpoints/share.py`, `session_share` table)
 
@@ -149,12 +159,14 @@ Frontend uploads/downloads directly to/from Alibaba OSS via presigned URLs. The 
 
 ### Credits / billing (`app/services/credits/`, `app/workers/`)
 
-PAYG credit ledger in front of the LLM turn pipeline. **Every write to `credit_ledger` / `user.credit_balance` funnels through `credits/_internal.py`** — nothing else touches them directly — which preserves the double-entry invariant `user.credit_balance == SUM(credit_ledger.amount)`. Storage unit is **µ-credits** (1 credit = 1_000_000 µ-credits ≈ $0.001 USD).
+PAYG credit ledger in front of the LLM turn pipeline. **Every write to `credit_ledger` / `user.credit_balance` funnels through `credits/_internal.py`** — nothing else touches them directly — which preserves the double-entry invariant `user.credit_balance == SUM(credit_ledger.amount)`. Storage unit is **µ-credits** (1 credit = 10_000_000 µ-credits ≈ $0.01 USD). The µ↔USD peg is invariant at `$1 = 1e9 µ-credits`; the 2026-05 redenomination changed only the credit display denomination (`_MICRO_PER_CREDIT` 1e6→1e7), so stored balances kept their USD value while displayed credit numbers shrank 10×.
 
 Per-turn lifecycle:
 1. **Reserve** (`reserve_for_turn`, called inside `queue_user_message`): locks the user row, snapshots the model's rate card onto a `credit_reservation`, debits a pessimistic max-estimate, raises `InsufficientCreditsError` if the balance can't cover it. The rate is **frozen on the reservation** so a config change between reserve and settle never re-prices an open turn (customer-trust property: charged cost == cost shown at start).
 2. **Settle** (`settle_turn`): posts the actual cost from `session_turn.input_tokens`/`output_tokens` — written by the worker in the same fenced transaction as its terminal status flip, so settle reads durable billing-grade storage, **not** the TTL'd Redis stream (a V1 race that's been removed). Idempotent. `refund_reservation` zeros the hold on crash/cancel/lost-worker.
 3. Cost is three additive factors carried in the snapshot: `α·token_cost + β·turn_seconds + γ·model_fee` (`token_markup`, `credit_per_second_credits`, `model_fee_credits`).
+
+**Two-sided pricing (buy vs sell).** The cost peg above (1 credit ≈ $0.01 of LLM COGS) is the **cost basis**, used to price a turn. Separately, `settings.credit_price_cny` (default ¥0.1/credit) is the **customer-facing RMB sale price** for converting a top-up payment into credits — the domestic-market recharge knob. They are deliberately different: selling at ¥0.1 against a ¥0.072 (≈$0.01) cost basis bakes ~28% margin into the recharge step on top of the per-turn token markup. Only `rates.credits_from_cny` (used by `scripts/topup_credits.py --cny` and any future self-serve payment) touches CNY; **billing/settle/balance never see RMB** — they stay entirely on the µ-credit ledger and the USD cost peg. The internal anchor was intentionally **not** redenominated to RMB: at 93 real users / ¥50万 in real top-ups, a peg change would require migrating live balances (high risk), whereas sell-side pricing achieves "1 credit = ¥0.1" with zero balance migration.
 
 Two trigger paths for settle, push + pull halves of one responsibility:
 - **Lazy sweep** (`settle_open_for_user`): user-facing endpoints (`GET /credits/*`, `queue_user_message`) settle that user's open reservations on every hit — covers any user who comes back.
@@ -187,6 +199,6 @@ JSONB list of discriminated blocks. Block types: `text` (USER has `files[]`, ASS
 
 ## Environment variables
 
-Required in `backend/.env`: `db_uri` (PostgreSQL, `postgresql+psycopg://...`), `secret_key` (JWT), `redis_url`, `llm_base_url`, `llm_api_key`, `oss_access_key_id`, `oss_access_key_secret`. `default_session_model_id` (the value written to `session.model_id` on creation) and `supported_session_model_ids` (the whitelist `POST /sessions` validates against) have defaults in `config.py` — keep `supported_session_model_ids` in sync with `agent-worker/models.toml`, since a mismatch surfaces as a worker-side `ValueError` on the next turn rather than at session creation. SMTP creds (`smtp_*`) default to empty strings so dev boxes without SMTP access still boot — Lark Suite Mail is the default provider (`smtp_host=smtp.larksuite.com`, port 465 SSL).
+Required in `backend/.env`: `db_uri` (PostgreSQL, `postgresql+psycopg://...`), `secret_key` (JWT), `redis_url`, `llm_base_url`, `llm_api_key`, `oss_access_key_id`, `oss_access_key_secret`. `session_tier_models` (maps the UI tier `FAST`/`STANDARD`/`ADVANCED` → the `model_id` written to `session.model_id`) and `supported_session_model_ids` (the whitelist the resolved `model_id` is checked against) have defaults in `config.py` — keep both in sync with `agent-worker/models.toml`, since a mismatch surfaces as a worker-side `ValueError` on the next turn rather than at session creation. SMTP creds (`smtp_*`) default to empty strings so dev boxes without SMTP access still boot — Lark Suite Mail is the default provider (`smtp_host=smtp.larksuite.com`, port 465 SSL).
 
 Credit/quota knobs (all defaulted in `config.py`, edit-and-restart for V1): `credit_rates` (per-model rate card — one entry per `supported_session_model_ids` model, else reserve fails for that model), `credit_per_second_credits` (β infra fee), `credit_reserve_max_turn_seconds` / `credit_reserve_max_input_tokens` (pessimistic reserve-time upper bounds; settle uses actuals), `credit_welcome_grant_credits` (auto-grant on registration). Skills use `oss_skill_bucket_name` (separate OSS bucket for bundles). See `config.py` for the full `Settings` model.

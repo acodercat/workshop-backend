@@ -51,6 +51,12 @@ class SessionTurnStatus(StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     COMPLETE = "COMPLETE"
+    # User-initiated cancel: the turn ran but was cut short by user
+    # intent. Distinct from COMPLETE so the queue layer records intent
+    # honestly, mirroring the parent ``session_status.CANCELLED``. The
+    # worker writes it via ``cancel_turn``; tokens are still recorded
+    # (partial work is billable).
+    CANCELLED = "CANCELLED"
     FAILED = "FAILED"
 
 

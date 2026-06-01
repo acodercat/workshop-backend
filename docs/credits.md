@@ -11,8 +11,8 @@ migrations. Deferred work and forward-looking plans live in
 ## 1. TL;DR
 
 - **PAYG, double-entry ledger** with reserve-then-settle semantics.
-- **All math is integer µ-credits** (1 credit = 1,000,000 µ-credits,
-  1 credit ≈ \$0.001 USD of LLM cost). No floats anywhere downstream
+- **All math is integer µ-credits** (1 credit = 10,000,000 µ-credits,
+  1 credit ≈ \$0.01 USD of LLM cost). No floats anywhere downstream
   of `app/services/credits/rates.py`.
 - **Pre-deduct + settle** — the right pattern for an agent platform
   where a single turn can cost \$1–\$5 and run for minutes; not the
@@ -80,10 +80,17 @@ Floats accumulate drift over millions of rows. `numeric` is slow and
 its `SUM` is provider-dependent. We use `bigint` with a fixed scale:
 
 ```
-1 USD             = 1_000_000_000 µ-credits
-1 credit          = 1_000_000 µ-credits ≈ \$0.001 USD of cost
-display credits   = bigint balance // 1_000_000
+1 USD             = 1_000_000_000 µ-credits        (invariant peg)
+1 credit          = 10_000_000 µ-credits ≈ \$0.01 USD of cost
+display credits   = bigint balance // 10_000_000
 ```
+
+> **Redenomination (2026-05):** `_MICRO_PER_CREDIT` went 1e6 → 1e7,
+> revaluing 1 credit from \$0.001 to \$0.01. Only the credit *display
+> denomination* changed — the µ↔USD peg (`$1 = 1e9 µ`) and every stored
+> µ-credit balance are unchanged, so displayed credit numbers shrank 10×
+> with no change to anyone's USD value. Whole-credit configs (β,
+> welcome grant) were divided by 10 in the same change.
 
 Cost is computed in floats during one short helper
 (`rates.cost_micro_credits`), then `math.ceil`'d into the integer
@@ -266,14 +273,14 @@ note is short because the org concept here is identity-only for V3.
 | Term | What |
 |---|---|
 | **µ-credit** | The storage unit. Integer bigint. 1 µ-credit ≈ \$0.000000001 USD of LLM cost. |
-| **credit** | The display unit. `credits = µ-credits // 1_000_000`. 1 credit ≈ \$0.001 USD. |
+| **credit** | The display unit. `credits = µ-credits // 10_000_000`. 1 credit ≈ \$0.01 USD. |
 | **reserve** | An OPEN reservation row + a negative ledger entry. Holds funds before the worker starts. |
 | **settle** | The pair of ledger rows that close out a reservation with the actual cost. State → SETTLED. |
 | **refund** | Closing out a reservation with zero actual cost (worker died, session deleted, usage missing). State → CANCELLED. |
 | **rate snapshot** | The frozen copy of the rate-card row stored on the reservation. Settle uses this, not the live `settings.credit_rates`. |
 | **rate card** | `settings.credit_rates`: per-model `{in_per_1k_usd, out_per_1k_usd, token_markup, model_fee_credits, reserve_max_output_tokens}` plus global `credit_per_second_credits`. |
 | **token markup** | Multiplier on token provider cost only. Covers gross margin + FX volatility for the LLM-cost component. |
-| **welcome grant** | One-time TOPUP at registration. `settings.credit_welcome_grant_credits`, default 100_000. |
+| **welcome grant** | One-time TOPUP at registration. `settings.credit_welcome_grant_credits`, default 500 (= \$5 at the post-2026-05 peg). |
 | **invariant** | `user.credit_balance == SUM(credit_ledger.amount)`. Always. Cron-checkable. |
 
 ---
@@ -293,8 +300,8 @@ Same formula, different inputs.
 ### Unit system
 
 ```
-1 credit          = 1_000_000 µ-credits     ≈ $0.001 USD of LLM cost
-1 USD             = 1_000_000_000 µ-credits  (the conversion peg)
+1 credit          = 10_000_000 µ-credits    ≈ $0.01 USD of LLM cost
+1 USD             = 1_000_000_000 µ-credits  (the conversion peg, invariant)
 ```
 
 All ledger amounts are stored as µ-credit `bigint`. `ceil` happens
@@ -320,10 +327,10 @@ token_micro     = ( input_tokens  / 1000 · in_per_1k_usd
 
 duration_micro  = max(0, turn_seconds)
                 · per_second_credits      ← β
-                · 1_000_000               ← credits → µ-credits
+                · 10_000_000              ← credits → µ-credits
 
 fee_micro       = model_fee_credits       ← γ
-                · 1_000_000
+                · 10_000_000
 
 cost_micro      = ceil(token_micro + duration_micro + fee_micro)
 ```

@@ -100,8 +100,8 @@ class User(Base):
         ForeignKey("organization.id", ondelete="RESTRICT"),
         nullable=True,
     )
-    # PAYG credit balance, in **µ-credits** (1 credit = 1_000_000 µ-credits;
-    # 1 credit ≈ $0.001 USD of LLM cost). Cached materialization of
+    # PAYG credit balance, in **µ-credits** (1 credit = 10_000_000 µ-credits;
+    # 1 credit ≈ $0.01 USD of LLM cost). Cached materialization of
     # ``SUM(credit_ledger.amount WHERE user_id = self.id)``; the ledger
     # is the source of truth. ``bigint`` keeps all arithmetic integer
     # (the alternative ``numeric`` accumulates float-style errors over

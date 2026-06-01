@@ -5,14 +5,20 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 from app.common.filenames import validate_input_filename
-from app.models.session import SessionStatus
+from app.models.session import AgentType, SessionStatus, Tier
 from app.schemas.message_feedback import FeedbackResponse
 from config import settings
 
 
 class SessionCreate(BaseModel):
     title: str | None = None
-    model_id: str | None = None
+    # Capability tier; the backend resolves it to a model_id (the model name
+    # is never sent over the wire). FAST / STANDARD / ADVANCED.
+    tier: Tier = Tier.STANDARD
+    # FULL = sandbox agent (default, back-compat); LITE = Q&A + web search.
+    agent_type: AgentType = AgentType.FULL
+    # Agent thinking toggle ("deep think" in the UI); default on.
+    thinking_enabled: bool = True
 
 
 class SessionUpdate(BaseModel):
@@ -25,7 +31,8 @@ class SessionResponse(BaseModel):
     user_id: int | None
     title: str | None
     status: SessionStatus
-    model_id: str
+    tier: Tier
+    agent_type: AgentType
     created_at: datetime
     updated_at: datetime
 
@@ -93,7 +100,8 @@ class SessionDetailResponse(BaseModel):
     id: UUID
     title: str | None
     status: SessionStatus
-    model_id: str
+    tier: Tier
+    agent_type: AgentType
     created_at: datetime
     updated_at: datetime
     messages: list[MessageResponse]

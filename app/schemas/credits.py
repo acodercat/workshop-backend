@@ -1,7 +1,7 @@
 """Pydantic schemas for the credit endpoints.
 
 Wire surface deliberately uses **whole credits** (integer; 1 credit
-= $0.001 USD of LLM cost), not µ-credits. The µ-credit storage unit
+= $0.01 USD of LLM cost), not µ-credits. The µ-credit storage unit
 is an internal precision detail; clients never see it. Conversion
 happens at the endpoint, not in this module — the schema documents
 the shape the frontend renders.

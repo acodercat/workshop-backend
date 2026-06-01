@@ -131,7 +131,7 @@ uv run python -m scripts.topup_credits \
     --reason="prepaid contract Q2"
 ```
 
-- `--credits` is whole credits (1 credit ≈ \$0.001 USD of LLM cost).
+- `--credits` is whole credits (1 credit ≈ \$0.01 USD of LLM cost).
 - `--idempotency-key` is required and globally unique per logical
   top-up. Re-running with the same key after a success exits
   cleanly with "already applied" — safe to retry.
