@@ -200,8 +200,8 @@ class Settings(BaseSettings):
         description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
     )
 
-    # Credit / quota rate card. The peg is ``1 credit = $0.001 USD of
-    # cost``; one credit is split into 1_000_000 µ-credits at the storage
+    # Credit / quota rate card. The peg is ``1 credit = $0.01 USD of
+    # cost``; one credit is split into 10_000_000 µ-credits at the storage
     # layer so all arithmetic stays in ``bigint`` (see
     # :mod:`app.services.credits`). One entry per model_id in
     # ``supported_session_model_ids`` — missing entries make the reserve
@@ -254,10 +254,20 @@ class Settings(BaseSettings):
     # β (per-second infrastructure occupancy fee). Whole credits per
     # second of ``terminated_at - created_at``. Global, not per-model
     # — sandbox/worker capacity doesn't care which LLM is running.
-    # Default 0.0 keeps day-1 behavior unchanged; calibrate from real
-    # ``turn_seconds`` distribution before turning on.
+    # Enabled in the 2026-05 unit-economics review
+    # (``scripts/pricing_analysis.py``): the duration fee covers sandbox
+    # occupancy on long-but-low-token turns, which were the entire
+    # loss-making tail (e.g. sonnet 16.7% of turns sold below cost when
+    # β=0). At ≈$0.0001/s ($0.36/sandbox-hour) it clears that tail.
+    # Re-run the script against real sandbox cost to recalibrate.
+    # Value is 0.01 (not 0.1) because the 2026-05 redenomination made
+    # 1 credit worth $0.01 (10× the prior $0.001) — see
+    # ``_MICRO_PER_CREDIT`` in credits/rates.py; the USD/s fee is
+    # unchanged. Per-message reserve hold from duration = 1860s × 0.01 ≈
+    # 19 credits ($0.19); watch for low-balance users hitting
+    # InsufficientCreditsError on send.
     credit_per_second_credits: float = Field(
-        default=0.0, ge=0.0,
+        default=0.01, ge=0.0,
         description="Credits per second of turn duration (β). 0 = disabled.",
     )
     # Pessimistic upper bound on ``turn_seconds`` used at reserve time
@@ -275,18 +285,32 @@ class Settings(BaseSettings):
         default=16_000,
         description="Upper bound on input tokens assumed at reserve time. Settle uses actual usage.",
     )
-    # Auto-grant on registration. At the current rate card (token_markup
-    # 3.0, β=γ=0) 100k credits is ~500+ HKGAI-V1 turns of headroom — generous "try
-    # the product" allowance; note this is large enough that
-    # signup-farming abuse is a real consideration (gate behind
-    # email/phone verification + rate limits). Set to 0 to disable
-    # (every new user starts at 0 balance, admin must top up). The
-    # grant uses a deterministic idempotency key
+    # Auto-grant on registration. 500 credits at the post-redenomination
+    # peg (1 credit = $0.01) is $5 of headroom — same USD value as the
+    # pre-2026-05 5_000-credit grant, just renumbered with the 10×
+    # denomination change. Generous "try the product" allowance; note
+    # this is large enough that signup-farming abuse is a real
+    # consideration (gate behind email/phone verification + rate limits).
+    # Set to 0 to disable (every new user starts at 0 balance, admin must
+    # top up). The grant uses a deterministic idempotency key
     # ``welcome-{user_id}`` so a registration retry after partial
     # failure can't double-grant.
     credit_welcome_grant_credits: int = Field(
-        default=5_000,
+        default=500,
         description="Whole credits granted to every new user at registration. Set to 0 to disable.",
+    )
+    # Customer-facing RMB sale price of ONE credit, used only to convert a
+    # top-up payment (¥) into credits — the domestic-market recharge knob.
+    # Deliberately distinct from the internal cost peg (1 credit ≈ $0.01 ≈
+    # ¥0.072 of LLM COGS): selling at ¥0.10 against a ¥0.072 cost basis
+    # bakes ~28% margin into the recharge step itself, on top of the
+    # per-turn token markup. Consumed by ``rates.credits_from_cny`` (admin
+    # ``topup_credits --cny`` today, self-serve Alipay/WeChat later). Does
+    # NOT touch billing / settle / balance — those stay on the µ-credit
+    # ledger and the USD cost peg; this is pure sell-side pricing.
+    credit_price_cny: float = Field(
+        default=0.1, gt=0.0,
+        description="Customer-facing RMB price of 1 credit at top-up. ¥0.1 → ¥100 buys 1000 credits.",
     )
 
 

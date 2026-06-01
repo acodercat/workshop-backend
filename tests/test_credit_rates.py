@@ -44,9 +44,9 @@ def test_cost_micro_credits_uses_three_factor_formula() -> None:
         turn_seconds=10.0,
     )
 
-    token_micro = ((1.5 * 0.001) + (2.5 * 0.002)) * 3.0 * 1_000_000_000
-    duration_micro = 10.0 * 0.25 * 1_000_000
-    fee_micro = 1.5 * 1_000_000
+    token_micro = ((1.5 * 0.001) + (2.5 * 0.002)) * 3.0 * rates._USD_TO_MICRO_CREDITS
+    duration_micro = 10.0 * 0.25 * rates._MICRO_PER_CREDIT
+    fee_micro = 1.5 * rates._MICRO_PER_CREDIT
     assert cost == math.ceil(token_micro + duration_micro + fee_micro)
 
 
@@ -76,9 +76,9 @@ def test_reserve_micro_credits_covers_tokens_duration_and_fee(monkeypatch) -> No
         max_input_tokens=1000,
     )
 
-    token_micro = ((1.0 * 0.001) + (3.0 * 0.002)) * 2.0 * 1_000_000_000
-    duration_micro = 120 * 0.5 * 1_000_000
-    fee_micro = 3.0 * 1_000_000
+    token_micro = ((1.0 * 0.001) + (3.0 * 0.002)) * 2.0 * rates._USD_TO_MICRO_CREDITS
+    duration_micro = 120 * 0.5 * rates._MICRO_PER_CREDIT
+    fee_micro = 3.0 * rates._MICRO_PER_CREDIT
     assert cost == math.ceil(token_micro + duration_micro + fee_micro)
 
 
@@ -123,3 +123,21 @@ def test_normalize_snapshot_requires_reserve_max_output_or_legacy() -> None:
             "token_markup": 1.3,
             "captured_at": "2026-05-01T00:00:00+00:00",
         })
+
+
+def test_credits_from_cny_uses_sale_price(monkeypatch) -> None:
+    monkeypatch.setattr(rates.settings, "credit_price_cny", 0.1)
+
+    assert rates.credits_from_cny(100) == 1000   # ¥100 → 1000 credits
+    assert rates.credits_from_cny(50) == 500
+    assert rates.credits_from_cny(0.1) == 1
+    # Decimal path: naive float ``100 / 0.1`` can be 999.999… and floor
+    # to 999 — the customer must not be shortchanged a credit.
+    assert rates.credits_from_cny(100.0) == 1000
+    # Sub-credit remainder floors in the operator's favor.
+    assert rates.credits_from_cny(99.95) == 999
+
+
+def test_credits_from_cny_respects_configured_price(monkeypatch) -> None:
+    monkeypatch.setattr(rates.settings, "credit_price_cny", 0.05)
+    assert rates.credits_from_cny(100) == 2000   # ¥0.05/credit → ¥100 = 2000

@@ -59,8 +59,9 @@ from app.models.session_turn import SessionTurn
 from app.services.credits.rates import cost_micro_credits, snapshot_rate
 from config import settings
 
-# Revenue from ``cost_micro_credits`` is in µ-credits; 1 credit = $0.001
-# and 1 credit = 1e6 µ-credits, so 1 USD = 1e9 µ-credits.
+# Revenue from ``cost_micro_credits`` is in µ-credits. The µ↔USD peg is
+# invariant ($1 = 1e9 µ-credits) regardless of the credit denomination,
+# so this constant is unaffected by the 2026-05 redenomination.
 _MICRO_PER_USD = 1_000_000_000
 
 
@@ -215,8 +216,8 @@ def _recommend(totals: dict, target_margin: float, sandbox_usd_per_hour: float) 
         return
 
     # β so the duration fee recovers sandbox COGS. credits/sec; peg
-    # 1 credit = $0.001 → β = (USD/hour) / 3600 / 0.001 = (USD/hour)/3.6.
-    beta_rec = sandbox_usd_per_hour / 3.6
+    # 1 credit = $0.01 → β = (USD/hour) / 3600 / 0.01 = (USD/hour)/36.
+    beta_rec = sandbox_usd_per_hour / 36.0
     if true_cogs / (1 - target_margin) <= sand:
         alpha_rec = 1.0  # sandbox alone exceeds target revenue; β carries it
     else:
@@ -281,9 +282,16 @@ async def main(args: argparse.Namespace) -> int:
             + out_tok / 1000.0 * rate["out_per_1k_usd"]
         )
         sandbox_cogs = duration_s / 3600.0 * args.sandbox_usd_per_hour
+        # ``--beta`` lets you preview a per-second price that isn't yet
+        # in config (e.g. "what if β=0.1?"). Default None → use the
+        # snapshot's real ``per_second_credits`` (today 0.0).
+        priced_rate = (
+            {**rate, "per_second_credits": args.beta}
+            if args.beta is not None else rate
+        )
         revenue = (
             cost_micro_credits(
-                rate, input_tokens=in_tok, output_tokens=out_tok,
+                priced_rate, input_tokens=in_tok, output_tokens=out_tok,
                 turn_seconds=duration_s,
             )
             / _MICRO_PER_USD
@@ -300,7 +308,7 @@ async def main(args: argparse.Namespace) -> int:
     print("=" * 64)
     print(
         f"PRICING ANALYSIS — last {args.days}d   "
-        f"sandbox=${args.sandbox_usd_per_hour}/h   peg 1 credit=$0.001"
+        f"sandbox=${args.sandbox_usd_per_hour}/h   peg 1 credit=$0.01"
     )
     print("=" * 64)
 
@@ -344,6 +352,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--target-margin", type=float, default=0.65,
         help="Target blended gross margin (0..1) for the recommendation.",
+    )
+    p.add_argument(
+        "--beta", type=float, default=None,
+        help="Preview a per-second price (credits/sec) instead of the "
+        "configured one. e.g. --beta=0.1",
     )
     return p.parse_args()
 

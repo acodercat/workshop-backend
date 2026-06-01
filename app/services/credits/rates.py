@@ -15,20 +15,30 @@ snapshot so settle is self-contained):
          + γ·model_fee(model)        # per-model value premium, fixed per turn
 
 Everything in this module deals in **µ-credits** (the storage unit;
-1 credit = 1_000_000 µ-credits, 1 credit ≈ $0.001 USD).
+1 credit = 10_000_000 µ-credits, 1 credit ≈ $0.01 USD).
 """
 
 import math
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import TypedDict
 
 from config import settings
 
 # 1 USD of LLM cost == this many µ-credits, given the peg
-# (1 credit = $0.001, 1 credit = 1_000_000 µ-credits → $1 = 1e9 µ-credits).
+# (1 credit = $0.01, 1 credit = 10_000_000 µ-credits → $1 = 100 credits = 1e9 µ-credits).
+#
+# µ-credit is the REAL stored currency; "credit" is only a display
+# denomination. This µ↔USD peg is INVARIANT. The 2026-05 denomination
+# change (1e6 → 1e7 µ per credit, making 1 credit worth $0.01 instead of
+# $0.001) moved only ``_MICRO_PER_CREDIT`` below — every stored µ-credit
+# balance keeps its exact USD value, while displayed credit numbers shrink
+# 10× (a "redenomination", not a revaluation). Configs expressed in whole
+# credits (β ``credit_per_second_credits``, ``credit_welcome_grant_credits``)
+# were divided by 10 in the same change to hold their USD value constant.
 _USD_TO_MICRO_CREDITS = 1_000_000_000
-# 1 whole credit == this many µ-credits (the storage-unit conversion).
-_MICRO_PER_CREDIT = 1_000_000
+# 1 whole credit == this many µ-credits (the display-denomination conversion).
+_MICRO_PER_CREDIT = 10_000_000
 
 
 class RateSnapshot(TypedDict):
@@ -140,8 +150,8 @@ def cost_micro_credits(
                          + out/1k · out_per_1k_usd) · token_markup)
                        · 1e9                                  # USD → µ-credits
         duration_micro = max(0, turn_seconds) · per_second_credits
-                       · 1_000_000                            # credits → µ-credits
-        fee_micro      = model_fee_credits · 1_000_000
+                       · _MICRO_PER_CREDIT                    # credits → µ-credits
+        fee_micro      = model_fee_credits · _MICRO_PER_CREDIT
 
         cost_micro     = ceil(token_micro + duration_micro + fee_micro)
 
@@ -189,3 +199,21 @@ def credits_from_micro(amount_micro: int) -> int:
 def micro_from_credits(amount_credits: int) -> int:
     """Convert whole-credit integer to µ-credits (storage)."""
     return amount_credits * _MICRO_PER_CREDIT
+
+
+def credits_from_cny(amount_cny: float | str) -> int:
+    """Whole credits a customer receives for an RMB top-up payment.
+
+    Uses the **customer-facing sale price** ``settings.credit_price_cny``
+    (¥0.1/credit by default) — NOT the internal USD cost peg. This is the
+    domestic recharge conversion; the gap between sale price and cost
+    basis is intentional margin and lives only in this sell-side path
+    (billing/settle never sees CNY).
+
+    Decimal arithmetic (not float division) because ``¥100 / 0.1`` in
+    binary float is ``999.9999…`` and would silently shortchange the
+    customer by one credit. Floors any sub-credit remainder in the
+    operator's favor, matching the µ-credit ``ceil`` convention.
+    """
+    credits = Decimal(str(amount_cny)) / Decimal(str(settings.credit_price_cny))
+    return int(credits)  # int(Decimal) truncates toward zero == floor for ≥0
