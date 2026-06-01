@@ -129,5 +129,14 @@ async def read_stream(
     default just keeps the calling generator from spinning when the
     stream is idle (10 idle SSE clients × 100ms loop = 100 RPS of
     pointless XREAD traffic).
+
+    A socket read timeout is treated as "no new entries" (return ``[]``)
+    rather than propagated: a blocking XREAD that trips the connection's
+    read timeout — a transient network blip, or a ``socket_timeout``
+    shorter than ``block_ms`` — should make the SSE generator loop, not
+    crash the stream. The caller advances no cursor and re-blocks.
     """
-    return await redis.xread({key: cursor}, count=count, block=block_ms) or []
+    try:
+        return await redis.xread({key: cursor}, count=count, block=block_ms) or []
+    except aioredis.TimeoutError:
+        return []

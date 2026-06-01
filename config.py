@@ -97,6 +97,18 @@ class Settings(BaseSettings):
     redis_url: str = Field(description="Redis connection URL")
     redis_pool_size: int = Field(default=30, description="Max connections for short Redis ops")
     redis_streaming_pool_size: int = Field(default=100, description="Max connections for SSE long-poll (per worker process)")
+    # Read timeout for the STREAMING pool only. SSE XREADs block up to
+    # ``read_stream``'s ``block_ms`` (15s) per call, so this MUST exceed
+    # that — otherwise a blocking XREAD trips the socket read timeout and
+    # the SSE connection dies mid-poll. Set explicitly (overriding any
+    # ``socket_timeout`` baked into ``redis_url``) because the short-op
+    # pool legitimately wants a *short* socket timeout for fast failure,
+    # but the streaming pool must tolerate the long block. Headroom above
+    # 15s lets a genuinely dead connection still surface as a timeout.
+    redis_streaming_socket_timeout_seconds: float = Field(
+        default=30.0,
+        description="Socket read timeout for the SSE streaming pool; must exceed read_stream block_ms (15s).",
+    )
     # Short-op pool uses BlockingConnectionPool: when full, callers wait
     # this long for a connection before raising. Trades a tail-latency
     # spike for fewer 5xx during traffic bursts.
