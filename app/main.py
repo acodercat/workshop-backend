@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import BlockingConnectionPool, ConnectionPool
+from redis.asyncio.connection import parse_url
 from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -46,18 +47,13 @@ ROUTERS = [
 ]
 
 
-# Sentinel: distinguishes "caller did not specify socket_timeout (inherit
-# whatever redis_url carries)" from "caller explicitly set it (incl. None)".
-_INHERIT_SOCKET_TIMEOUT = object()
-
-
 def _make_redis_client(
     url: str,
     *,
     max_connections: int,
     blocking: bool,
     pool_timeout: float | None = None,
-    socket_timeout: object = _INHERIT_SOCKET_TIMEOUT,
+    socket_timeout: float | None = None,
 ) -> aioredis.Redis:
     """Build a Redis client backed by the requested pool class.
 
@@ -71,31 +67,31 @@ def _make_redis_client(
     cap is hit, it means the box is already serving its target number
     of streams; rejecting the next connection cleanly beats letting it
     pile up.
+
+    ``socket_timeout`` is a per-pool **behaviour** knob (the short-op pool
+    wants a short fast-fail; the streaming pool must outlast a blocking
+    XREAD), so it is owned by config and passed in explicitly — never read
+    from the URL query string, where a single value can't serve both pools
+    and would be ambiguous. ``parse_url`` extracts only the connection
+    target (host/port/db/auth/ssl); our kwargs layer on top, so the
+    explicit ``socket_timeout`` always wins regardless of the URL.
     """
     pool_cls = BlockingConnectionPool if blocking else ConnectionPool
-    pool_kwargs: dict = {
-        "max_connections": max_connections,
-        "decode_responses": True,
-        # Probe pooled connections on next-use so a silently-dropped
-        # TCP socket (Redis OOM, kernel half-open, middleware drop
-        # without RST) surfaces as a prompt ``ConnectionError`` instead
-        # of an indefinite ``recv``. The 30s cadence is no-op on
-        # healthy connections; SSE long-poll commands are unaffected
-        # because the check fires only at connection checkout.
-        "health_check_interval": 30,
-    }
+    conn_kwargs = parse_url(url)
+    conn_kwargs.update(
+        max_connections=max_connections,
+        decode_responses=True,
+        # Probe pooled connections on checkout so a silently-dropped TCP
+        # socket (Redis OOM, kernel half-open, middleware drop without RST)
+        # surfaces as a prompt ``ConnectionError`` instead of an indefinite
+        # ``recv``. No-op on healthy connections; only fires at checkout, so
+        # SSE long-poll commands are unaffected mid-stream.
+        health_check_interval=30,
+        socket_timeout=socket_timeout,
+    )
     if blocking and pool_timeout is not None:
-        pool_kwargs["timeout"] = pool_timeout
-    pool = pool_cls.from_url(url, **pool_kwargs)
-    if socket_timeout is not _INHERIT_SOCKET_TIMEOUT:
-        # ``from_url`` does ``kwargs.update(parse_url(url))`` — a
-        # ``socket_timeout`` baked into redis_url overrides one passed as a
-        # kwarg. So force ours onto the pool's per-connection kwargs AFTER
-        # construction; otherwise the streaming pool's long read timeout
-        # would lose to a short socket_timeout in the URL and blocking
-        # XREADs would die mid-poll.
-        pool.connection_kwargs["socket_timeout"] = socket_timeout
-    return aioredis.Redis(connection_pool=pool)
+        conn_kwargs["timeout"] = pool_timeout
+    return aioredis.Redis(connection_pool=pool_cls(**conn_kwargs))
 
 
 async def _ping_redis(
@@ -104,7 +100,7 @@ async def _ping_redis(
     max_connections: int,
     blocking: bool = False,
     pool_timeout: float | None = None,
-    socket_timeout: object = _INHERIT_SOCKET_TIMEOUT,
+    socket_timeout: float | None = None,
 ) -> aioredis.Redis:
     """Connect to Redis with bounded exponential backoff and a sized pool.
 
@@ -185,9 +181,9 @@ async def lifespan(app: FastAPI):
         settings.redis_url,
         max_connections=settings.redis_streaming_pool_size,
         blocking=False,
-        # Override any short ``socket_timeout`` in redis_url: a blocking
-        # XREAD holds the socket for up to block_ms (15s), so the read
-        # timeout must exceed that or the SSE poll dies mid-block.
+        # A blocking XREAD holds the socket for up to block_ms (15s), so the
+        # streaming pool needs a read timeout longer than that; the short-op
+        # pool leaves it unset. See redis_streaming_socket_timeout_seconds.
         socket_timeout=settings.redis_streaming_socket_timeout_seconds,
     )
     logger.info(
