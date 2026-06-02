@@ -6,12 +6,12 @@ keeping unused endpoints invites scope creep and security regressions
 admin UI, ideally with a dedicated search index instead of ``ilike``.
 """
 
-from fastapi import APIRouter, Depends, Header, Request, status
+from fastapi import APIRouter, Depends, Request, status
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.dependencies import get_db, get_redis, get_redis_streaming
+from app.api.dependencies import get_db, get_redis, get_user_event_hub
 from app.auth import (
     authenticate_and_get_user,
     authenticate_for_streaming,
@@ -33,7 +33,7 @@ from app.services.auth.email_change import (
     change_email,
     request_email_change_code,
 )
-from app.services.user import stream_user_events
+from app.services.user import UserEventHub, stream_user_events
 from config import settings
 
 router = APIRouter()
@@ -72,27 +72,24 @@ async def update_profile(
 
 @router.get("/me/events")
 async def stream_current_user_events(
-    redis: aioredis.Redis = Depends(get_redis_streaming),
+    hub: UserEventHub = Depends(get_user_event_hub),
     current_user: User = Depends(authenticate_for_streaming),
-    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ):
     """Long-lived SSE stream of cross-session notifications for the
     authenticated user. Receives ``session.status_changed`` events for
     any session this user owns, regardless of which page the client is
     on. The generator runs until the HTTP client disconnects.
 
-    ``Last-Event-ID`` is sent by the browser on reconnect; see
-    :func:`stream_user_events` for the replay semantics.
+    Live-only: events are fanned out in-process from the per-user
+    notification channel (see :class:`~app.services.user.hub.UserEventHub`);
+    the page's initial sidebar state comes from ``GET /sessions``, so
+    there is no ``Last-Event-ID`` replay.
 
     Auth uses :func:`authenticate_for_streaming` (not the standard
     request-scoped variant) so the JWT lookup's DB session closes before
     the SSE response begins — see that function's docstring for why.
     """
-    return EventSourceResponse(
-        stream_user_events(
-            redis, current_user.id, last_event_id=last_event_id,
-        )
-    )
+    return EventSourceResponse(stream_user_events(hub, current_user.id))
 
 
 @router.put("/me/password")

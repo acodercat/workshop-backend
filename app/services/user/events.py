@@ -1,64 +1,53 @@
 """SSE stream generator for the per-user notification channel.
 
 :func:`stream_user_events` is a long-lived async generator that runs
-until the HTTP client disconnects: sse-starlette's internal listener
-observes the ASGI ``http.disconnect`` and cancels the generator's
-task; the ``CancelledError`` propagates through the next suspension
-point (``await`` or ``yield``) and unwinds normally.
+until the HTTP client disconnects: sse-starlette observes the ASGI
+``http.disconnect``, cancels the generator's task, and the
+``CancelledError`` unwinds through ``await queue.get()`` into the
+``finally`` that deregisters the connection from the hub.
 
-Carries cross-session events like ``session.status_changed`` so the
-sidebar's ``RUNNING`` indicator stays in sync regardless of which page
-the user is on.
+Events are fanned out in-process by
+:class:`~app.services.user.hub.UserEventHub` (one Redis SUBSCRIBE per
+process), not read per-connection from Redis. Carries cross-session
+``session.status_changed`` so the sidebar's RUNNING indicator stays in
+sync regardless of which page the user is on.
 """
 
-import json
 import time
 from typing import AsyncIterator
 
-import redis.asyncio as aioredis
+import orjson
 
-from app.common.sse import event_to_sse, sse_event
-from app.services.redis import read_stream, user_events_key
+from app.common.sse import SSEMessage, sse_event
+from app.services.user.hub import UserEventHub
 
 
 async def stream_user_events(
-    redis: aioredis.Redis,
+    hub: UserEventHub,
     user_id: int,
-    *,
-    last_event_id: str | None = None,
-) -> AsyncIterator[dict]:
-    """Live-tail the per-user notification stream.
+) -> AsyncIterator[SSEMessage]:
+    """Live-tail one user's cross-session notifications via the in-process hub.
 
-    Fresh connect (``last_event_id`` is ``None``) starts from ``$`` —
-    only future entries. Replaying history would overwrite the page's
-    initial session-list snapshot with stale ``COMPLETE``/``FAILED``
-    lines from past turns, silently flipping the sidebar's ``RUNNING``
-    indicator off while a turn is still in flight.
-
-    Reconnect: passing the browser's ``Last-Event-ID`` replays exactly
-    the gap the disconnect created.
+    Live-only: emits events that arrive after the connection opens. The
+    page's initial sidebar state comes from its ``GET /sessions`` fetch,
+    not from this stream — replaying past ``COMPLETE`` / ``FAILED`` lines
+    would wrongly flip a still-running session's indicator off. On
+    reconnect the client re-fetches that list, so an event missed during
+    the gap is reconciled there (``session.status_changed`` is idempotent).
     """
-    # Handshake — fires once per (re)connect, before the XREAD loop.
-    # Mirrors ``session/streaming.py``'s ``session.ready``: distinguishes
-    # "connected, no traffic yet" from "broken connection" for any UI /
-    # ops surface that wants to react, and forces buffering proxies
-    # (nginx ``proxy_buffering on``, some CDNs) to flush bytes
-    # immediately instead of holding the response open until enough
-    # data accumulates. No Redis hop; no entry id (per-connection,
-    # never persisted to the stream).
-    yield sse_event(
-        "user.ready",
-        data=json.dumps({"ts": str(time.time())}),
-    )
+    queue = hub.subscribe(user_id)
+    try:
+        # Handshake before the first event: lets the client distinguish
+        # "connected, idle" from "broken connection", and forces buffering
+        # proxies (nginx, CDNs) to flush bytes immediately. Per-connection;
+        # never persisted.
+        yield sse_event("user.ready", orjson.dumps({"ts": time.time()}).decode())
 
-    key = user_events_key(user_id)
-    cursor = last_event_id or "$"
-
-    while True:
-        entries = await read_stream(redis, key, cursor)
-        for _, messages in entries:
-            for entry_id, event in messages:
-                cursor = entry_id
-                yield event_to_sse(event, entry_id)
-        # Empty result → XREAD timed out without new data. Loop again;
-        # sse-starlette's own ping (default 15s) handles keepalive.
+        while True:
+            # Blocks until the hub routes an event here; sse-starlette's
+            # own ping keeps the connection alive while idle.
+            event = await queue.get()
+            fields = {k: v for k, v in event.items() if k != "type"}
+            yield sse_event(event["type"], orjson.dumps(fields).decode())
+    finally:
+        hub.unsubscribe(user_id, queue)

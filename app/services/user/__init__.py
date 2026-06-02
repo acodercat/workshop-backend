@@ -6,10 +6,13 @@ which submodule the function lives in.
 
 Submodule responsibilities:
 
-- :mod:`~app.services.user.events` — SSE generator for the per-user
-  notification stream (``user_events:{user_id}``).
+- :mod:`~app.services.user.hub` — :class:`UserEventHub`, the process-wide
+  in-process fan-out for the per-user notification channel.
+- :mod:`~app.services.user.events` — SSE generator that tails one user's
+  notifications off the hub.
 """
 
 from app.services.user.events import stream_user_events
+from app.services.user.hub import UserEventHub
 
-__all__ = ["stream_user_events"]
+__all__ = ["UserEventHub", "stream_user_events"]
