@@ -5,8 +5,8 @@ input-queue concepts. Redis still owns:
 
 - Per-session output stream (``session_stream:{id}``) — worker XADDs
   axon events here, the SSE endpoint forwards to the browser.
-- Per-user notification stream (``user_events:{user_id}``) — cross-tab
-  status sync.
+- Per-user notification channel (``user_events:bus``) — cross-session
+  status events, fanned out in-process to a user's SSE connections.
 - Wake pub/sub (``notify:worker``) — backend pings after INSERTing a
   ``session_turn`` so the worker doesn't have to wait for its 5s poll.
   Best-effort: a missed publish is recovered by the poll fallback.
@@ -19,7 +19,7 @@ import uuid
 import redis.asyncio as aioredis
 
 # Wire contract — **mirrored** in ``agent-worker/agent_worker/wire/keys.py``
-# (``STREAM_PREFIX``, ``USER_EVENTS_PREFIX``, ``NOTIFY_CHANNEL``). Any
+# (``STREAM_PREFIX``, ``USER_EVENTS_CHANNEL``, ``NOTIFY_CHANNEL``). Any
 # change here must be coordinated there, or the two services silently
 # desync.
 
@@ -27,11 +27,14 @@ import redis.asyncio as aioredis
 # ``session_stream:{session_id}``; this SSE endpoint XRANGE/XREADs from it.
 SESSION_STREAM_PREFIX = "session_stream"
 
-# Per-user notification stream prefix. The worker XADDs cross-session
-# events (e.g. ``session.status_changed``) to ``user_events:{user_id}``;
-# the per-user SSE endpoint forwards them so the sidebar stays in sync
-# regardless of which page the user is on.
-USER_EVENTS_PREFIX = "user_events"
+# Per-user notification channel. The worker PUBLISHes cross-session
+# events (e.g. ``session.status_changed``) as a ``{user_id, event}`` JSON
+# payload to this single global channel; each backend process SUBSCRIBEs
+# once and fans the event out in-process to that user's SSE connections
+# (see ``app/services/user/hub.py``). One global channel — not one per
+# user — so a process holds a single subscription no matter how many
+# users it serves.
+USER_EVENTS_CHANNEL = "user_events:bus"
 
 # Pub/Sub channel the backend publishes to after INSERTing a
 # ``session_turn`` row. Wakes idle workers immediately instead of
@@ -82,11 +85,6 @@ def email_change_key(email: str) -> str:
     for the *new* address. Lowercased for the same reason as
     :func:`email_verify_key`."""
     return f"{EMAIL_CHANGE_PREFIX}:{email.lower()}"
-
-
-def user_events_key(user_id: int) -> str:
-    """Redis stream key for one user's cross-session notification feed."""
-    return stream_key(USER_EVENTS_PREFIX, str(user_id))
 
 
 def cancel_channel(session_id: str) -> str:

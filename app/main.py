@@ -32,6 +32,7 @@ from app.exception_handlers import (
 )
 from app.observability import install_observability
 from app.rate_limit import limiter, rate_limit_exceeded_handler
+from app.services.user import UserEventHub
 from config import settings
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -194,6 +195,11 @@ async def lifespan(app: FastAPI):
         settings.redis_streaming_pool_size,
     )
 
+    # In-process fan-out for /me/events: one Redis SUBSCRIBE per process
+    # feeds every local SSE connection (see app/services/user/hub.py).
+    app.state.user_event_hub = UserEventHub(app.state.redis)
+    await app.state.user_event_hub.start()
+
     # Background-settle process (sweeper + subscriber) runs as a
     # **sibling**, not inside this event loop — see ``app/workers/run.py``
     # and ``scripts/deploy.sh settle``. Web's lifespan is HTTP-only
@@ -204,6 +210,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await app.state.user_event_hub.stop()
         await app.state.redis.close()
         await app.state.redis_streaming.close()
         await engine.dispose()
