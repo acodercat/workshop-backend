@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 # idempotent status sync where only the latest state matters.
 _QUEUE_MAXSIZE = 64
 
+# How long the reader blocks per ``get_message`` loop. Doubles as the
+# pubsub health-check cadence: each loop re-enters ``parse_response``,
+# which PINGs a silently-dropped subscription connection (→ surfaces as a
+# ConnectionError → resubscribe) instead of blocking forever on a dead
+# socket. A plain ``listen()`` would block indefinitely and never
+# re-check while idle. Aligned with the pool's 30s health_check_interval.
+_READER_TIMEOUT_SECONDS = 30.0
+
 
 class UserEventHub:
     """Fans Redis-published user events out to in-memory SSE queues.
@@ -80,14 +88,33 @@ class UserEventHub:
         """Single SUBSCRIBE for the whole process; route each event to its
         target user's local queues. Resubscribes on a dropped pubsub
         socket — events missed during the reconnect window are tolerated
-        (idempotent status sync; see the module docstring)."""
+        (idempotent status sync; see the module docstring).
+
+        Uses ``get_message(timeout=...)`` rather than ``listen()`` so the
+        loop periodically re-runs the pubsub health check and a dead
+        subscription connection surfaces instead of hanging silently.
+        """
         while True:
             pubsub = self._redis.pubsub()
             try:
                 await pubsub.subscribe(USER_EVENTS_CHANNEL)
-                async for message in pubsub.listen():
-                    if message["type"] == "message":
+                while True:
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True,
+                        timeout=_READER_TIMEOUT_SECONDS,
+                    )
+                    if message is None:
+                        continue  # idle tick — also ran the health check
+                    try:
                         self._dispatch(message["data"])
+                    except Exception:
+                        # One malformed payload must not tear down the
+                        # reader (which would resubscribe and briefly
+                        # stall every connection on this process).
+                        logger.warning(
+                            "user-event hub: dropping malformed payload",
+                            exc_info=True,
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:

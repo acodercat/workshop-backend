@@ -34,7 +34,7 @@ async def get_redis_streaming(request: Request) -> aioredis.Redis:
     return request.app.state.redis_streaming
 
 
-def get_user_event_hub(request: Request):
+async def get_user_event_hub(request: Request):
     """Process-wide :class:`~app.services.user.hub.UserEventHub`.
 
     Built once in the app lifespan; fans the per-user notification
