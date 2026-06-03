@@ -103,6 +103,10 @@ Redis key names (`SESSION_QUEUE`, `SESSION_STREAM_PREFIX`, `WORKER_NOTIFY_CHANNE
 
 Two-phase generator: replay all existing stream entries, then block-read until an `agent.stopped` terminal event arrives. An older version merged `message_chunk` events into one blob on replay and lost tool calls — do not reintroduce that. Cold history is served by `GET /sessions/{id}` (structured `blocks`), not by the SSE endpoint; the stream endpoint is only meaningful while `status == "running"`.
 
+### Per-user notifications `/me/events` (`app/services/user/hub.py`)
+
+Separate from `session_stream`: a lightweight SSE feed carrying idempotent `session.status_changed` for cross-tab sidebar sync. **One Redis `SUBSCRIBE` per process** (the `UserEventHub`, started in the lifespan) fans `user_events:bus` out in-memory to each connection's bounded `asyncio.Queue` — opening `/me/events` allocates a queue, **never a Redis connection**. At-most-once (Pub/Sub) is fine because the payload is idempotent state sync; no replay, no sticky sessions, multi-node native. `USER_EVENTS_CHANNEL` is a wire contract mirrored in the worker (which `PUBLISH`es it) — deploy together. Full design: [`docs/user-events-fanout.md`](docs/user-events-fanout.md).
+
 ### Redis client setup (`app/main.py` lifespan)
 
 Two pools, intentionally separate (see `_make_redis_client`):
