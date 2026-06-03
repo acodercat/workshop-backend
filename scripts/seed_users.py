@@ -31,7 +31,7 @@ from config import settings
 
 USERS = [
     # ("tianlan", "tianlan20260518"),
-    ("hewei", "hewei20260530"),
+    ("jinsheng", "jinsheng20260603"),
     # ("andy", "andy123"),
     # ("zhou", "zhou123"),
     # ("jun", "jun123"),
@@ -39,9 +39,8 @@ USERS = [
     # ("xuchang", "xuchang123"),
 ]
 
-# Whole credits granted to every freshly seeded user. Matches the
-# registration default (``settings.credit_welcome_grant_credits``).
-WELCOME_CREDITS = settings.credit_welcome_grant_credits
+
+WELCOME_CREDITS = 5000
 
 
 def _create_user_with_personal_org(
