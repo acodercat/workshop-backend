@@ -318,7 +318,7 @@ class Settings(BaseSettings):
     # ``welcome-{user_id}`` so a registration retry after partial
     # failure can't double-grant.
     credit_welcome_grant_credits: int = Field(
-        default=500,
+        default=1000,
         description="Whole credits granted to every new user at registration. Set to 0 to disable.",
     )
     # Customer-facing RMB sale price of ONE credit, used only to convert a
