@@ -51,7 +51,10 @@ APP_DIR="$(dirname "$HERE")"
 cd "$APP_DIR"
 
 PORT=8005
-WORKERS=4
+# uvicorn worker processes. Default tuned for an 8-core box: ~cores minus
+# headroom for the settle sibling + OS + bursts (async workers ≈ cores).
+# Override per-host via the WORKERS env var, e.g. `WORKERS=12 bash scripts/deploy.sh restart`.
+WORKERS="${WORKERS:-6}"
 LOG_DIR="$APP_DIR/logs"
 UVICORN_LOG="$LOG_DIR/uvicorn.log"
 SETTLE_LOG="$LOG_DIR/settle.log"
