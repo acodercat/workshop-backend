@@ -8,7 +8,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import BlockingConnectionPool, ConnectionPool
 from redis.asyncio.connection import parse_url
-from redis.exceptions import RedisError
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    RedisError,
+    TimeoutError as RedisTimeoutError,
+)
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -82,13 +88,20 @@ def _make_redis_client(
     conn_kwargs.update(
         max_connections=max_connections,
         decode_responses=True,
-        # Probe pooled connections on checkout so a silently-dropped TCP
-        # socket (Redis OOM, kernel half-open, middleware drop without RST)
-        # surfaces as a prompt ``ConnectionError`` instead of an indefinite
-        # ``recv``. No-op on healthy connections; only fires at checkout, so
-        # SSE long-poll commands are unaffected mid-stream.
-        health_check_interval=30,
         socket_timeout=socket_timeout,
+        # Dead-connection handling — three cooperating layers so a
+        # connection the Redis server reaped for idleness never surfaces
+        # as a failed request:
+        #   * health_check_interval: on checkout, PING first when the
+        #     connection has been idle this long, to prove it's alive.
+        #   * socket_timeout (above): bounds that PING — and every command
+        #     — so a half-open socket fails in seconds, not after the
+        #     kernel's minutes-long TCP retransmits (errno 110).
+        #   * retry / retry_on_error: on that timeout, drop the dead
+        #     connection and rerun the command on a fresh one.
+        health_check_interval=30,
+        retry=Retry(ExponentialBackoff(cap=0.5, base=0.05), retries=2),
+        retry_on_error=[RedisConnectionError, RedisTimeoutError],
     )
     if blocking and pool_timeout is not None:
         conn_kwargs["timeout"] = pool_timeout
@@ -173,6 +186,7 @@ async def lifespan(app: FastAPI):
         max_connections=settings.redis_pool_size,
         blocking=True,
         pool_timeout=settings.redis_pool_timeout_seconds,
+        socket_timeout=settings.redis_socket_timeout_seconds,
     )
     # Streaming pool: SSE long-poll XREADs hold connections for ``block_ms``
     # seconds each. Default ``ConnectionPool`` semantics — once full the

@@ -100,13 +100,24 @@ class Settings(BaseSettings):
     # Read timeout for the STREAMING pool. An SSE XREAD blocks up to
     # ``read_stream``'s ``block_ms`` (15s), so this MUST exceed it — else
     # the blocking read trips the socket timeout and the SSE dies mid-poll.
-    # (The short-op pool, by contrast, leaves socket_timeout unset: its
-    # commands are quick and don't need a long read timeout.) The headroom
-    # above 15s is what lets a genuinely dead connection still surface as a
-    # timeout instead of hanging until TCP keepalive notices.
+    # (The short-op pool sets its own, much shorter, socket_timeout — see
+    # ``redis_socket_timeout_seconds``.) The headroom above 15s is what lets
+    # a genuinely dead connection still surface as a timeout instead of
+    # hanging until TCP keepalive notices.
     redis_streaming_socket_timeout_seconds: float = Field(
         default=30.0,
         description="Socket read timeout for the SSE streaming pool; must exceed read_stream block_ms (15s).",
+    )
+    # Socket read/write timeout for the SHORT-OP pool. Its commands are
+    # sub-millisecond, so a short timeout just bounds how long a silently-
+    # dead connection (e.g. one the Redis server closed for idleness)
+    # stalls a request before it surfaces as a TimeoutError — which
+    # ``retry`` then transparently recovers by reconnecting. Without it a
+    # dead socket waits out the kernel's TCP retransmits (~tens of seconds,
+    # errno 110), failing the request outright.
+    redis_socket_timeout_seconds: float = Field(
+        default=5.0,
+        description="Socket read/write timeout for the short-op pool; bounds dead-connection stalls before retry reconnects.",
     )
     # Short-op pool uses BlockingConnectionPool: when full, callers wait
     # this long for a connection before raising. Trades a tail-latency
