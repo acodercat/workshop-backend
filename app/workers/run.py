@@ -46,7 +46,21 @@ from config import settings
 
 
 async def _run() -> None:
-    redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    # Subscriber connection: a pub/sub ``get_message``/``listen`` is a long
+    # blocking read, and ``settle:notify`` is idle most of the time (only
+    # published on a terminal turn). A socket read-timeout here would
+    # mistake normal idle silence for a failure and churn a
+    # reconnect→timeout→reconnect loop, so leave it unset (block forever)
+    # and instead rely on a periodic PING (``health_check_interval``) plus
+    # TCP keepalive to surface a genuinely dead connection — e.g. one a
+    # managed-Redis proxy reaped while idle.
+    redis = aioredis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_timeout=None,
+        socket_keepalive=True,
+        health_check_interval=30,
+    )
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(settle_sweeper.run_forever())

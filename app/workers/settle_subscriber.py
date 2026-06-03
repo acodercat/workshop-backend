@@ -35,6 +35,12 @@ logger = logging.getLogger(__name__)
 # on a dead Redis. Mirrors the worker's CancelListener reconnect cadence.
 _RECONNECT_DELAY_SECONDS = 1.0
 
+# How long ``get_message`` waits for a message before returning ``None``.
+# A returned ``None`` is a normal idle tick (the channel is quiet), not an
+# error — the loop just waits again. Also bounds how often the connection's
+# health-check PING gets a chance to run between reads.
+_POLL_TIMEOUT_SECONDS = 30.0
+
 
 async def run_forever(redis: aioredis.Redis) -> None:
     """Subscribe to ``settle:notify`` forever, settling on each message.
@@ -50,11 +56,21 @@ async def run_forever(redis: aioredis.Redis) -> None:
             async with redis.pubsub() as pubsub:
                 await pubsub.subscribe(SETTLE_NOTIFY_CHANNEL)
                 logger.info("settle subscriber subscribed on %s", SETTLE_NOTIFY_CHANNEL)
-                async for message in pubsub.listen():
-                    # ``listen()`` also yields a subscribe-confirmation
-                    # event with ``type="subscribe"`` — skip non-data.
-                    if message.get("type") != "message":
-                        continue
+                # Poll with an explicit timeout instead of ``listen()``: on an
+                # idle channel ``get_message`` returns ``None`` when the window
+                # elapses (normal idle, NOT an error), where a blocking
+                # ``listen()`` read raises ``TimeoutError`` if the client has a
+                # socket read-timeout. Looping also lets the connection's
+                # health-check PING fire between reads to detect a dead socket.
+                # ``ignore_subscribe_messages`` drops the subscribe confirmation
+                # so only real ``message`` payloads reach the handler.
+                while True:
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True,
+                        timeout=_POLL_TIMEOUT_SECONDS,
+                    )
+                    if message is None:
+                        continue  # idle window elapsed — keep waiting
                     # ``_handle_message`` already swallows expected
                     # errors (bad payload, DB blip). The outer guard
                     # here is defense against a programming bug in
