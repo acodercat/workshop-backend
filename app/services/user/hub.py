@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # network) that can't drain fast enough drops its OLDEST queued event
 # rather than stalling the shared reader or its peers — fine for
 # idempotent status sync where only the latest state matters.
-_QUEUE_MAXSIZE = 64
+_QUEUE_MAXSIZE = 16
 
 # How long the reader blocks per ``get_message`` loop. Doubles as the
 # pubsub health-check cadence: each loop re-enters ``parse_response``,

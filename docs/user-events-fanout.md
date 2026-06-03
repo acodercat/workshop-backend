@@ -80,7 +80,7 @@ and holds one connection for the life of the process. It is torn down in
 the lifespan `finally`, before the Redis pools close.
 
 **Connections are in-memory only.** `hub.subscribe(user_id)` (called by
-`stream_user_events`) creates an `asyncio.Queue(maxsize=64)`, adds it to
+`stream_user_events`) creates an `asyncio.Queue(maxsize=16)`, adds it to
 `_subscribers[user_id]`, and returns it. `hub.unsubscribe` removes it on
 disconnect. Neither touches Redis.
 
@@ -123,7 +123,7 @@ disconnect. Neither touches Redis.
   feed use the lightest broker primitive (Pub/Sub) instead of a durable
   Stream.
 
-- **Bounded per-connection queue, drop-oldest** (`_QUEUE_MAXSIZE = 64`).
+- **Bounded per-connection queue, drop-oldest** (`_QUEUE_MAXSIZE = 16`).
   This is the **depth of one connection's buffer**, *not* a cap on
   connections per process. A slow client (backgrounded tab, weak
   network) that can't drain in time drops its **oldest** queued event
