@@ -13,6 +13,7 @@ import zipfile
 import pytest
 
 from app.services.skill_bundle import (
+    _MAX_BODY_BYTES,
     InvalidSkillBundleError,
     parse_bundle,
     validate_zip_structure,
@@ -199,20 +200,14 @@ class TestZipBombRejections:
         with pytest.raises(InvalidSkillBundleError, match="entry too large"):
             validate_zip_structure(data)
 
-    def test_total_uncompressed_size_too_large(self):
-        # Each entry is just under the per-entry cap, but the sum is past
-        # the total cap.
-        from app.services.skill_bundle import (
-            _MAX_UNCOMPRESSED_PER_ENTRY,
-            _MAX_UNCOMPRESSED_TOTAL,
-        )
-        entry_count = (_MAX_UNCOMPRESSED_TOTAL // _MAX_UNCOMPRESSED_PER_ENTRY) + 1
-        entries = {
-            "SKILL.md": _skill_md({"name": "n"}, "body"),
-            **{f"f{i}.txt": b"A" * _MAX_UNCOMPRESSED_PER_ENTRY for i in range(entry_count)},
-        }
+    def test_too_many_files_rejected(self):
+        # File count past the Agent Skills 500-file cap. Tiny files — the
+        # count check fires regardless of their size.
+        from app.services.skill_bundle import _MAX_ENTRY_COUNT
+        entries = {"SKILL.md": _skill_md({"name": "n"}, "body")}
+        entries.update({f"f{i}.txt": "x" for i in range(_MAX_ENTRY_COUNT)})
         data = _zip(entries)
-        with pytest.raises(InvalidSkillBundleError, match="exceeds"):
+        with pytest.raises(InvalidSkillBundleError, match="too many files"):
             validate_zip_structure(data)
 
     def test_suspicious_compression_ratio_rejected(self):
@@ -250,3 +245,37 @@ class TestEncodingRejections:
             zf.writestr("SKILL.md", b"\xff\xfe\xfdname: x")
         with pytest.raises(InvalidSkillBundleError, match="UTF-8"):
             parse_bundle(buf.getvalue())
+
+
+# ── body size cap ───────────────────────────────────────────────────────────
+
+
+class TestBodySizeCap:
+    def test_body_at_limit_accepted(self):
+        # Body (frontmatter excluded) exactly at the cap is still allowed.
+        body = "x" * _MAX_BODY_BYTES
+        data = _zip({"SKILL.md": _skill_md({"name": "big"}, body)})
+        assert parse_bundle(data).name == "big"
+
+    def test_oversized_body_rejected(self):
+        body = "x" * (_MAX_BODY_BYTES + 1)
+        data = _zip({"SKILL.md": _skill_md({"name": "big"}, body)})
+        with pytest.raises(InvalidSkillBundleError, match="body is too large"):
+            parse_bundle(data)
+
+    def test_cap_counts_utf8_bytes_not_chars(self):
+        # Fewer characters than the byte cap, but each '✓' is 3 UTF-8 bytes,
+        # so the byte count exceeds the cap and must be rejected.
+        body = "✓" * ((_MAX_BODY_BYTES // 3) + 1)
+        assert len(body) < _MAX_BODY_BYTES
+        assert len(body.encode("utf-8")) > _MAX_BODY_BYTES
+        data = _zip({"SKILL.md": _skill_md({"name": "uni"}, body)})
+        with pytest.raises(InvalidSkillBundleError, match="body is too large"):
+            parse_bundle(data)
+
+    def test_missing_name_reported_before_oversized_body(self):
+        # A huge file with no frontmatter should hear the actionable
+        # structural error ("missing name"), not "too large".
+        data = _zip({"SKILL.md": "x" * (_MAX_BODY_BYTES + 1)})
+        with pytest.raises(InvalidSkillBundleError, match="must include a 'name'"):
+            parse_bundle(data)
