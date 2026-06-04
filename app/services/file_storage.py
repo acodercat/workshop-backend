@@ -123,13 +123,15 @@ SESSION_FILE_POLICY = UploadPolicy(
     },
 )
 
-# Skill uploads (zip bundle or bare SKILL.md, 5 MiB cap, separate bucket).
+# Skill uploads (zip bundle or bare SKILL.md, separate bucket). 50 MiB cap
+# matches the Agent Skills standard's maximum upload size.
 SKILL_POLICY = UploadPolicy(
     bucket_name=settings.oss_skill_bucket_name,
     key_prefix="user_skills",
-    max_bytes=5 * 1024 * 1024,
+    max_bytes=50 * 1024 * 1024,
     allowed_types={
         ".zip": "application/zip",
+        ".skill": "application/zip",  # a ``.skill`` is a renamed zip (portable Agent Skills package)
         ".md": "text/markdown",
     },
 )

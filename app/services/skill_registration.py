@@ -66,7 +66,12 @@ async def register_skill_bundle(
             f"unsupported file extension {ext!r}; "
             f"allowed: {', '.join(sorted(SKILL_POLICY.allowed_types))}"
         )
-    is_zip = ext == ".zip"
+    # A ``.skill`` file is just a renamed zip (the portable Agent Skills
+    # package extension): treat it as a zip and canonicalize ``ext`` to
+    # ``.zip`` for the derived key (see the bundle-key comment below).
+    is_zip = ext in (".zip", ".skill")
+    if is_zip:
+        ext = ".zip"
 
     if len(data) > SKILL_POLICY.max_bytes:
         raise SkillBundleTooLargeError(
@@ -98,12 +103,11 @@ async def register_skill_bundle(
     # ``IntegrityError`` would leave an orphan bundle paying OSS storage
     # forever.
     #
-    # The filename segment of the key is **derived** from the parsed
-    # skill name + canonical (lowercased) extension — NOT the user's
-    # original filename. The user-supplied filename was only inspected
-    # to decide the ``is_zip`` branch; reusing it verbatim in the key
-    # would leak case (``MySkill.ZIP``) and odd characters through to
-    # every consumer that dispatches on ``bundle_key.endsWith(".zip")``.
+    # The key's filename segment is **derived** — parsed name + canonical
+    # extension, not the user's original filename. The zip family
+    # (``.zip``/``.skill``, any case) is canonicalized to ``.zip`` above;
+    # ``.md`` keeps its lowercased ext. This matters because consumers
+    # (notably the worker's staging) dispatch on the ``.zip`` suffix.
     bundle_filename = f"{parsed.name}{ext}"
     bundle_key = f"{SKILL_POLICY.key_prefix}/{user_id}/{uuid.uuid4()}/{bundle_filename}"
     await asyncio.to_thread(

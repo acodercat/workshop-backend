@@ -42,19 +42,23 @@ _MAX_NAME_CHARS = 64
 _MAX_DESCRIPTION_CHARS = 1024
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
-# Zip-bomb defenses. The wrapper zip itself is already capped at upload
-# time (``SKILL_POLICY.max_bytes``); these bound what comes out *after*
-# decompression. A real skill bundle of ours has uncompressed
-# < 1 MiB (single SKILL.md + a few scripts); 10× headroom is plenty
-# for legitimate cases while shutting down pathological archives.
-#
-# A bundle is rejected if it fails ANY of: per-entry uncompressed size,
-# total uncompressed size, or compression ratio. The ratio check
-# catches "many small entries each just under the per-entry cap" that
-# would otherwise sneak past — a real bundle compresses ~3-10×, so
-# anything over 100× is structurally suspicious.
-_MAX_UNCOMPRESSED_PER_ENTRY = 10 * 1024 * 1024  # 10 MiB
-_MAX_UNCOMPRESSED_TOTAL = 50 * 1024 * 1024      # 50 MiB
+# SKILL.md body (everything after the frontmatter) is injected into the
+# agent's context when the skill is invoked and kept through compaction
+# (axon marks it ``preserve_in_compact``), so its size is a permanent
+# context-budget cost. Anthropic's Agent Skills guidance is < ~5000 tokens
+# / < 500 lines, with bulk content split into reference files the agent
+# loads on demand. 32 KiB (~8K tokens) is a generous cap above that.
+_MAX_BODY_BYTES = 32 * 1024  # 32 KiB
+
+# Decompression-safety / distribution limits. The per-file size and file
+# count match the Agent Skills standard (≤ 25 MB uncompressed per file,
+# ≤ 500 files); the wrapper zip itself is capped at upload time
+# (``SKILL_POLICY.max_bytes`` = 50 MiB). The compression-ratio guard is
+# ours — a real bundle compresses ~3-10×, so > 100× is a zip bomb. The
+# ratio (not a separate total-size cap, which the standard doesn't define)
+# is what catches "many small entries that cumulatively explode".
+_MAX_UNCOMPRESSED_PER_ENTRY = 25 * 1024 * 1024  # 25 MiB — Agent Skills: per file
+_MAX_ENTRY_COUNT = 500                          # Agent Skills: files per bundle
 _MAX_COMPRESSION_RATIO = 100
 
 
@@ -128,6 +132,7 @@ def parse_bundle(data: bytes) -> ParsedSkill:
             "(e.g. `name: my-skill`)."
         )
     _validate_skill_name(name)
+    _reject_oversized_body(body)
     # ``description`` falls back to the first non-empty body line if
     # omitted from frontmatter — stricter enforcement isn't worth the
     # UX cost since many real SKILL.md files rely on body-as-description.
@@ -206,6 +211,7 @@ def parse_skill_md(data: bytes) -> ParsedSkill:
             "(e.g. `name: my-skill`)."
         )
     _validate_skill_name(name)
+    _reject_oversized_body(body)
     description = _clip(
         meta.get("description") or _first_nonempty_line(body) or name,
         _MAX_DESCRIPTION_CHARS,
@@ -214,22 +220,26 @@ def parse_skill_md(data: bytes) -> ParsedSkill:
 
 
 def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
-    """Reject archives that would expand to unreasonable sizes.
+    """Reject archives whose declared expansion is unreasonable.
 
-    Uses the per-entry uncompressed size reported by the zip directory
-    — that's what an unzipper allocates before reading the stream, so
-    rejecting on it shuts down the attack without ever decompressing
-    a byte. The compression-ratio check catches the case where many
-    small entries each stay under the per-entry cap but cumulatively
-    explode.
-
-    Industry-standard three-layer defense (see
-    https://codingtechroom.com/question/safeguard-against-zip-bombs):
-    per-entry cap, total cap, ratio cap.
+    Header-only — reads the zip central directory, never decompresses a
+    byte (the reported sizes are what an unzipper would allocate up front).
+    Three checks: file count and per-entry uncompressed size (the Agent
+    Skills distribution limits), plus a compression-ratio guard that catches
+    many small entries each under the per-entry cap but cumulatively
+    explosive.
     """
     total_compressed = 0
     total_uncompressed = 0
+    file_count = 0
     for info in zf.infolist():
+        if info.is_dir():
+            continue
+        file_count += 1
+        if file_count > _MAX_ENTRY_COUNT:
+            raise InvalidSkillBundleError(
+                f"bundle has too many files (max {_MAX_ENTRY_COUNT})"
+            )
         if info.file_size > _MAX_UNCOMPRESSED_PER_ENTRY:
             raise InvalidSkillBundleError(
                 f"entry too large when uncompressed: {info.filename!r} "
@@ -237,10 +247,6 @@ def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
             )
         total_compressed += info.compress_size
         total_uncompressed += info.file_size
-        if total_uncompressed > _MAX_UNCOMPRESSED_TOTAL:
-            raise InvalidSkillBundleError(
-                f"bundle exceeds {_MAX_UNCOMPRESSED_TOTAL} bytes when uncompressed"
-            )
     if (
         total_compressed > 0
         and total_uncompressed / total_compressed > _MAX_COMPRESSION_RATIO
@@ -350,6 +356,22 @@ def _validate_skill_name(name: str) -> None:
         raise InvalidSkillBundleError(
             "invalid skill name: use 1-64 lowercase letters, numbers, "
             "and single hyphens; do not start or end with a hyphen"
+        )
+
+
+def _reject_oversized_body(body: str) -> None:
+    """Reject a SKILL.md whose body would blow the agent's context budget.
+
+    The body (frontmatter stripped) is injected and kept through compaction
+    when the skill is invoked, so an oversized one is a permanent context
+    cost. See :data:`_MAX_BODY_BYTES`.
+    """
+    size = len(body.encode("utf-8"))
+    if size > _MAX_BODY_BYTES:
+        raise InvalidSkillBundleError(
+            f"SKILL.md body is too large ({size} bytes; max {_MAX_BODY_BYTES}). "
+            "Keep SKILL.md an overview and move bulk content into reference "
+            "files linked from it."
         )
 
 
