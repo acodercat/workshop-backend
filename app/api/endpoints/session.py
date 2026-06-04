@@ -108,7 +108,7 @@ async def _get_or_404(
 
 
 async def _load_messages(
-    db: AsyncSession, session_id: str, user_id: int,
+    db: AsyncSession, session_id: uuid.UUID, user_id: int,
 ) -> list[MessageResponse]:
     """Load a session's messages, projected into the response shape.
 
@@ -204,11 +204,11 @@ async def list_sessions(
     )
 
 
-# Must register BEFORE ``/sessions/{session_id}`` — Starlette matches
-# routes in registration order, and ``{session_id}`` is typed ``str``
-# so without this line first the literal ``upload-url`` would be
-# accepted as a session_id and dispatch to ``get_session`` (which then
-# 404s on the DB lookup) instead of reaching this handler.
+# Registered BEFORE ``/sessions/{session_id}`` as a route-match-order
+# guard. ``{session_id}`` is typed ``uuid.UUID`` now, so a literal like
+# ``upload-url`` no longer validates as a session_id (it 422s instead of
+# dispatching to a session handler) — but keeping the literal route first
+# is the explicit, order-independent guarantee.
 @router.post("/sessions/upload-url")
 @limiter.limit("60/minute")
 async def create_session_upload_url(
@@ -244,7 +244,7 @@ async def create_session_upload_url(
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
 async def get_session(
-    session_id: str,
+    session_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
@@ -273,7 +273,7 @@ async def get_session(
 @limiter.limit("30/minute")
 async def update_session(
     request: Request,
-    session_id: str,
+    session_id: uuid.UUID,
     body: SessionUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
@@ -290,7 +290,7 @@ async def update_session(
 @limiter.limit("30/minute")
 async def delete_session(
     request: Request,
-    session_id: str,
+    session_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(authenticate_and_get_user),
@@ -323,7 +323,7 @@ async def delete_session(
     await db.commit()
 
     try:
-        await redis.delete(stream_key(SESSION_STREAM_PREFIX, session_id))
+        await redis.delete(stream_key(SESSION_STREAM_PREFIX, str(session_id)))
     except Exception:
         logger.warning(
             "Failed to delete Redis stream for session %s — TTL will reap it",
@@ -340,7 +340,7 @@ async def delete_session(
 @limiter.limit(settings.rate_limit_message_create)
 async def create_message(
     request: Request,
-    session_id: str,
+    session_id: uuid.UUID,
     body: MessageCreate,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
@@ -377,7 +377,7 @@ async def create_message(
 @limiter.limit("30/minute")
 async def cancel_session(
     request: Request,
-    session_id: str,
+    session_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(authenticate_and_get_user),
@@ -396,13 +396,13 @@ async def cancel_session(
             status_code=status.HTTP_409_CONFLICT,
             detail="Session is not running",
         )
-    await redis.publish(cancel_channel(session_id), "")
+    await redis.publish(cancel_channel(str(session_id)), "")
 
 
 @router.get("/sessions/{session_id}/stream")
 @limiter.exempt
 async def stream_session(
-    session_id: str,
+    session_id: uuid.UUID,
     redis: aioredis.Redis = Depends(get_redis_streaming),
     current_user: User = Depends(authenticate_for_streaming),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
@@ -427,7 +427,7 @@ async def stream_session(
     async with AsyncSessionLocal() as db:
         await _get_or_404(db, session_id, current_user.id)
     return EventSourceResponse(
-        stream_events(redis, session_id, last_event_id=last_event_id)
+        stream_events(redis, str(session_id), last_event_id=last_event_id)
     )
 
 
@@ -437,7 +437,7 @@ async def stream_session(
     deprecated=True,
 )
 async def list_messages(
-    session_id: str,
+    session_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
