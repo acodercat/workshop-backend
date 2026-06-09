@@ -55,7 +55,7 @@ class SessionFile(Base):
     # for free.
     file_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP, server_default=func.now(), nullable=False
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
     # Postgres doesn't auto-index FK columns; without this CASCADE

@@ -44,7 +44,7 @@ class SessionShare(Base):
     # column-widening migration.
     password_hash: Mapped[str | None] = mapped_column(String(72), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP, server_default=func.now(), nullable=False
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
     # Postgres doesn't auto-index FK columns; without this CASCADE

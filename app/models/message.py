@@ -34,7 +34,7 @@ class Message(Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP, server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
 
     def __repr__(self) -> str:
