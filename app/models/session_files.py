@@ -16,10 +16,13 @@ one read path:
   ``(session_id, file_key)`` is present here, no JSONB scans, no key-
   prefix parsing.
 
-The presentation copy (filename / mime_type / size_bytes) lives on
-the message blocks JSON; this table stays lean — the FK invariant plus
-an ``origin`` tag (which file-library bucket the row belongs to, see
-``SessionFileOrigin``), not presentation-metadata storage.
+Beyond the FK invariant the row carries an ``origin`` tag (which
+file-library bucket it belongs to, see ``SessionFileOrigin``) and a
+denormalized copy of the file's presentation metadata (``filename`` /
+``mime_type`` / ``size_bytes``) so the library (``GET /files``) renders
+without scanning the message blocks. The blocks JSON stays the
+write-time source of truth; these columns are a read-optimized mirror,
+backfilled for history by ``scripts/backfill_session_file_metadata.py``.
 """
 
 import uuid
@@ -75,6 +78,13 @@ class SessionFile(Base):
     # UNIQUE constraint enforces that and gives us the read-path index
     # for free.
     file_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # Presentation metadata, denormalized from the message blocks so the
+    # file library can render name / type / size without a JSONB scan.
+    # Nullable: pre-backfill rows (and any producer that omits them) leave
+    # these null and the reader falls back to deriving a name from the key.
+    filename: Mapped[str | None] = mapped_column(String, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Which bucket this file belongs to (see ``SessionFileOrigin``).
     # Stamped by the producer: the worker tags by bind path (output →
     # DELIVERABLE, input + preview keys → INTERNAL); the backend's upload

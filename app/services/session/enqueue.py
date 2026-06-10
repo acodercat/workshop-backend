@@ -228,21 +228,23 @@ async def _bind_session_files(
     and rely on the JSONB copy even though download authorization would
     later fail.
     """
-    unique_file_keys = list(
-        dict.fromkeys(file_ref.file_key for file_ref in files)
-    )
-    if not unique_file_keys:
+    # Keep the first FileRef per key — it carries the presentation metadata
+    # (filename / mime_type / size_bytes) denormalized onto the row.
+    unique_files: dict[str, FileRef] = {}
+    for file_ref in files:
+        unique_files.setdefault(file_ref.file_key, file_ref)
+    if not unique_files:
         return
 
     rows = await db.execute(
         select(SessionFile.file_key, SessionFile.session_id)
-        .where(SessionFile.file_key.in_(unique_file_keys))
+        .where(SessionFile.file_key.in_(unique_files.keys()))
     )
     existing = {
         file_key: owner_session_id for file_key, owner_session_id in rows.all()
     }
 
-    for file_key in unique_file_keys:
+    for file_key, file_ref in unique_files.items():
         owner_session_id = existing.get(file_key)
         if owner_session_id is None:
             db.add(
@@ -250,6 +252,9 @@ async def _bind_session_files(
                     session_id=session_id,
                     file_key=file_key,
                     origin=SessionFileOrigin.UPLOAD,
+                    filename=file_ref.filename,
+                    mime_type=file_ref.mime_type,
+                    size_bytes=file_ref.size_bytes,
                 )
             )
             continue

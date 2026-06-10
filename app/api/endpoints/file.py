@@ -8,18 +8,16 @@ file library can be listed in one place, newest first, without walking
 each session's ``GET /sessions/{id}`` payload. Auth-scoped to the
 caller, the same way ``GET /sessions`` is.
 
-``session_files`` is intentionally metadata-free (see
-:class:`~app.models.session_files.SessionFile`), so the display
-filename is recovered from the OSS key here. There is deliberately no
-type filter — file kind isn't a column, so the client classifies by
-the filename extension instead.
+Each row carries its own ``filename`` / ``mime_type`` / ``size_bytes``
+(denormalized from the message blocks); ``filename`` falls back to a
+key-derived name for any row not yet backfilled. There is deliberately no
+type filter — file kind isn't a column, so the client classifies by the
+filename extension instead.
 
 Download reuses the existing presigned-URL endpoint
 (``GET /sessions/{id}/files/download-url``): a list item carries the
 ``session_id`` + ``file_key`` + ``filename`` that endpoint needs.
 """
-
-import re
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Query
@@ -28,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
+from app.common.filenames import filename_from_key
 from app.common.pagination import paginate
 from app.models.session import Session
 from app.models.session_files import SessionFile, SessionFileOrigin
@@ -36,24 +35,6 @@ from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.file import SessionFileResponse
 
 router = APIRouter(tags=["files"])
-
-# Tool-output keys prefix the filename with the result index
-# (``outputs/{sid}/{tool_use_id}/{idx}_{name}``); dropped for display.
-_OUTPUT_INDEX_PREFIX = re.compile(r"^\d+_")
-
-
-def _filename_from_key(file_key: str) -> str:
-    """Recover a display filename from an OSS key.
-
-    ``session_files`` stores no metadata, so the name comes from the
-    key's last segment: the original filename for uploads
-    (``session-files/{uuid}/{name}``, legacy ``documents/...``); tool
-    outputs additionally carry the result-index prefix, dropped here.
-    """
-    name = file_key.rsplit("/", 1)[-1]
-    if file_key.startswith("outputs/"):
-        name = _OUTPUT_INDEX_PREFIX.sub("", name, count=1)
-    return name
 
 
 @router.get("/files")
@@ -84,7 +65,11 @@ async def list_files(
     base = (
         select(
             SessionFile.file_key,
+            SessionFile.filename,
+            SessionFile.mime_type,
+            SessionFile.size_bytes,
             SessionFile.created_at,
+            SessionFile.origin,
             Session.id.label("session_id"),
             Session.title,
         )
@@ -105,10 +90,13 @@ async def list_files(
         items=[
             SessionFileResponse(
                 file_key=row.file_key,
-                filename=_filename_from_key(row.file_key),
+                filename=row.filename or filename_from_key(row.file_key),
+                mime_type=row.mime_type,
+                size_bytes=row.size_bytes,
                 session_id=row.session_id,
                 session_title=row.title,
                 created_at=row.created_at,
+                origin=row.origin,
             )
             for row in rows
         ],
