@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.message import Message, MessageRole
 from app.models.session import Session, SessionStatus
-from app.models.session_files import SessionFile
+from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.models.skill import Skill, SkillOrigin
 from app.models.user_skill_preference import UserSkillPreference
@@ -245,7 +245,13 @@ async def _bind_session_files(
     for file_key in unique_file_keys:
         owner_session_id = existing.get(file_key)
         if owner_session_id is None:
-            db.add(SessionFile(session_id=session_id, file_key=file_key))
+            db.add(
+                SessionFile(
+                    session_id=session_id,
+                    file_key=file_key,
+                    origin=SessionFileOrigin.UPLOAD,
+                )
+            )
             continue
         if owner_session_id == session_id:
             continue

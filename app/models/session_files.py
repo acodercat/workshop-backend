@@ -17,15 +17,18 @@ one read path:
   prefix parsing.
 
 The presentation copy (filename / mime_type / size_bytes) lives on
-the message blocks JSON; this table is intentionally minimal — its
-job is the FK invariant, not metadata storage.
+the message blocks JSON; this table stays lean — the FK invariant plus
+an ``origin`` tag (which file-library bucket the row belongs to, see
+``SessionFileOrigin``), not presentation-metadata storage.
 """
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    Enum as SAEnum,
     ForeignKey,
     Index,
     String,
@@ -36,6 +39,24 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.database import Base
+
+
+class SessionFileOrigin(StrEnum):
+    """Where a ``session_files`` row came from — drives which files the
+    cross-session library surfaces (``GET /files`` lists ``UPLOAD`` +
+    ``DELIVERABLE``, hides ``INTERNAL``).
+
+    - ``UPLOAD``      — a file the user attached to a message.
+    - ``DELIVERABLE`` — a tool output handed to the user (``deliver_file``,
+      a published site, …).
+    - ``INTERNAL``    — agent-side artifacts not meant for the library:
+      ``read_image`` inputs the model looked at, the office→PDF preview
+      sidecars (``{name}.preview.pdf``), and similar intermediates.
+    """
+
+    UPLOAD = "UPLOAD"
+    DELIVERABLE = "DELIVERABLE"
+    INTERNAL = "INTERNAL"
 
 
 class SessionFile(Base):
@@ -54,6 +75,18 @@ class SessionFile(Base):
     # UNIQUE constraint enforces that and gives us the read-path index
     # for free.
     file_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # Which bucket this file belongs to (see ``SessionFileOrigin``).
+    # Stamped by the producer: the worker tags by bind path (output →
+    # DELIVERABLE, input + preview keys → INTERNAL); the backend's upload
+    # path tags UPLOAD.
+    origin: Mapped[SessionFileOrigin] = mapped_column(
+        SAEnum(
+            SessionFileOrigin,
+            name="session_file_origin",
+            values_callable=lambda cls: [m.value for m in cls],
+        ),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
