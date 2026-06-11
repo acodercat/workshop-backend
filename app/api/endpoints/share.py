@@ -70,9 +70,6 @@ _ShareViewCredentials = Annotated[
 ]
 
 
-# ---- helpers --------------------------------------------------------------
-
-
 async def _resolve_share(
     db: AsyncSession, token: str
 ) -> tuple[SessionShare, Session]:
@@ -125,9 +122,6 @@ async def _require_view_access(
     if decode_share_view_token(credentials.credentials) != share.token:
         # Bound to a different share, expired, or scope-mismatched.
         raise _locked_exception()
-
-
-# ---- endpoints ------------------------------------------------------------
 
 
 @router.get("/shares/{token}", response_model=ShareDetailResponse)

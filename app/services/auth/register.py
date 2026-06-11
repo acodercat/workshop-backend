@@ -66,7 +66,6 @@ async def register_user(
        new accounts are email-OTP only until the user sets a real
        password in settings.
     """
-    # ---- pre-check uniqueness ---------------------------------------
     # Single SELECT — only ``email`` is user-supplied here; the
     # generated ``axon_${id}`` is unique by construction (id is from
     # a sequence). The code consumption in step 2 is the transactional
@@ -76,10 +75,8 @@ async def register_user(
     if existing.first() is not None:
         raise EmailTakenError("Email already registered")
 
-    # ---- verify + consume code --------------------------------------
     await verify_register_code(redis, email=email, code=code)
 
-    # ---- create user + personal organization ------------------------
     # Reserve the id up-front so the username can encode it. ``nextval``
     # bumps the sequence atomically; if the subsequent INSERT fails for
     # any reason the id is "burned" (Postgres sequences don't roll back),

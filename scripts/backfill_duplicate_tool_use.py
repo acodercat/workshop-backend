@@ -58,12 +58,10 @@ import psycopg
 from config import settings
 
 
-# ---------------------------------------------------------------------------
 # Find candidate messages — same SQL as the Pass 1 diagnostic, scoped to
 # rows that have ANY intra-message duplicate. We then pull each candidate's
 # full blocks array and recompute the rename in Python so the logic stays
 # auditable.
-# ---------------------------------------------------------------------------
 
 SQL_FIND_DIRTY_MESSAGES = """
 WITH dups AS (
@@ -95,13 +93,11 @@ WHERE id = %(message_id)s
 """
 
 
-# ---------------------------------------------------------------------------
 # Rename core — pure function, unit-testable. Walks the blocks array in
 # order, tracks per-raw-id occurrence counters separately for tool_use and
 # tool_result, and rewrites ``tool_use_id`` in place when the count exceeds
 # zero. Idempotent: re-running on already-renamed blocks is a no-op
 # because the ``X#1`` shape itself doesn't collide with ``X``.
-# ---------------------------------------------------------------------------
 
 
 def rename_duplicates(blocks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[tuple[int, str, str]]]:
@@ -140,11 +136,6 @@ def rename_duplicates(blocks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
         out.append({**block, "tool_use_id": new_id})  # copy-on-write
         renames.append((index, raw_id, new_id))
     return out, renames
-
-
-# ---------------------------------------------------------------------------
-# Reporting + apply
-# ---------------------------------------------------------------------------
 
 
 def _build_filter(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:

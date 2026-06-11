@@ -104,7 +104,6 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 
-# ---- share-view tokens ----------------------------------------------------
 #
 # Share-view tokens are a separate JWT class scoped to a single share-link
 # recipient. Three properties make them safe to coexist with user tokens:

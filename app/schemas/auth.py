@@ -11,7 +11,6 @@ class AccessTokenResponse(BaseModel):
     token_type: str
 
 
-# ---- registration ---------------------------------------------------------
 #
 # Email-OTP flow: ``email`` + ``code`` + ``name`` is all the user
 # supplies. The ``axon_${id}`` username and a random password
@@ -37,7 +36,6 @@ class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
 
 
-# ---- email-OTP login ------------------------------------------------------
 #
 # The unified entry point: ``POST /auth/access-tokens-by-code`` peek-
 # verifies the code (no consume) and reports whether the email
