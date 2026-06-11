@@ -6,7 +6,7 @@ from enum import StrEnum
 class EventType(StrEnum):
     """Wire-format event types on the per-session SSE stream.
 
-    Two categories share one enum because both end up as ``event:``
+    Three categories share one enum because all end up as ``event:``
     lines on the same channel:
 
     - ``session.*`` — transport-layer handshakes synthesised by the
@@ -18,6 +18,15 @@ class EventType(StrEnum):
       ``agent_worker.wire.session_events.SessionEventEmitter``. The
       backend keeps its own enum so it has no runtime dependency on
       ``axon`` — it only consumes the stream.
+    - ``sandbox.*`` — sandbox-lifecycle handshakes the worker synthesises
+      outside the agent loop (``SessionEventEmitter.emit_sandbox``) and
+      XADDs to Redis, so the UI can show a "starting sandbox" state. Like
+      ``agent.*`` they ride the stream; like ``session.*`` they aren't
+      axon events.
+
+    The backend forwards stream entries verbatim and only matches on
+    ``SESSION_*`` / ``AGENT_STOPPED`` here, so this enum is the documented
+    catalog of what crosses the wire, not a filter.
     """
     SESSION_READY = "session.ready"
     # Marks the Phase-1-replay → Phase-2-live boundary so clients can
@@ -32,7 +41,11 @@ class EventType(StrEnum):
     AGENT_TOOL_USE = "agent.tool_use"
     AGENT_TOOL_PROGRESS = "agent.tool_progress"
     AGENT_TOOL_RESULT = "agent.tool_result"
-    AGENT_FILE_OUTPUT = "agent.file_output"
     AGENT_STATUS = "agent.status"
     AGENT_ERROR = "agent.error"
     AGENT_STOPPED = "agent.stopped"
+    # Sandbox-lifecycle handshakes the worker synthesises outside the agent
+    # loop (``emit_sandbox``); ``creating`` → ``created`` brackets the
+    # "starting sandbox" UI state.
+    SANDBOX_CREATING = "sandbox.creating"
+    SANDBOX_CREATED = "sandbox.created"
