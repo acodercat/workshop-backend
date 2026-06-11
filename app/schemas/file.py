@@ -37,6 +37,10 @@ class SessionFileResponse(BaseModel):
     filename: str
     mime_type: str | None
     size_bytes: int | None
+    # Coarse file-type bucket (web / document / … / other), classified
+    # server-side from mime_type / filename (see ``file_kind_case``) so the
+    # library's type filter can run in the query.
+    kind: str
     session_id: UUID
     session_title: str | None
     created_at: datetime

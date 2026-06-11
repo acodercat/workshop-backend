@@ -37,6 +37,7 @@ from app.auth import (
 )
 from app.database import AsyncSessionLocal
 from config import settings
+from app.common.file_kind import file_kind_case
 from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
 from app.errors import SessionFileQuotaExceededError
@@ -251,27 +252,55 @@ async def create_session_upload_url(
 async def list_files(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    origin: str = Query("all"),
+    kind: str = Query("all"),
+    search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> PaginatedResponse[SessionFileResponse]:
     """List the caller's files across all their sessions, newest first.
 
     Declared before ``/sessions/{session_id}`` so the literal ``files``
-    segment isn't parsed as a session id. Paged like ``GET /sessions``.
+    segment isn't parsed as a session id. Paginated server-side like
+    ``GET /sessions``.
 
-    Only user-facing files are listed — uploads and tool deliverables
-    (``origin IN (UPLOAD, DELIVERABLE)``); agent-side artifacts
-    (``read_image`` inputs, office→PDF preview sidecars) carry
-    ``origin = INTERNAL`` and are hidden. ``filename`` falls back to a
-    key-derived name for any row not yet backfilled.
+    Always scoped to the caller's non-deleted sessions and to user-facing
+    files (``origin IN (UPLOAD, DELIVERABLE)`` — ``INTERNAL`` agent
+    artifacts stay hidden). Optional filters, all applied server-side so
+    paging stays correct: ``origin`` (``all`` / ``upload`` /
+    ``deliverable``), ``kind`` (a file-type bucket classified from
+    ``mime_type`` / ``filename`` via :func:`file_kind_case`), and
+    ``search`` (substring match on filename or session title). ``filename``
+    falls back to a key-derived name for any row not yet backfilled.
     """
-    filter_clause = sa.and_(
+    if origin == "upload":
+        origin_clause = SessionFile.origin == SessionFileOrigin.UPLOAD
+    elif origin == "deliverable":
+        origin_clause = SessionFile.origin == SessionFileOrigin.DELIVERABLE
+    else:
+        origin_clause = SessionFile.origin.in_(
+            (SessionFileOrigin.UPLOAD, SessionFileOrigin.DELIVERABLE)
+        )
+
+    kind_expr = file_kind_case(SessionFile.mime_type, SessionFile.filename)
+
+    conditions = [
         Session.user_id == current_user.id,
         Session.deleted_at.is_(None),
-        SessionFile.origin.in_(
-            (SessionFileOrigin.UPLOAD, SessionFileOrigin.DELIVERABLE)
-        ),
-    )
+        origin_clause,
+    ]
+    if kind != "all":
+        conditions.append(kind_expr == kind)
+    if search:
+        pattern = f"%{search}%"
+        conditions.append(
+            sa.or_(
+                SessionFile.filename.ilike(pattern),
+                Session.title.ilike(pattern),
+            )
+        )
+    filter_clause = sa.and_(*conditions)
+
     base = (
         select(
             SessionFile.file_key,
@@ -280,6 +309,7 @@ async def list_files(
             SessionFile.size_bytes,
             SessionFile.created_at,
             SessionFile.origin,
+            kind_expr.label("kind"),
             Session.id.label("session_id"),
             Session.title,
         )
@@ -303,6 +333,7 @@ async def list_files(
                 filename=row.filename or filename_from_key(row.file_key),
                 mime_type=row.mime_type,
                 size_bytes=row.size_bytes,
+                kind=row.kind,
                 session_id=row.session_id,
                 session_title=row.title,
                 created_at=row.created_at,
