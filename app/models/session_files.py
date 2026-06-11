@@ -19,7 +19,7 @@ one read path:
 Beyond the FK invariant the row carries an ``origin`` tag (which
 file-library bucket it belongs to, see ``SessionFileOrigin``) and a
 denormalized copy of the file's presentation metadata (``filename`` /
-``mime_type`` / ``size_bytes``) so the library (``GET /files``) renders
+``mime_type`` / ``size_bytes``) so the library (``GET /sessions/files``) renders
 without scanning the message blocks. The blocks JSON stays the
 write-time source of truth; these columns are a read-optimized mirror,
 backfilled for history by ``scripts/backfill_session_file_metadata.py``.
@@ -46,7 +46,7 @@ from app.database import Base
 
 class SessionFileOrigin(StrEnum):
     """Where a ``session_files`` row came from — drives which files the
-    cross-session library surfaces (``GET /files`` lists ``UPLOAD`` +
+    cross-session library surfaces (``GET /sessions/files`` lists ``UPLOAD`` +
     ``DELIVERABLE``, hides ``INTERNAL``).
 
     - ``UPLOAD``      — a file the user attached to a message.

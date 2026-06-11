@@ -30,14 +30,8 @@ class DownloadUrlResponse(BaseModel):
 
 
 class SessionFileResponse(BaseModel):
-    """One file in the cross-session ``GET /files`` listing.
-
-    A ``session_files`` row joined to its owning session. ``filename`` /
-    ``mime_type`` / ``size_bytes`` come from the row's denormalized
-    metadata, with ``filename`` falling back to a key-derived name when a
-    (pre-backfill) row hasn't been populated. Pair ``session_id`` +
-    ``file_key`` with ``GET /sessions/{id}/files/download-url`` to fetch
-    the bytes.
+    """A row in the cross-session file library. ``filename`` falls back to
+    a key-derived name for rows whose stored metadata isn't backfilled.
     """
     file_key: str
     filename: str

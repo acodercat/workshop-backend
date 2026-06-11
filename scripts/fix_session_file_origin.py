@@ -1,7 +1,7 @@
 """One-off: correct ``session_files.origin`` rows mis-tagged as DELIVERABLE.
 
 Two sources of historical mis-tagging, both leaking agent-side artifacts
-into the file library (``GET /files`` lists UPLOAD + DELIVERABLE):
+into the file library (``GET /sessions/files`` lists UPLOAD + DELIVERABLE):
 
 1. The deploy-gap default — while ``origin`` carried
    ``DEFAULT 'DELIVERABLE'`` (added by migration ``f1a7c3e9d2b6``,

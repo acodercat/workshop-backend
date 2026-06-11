@@ -37,18 +37,23 @@ from app.auth import (
 )
 from app.database import AsyncSessionLocal
 from config import settings
-from app.common.filenames import InvalidFilenameError
+from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
 from app.errors import SessionFileQuotaExceededError
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
-from app.models.session_files import SessionFile
+from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_share import SessionShare
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.schemas.file import DownloadUrlResponse, UploadUrlRequest, UploadUrlResponse
+from app.schemas.file import (
+    DownloadUrlResponse,
+    SessionFileResponse,
+    UploadUrlRequest,
+    UploadUrlResponse,
+)
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
 from app.services import file_storage
 from app.services.file_storage import (
@@ -240,6 +245,73 @@ async def create_session_upload_url(
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc),
         )
+
+
+@router.get("/sessions/files")
+async def list_files(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> PaginatedResponse[SessionFileResponse]:
+    """List the caller's files across all their sessions, newest first.
+
+    Declared before ``/sessions/{session_id}`` so the literal ``files``
+    segment isn't parsed as a session id. Paged like ``GET /sessions``.
+
+    Only user-facing files are listed — uploads and tool deliverables
+    (``origin IN (UPLOAD, DELIVERABLE)``); agent-side artifacts
+    (``read_image`` inputs, office→PDF preview sidecars) carry
+    ``origin = INTERNAL`` and are hidden. ``filename`` falls back to a
+    key-derived name for any row not yet backfilled.
+    """
+    filter_clause = sa.and_(
+        Session.user_id == current_user.id,
+        Session.deleted_at.is_(None),
+        SessionFile.origin.in_(
+            (SessionFileOrigin.UPLOAD, SessionFileOrigin.DELIVERABLE)
+        ),
+    )
+    base = (
+        select(
+            SessionFile.file_key,
+            SessionFile.filename,
+            SessionFile.mime_type,
+            SessionFile.size_bytes,
+            SessionFile.created_at,
+            SessionFile.origin,
+            Session.id.label("session_id"),
+            Session.title,
+        )
+        .join(Session, Session.id == SessionFile.session_id)
+        .where(filter_clause)
+        # Secondary sort on id keeps paging stable when timestamps tie.
+        .order_by(SessionFile.created_at.desc(), SessionFile.id.desc())
+    )
+    total = (
+        await db.execute(
+            select(func.count(SessionFile.id))
+            .join(Session, Session.id == SessionFile.session_id)
+            .where(filter_clause)
+        )
+    ).scalar() or 0
+    rows = (await db.execute(paginate(base, page, page_size))).all()
+    return PaginatedResponse(
+        items=[
+            SessionFileResponse(
+                file_key=row.file_key,
+                filename=row.filename or filename_from_key(row.file_key),
+                mime_type=row.mime_type,
+                size_bytes=row.size_bytes,
+                session_id=row.session_id,
+                session_title=row.title,
+                created_at=row.created_at,
+                origin=row.origin,
+            )
+            for row in rows
+        ],
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
+    )
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
@@ -477,7 +549,6 @@ async def generate_session_title(
     return TitleGenerateResponse(title=title)
 
 
-# ---- session share (owner-side) ------------------------------------------
 #
 # Singleton sub-resource of the session: one share per session.
 # Public-side read access for share recipients lives in
@@ -563,7 +634,6 @@ async def delete_share(
     await db.commit()
 
 
-# ---- session file download (presigned URL + ownership check) -------------
 #
 # Authorization is a single ``session_files`` lookup —
 # ``(session_id, file_key)`` is the FK invariant set up at write time
@@ -618,7 +688,6 @@ async def get_download_url(
     )
 
 
-# ---- per-message feedback (thumbs up / down + optional comment) ----------
 #
 # One vote per user per message, enforced by ``UNIQUE(message_id,
 # user_id)``. PUT does upsert (rating + comment in one call); DELETE
