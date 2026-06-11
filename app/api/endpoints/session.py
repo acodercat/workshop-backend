@@ -19,7 +19,7 @@ SSE streaming — lives in :mod:`app.services.session`.
 import logging
 import secrets
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from openai import OpenAIError
@@ -37,7 +37,7 @@ from app.auth import (
 )
 from app.database import AsyncSessionLocal
 from config import settings
-from app.common.file_kind import file_kind_case
+from app.common.file_kind import FILE_KINDS, file_kind_case
 from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
 from app.errors import SessionFileQuotaExceededError
@@ -252,7 +252,7 @@ async def create_session_upload_url(
 async def list_files(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    origin: str = Query("all"),
+    origin: Literal["all", "upload", "deliverable"] = Query("all"),
     kind: str = Query("all"),
     search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
@@ -273,6 +273,11 @@ async def list_files(
     ``search`` (substring match on filename or session title). ``filename``
     falls back to a key-derived name for any row not yet backfilled.
     """
+    if kind != "all" and kind not in FILE_KINDS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown kind: {kind!r}"
+        )
+
     if origin == "upload":
         origin_clause = SessionFile.origin == SessionFileOrigin.UPLOAD
     elif origin == "deliverable":
@@ -292,11 +297,16 @@ async def list_files(
     if kind != "all":
         conditions.append(kind_expr == kind)
     if search:
-        pattern = f"%{search}%"
+        # Escape LIKE wildcards so a literal "_" / "%" in the query (common
+        # in filenames) matches literally rather than as a wildcard.
+        escaped = (
+            search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
         conditions.append(
             sa.or_(
-                SessionFile.filename.ilike(pattern),
-                Session.title.ilike(pattern),
+                SessionFile.filename.ilike(pattern, escape="\\"),
+                Session.title.ilike(pattern, escape="\\"),
             )
         )
     filter_clause = sa.and_(*conditions)

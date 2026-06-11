@@ -20,17 +20,29 @@ from sqlalchemy import ColumnElement, case, func, or_
 # or the filename ends in any of its extensions. Unmatched → ``other``.
 _KIND_RULES: list[tuple[str, list[str], list[str]]] = [
     ("image", ["image/"], ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "heif"]),
+    ("video", ["video/"], ["webm", "mp4", "mov", "m4v", "mkv", "avi"]),
+    ("audio", ["audio/"], ["mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "opus", "weba", "wma"]),
     ("web", ["text/html"], ["html", "htm"]),
     ("spreadsheet", ["csv", "spreadsheet", "excel"], ["xls", "xlsx", "csv"]),
     ("presentation", ["presentation", "powerpoint"], ["ppt", "pptx", "pps", "ppsx"]),
+    # ``text/plain`` is deliberately omitted as a mime keyword — code, CSV
+    # and log files are all served as text/plain and would be stolen from
+    # later rules (``code`` especially). ``.txt`` still maps here by extension.
     ("document",
-        ["pdf", "wordprocessing", "msword", "text/plain", "markdown", "rtf"],
+        ["pdf", "wordprocessing", "msword", "markdown", "rtf"],
         ["pdf", "doc", "docx", "md", "markdown", "txt", "rtf"]),
     ("archive", ["zip", "compressed", "tar", "gzip", "rar"], ["zip", "rar", "7z", "tar", "gz", "tgz"]),
     ("code",
         ["json", "xml", "x-python", "javascript", "typescript", "yaml", "sql", "x-sh", "x-ipynb"],
         ["py", "ipynb", "js", "jsx", "ts", "tsx", "mjs", "cjs", "sh", "bash", "zsh", "json", "yaml", "yml", "toml", "xml", "sql", "css"]),
 ]
+
+# Kinds the classifier can emit — the rule kinds plus the ``other`` fallback.
+# The listing endpoint validates its ``kind`` filter against this so an
+# unknown bucket 422s instead of silently matching nothing.
+FILE_KINDS: frozenset[str] = frozenset(
+    kind for kind, _, _ in _KIND_RULES
+) | {"other"}
 
 
 def file_kind_case(
