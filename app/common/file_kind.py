@@ -1,7 +1,8 @@
 """Server-side file-type (``kind``) classification for the file library.
 
-The library's type filter buckets a file into one coarse kind (web /
-document / presentation / spreadsheet / code / image / archive / other).
+The library's type filter buckets a file into one coarse kind (image /
+video / audio / web / spreadsheet / presentation / document / archive /
+code / other).
 Classifying in the query — off the existing ``mime_type`` / ``filename``
 columns — lets ``GET /sessions/files`` filter by kind server-side (so
 pagination stays correct) without a stored ``kind`` column. This is the
