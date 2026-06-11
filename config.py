@@ -217,7 +217,7 @@ class Settings(BaseSettings):
         default_factory=lambda: {
             "FAST": "deepseek-v4-flash",
             "STANDARD": "kimi-k2",
-            "ADVANCED": "qwen3.7-max",
+            "ADVANCED": "kimi-k2",
         },
         description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
     )
