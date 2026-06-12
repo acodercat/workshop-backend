@@ -24,18 +24,67 @@ usage storage eliminates.
 """
 
 import json
+import logging
 import time
 from typing import AsyncIterator
 
 import redis.asyncio as aioredis
+from sqlalchemy import select
 
 from app.common.event_types import EventType
 from app.common.sse import event_to_sse, sse_event
+from app.database import AsyncSessionLocal
+from app.models.session import Session, SessionStatus
 from app.services.redis import (
     SESSION_STREAM_PREFIX,
     read_stream,
     stream_key,
 )
+
+logger = logging.getLogger(__name__)
+
+# session.status values that mean the turn is over. The worker writes one
+# of these in the same fenced transaction that *precedes* the Redis
+# ``agent.stopped`` emit, so a terminal status with no terminal stream
+# event means the event was lost (Redis blip swallowed the XADD, or the
+# worker died between the DB commit and the emit).
+#
+# Defined here rather than on ``SessionStatus``: this is service-layer
+# liveness logic, and the enum ships no terminal-set helper (the rest of
+# the codebase checks ``== RUNNING`` / ``!= RUNNING`` at its gates, never
+# a terminal set), so there's nothing to reuse and nothing else to keep
+# in sync.
+_TERMINAL_STATUSES = frozenset(
+    {SessionStatus.COMPLETE, SessionStatus.CANCELLED, SessionStatus.FAILED}
+)
+
+
+async def _session_is_terminal(session_id: str) -> bool:
+    """Whether the session has reached a terminal ``status`` in Postgres.
+
+    Opens its own short-lived session — the SSE generator deliberately
+    holds no DB connection across its lifetime (it reads Redis only; see
+    the stream endpoint), so this must not pin one either. Consulted only
+    after an idle XREAD block, never on the hot path.
+
+    A missing row (session deleted mid-stream) counts as terminal so the
+    stream closes rather than blocking forever. Any DB error is swallowed
+    as "not terminal" — the caller simply re-blocks and the live Redis
+    terminal (or the next idle check) still resolves the stream; a transient
+    DB blip must not tear down an otherwise-healthy SSE connection.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            status = await db.scalar(
+                select(Session.status).where(Session.id == session_id)
+            )
+    except Exception:
+        logger.warning(
+            "stream_events: terminal-status check failed for session %s; "
+            "will retry next idle block", session_id, exc_info=True,
+        )
+        return False
+    return status is None or status in _TERMINAL_STATUSES
 
 
 async def stream_events(
@@ -108,5 +157,27 @@ async def stream_events(
                 yield event_to_sse(event, entry_id)
                 if event["type"] == EventType.AGENT_STOPPED:
                     return
-        # Empty result → XREAD timed out without new data. Loop again;
-        # sse-starlette's own ping (default 15s) handles keepalive.
+        if entries:
+            # Got live data this cycle — keep following. Only consult the
+            # DB fallback after a genuinely idle block.
+            continue
+        # Empty block. The terminal ``agent.stopped`` reaches us only via
+        # Redis, but a blip can swallow that XADD (the worker's stream
+        # writes are best-effort — Postgres is the durable truth) and a
+        # crash can drop it between the DB commit and the emit. Either way
+        # this loop would otherwise block forever, hanging the SSE client
+        # and every later replay within the stream TTL. Consult the source
+        # of truth: if the session is already terminal, the event is not
+        # coming — synthesize ``agent.stopped`` (empty content, matching
+        # the worker's ``emit_terminal_done`` / recovery-cron shape) so the
+        # client closes cleanly and re-fetches the consistent DB state.
+        # A still-``RUNNING`` session returns False here, so a legitimately
+        # slow turn (long tool call, cold-start sandbox) never false-closes.
+        if await _session_is_terminal(session_id):
+            yield sse_event(
+                EventType.AGENT_STOPPED.value,
+                data=json.dumps({"content": ""}),
+            )
+            return
+        # Still running — loop again; sse-starlette's own ping (default
+        # 15s) handles keepalive.

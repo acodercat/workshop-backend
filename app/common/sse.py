@@ -8,16 +8,18 @@ fields are event-type-specific, declared per variant below.
 
 All values are strings because Redis Streams store flat ``str → str``
 maps. Non-string values the worker writes (dicts, lists, ints,
-floats, ``None``) go through the worker's ``_encode_fields``
-(``agent_worker.queue``) which JSON-encodes non-strings — so e.g.
-``elapsed`` is the literal string ``"2.5"``, a missing ``usage`` is
-``"null"``, and structured fields like ``args`` / ``files`` / ``usage``
-are JSON strings the backend forwards verbatim to the frontend.
+floats) go through the worker's ``_encode_fields``
+(``agent_worker.infra.redis_queue``) which JSON-encodes non-strings —
+so e.g. ``elapsed`` is the literal string ``"2.5"`` and structured
+fields like ``args`` / ``files`` / ``usage`` are JSON strings the
+backend forwards verbatim to the frontend. ``None``-valued fields are
+dropped entirely by ``_encode_fields`` (they never reach the wire), so
+the consumer treats an absent field and a null one the same.
 
 The authoritative producer of these shapes is
-``agent_worker/emitter.py``; if you need to reason about exactly what
-the worker writes, read that. This file documents the consumer-side
-view.
+``agent_worker/wire/session_events.py``; if you need to reason about
+exactly what the worker writes, read that. This file documents the
+consumer-side view.
 """
 
 from typing import Literal, NotRequired, TypedDict
@@ -184,15 +186,15 @@ class AgentStatusEvent(_EventBase):
 
 
 class AgentErrorEvent(_EventBase):
-    """``agent.error`` — a non-fatal error message.
+    """``agent.error`` — a non-fatal, user-safe error message.
 
-    Two producers: axon's ``AgentErrorEvent`` (``content`` only), and
-    the runner's ``emitter.emit_error(...)`` which can attach a Python
-    ``traceback`` for crash paths.
+    ``content`` only. Both producers (axon's ``AgentErrorEvent`` and the
+    runner's ``emit_error(...)``) deliberately keep all detail — exception
+    class, upstream body, stack trace — in the worker log, never on the
+    wire, so a browser-visible event can't leak internals.
     """
     type: Literal["agent.error"]
     content: str
-    traceback: NotRequired[str]
 
 
 class AgentStoppedEvent(_EventBase):
@@ -244,7 +246,8 @@ StreamEvent = (
 
 # Header fields stripped from the per-event ``data`` payload sent over SSE.
 # ``type`` is redundant with the SSE ``event:`` line. ``ts`` stays on the
-# wire — it's the worker's emit-time clock (see ``emitter.py``) and the
+# wire — it's the worker's emit-time clock (see
+# ``agent_worker/wire/session_events.py``) and the
 # frontend uses it for elapsed-time displays. Keeping it here instead
 # of deriving from the SSE ``id:`` field avoids coupling the frontend to
 # the Redis Streams entry-id format.

@@ -12,14 +12,24 @@ from app.database import Base
 class SandboxStatus(StrEnum):
     """Sandbox lifecycle state.
 
-    - ``RUNNING`` — default after ``create``; the container is up.
-    - ``PAUSED`` — paused between turns to save resources (OpenSandbox
-      ``pause``/``resume``).
+    - ``LIVE`` — default after ``create``; the container is up and
+      usable (the sandbox/container lifecycle, not turn state).
+    - ``PAUSED`` — a live-but-suspended sub-state, paused between turns
+      to save resources (OpenSandbox ``pause``/``resume``). No code path
+      writes it yet.
+    - ``REAPING`` — claimed by the sandbox reaper, kill in flight. A
+      transient state the reaper flips a row into *before* it kills the
+      container (re-asserting the idle predicate atomically), so a new
+      turn can't reconnect to a container that's about to die. The
+      worker's ``claim_next_turn`` excludes REAPING; a row stuck here
+      (reaper crash between claim and ``TERMINATED``) is retried on the
+      next sweep since ``last_used_at`` stays old. Ends at ``TERMINATED``.
     - ``TERMINATED`` — irreversible; the container has been killed.
     """
 
-    RUNNING = "RUNNING"
+    LIVE = "LIVE"
     PAUSED = "PAUSED"
+    REAPING = "REAPING"
     TERMINATED = "TERMINATED"
 
 
@@ -56,7 +66,7 @@ class Sandbox(Base):
     status: Mapped[SandboxStatus] = mapped_column(
         SAEnum(SandboxStatus, name="sandbox_status"),
         nullable=False,
-        default=SandboxStatus.RUNNING,
+        default=SandboxStatus.LIVE,
     )
     image: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
