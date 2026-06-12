@@ -8,8 +8,6 @@ the steps in a specific order:
    enqueue requests for the same session so the second one always sees
    the first's ``running`` status.
 2. In one transaction:
-   - DELETE the per-session output stream so the next turn's events
-     don't tail onto stale history;
    - Lazy-sweep this user's open credit reservations into terminal
       state (settles from durable ``session_turn`` usage, or refunds
       if usage is missing);
@@ -20,8 +18,11 @@ the steps in a specific order:
      raises :class:`~app.errors.InsufficientCreditsError` if the
      estimate would push the balance negative — the entire tx rolls
      back, no message stored;
-   - INSERT the user ``message`` row;
-   - flip ``session.status`` to ``running``.
+   - INSERT the user ``message`` row + flip ``session.status`` to
+     ``running``;
+   - DELETE the per-session output stream so the next turn's events
+     don't tail onto stale history. Last, after every fallible step,
+     so a failed enqueue never destroys replay history.
 3. After the DB commits, ``PUBLISH notify:worker`` so an idle worker
    wakes immediately. Best-effort: a missed publish is recovered by
    the worker's poll fallback.
@@ -30,6 +31,7 @@ Conversation history is **not** sent — the worker keeps its own
 compacted context file.
 """
 
+import asyncio
 import logging
 from uuid import UUID
 
@@ -44,15 +46,17 @@ from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.models.skill import Skill, SkillOrigin
 from app.models.user_skill_preference import UserSkillPreference
 from app.schemas.session import FileRef
-from app.services import credits
+from app.services import credits, file_storage
 from app.services.redis import (
     SESSION_STREAM_PREFIX,
     publish_wake,
     stream_key,
 )
+from config import settings
 from app.services.session.exceptions import (
     FileNotInSessionError,
     GenerationInProgressError,
+    SessionGoneError,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,25 +85,26 @@ async def queue_user_message(
        ``output_tokens`` / ``terminated_at`` written by the worker,
        not the Redis stream. Skipped on legacy sessions without a
        ``user_id``.
-    3. DELETE the previous turn's output stream so new events don't
-       tail onto stale history.
-    4. INSERT the ``session_turn`` (status=``pending``) and flush so
+    3. INSERT the ``session_turn`` (status=``pending``) and flush so
        its auto-generated id is the ``turn_id`` carried on the new
        reservation.
-    5. Reserve credits for this turn — raises
+    4. Reserve credits for this turn — raises
        :class:`~app.errors.InsufficientCreditsError` (→ HTTP 402) if
        the estimate would push the balance negative. The entire tx
        rolls back; no message stored, no worker wake.
-    6. INSERT the user ``message`` row, bind uploaded files to the
-       session, flip ``session.status='RUNNING'`` — one commit so a
-       refetch between steps can't see a half-applied state.
-    7. ``publish_wake`` so an idle worker doesn't have to wait for
+    5. INSERT the user ``message`` row, bind uploaded files to the
+       session, flip ``session.status='RUNNING'``, then DELETE the
+       previous turn's output stream — all before one commit so a
+       refetch can't see a half-applied state, and so a 402/skills
+       failure above can't destroy replay history for a turn that
+       never enqueues.
+    6. ``publish_wake`` so an idle worker doesn't have to wait for
        its poll cycle. **After commit** so the worker's claim sees
        the row. Best-effort; poll fallback covers a publish failure.
 
-    ``files`` are bound to the session at step 6; ``skills`` (the
+    ``files`` are bound to the session at step 5; ``skills`` (the
     composer's per-turn selection) is persisted on the ``session_turn``
-    row at step 4 and rides along to the worker through the claim
+    row at step 3 and rides along to the worker through the claim
     query — no separate binding needed (skill rows are already
     user-scoped, the worker re-checks ownership at lookup time).
 
@@ -109,6 +114,8 @@ async def queue_user_message(
 
     Raises:
         GenerationInProgressError: a turn is already streaming.
+        SessionGoneError: the session was deleted between the
+            endpoint's ownership check and this lock.
         InsufficientCreditsError: user's balance is below the
             estimated max cost.
     """
@@ -133,10 +140,6 @@ async def queue_user_message(
         )
     else:
         await credits.settle_open_for_user(db, session.user_id)
-    # Prior stream lingers post-``agent.stopped`` for late SSE replay;
-    # clear before the new turn so new events don't tail onto stale
-    # history. ``DELETE`` is a no-op on missing keys.
-    await redis.delete(stream_key(SESSION_STREAM_PREFIX, session.id))
 
     # Reject ``skills`` the user can't actually invoke — visible to
     # them AND effective-enabled. Without this check, a client could
@@ -182,7 +185,17 @@ async def queue_user_message(
     )
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
-    await _bind_session_files(db, session_id=session.id, files=files)
+    newly_bound_keys = await _bind_session_files(
+        db, session_id=session.id, files=files,
+    )
+
+    # Clear the prior turn's output stream (it lingers post-``agent.stopped``
+    # for late SSE replay) here, after every fallible step (see the step
+    # list above). ``DELETE`` is a no-op on a missing key; before commit so
+    # the stream is clean before the worker (woken post-commit) writes the
+    # new turn's first event.
+    await redis.delete(stream_key(SESSION_STREAM_PREFIX, session.id))
+
     await db.commit()  # releases the FOR UPDATE lock + makes session_turn visible
 
     # Wake any idle worker — fire-and-forget; if it fails the worker's
@@ -197,9 +210,41 @@ async def queue_user_message(
             session.id, exc_info=True,
         )
 
+    # Clear the orphan-reaping tag on files this turn just bound (M5), so the
+    # bucket lifecycle rule no longer reaps them. Best-effort + post-commit:
+    # the binding is already durable, so a tag-clear blip must not fail the
+    # send (mirrors publish_wake / stream-delete). A genuinely stuck clear is
+    # logged loudly — the ~1-day lifecycle window leaves room to react.
+    if settings.oss_orphan_tagging_enabled and newly_bound_keys:
+        await _clear_orphan_tags(newly_bound_keys)
+
+
+async def _clear_orphan_tags(file_keys: list[str]) -> None:
+    """Best-effort clear of the orphan tag on newly-bound uploads.
+
+    Runs the sync OSS calls off the event loop, concurrently. Per-key
+    failures are logged, never raised — see the call site.
+    """
+    results = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                file_storage.clear_orphan_tag, file_storage.SESSION_FILE_POLICY, key,
+            )
+            for key in file_keys
+        ),
+        return_exceptions=True,
+    )
+    for key, result in zip(file_keys, results):
+        if isinstance(result, Exception):
+            logger.error(
+                "failed to clear orphan tag on %s — it may be reaped by the "
+                "lifecycle rule; re-clear within the window",
+                key, exc_info=result,
+            )
+
 
 async def _lock_session(db: AsyncSession, session_id: str) -> Session:
-    """Re-fetch the session under a row-level lock.
+    """Re-fetch the live session under a row-level lock.
 
     Returns the locked row whose ``status`` is the authoritative answer
     to "is a generation running for this session"; the lock is held
@@ -207,11 +252,24 @@ async def _lock_session(db: AsyncSession, session_id: str) -> Session:
     caller-supplied ``Session`` object may be a stale snapshot (read
     in a different transaction at endpoint dispatch); the lock is what
     makes the subsequent status check race-free.
+
+    ``deleted_at IS NULL`` is part of the locked predicate so a
+    ``delete_session`` that committed between the endpoint's
+    ``_get_or_404`` and this lock leaves no row to match — we raise
+    :class:`SessionGoneError` rather than enqueue a turn (+ user message
+    + credit reservation) against a tombstoned session. ``delete_session``
+    takes the same row lock before tombstoning, so the two serialize:
+    whichever commits first, the other sees the committed state.
     """
     result = await db.execute(
-        select(Session).where(Session.id == session_id).with_for_update()
+        select(Session)
+        .where(Session.id == session_id, Session.deleted_at.is_(None))
+        .with_for_update()
     )
-    return result.scalar_one()
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise SessionGoneError(f"session {session_id} no longer exists")
+    return session
 
 
 async def _bind_session_files(
@@ -219,8 +277,13 @@ async def _bind_session_files(
     *,
     session_id: UUID,
     files: list[FileRef],
-) -> None:
+) -> list[str]:
     """Bind uploaded file keys to this session exactly once.
+
+    Returns the keys that were **newly** bound this call (a fresh
+    ``session_files`` row), so the caller can clear their orphan-reaping
+    tag (M5). Keys already bound to this session are not returned (their
+    tag was cleared on first bind).
 
     Reusing a file already bound to this same session is idempotent.
     Reusing a file bound to a different session is rejected: otherwise
@@ -234,7 +297,7 @@ async def _bind_session_files(
     for file_ref in files:
         unique_files.setdefault(file_ref.file_key, file_ref)
     if not unique_files:
-        return
+        return []
 
     rows = await db.execute(
         select(SessionFile.file_key, SessionFile.session_id)
@@ -244,6 +307,7 @@ async def _bind_session_files(
         file_key: owner_session_id for file_key, owner_session_id in rows.all()
     }
 
+    newly_bound: list[str] = []
     for file_key, file_ref in unique_files.items():
         owner_session_id = existing.get(file_key)
         if owner_session_id is None:
@@ -257,12 +321,14 @@ async def _bind_session_files(
                     size_bytes=file_ref.size_bytes,
                 )
             )
+            newly_bound.append(file_key)
             continue
         if owner_session_id == session_id:
             continue
         raise FileNotInSessionError(
             f"file_key {file_key!r} is already bound to another session"
         )
+    return newly_bound
 
 
 async def _filter_invokable_skills(

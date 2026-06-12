@@ -24,8 +24,28 @@ from slowapi.util import get_remote_address
 
 from config import settings
 
+
+def _client_ip(request: Request) -> str:
+    """Rate-limit key: the client IP.
+
+    Default is the socket peer (``get_remote_address``) — correct when
+    clients connect directly. Behind a reverse proxy that collapses every
+    client onto the proxy's IP (so per-IP limits become one shared bucket),
+    set ``trust_proxy_headers`` to key on the first ``X-Forwarded-For`` hop
+    instead. **Off by default**: trusting XFF when the deployment is *not*
+    behind a proxy that overwrites client-supplied values would let any
+    client spoof the key and dodge the limit, so it's opt-in for operators
+    who know their proxy sets it.
+    """
+    if settings.trust_proxy_headers:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip()
+    return get_remote_address(request)
+
+
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=_client_ip,
     default_limits=[settings.rate_limit_default],
     storage_uri=settings.redis_url,
     in_memory_fallback_enabled=True,

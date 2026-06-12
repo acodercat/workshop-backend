@@ -118,6 +118,16 @@ class InsufficientCreditsError(AppError):
     error_type = "insufficient_credits"
 
 
+class ModelUnavailableError(AppError):
+    """The session's ``model_id`` has no rate-card entry, so a turn can't
+    be priced. An operator-config gap (a model in
+    ``supported_session_model_ids`` but missing from ``credit_rates``), not
+    user error — surface 503 so it reads as "temporarily can't serve this"
+    rather than a generic 500, and stays diagnosable from the error type."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    error_type = "model_unavailable"
+
 
 class InvalidSkillBundleError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST

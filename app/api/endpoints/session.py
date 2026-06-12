@@ -80,6 +80,7 @@ from app.services.session import generate_title, queue_user_message, stream_even
 from app.services.session.exceptions import (
     FileNotInSessionError,
     GenerationInProgressError,
+    SessionGoneError,
 )
 from app.services.session.files import assert_file_belongs_to_session
 
@@ -89,7 +90,11 @@ router = APIRouter(tags=["sessions"])
 
 
 async def _get_or_404(
-    db: AsyncSession, session_id: str | uuid.UUID, user_id: int
+    db: AsyncSession,
+    session_id: str | uuid.UUID,
+    user_id: int,
+    *,
+    for_update: bool = False,
 ) -> Session:
     """Return the session row iff it exists, is not soft-deleted, AND
     the caller owns it.
@@ -98,16 +103,20 @@ async def _get_or_404(
     session ids isn't leaked. ``deleted_at IS NULL`` is folded into the
     query so every endpoint funnelling through here treats a
     soft-deleted session as gone.
+
+    ``for_update`` takes a row-level lock held until the transaction
+    ends — used by ``delete_session`` so its status check and tombstone
+    serialize against ``queue_user_message``'s own ``FOR UPDATE`` lock,
+    closing the race where a turn enqueues onto a session being deleted.
     """
-    session = (
-        await db.execute(
-            select(Session).where(
-                Session.id == session_id,
-                Session.user_id == user_id,
-                Session.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
+    stmt = select(Session).where(
+        Session.id == session_id,
+        Session.user_id == user_id,
+        Session.deleted_at.is_(None),
+    )
+    if for_update:
+        stmt = stmt.with_for_update()
+    session = (await db.execute(stmt)).scalar_one_or_none()
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
@@ -134,7 +143,10 @@ async def _load_messages(
             ),
         )
         .where(Message.session_id == session_id)
-        .order_by(Message.created_at.asc())
+        # Secondary sort on id: ``now()`` is transaction-scoped, so a USER
+        # row and the worker's ASSISTANT row committed in one transaction
+        # share a ``created_at`` — id breaks the tie in insert order.
+        .order_by(Message.created_at.asc(), Message.id.asc())
     )
     rows = (await db.execute(stmt)).all()
     return [
@@ -424,8 +436,15 @@ async def delete_session(
 
     Redis stream cleanup is best-effort; failure is logged, not
     raised — the worker's ``expire_stream`` TTL reaps the orphan.
+
+    The row is locked (``for_update``) so the status check + tombstone is
+    atomic against ``queue_user_message``: a concurrent enqueue either
+    commits first (we then see ``RUNNING`` and 409) or blocks on our lock
+    and finds the session gone afterward — never a turn on a deleted row.
     """
-    session = await _get_or_404(db, session_id, current_user.id)
+    session = await _get_or_404(
+        db, session_id, current_user.id, for_update=True,
+    )
     if session.status == SessionStatus.RUNNING:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -462,9 +481,11 @@ async def create_message(
     """Create a user message and enqueue LLM generation to the worker.
 
     Service-layer domain errors translate to HTTP here so the service
-    stays unaware of FastAPI: ``GenerationInProgressError`` → 409. The
-    DB-lease design has no Redis-enqueue failure path: ``publish_wake``
-    is best-effort and never raises into this handler.
+    stays unaware of FastAPI: ``GenerationInProgressError`` → 409,
+    ``SessionGoneError`` → 404 (the session was deleted between our
+    ownership check and the enqueue's row lock). The DB-lease design has
+    no Redis-enqueue failure path: ``publish_wake`` is best-effort and
+    never raises into this handler.
     """
     session = await _get_or_404(db, session_id, current_user.id)
     try:
@@ -476,6 +497,8 @@ async def create_message(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc),
         )
+    except SessionGoneError:
+        raise HTTPException(status_code=404, detail="Session not found")
     except FileNotInSessionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),

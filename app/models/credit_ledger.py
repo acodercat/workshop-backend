@@ -121,6 +121,19 @@ class CreditLedger(Base):
             "user_id",
             text("created_at DESC"),
         ),
+        # Point-lookup for the transactions view's per-reservation probe
+        # (``services/credits/transactions.py``): the negative SETTLE row
+        # for a given reservation. Without it that correlated subquery
+        # seq-scans the whole ledger once per SETTLED reservation on the
+        # page. Partial + expression so it stays tiny (only the ``-actual``
+        # settle rows) and matches the subquery's
+        # ``(reference->>'reservation_id')::bigint`` /
+        # ``kind='SETTLE' AND amount<0`` filters exactly.
+        Index(
+            "ix_credit_ledger_settle_reservation",
+            text("((reference ->> 'reservation_id')::bigint)"),
+            postgresql_where=text("kind = 'SETTLE' AND amount < 0"),
+        ),
     )
 
     def __repr__(self) -> str:

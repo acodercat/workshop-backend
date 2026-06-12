@@ -20,6 +20,11 @@ class UploadUrlResponse(BaseModel):
     file_key: str
     content_type: str
     expires_in: int
+    # When present, the client MUST send it as the ``x-oss-tagging`` request
+    # header on the PUT (it's signed into ``upload_url``, so omitting it would
+    # fail the signature). ``None`` when orphan-tagging is off — the client
+    # then sends no such header. See ``oss_orphan_tagging_enabled``.
+    tagging_header: str | None = None
 
 
 class DownloadUrlResponse(BaseModel):

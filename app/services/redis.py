@@ -14,9 +14,16 @@ input-queue concepts. Redis still owns:
   the worker holding the session (if any).
 """
 
+import asyncio
 import uuid
 
 import redis.asyncio as aioredis
+
+# Pause before treating a Redis ``ConnectionError`` as an empty block, so a
+# persistently-unreachable Redis can't hot-spin the SSE follow loop (which
+# would otherwise re-issue XREAD with no blocking delay). Short enough that
+# a recovered Redis resumes streaming promptly.
+_CONNECTION_ERROR_BACKOFF_SECONDS = 1.0
 
 # Wire contract — **mirrored** in ``agent-worker/agent_worker/wire/keys.py``
 # (``STREAM_PREFIX``, ``USER_EVENTS_CHANNEL``, ``NOTIFY_CHANNEL``). Any
@@ -133,8 +140,19 @@ async def read_stream(
     read timeout — a transient network blip, or a ``socket_timeout``
     shorter than ``block_ms`` — should make the SSE generator loop, not
     crash the stream. The caller advances no cursor and re-blocks.
+
+    A ``ConnectionError`` is handled the same way (empty block), not
+    propagated: the pooled client already retried internally, and tearing
+    the generator down on a blip would drop **every** live SSE at once →
+    a reconnect herd against the fail-fast streaming pool. We pause briefly
+    so a persistently-down Redis doesn't hot-spin, then return ``[]``; the
+    caller's DB-terminal fallback still closes finished sessions, and a
+    still-running session resumes streaming once Redis recovers.
     """
     try:
         return await redis.xread({key: cursor}, count=count, block=block_ms) or []
     except aioredis.TimeoutError:
+        return []
+    except aioredis.ConnectionError:
+        await asyncio.sleep(_CONNECTION_ERROR_BACKOFF_SECONDS)
         return []

@@ -54,6 +54,17 @@ class Settings(BaseSettings):
 
     # Rate limits — slowapi key is the client IP. Sized for human use;
     # raise behind authenticated identity if abuse appears.
+    #
+    # ``trust_proxy_headers``: when the API sits behind a reverse proxy,
+    # ``request.client.host`` is the proxy's IP (one shared rate-limit
+    # bucket for all clients). Enable to key on the first ``X-Forwarded-For``
+    # hop instead. Leave OFF unless a proxy that overwrites client-supplied
+    # XFF is actually in front — otherwise clients can spoof the header and
+    # bypass the limit.
+    trust_proxy_headers: bool = Field(
+        default=False,
+        description="Key rate limits on the first X-Forwarded-For hop (only behind a trusted proxy).",
+    )
     rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
     rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
@@ -141,6 +152,19 @@ class Settings(BaseSettings):
     oss_document_bucket_name: str = Field(default="metaseq-computer", description="OSS document bucket")
     oss_skill_bucket_name: str = Field(default="axon-skills", description="OSS bucket for user-uploaded SKILL.md bundles")
     oss_endpoint: str = Field(default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL")
+    # Orphan-upload reaping (M5): presigned session-file uploads are born
+    # tagged ``lifecycle=orphan``; a bucket lifecycle rule deletes objects
+    # still carrying the tag after ~1 day (set up via
+    # ``scripts/setup_oss_lifecycle.py``), and the tag is cleared when the
+    # file is bound to a session. OFF by default — turning it on requires
+    # the frontend to send the signed ``x-oss-tagging`` header (it does so
+    # only when the upload-url response carries ``tagging_header``, so the
+    # two stay in lockstep per request), the bucket lifecycle rule, and a
+    # CORS ``allowed-header`` for ``x-oss-tagging``. See docs/M5 notes.
+    oss_orphan_tagging_enabled: bool = Field(
+        default=False,
+        description="Tag presigned session-file uploads for lifecycle reaping; clear the tag on bind.",
+    )
 
     # Alibaba Cloud DirectMail — used to send the registration
     # verification code. Independent AK pair from OSS so the RAM

@@ -64,7 +64,14 @@ class Sandbox(Base):
     # INSERT, never updates. No DB-level FK — see class docstring.
     session_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     status: Mapped[SandboxStatus] = mapped_column(
-        SAEnum(SandboxStatus, name="sandbox_status"),
+        # ``values_callable`` so the Postgres enum holds the ``.value``
+        # strings, matching every other SAEnum in the schema (names ==
+        # values here, so this only aligns the convention).
+        SAEnum(
+            SandboxStatus,
+            name="sandbox_status",
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
         nullable=False,
         default=SandboxStatus.LIVE,
     )

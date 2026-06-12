@@ -14,6 +14,17 @@ class GenerationInProgressError(SessionServiceError):
     """A new turn was requested while one is still running."""
 
 
+class SessionGoneError(SessionServiceError):
+    """The session was soft-deleted (or hard-deleted) out from under an
+    in-flight enqueue.
+
+    ``create_message`` checks ownership/liveness via ``_get_or_404`` on an
+    unlocked read, then ``queue_user_message`` re-locks the row; a delete
+    that commits in that window is caught here under the lock so we never
+    enqueue a turn against a tombstoned session. The endpoint turns it
+    into 404, matching how every other read treats a deleted session."""
+
+
 class FileNotInSessionError(SessionServiceError):
     """A file_key was looked up against a session it doesn't belong to.
 

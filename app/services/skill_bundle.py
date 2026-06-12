@@ -28,10 +28,11 @@ import re
 import zipfile
 from dataclasses import dataclass
 
-# Mirrors :func:`axon.skills._parse_frontmatter` — flat ``key: value``
-# lines only between the leading and trailing ``---`` fences. Anything
-# fancier is silently dropped (kept consistent with axon's behavior
-# so what backend extracts == what worker eventually re-discovers).
+# Bounds the ``---`` … ``---`` frontmatter block; the body between the
+# fences is parsed with ``yaml.safe_load`` (see ``_split_frontmatter``).
+# Mirrors :func:`axon.skills._parse_frontmatter`, which uses the same regex
+# + ``yaml.safe_load``, so what the backend extracts at upload matches what
+# the worker re-discovers from the staged bundle.
 _FRONTMATTER_RE = re.compile(r"^---[ \t]*\r?\n(.*?)^---[ \t]*\r?\n?", re.DOTALL | re.MULTILINE)
 _SKILL_FILENAME = "SKILL.md"
 
@@ -55,11 +56,18 @@ _MAX_BODY_BYTES = 32 * 1024  # 32 KiB
 # ≤ 500 files); the wrapper zip itself is capped at upload time
 # (``SKILL_POLICY.max_bytes`` = 50 MiB). The compression-ratio guard is
 # ours — a real bundle compresses ~3-10×, so > 100× is a zip bomb. The
-# ratio (not a separate total-size cap, which the standard doesn't define)
-# is what catches "many small entries that cumulatively explode".
+# ratio catches "many small entries that cumulatively explode"; the
+# absolute total cap is the hard ceiling that ratio alone misses — a
+# ratio-100 archive of 50 MiB still declares ~5 GB of expansion, which
+# ``normalize_bundle`` would actually materialize in memory while
+# repacking. Both guards are header-only (no bytes decompressed), so a
+# bundle that declares more than the total cap is rejected before any
+# allocation. 200 MiB is generous headroom over the 500 × 25 MiB real
+# ceiling while still bounding the repack's peak memory.
 _MAX_UNCOMPRESSED_PER_ENTRY = 25 * 1024 * 1024  # 25 MiB — Agent Skills: per file
 _MAX_ENTRY_COUNT = 500                          # Agent Skills: files per bundle
 _MAX_COMPRESSION_RATIO = 100
+_MAX_TOTAL_UNCOMPRESSED = 200 * 1024 * 1024     # 200 MiB — hard ceiling on declared expansion
 
 
 class InvalidSkillBundleError(ValueError):
@@ -247,6 +255,16 @@ def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
             )
         total_compressed += info.compress_size
         total_uncompressed += info.file_size
+        # Absolute ceiling, checked as we accumulate so a long entry list
+        # whose declared sizes sum past the cap is rejected without
+        # finishing the scan — and, critically, before ``normalize_bundle``
+        # would try to materialize that expansion in memory.
+        if total_uncompressed > _MAX_TOTAL_UNCOMPRESSED:
+            raise InvalidSkillBundleError(
+                f"bundle expands to too many bytes uncompressed "
+                f"(> {_MAX_TOTAL_UNCOMPRESSED} bytes; refusing to decompress "
+                "a possible zip bomb)"
+            )
     if (
         total_compressed > 0
         and total_uncompressed / total_compressed > _MAX_COMPRESSION_RATIO

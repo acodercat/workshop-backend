@@ -46,6 +46,16 @@ class FileTooLargeError(ValueError):
 UPLOAD_URL_TTL_SECONDS = 15 * 60
 _DOWNLOAD_URL_TTL_SECONDS = 60 * 60
 
+# Orphan-reaping tag (M5). A presigned upload is born tagged
+# ``lifecycle=orphan``; a bucket lifecycle rule deletes objects still
+# carrying it after ~1 day, and :func:`clear_orphan_tag` removes it when the
+# upload is bound to a session. ``ORPHAN_TAGGING_HEADER`` is the OSS
+# url-encoded ``key=value`` tagging-header value the presigned PUT signs and
+# the client must echo. Gated by ``settings.oss_orphan_tagging_enabled``.
+_ORPHAN_TAG_KEY = "lifecycle"
+_ORPHAN_TAG_VALUE = "orphan"
+ORPHAN_TAGGING_HEADER = f"{_ORPHAN_TAG_KEY}={_ORPHAN_TAG_VALUE}"
+
 
 @dataclass(frozen=True)
 class UploadPolicy:
@@ -177,18 +187,39 @@ def generate_upload_url(
         raise UnsupportedFileTypeError(ext, sorted(policy.allowed_types))
 
     file_key = f"{policy.key_prefix}/{key_extra}{uuid.uuid4()}/{filename}"
+    # Tag the object orphan at upload (M5) so a never-bound upload is reaped
+    # by the bucket lifecycle rule. Signed into the URL, so the client must
+    # echo the header exactly — ``tagging_header`` tells it what to send, and
+    # is omitted (no signed header) when the feature is off, keeping the
+    # client in lockstep per request.
+    sign_headers = {"Content-Type": content_type}
+    tagging_header: str | None = None
+    if settings.oss_orphan_tagging_enabled:
+        tagging_header = ORPHAN_TAGGING_HEADER
+        sign_headers["x-oss-tagging"] = tagging_header
     upload_url = get_bucket(policy.bucket_name).sign_url(
         "PUT",
         file_key,
         expires=UPLOAD_URL_TTL_SECONDS,
-        headers={"Content-Type": content_type},
+        headers=sign_headers,
     )
     return UploadUrlResponse(
         upload_url=upload_url,
         file_key=file_key,
         content_type=content_type,
         expires_in=UPLOAD_URL_TTL_SECONDS,
+        tagging_header=tagging_header,
     )
+
+
+def clear_orphan_tag(policy: UploadPolicy, file_key: str) -> None:
+    """Remove the orphan lifecycle tag so the object survives the reaper.
+
+    Called when a presigned upload is bound to a session. Idempotent: OSS
+    treats deleting tags on an untagged object as a no-op, so it's safe for
+    objects uploaded before the feature was enabled (or already cleared).
+    """
+    get_bucket(policy.bucket_name).delete_object_tagging(file_key)
 
 
 def download(policy: UploadPolicy, file_key: str) -> bytes:

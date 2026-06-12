@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TypedDict
 
+from app.errors import ModelUnavailableError
 from config import settings
 
 # 1 USD of LLM cost == this many µ-credits, given the peg
@@ -65,14 +66,15 @@ class RateSnapshot(TypedDict):
 
 def snapshot_rate(model_id: str) -> RateSnapshot:
     """Return a fresh snapshot of the current rate-card row for
-    ``model_id``. Raises ``KeyError`` if the model isn't priced —
-    that's intentional: silently charging zero for an un-priced model
-    is the kind of bug that costs money for months before anyone
-    notices.
+    ``model_id``. Raises :class:`~app.errors.ModelUnavailableError` (→ 503)
+    if the model isn't priced — fail loud rather than silently charging
+    zero (the kind of bug that costs money for months before anyone
+    notices), but as a typed error the API renders cleanly instead of a
+    raw 500.
     """
     card = settings.credit_rates.get(model_id)
     if card is None:
-        raise KeyError(
+        raise ModelUnavailableError(
             f"No rate-card entry for model_id={model_id!r}; "
             f"add one to ``settings.credit_rates`` in config.py"
         )

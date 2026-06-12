@@ -61,6 +61,42 @@ def test_generate_upload_url_uses_sanitized_basename_in_key():
     bucket.sign_url.assert_called_once()
 
 
+def test_generate_upload_url_omits_tagging_when_feature_off(monkeypatch):
+    monkeypatch.setattr(file_storage.settings, "oss_orphan_tagging_enabled", False)
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://oss/upload"
+
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        response = file_storage.generate_upload_url("report.pdf", 1, file_storage.SESSION_FILE_POLICY)
+
+    assert response.tagging_header is None
+    # The signed headers must NOT include x-oss-tagging (else the client,
+    # which sends nothing, would fail the signature).
+    signed_headers = bucket.sign_url.call_args.kwargs["headers"]
+    assert "x-oss-tagging" not in signed_headers
+
+
+def test_generate_upload_url_signs_tagging_when_feature_on(monkeypatch):
+    monkeypatch.setattr(file_storage.settings, "oss_orphan_tagging_enabled", True)
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://oss/upload"
+
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        response = file_storage.generate_upload_url("report.pdf", 1, file_storage.SESSION_FILE_POLICY)
+
+    # Response value and signed header must match exactly (signature contract).
+    assert response.tagging_header == file_storage.ORPHAN_TAGGING_HEADER
+    signed_headers = bucket.sign_url.call_args.kwargs["headers"]
+    assert signed_headers["x-oss-tagging"] == file_storage.ORPHAN_TAGGING_HEADER
+
+
+def test_clear_orphan_tag_deletes_object_tagging():
+    bucket = MagicMock()
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        file_storage.clear_orphan_tag(file_storage.SESSION_FILE_POLICY, "session-files/x/y.pdf")
+    bucket.delete_object_tagging.assert_called_once_with("session-files/x/y.pdf")
+
+
 def test_file_ref_rejects_declared_size_above_cap():
     with pytest.raises(ValidationError):
         FileRef(

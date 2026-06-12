@@ -37,6 +37,15 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# The reservation's ``expires_at`` is the sweeper's "worker probably died"
+# cutoff, so it MUST exceed the longest legitimate turn — otherwise a turn
+# that genuinely runs long is indistinguishable from a dead worker and gets
+# wrongly refunded mid-flight (free turn). Derive it from the same config
+# knob that bounds a turn (``credit_reserve_max_turn_seconds``) so a bump to
+# that ceiling can't silently invert the invariant. The multiplier is the
+# safety margin above one max-length turn.
+_EXPIRY_TO_MAX_TURN_RATIO = 8
+
 
 async def reserve_for_turn(
     db: AsyncSession,
@@ -58,7 +67,8 @@ async def reserve_for_turn(
         InsufficientCreditsError: balance below the estimated max
             cost. The HTTP layer renders this as 402 via the typed-
             error handler.
-        KeyError: ``model_id`` has no rate-card entry (see
+        ModelUnavailableError: ``model_id`` has no rate-card entry
+            (→ 503; see
             :func:`~app.services.credits.rates.snapshot_rate`).
     """
     balance = await lock_user_balance(db, user_id)
@@ -85,16 +95,12 @@ async def reserve_for_turn(
             "model_id": model_id,
         },
     )
-    # ``expires_at`` is the sweeper's "worker probably died" cutoff
-    # (``settle_sweeper`` refunds OPEN reservations past it whose
-    # session is still non-terminal). It MUST exceed the longest
-    # legitimate turn — a deep-research / long autonomous loop that
-    # genuinely runs past this window is indistinguishable from a
-    # dead worker and would be wrongly refunded mid-flight (the user
-    # then gets that turn for free). 4h is the conservative upper
-    # bound for current workloads; a heartbeat-based passive cancel
-    # (see docs/credits-future.md) is the real fix and removes the
-    # need for any fixed timeout.
+    # Derived (see ``_EXPIRY_TO_MAX_TURN_RATIO``); defaults to 1860s × 8 ≈
+    # 4.1h. A heartbeat-based passive cancel (docs/credits-future.md) is the
+    # real fix and removes the need for any fixed timeout.
+    expiry_seconds = (
+        settings.credit_reserve_max_turn_seconds * _EXPIRY_TO_MAX_TURN_RATIO
+    )
     reservation = CreditReservation(
         user_id=user_id,
         session_id=session_id,
@@ -102,7 +108,7 @@ async def reserve_for_turn(
         reserved=reserved,
         rate_snapshot=dict(rate),  # JSONB stores the dict copy
         state=CreditReservationState.OPEN,
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=4),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=expiry_seconds),
     )
     db.add(reservation)
     await db.flush()  # populate reservation.id for downstream callers

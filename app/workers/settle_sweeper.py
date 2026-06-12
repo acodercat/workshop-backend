@@ -24,11 +24,12 @@ inside the FastAPI lifespan — see ``app/workers/run.py`` and
 restarted, and observed independently.
 
 Concurrency: every host in a multi-node deployment runs its own
-sweeper. Postgres advisory locks (:func:`pg_try_advisory_lock`) ensure
-only one process actually sweeps per tick across the entire cluster
-— the rest see a busy lock and skip. Connection loss = automatic
-release, so a crashed sweeper (SIGKILL, OOM, hardware failure) never
-strands the lock; the next tick's first survivor picks it up.
+sweeper. A Postgres **transaction-scoped** advisory lock
+(``pg_try_advisory_xact_lock``) ensures only one process actually sweeps
+per tick across the entire cluster — the rest see a busy lock and skip.
+The lock auto-releases when the tick's transaction ends (normal exit,
+crash, SIGKILL, OOM, or connection loss), so it can never strand; the
+next tick's first survivor picks it up.
 
 Sweep eligibility (per reservation row, ``state='OPEN'``):
 
@@ -38,7 +39,11 @@ Sweep eligibility (per reservation row, ``state='OPEN'``):
   which reads usage from ``session_turn`` and routes to settle (usage
   present) or refund (usage NULL).
 - ``expires_at`` has passed AND session not terminal (worker died
-  between RESERVE and terminal flip) → refund.
+  before its terminal flip, or the fleet is down and the turn was never
+  claimed) → terminalize the stranded turn + session to FAILED
+  (:func:`~app.services.session.recovery.fail_abandoned_turn`) so it
+  stops being a zombie, then refund — atomically. Left OPEN if a worker
+  still holds a live lease.
 - Otherwise (turn still running, not yet expired) → leave open.
 """
 
@@ -53,6 +58,7 @@ from app.database import AsyncSessionLocal
 from app.models.credit_reservation import CreditReservation, CreditReservationState
 from app.models.session import Session, SessionStatus
 from app.services import credits
+from app.services.session.recovery import fail_abandoned_turn
 
 logger = logging.getLogger(__name__)
 
@@ -106,40 +112,45 @@ async def _tick() -> int:
     Two distinct session lifetimes here, deliberately separated so a
     per-row failure can't poison the lock session:
 
-    - ``lock_db`` — held for the whole tick to keep the advisory lock
-      acquired. Only reads (the candidate list); never writes. Its
-      transaction state can't be aborted by per-row failures.
+    - ``lock_db`` — its transaction stays open for the whole tick to hold
+      the advisory lock. Only reads (the candidate list); never writes.
     - Per-row sessions — each candidate reservation gets its own
       :class:`AsyncSession` inside :func:`_process_one`. Isolating
       transactions per row means a DB blip on row 7 doesn't poison
       rows 8-100; the per-row try/except logs and the loop continues.
+
+    The lock is **transaction-scoped** (``pg_try_advisory_xact_lock``): it
+    auto-releases when ``lock_db``'s transaction ends as the ``async with``
+    block exits (rollback on close). No manual unlock — so there's no path
+    where a failed ``pg_advisory_unlock`` on a *pooled* connection leaks a
+    session-scoped lock and silently wedges every host's sweeper.
     """
     async with AsyncSessionLocal() as lock_db:
         got = (
             await lock_db.execute(
-                text("SELECT pg_try_advisory_lock(:key)"), {"key": _LOCK_KEY}
+                text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _LOCK_KEY}
             )
         ).scalar()
         if not got:
             return 0
-        try:
-            candidates = await _list_candidates(lock_db)
-            processed = 0
-            for candidate in candidates:
-                if await _process_one(candidate):
-                    processed += 1
-            return processed
-        finally:
-            await _release_lock(lock_db)
+        candidates = await _list_candidates(lock_db)
+        processed = 0
+        for candidate in candidates:
+            if await _process_one(candidate):
+                processed += 1
+        return processed
 
 
 async def _list_candidates(db: AsyncSession) -> list[tuple]:
     """Read the current sweep-eligible candidates from one snapshot.
 
-    Returned tuples are immutable — the per-row workers re-fetch under
-    ``FOR UPDATE`` inside their own transactions, so a candidate that
-    raced and got settled between list-time and process-time becomes
-    a harmless no-op (settle is idempotent on terminal state).
+    ``Session.status`` is used to *filter* the candidate set but is
+    deliberately **not** returned: a 100-row batch is processed serially,
+    so by the time ``_process_one`` reaches a late row the snapshot status
+    can be many seconds stale (a worker may have committed its terminal +
+    usage in between). ``_process_one`` re-reads the live status in its own
+    transaction and routes on that, so a completed turn settles instead of
+    being wrongly refunded.
 
     Only rows the sweeper can act on are selected. Leaving eligibility to
     ``_process_one`` after ``LIMIT`` would let a large prefix of active,
@@ -150,7 +161,6 @@ async def _list_candidates(db: AsyncSession) -> list[tuple]:
             CreditReservation.id,
             CreditReservation.session_id,
             CreditReservation.expires_at,
-            Session.status,
         )
         .join(Session, Session.id == CreditReservation.session_id, isouter=True)
         .where(
@@ -167,17 +177,6 @@ async def _list_candidates(db: AsyncSession) -> list[tuple]:
     return list(rows.all())
 
 
-async def _release_lock(db: AsyncSession) -> None:
-    """Best-effort unlock — connection close also releases, so a
-    failure here is logged but never re-raised."""
-    try:
-        await db.execute(
-            text("SELECT pg_advisory_unlock(:key)"), {"key": _LOCK_KEY}
-        )
-    except Exception:
-        logger.exception("sweeper: pg_advisory_unlock failed (connection-close fallback will release)")
-
-
 async def _process_one(candidate: tuple) -> bool:
     """Settle / refund one reservation in its own short transaction.
 
@@ -186,7 +185,7 @@ async def _process_one(candidate: tuple) -> bool:
     Per-row exceptions are caught and logged — the sweeper must
     survive a single bad reservation to keep processing the batch.
     """
-    reservation_id, session_id, expires_at, session_status = candidate
+    reservation_id, session_id, expires_at = candidate
     try:
         async with AsyncSessionLocal() as db:
             if session_id is None:
@@ -197,19 +196,32 @@ async def _process_one(candidate: tuple) -> bool:
                 )
                 await db.commit()
                 return True
-            session_terminal = (
-                session_status is not None and session_status not in _NON_TERMINAL
+            # Re-read the *live* status — the candidate snapshot is stale by
+            # the time we reach a late row in a serial batch, and routing
+            # settle-vs-refund off a stale "still running" would refund a
+            # turn the worker has since completed (free turn). Decide on the
+            # fresh value; the settle / refund helpers below are each
+            # idempotent and self-guarding against any remaining TOCTOU.
+            session_status = await db.scalar(
+                select(Session.status).where(Session.id == session_id)
             )
-            if session_terminal:
+            if session_status is not None and session_status not in _NON_TERMINAL:
                 # Worker finished — settle from session_turn (or refund
                 # if usage is missing, per settle_open_for_session).
                 await credits.settle_open_for_session(db, session_id)
                 await db.commit()
                 return True
             if expires_at is not None and expires_at < datetime.now(timezone.utc):
-                # Worker died between RESERVE and the fenced terminal
-                # write — session.status stays RUNNING / IDLE, no usage
-                # on session_turn. Refund.
+                # Reservation OPEN past its 4h expiry on a non-terminal
+                # session: the worker is gone (crashed before its terminal
+                # write, or the fleet is down and the turn was never
+                # claimed). Terminalize the stranded turn + session to FAILED
+                # so it stops being a zombie, THEN refund — same commit, so
+                # lifecycle and money reconcile atomically. A False return
+                # means a worker still holds a live lease; leave it OPEN for
+                # the next sweep rather than refund a turn that may finish.
+                if not await fail_abandoned_turn(db, session_id=session_id):
+                    return False
                 await credits.refund_reservation(
                     db, reservation_id=reservation_id,
                     reason={"cause": "sweeper_expired_no_terminal"},
