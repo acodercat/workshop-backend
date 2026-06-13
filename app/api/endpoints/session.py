@@ -861,12 +861,16 @@ async def delete_feedback(
 
 
 async def _enforce_session_file_quota(db: AsyncSession, user_id: int) -> None:
-    """Reject the upload-url mint if the user is at the per-user file cap.
+    """Reject the upload-url mint if the user is at the per-user upload cap.
 
-    Counts all ``session_files`` rows for the user — both files the
-    user uploaded directly and files LLM tool calls produced into
-    their sessions. Both occupy OSS storage on the user's behalf, so
-    a single combined cap is what bounds account-level OSS cost.
+    Counts only ``UPLOAD``-origin rows — files the user uploaded
+    directly. ``DELIVERABLE`` (tool outputs) and ``INTERNAL``
+    (``read_image`` inputs, office→PDF preview sidecars) are produced
+    by the agent, not the user, and ``INTERNAL`` isn't even shown in
+    the file library — counting either against this *upload* gate would
+    let heavy agent use silently exhaust a user's upload headroom. The
+    worker writes those origins with no quota check anyway, so a
+    combined cap here never actually bounded their growth.
 
     Joined to non-soft-deleted sessions only — deleting a session
     frees up quota. Race-acceptable: two concurrent mints at the
@@ -878,6 +882,7 @@ async def _enforce_session_file_quota(db: AsyncSession, user_id: int) -> None:
         .join(Session, Session.id == SessionFile.session_id)
         .where(Session.user_id == user_id)
         .where(Session.deleted_at.is_(None))
+        .where(SessionFile.origin == SessionFileOrigin.UPLOAD)
     ) or 0
     if count >= settings.max_session_files_per_user:
         raise SessionFileQuotaExceededError(

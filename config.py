@@ -211,7 +211,11 @@ class Settings(BaseSettings):
     )
     max_session_files_per_user: int = Field(
         default=1000,
-        description="Total session-file rows allowed per user across all sessions",
+        description=(
+            "Max UPLOAD-origin session-file rows per user across all sessions "
+            "(the upload gate; agent-produced DELIVERABLE / INTERNAL rows are "
+            "not counted)"
+        ),
     )
 
     # Sessions
