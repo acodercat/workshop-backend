@@ -217,6 +217,7 @@ class Settings(BaseSettings):
             "deepseek-v4-flash",
             "glm-5.1",
             "MiniMax/MiniMax-M2.7",
+            "fable",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
     )
@@ -230,7 +231,7 @@ class Settings(BaseSettings):
         default_factory=lambda: {
             "FAST": "HKGAI-V3",
             "STANDARD": "kimi-k2",
-            "ADVANCED": "kimi-k2",
+            "ADVANCED": "fable",
         },
         description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
     )
