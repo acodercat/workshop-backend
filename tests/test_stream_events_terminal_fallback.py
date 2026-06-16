@@ -17,6 +17,11 @@ from unittest.mock import AsyncMock
 
 from app.common.event_types import EventType
 from app.services.session import streaming
+from app.services.session.streaming import (
+    _BLIND_FUSE_SECONDS,
+    _Liveness,
+    _safe_cursor,
+)
 
 
 async def _collect(gen, limit: int = 20) -> list[dict]:
@@ -42,7 +47,8 @@ async def test_idle_stream_with_terminal_db_synthesizes_stopped(monkeypatch):
     redis.xrange = AsyncMock(return_value=[])  # no replay history
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))  # idle block
     monkeypatch.setattr(
-        streaming, "_session_is_terminal", AsyncMock(return_value=True),
+        streaming, "_session_liveness",
+        AsyncMock(return_value=_Liveness.TERMINAL),
     )
 
     events = await _collect(streaming.stream_events(redis, "sess-1"))
@@ -71,13 +77,112 @@ async def test_idle_stream_still_running_does_not_false_close(monkeypatch):
     monkeypatch.setattr(
         streaming, "read_stream", AsyncMock(side_effect=[[], real_terminal]),
     )
-    is_terminal = AsyncMock(return_value=False)  # still RUNNING at the idle check
-    monkeypatch.setattr(streaming, "_session_is_terminal", is_terminal)
+    liveness = AsyncMock(return_value=_Liveness.RUNNING)  # still RUNNING at the idle check
+    monkeypatch.setattr(streaming, "_session_liveness", liveness)
 
     events = await _collect(streaming.stream_events(redis, "sess-1"))
 
     # Consulted the DB once after the idle block, saw RUNNING, did not
     # false-close — the terminal that closed the stream is the real event.
-    is_terminal.assert_awaited_once()
+    liveness.assert_awaited_once()
     assert events[-1]["event"] == EventType.AGENT_STOPPED.value
     assert json.loads(events[-1]["data"]) == {"content": "done"}
+
+
+async def test_blind_dual_outage_trips_the_fuse(monkeypatch):
+    """Redis idle *and* DB unreachable past the fuse window → close, no
+    synthetic terminal.
+
+    Simulates a sustained dual outage: every follow read is idle and every
+    liveness check returns UNKNOWN. The generator must NOT block for the
+    full stream TTL — once it has been fully blind past
+    ``_BLIND_FUSE_SECONDS`` it returns, *without* fabricating an
+    ``agent.stopped`` (it doesn't actually know the turn stopped), so the
+    client's EventSource reconnects and re-evaluates."""
+    redis = AsyncMock()
+    redis.xrange = AsyncMock(return_value=[])
+    monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))  # always idle
+    monkeypatch.setattr(
+        streaming, "_session_liveness",
+        AsyncMock(return_value=_Liveness.UNKNOWN),
+    )
+    # Deterministic monotonic clock: the first blind cycle records the start,
+    # the second reads past the fuse window and trips it.
+    ticks = iter([1.0, _BLIND_FUSE_SECONDS + 2.0] + [9_999.0] * 50)
+    monkeypatch.setattr(streaming.time, "monotonic", lambda: next(ticks))
+
+    events = await _collect(streaming.stream_events(redis, "sess-1"))
+
+    # Closed (under the cap) and never fabricated a terminal under the outage.
+    assert len(events) < 20
+    assert all(e["event"] != EventType.AGENT_STOPPED.value for e in events)
+
+
+def test_safe_cursor_passes_valid_entry_id():
+    """A well-formed ``<ms>-<seq>`` id round-trips unchanged."""
+    assert _safe_cursor("1700000000000-0") == "1700000000000-0"
+    assert _safe_cursor("5-12") == "5-12"
+
+
+def test_safe_cursor_rejects_malformed_id():
+    """Anything that isn't a clean entry id → None (full replay), so a
+    client-controlled header can't inject range syntax into xrange(min=)."""
+    for bad in [None, "", "(5-0", "+", "-", "5", "abc", "5-0; DROP", "5-"]:
+        assert _safe_cursor(bad) is None
+
+
+def _chunk(i: int) -> tuple[str, dict]:
+    """A replay entry shaped ``(entry_id, fields)`` as Redis xrange returns it."""
+    return f"{i}-0", {"type": "agent.message_chunk", "content": f"c{i}", "ts": "1"}
+
+
+async def test_replay_spans_multiple_pages_in_order(monkeypatch):
+    """A backlog larger than one page is drained across successive ``xrange``
+    calls, each resuming from an exclusive cursor past the last entry — every
+    event forwarded once, in order, with no overlap or skip."""
+    monkeypatch.setattr(streaming, "_REPLAY_PAGE_SIZE", 2)
+    redis = AsyncMock()
+    # Two full pages then a short one — the short page ends replay without a
+    # trailing empty xrange.
+    redis.xrange = AsyncMock(
+        side_effect=[[_chunk(1), _chunk(2)], [_chunk(3), _chunk(4)], [_chunk(5)]]
+    )
+    # Phase 2 closes the stream straight away so the test targets replay only.
+    terminal = [("k", [("9-0", {"type": "agent.stopped", "content": "done"})])]
+    monkeypatch.setattr(
+        streaming, "read_stream", AsyncMock(return_value=terminal),
+    )
+
+    events = await _collect(streaming.stream_events(redis, "sess-1"))
+
+    # All five replayed chunks, in order.
+    contents = [
+        json.loads(e["data"])["content"]
+        for e in events
+        if e["event"] == "agent.message_chunk"
+    ]
+    assert contents == ["c1", "c2", "c3", "c4", "c5"]
+    # Three pages read; the short final page skipped a fourth (empty) call.
+    assert redis.xrange.await_count == 3
+    # Each call resumed strictly after the previous page's last entry.
+    mins = [c.kwargs["min"] for c in redis.xrange.await_args_list]
+    assert mins == ["-", "(2-0", "(4-0"]
+
+
+async def test_replay_terminal_returns_before_paging_on(monkeypatch):
+    """An ``agent.stopped`` inside a replay page closes the stream immediately
+    — no further pages, no follow loop."""
+    monkeypatch.setattr(streaming, "_REPLAY_PAGE_SIZE", 2)
+    redis = AsyncMock()
+    redis.xrange = AsyncMock(
+        side_effect=[[_chunk(1), ("2-0", {"type": "agent.stopped", "content": "done"})]]
+    )
+    follow = AsyncMock(return_value=[])
+    monkeypatch.setattr(streaming, "read_stream", follow)
+
+    events = await _collect(streaming.stream_events(redis, "sess-1"))
+
+    assert events[-1]["event"] == EventType.AGENT_STOPPED.value
+    assert json.loads(events[-1]["data"]) == {"content": "done"}
+    redis.xrange.assert_awaited_once()  # returned mid-page, never paged on
+    follow.assert_not_awaited()  # never reached the follow loop
