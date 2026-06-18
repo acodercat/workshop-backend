@@ -216,6 +216,7 @@ class Settings(BaseSettings):
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "glm-5.1",
+            "glm-5.2",
             "MiniMax/MiniMax-M2.7",
             "fable",
         }),
@@ -231,7 +232,7 @@ class Settings(BaseSettings):
         default_factory=lambda: {
             "FAST": "HKGAI-V3",
             "STANDARD": "kimi-k2",
-            "ADVANCED": "fable",
+            "ADVANCED": "glm-5.2",
         },
         description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
     )
@@ -281,6 +282,7 @@ class Settings(BaseSettings):
             # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
             "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "glm-5.2":           {"in_per_1k_usd": 0.00090, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
             # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
             # ¥0.42/M not separately tracked here; settle uses uncached rate.
