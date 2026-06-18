@@ -220,12 +220,21 @@ class Settings(BaseSettings):
         default=100 * 1024 * 1024,
         description="Per-file upload size cap (bytes)",
     )
-    max_session_files_per_user: int = Field(
-        default=1000,
+    max_session_files_bytes_per_user: int = Field(
+        default=10 * 1024 * 1024 * 1024,
         description=(
-            "Max UPLOAD-origin session-file rows per user across all sessions "
-            "(the upload gate; agent-produced DELIVERABLE / INTERNAL rows are "
-            "not counted)"
+            "Per-user total-size cap (bytes) for UPLOAD-origin session files "
+            "across all sessions. The primary upload gate — tracks OSS storage "
+            "cost. Agent-produced DELIVERABLE / INTERNAL rows are not counted "
+            "(they have no upload-time gate)."
+        ),
+    )
+    max_session_files_per_user: int = Field(
+        default=5000,
+        description=(
+            "Backstop cap on the COUNT of UPLOAD-origin session-file rows per "
+            "user, guarding against many-tiny-files row explosion that the "
+            "size cap alone misses. Same UPLOAD-only scope as the size cap."
         ),
     )
 
@@ -241,7 +250,7 @@ class Settings(BaseSettings):
             "qwen3.7-max",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
-            "glm-5.1",
+            "glm-5.2",
             "MiniMax/MiniMax-M2.7",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
@@ -256,7 +265,7 @@ class Settings(BaseSettings):
         default_factory=lambda: {
             "FAST": "deepseek-v4-flash",
             "STANDARD": "kimi-k2",
-            "ADVANCED": "kimi-k2",
+            "ADVANCED": "glm-5.2",
         },
         description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
     )
@@ -304,7 +313,7 @@ class Settings(BaseSettings):
             # tokens (≈$0.14/$0.28 per M), no promo expiry. Cheaper than
             # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
             "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "glm-5.2":           {"in_per_1k_usd": 0.00090, "out_per_1k_usd": 0.00350, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
             # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
             # ¥0.42/M not separately tracked here; settle uses uncached rate.

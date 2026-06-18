@@ -241,14 +241,14 @@ async def create_session_upload_url(
 
     Validates filename extension (whitelist in
     :mod:`app.services.file_storage`) and rejects oversize requests
-    before the URL is issued. Also enforces a per-user file count
-    cap so a single account can't squat OSS by accumulating files
-    across sessions. The eventual file→session binding happens when
-    the message is enqueued (``services/session/enqueue.py`` inserts
-    the ``session_files`` row); this endpoint is purely the "mint me
-    a presigned URL" step.
+    before the URL is issued. Also enforces a per-user upload quota
+    (total size, with a file-count backstop) so a single account can't
+    squat OSS by accumulating files across sessions. The eventual
+    file→session binding happens when the message is enqueued
+    (``services/session/enqueue.py`` inserts the ``session_files`` row);
+    this endpoint is purely the "mint me a presigned URL" step.
     """
-    await _enforce_session_file_quota(db, current_user.id)
+    await _enforce_session_file_quota(db, current_user.id, body.size_bytes)
     try:
         return file_storage.generate_upload_url(
             body.filename, body.size_bytes, SESSION_FILE_POLICY,
@@ -904,32 +904,53 @@ async def delete_feedback(
     await db.commit()
 
 
-async def _enforce_session_file_quota(db: AsyncSession, user_id: int) -> None:
-    """Reject the upload-url mint if the user is at the per-user upload cap.
+async def _enforce_session_file_quota(
+    db: AsyncSession, user_id: int, incoming_size_bytes: int
+) -> None:
+    """Reject the upload-url mint if this upload would put the user over a
+    per-user quota. Two gates, both scoped to ``UPLOAD``-origin rows on
+    non-soft-deleted sessions (deleting a session frees up quota):
 
-    Counts only ``UPLOAD``-origin rows — files the user uploaded
-    directly. ``DELIVERABLE`` (tool outputs) and ``INTERNAL``
-    (``read_image`` inputs, office→PDF preview sidecars) are produced
-    by the agent, not the user, and ``INTERNAL`` isn't even shown in
-    the file library — counting either against this *upload* gate would
-    let heavy agent use silently exhaust a user's upload headroom. The
-    worker writes those origins with no quota check anyway, so a
-    combined cap here never actually bounded their growth.
+    - **Total size** (primary): summed ``size_bytes`` plus this upload
+      must stay under ``max_session_files_bytes_per_user``. This gate
+      tracks real OSS storage cost.
+    - **Count** (backstop): guards against many-tiny-files row explosion
+      that the size gate alone wouldn't catch.
 
-    Joined to non-soft-deleted sessions only — deleting a session
-    frees up quota. Race-acceptable: two concurrent mints at the
-    boundary could both succeed, leaving the user one over. Not worth
-    a row lock for a soft policy limit.
+    Only ``UPLOAD`` rows count — files the user uploaded directly.
+    ``DELIVERABLE`` (tool outputs) and ``INTERNAL`` (``read_image``
+    inputs, office→PDF preview sidecars) are written by the worker with
+    no upload-time gate, so counting them here would let heavy agent use
+    silently exhaust a user's upload headroom.
+
+    ``size_bytes`` is the client-declared size captured at mint time (the
+    same value the per-file cap trusts); pre-backfill rows with a null
+    size contribute 0 to the sum. Race-acceptable: two concurrent mints
+    at the boundary can both pass, leaving the user slightly over — not
+    worth a row lock for a soft policy limit.
     """
-    count = await db.scalar(
-        select(func.count(SessionFile.id))
-        .join(Session, Session.id == SessionFile.session_id)
-        .where(Session.user_id == user_id)
-        .where(Session.deleted_at.is_(None))
-        .where(SessionFile.origin == SessionFileOrigin.UPLOAD)
-    ) or 0
+    count, used_bytes = (
+        await db.execute(
+            select(
+                func.count(SessionFile.id),
+                func.coalesce(func.sum(SessionFile.size_bytes), 0),
+            )
+            .join(Session, Session.id == SessionFile.session_id)
+            .where(Session.user_id == user_id)
+            .where(Session.deleted_at.is_(None))
+            .where(SessionFile.origin == SessionFileOrigin.UPLOAD)
+        )
+    ).one()
+
+    size_cap = settings.max_session_files_bytes_per_user
+    if used_bytes + incoming_size_bytes > size_cap:
+        raise SessionFileQuotaExceededError(
+            f"upload would put the user at "
+            f"{(used_bytes + incoming_size_bytes) / 1024**3:.2f} GB of "
+            f"uploaded files; per-user limit is {size_cap / 1024**3:.1f} GB"
+        )
     if count >= settings.max_session_files_per_user:
         raise SessionFileQuotaExceededError(
-            f"user already has {count} session files; "
+            f"user already has {count} uploaded files; "
             f"per-user limit is {settings.max_session_files_per_user}"
         )

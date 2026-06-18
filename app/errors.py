@@ -162,12 +162,14 @@ class SkillQuotaExceededError(AppError):
 
 
 class SessionFileQuotaExceededError(AppError):
-    """User already has the maximum allowed number of session files.
+    """User has hit a per-user session-file upload quota — either the
+    total-size cap or the file-count backstop.
 
     Matches the ``SessionFile`` DB model name. Distinct from
     :class:`FileTooLargeError`: the individual file would have been
-    accepted, but the user has hit the count cap. The per-file size
-    cap is enforced separately in ``file_storage``.
+    accepted on its own, but it would push the user's account over the
+    quota. The per-file size cap is enforced separately in
+    ``file_storage``.
     """
 
     status_code = status.HTTP_403_FORBIDDEN
