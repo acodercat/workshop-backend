@@ -90,6 +90,73 @@ def test_generate_upload_url_signs_tagging_when_feature_on(monkeypatch):
     assert signed_headers["x-oss-tagging"] == file_storage.ORPHAN_TAGGING_HEADER
 
 
+def test_generate_inline_url_signs_inline_disposition_not_attachment(monkeypatch):
+    # The whole point of the inline URL: it must render in an iframe, not
+    # trigger a save-as. Attachment disposition would download instead —
+    # the exact bug that forced the in-memory ``srcDoc`` workaround.
+    # No custom domain configured → falls back to the default endpoint.
+    monkeypatch.setattr(file_storage.settings, "oss_document_domain", None)
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://oss/inline"
+
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        url, expires_in = file_storage.generate_inline_url(
+            file_storage.SESSION_FILE_POLICY, "session-files/x/page.html"
+        )
+
+    assert url == "https://oss/inline"
+    assert expires_in == file_storage._DOWNLOAD_URL_TTL_SECONDS
+    params = bucket.sign_url.call_args.kwargs["params"]
+    assert params["response-content-disposition"] == "inline"
+    # Must NOT override Content-Type: Aliyun OSS rejects
+    # ``response-content-type`` on a presigned GET (error 0017-00000902).
+    # Rendering relies on the object's stored text/html type.
+    assert "response-content-type" not in params
+
+
+def test_generate_inline_url_signs_against_custom_domain_when_set(monkeypatch):
+    # A bound custom domain is required for inline rendering: the default
+    # ``*.aliyuncs.com`` endpoint force-downloads HTML in mainland regions.
+    # When configured, the URL must be signed against it (via the CNAME
+    # bucket — get_bucket(cname_domain=...)).
+    monkeypatch.setattr(
+        file_storage.settings, "oss_document_domain", "https://files.example.com"
+    )
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://files.example.com/inline"
+
+    with patch(
+        "app.services.file_storage.get_bucket", return_value=bucket
+    ) as get:
+        url, _ = file_storage.generate_inline_url(
+            file_storage.SESSION_FILE_POLICY, "session-files/x/page.html"
+        )
+
+    get.assert_called_once_with(
+        file_storage.SESSION_FILE_POLICY.bucket_name,
+        cname_domain="https://files.example.com",
+    )
+    assert url == "https://files.example.com/inline"
+    assert bucket.sign_url.call_args.kwargs["params"] == {
+        "response-content-disposition": "inline"
+    }
+
+
+def test_generate_download_url_keeps_attachment_disposition():
+    # Guards the distinction from ``generate_inline_url``: the download
+    # button must still save-as, never render inline.
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://oss/download"
+
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        file_storage.generate_download_url(
+            file_storage.SESSION_FILE_POLICY, "session-files/x/page.html", "page.html"
+        )
+
+    params = bucket.sign_url.call_args.kwargs["params"]
+    assert params["response-content-disposition"].startswith("attachment;")
+
+
 def test_clear_orphan_tag_deletes_object_tagging():
     bucket = MagicMock()
     with patch("app.services.file_storage.get_bucket", return_value=bucket):

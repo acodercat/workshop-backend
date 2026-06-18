@@ -147,22 +147,34 @@ SKILL_POLICY = UploadPolicy(
 )
 
 
-_buckets: dict[str, oss2.Bucket] = {}
+_buckets: dict[tuple[str, str | None], oss2.Bucket] = {}
 _buckets_lock = threading.Lock()
 
 
-def get_bucket(bucket_name: str) -> oss2.Bucket:
-    bucket = _buckets.get(bucket_name)
+def get_bucket(bucket_name: str, *, cname_domain: str | None = None) -> oss2.Bucket:
+    """Process-wide cached bucket handle.
+
+    ``cname_domain`` signs URLs against a bound custom domain (CNAME)
+    instead of the default OSS endpoint — needed for inline previews,
+    since the default ``*.aliyuncs.com`` endpoint force-downloads HTML in
+    mainland regions. ``None`` uses the default endpoint (every caller but
+    the inline-preview one). Cached per ``(bucket, cname_domain)``."""
+    key = (bucket_name, cname_domain)
+    bucket = _buckets.get(key)
     if bucket is None:
         with _buckets_lock:
-            bucket = _buckets.get(bucket_name)
+            bucket = _buckets.get(key)
             if bucket is None:
                 auth = oss2.Auth(
                     settings.oss_access_key_id,
                     settings.oss_access_key_secret,
                 )
-                bucket = oss2.Bucket(auth, settings.oss_endpoint, bucket_name)
-                _buckets[bucket_name] = bucket
+                bucket = (
+                    oss2.Bucket(auth, cname_domain, bucket_name, is_cname=True)
+                    if cname_domain
+                    else oss2.Bucket(auth, settings.oss_endpoint, bucket_name)
+                )
+                _buckets[key] = bucket
     return bucket
 
 
@@ -261,5 +273,40 @@ def generate_download_url(
                 f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
             ),
         },
+    )
+    return url, _DOWNLOAD_URL_TTL_SECONDS
+
+
+def generate_inline_url(policy: UploadPolicy, file_key: str) -> tuple[str, int]:
+    """Presigned GET URL the browser renders **inline** — for HTML previews.
+
+    The mirror image of :func:`generate_download_url`: instead of forcing
+    ``attachment`` (save-as), it signs ``inline`` so the object loads as a
+    page inside an ``<iframe src>``. Serving it from the OSS origin — not
+    the app's — is the whole point: relative links in the delivered HTML
+    resolve against OSS, so the page can't navigate the frame back into
+    the app and render the app nested inside itself.
+
+    We deliberately do NOT override the response ``Content-Type``: Aliyun
+    OSS rejects ``response-content-type`` on a presigned GET ("Can not
+    override response header on content-type", an XSS-hardening rule), so
+    rendering relies on the object's *stored* Content-Type — delivered
+    ``.html`` is uploaded as ``text/html``. HTML-only by design; binary
+    previews (PDF / Office) fetch bytes through their own viewer and
+    ignore Content-Disposition, so they keep using the download URL.
+
+    Signs against ``oss_document_domain`` (a bound custom domain) when set
+    — required because the default ``*.aliyuncs.com`` endpoint
+    force-downloads HTML in mainland regions regardless of the ``inline``
+    disposition. Falls back to the default endpoint when unset (the URL
+    then downloads, but nothing breaks).
+    """
+    url = get_bucket(
+        policy.bucket_name, cname_domain=settings.oss_document_domain
+    ).sign_url(
+        "GET",
+        file_key,
+        expires=_DOWNLOAD_URL_TTL_SECONDS,
+        params={"response-content-disposition": "inline"},
     )
     return url, _DOWNLOAD_URL_TTL_SECONDS

@@ -34,6 +34,16 @@ class DownloadUrlResponse(BaseModel):
     expires_in: int
 
 
+class PreviewUrlResponse(BaseModel):
+    """Presigned URL the frontend loads inline in an ``<iframe src>`` to
+    preview an HTML deliverable. Distinct from ``DownloadUrlResponse``
+    because the disposition differs (inline vs attachment) and so does
+    the intent — this URL renders, it doesn't save-as."""
+    preview_url: str
+    file_key: str
+    expires_in: int
+
+
 class SessionFileResponse(BaseModel):
     """A row in the cross-session file library. ``filename`` falls back to
     a key-derived name for rows whose stored metadata isn't backfilled.

@@ -51,6 +51,7 @@ from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.file import (
     DownloadUrlResponse,
+    PreviewUrlResponse,
     SessionFileResponse,
     UploadUrlRequest,
     UploadUrlResponse,
@@ -749,6 +750,49 @@ async def get_download_url(
     )
     return DownloadUrlResponse(
         download_url=url, file_key=file_key, expires_in=expires_in,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/files/preview-url",
+    response_model=PreviewUrlResponse,
+)
+@limiter.limit("60/minute")
+async def get_preview_url(
+    request: Request,
+    session_id: uuid.UUID,
+    file_key: Annotated[str, Query(description="OSS file key of the HTML deliverable to preview")],
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Mint a presigned GET URL that renders an HTML deliverable inline.
+
+    Parallel to :func:`get_download_url`, but the minted URL carries
+    ``inline`` disposition so it loads as a page inside an ``<iframe
+    src>`` instead of triggering a save-as — the frontend uses it to
+    preview HTML on the OSS origin, where its relative links can't
+    navigate back into the app (the iframe-nesting fix). No ``filename``
+    param: there's no save-as name for an inline render.
+
+    ``preview-url`` is the resource being minted; ``file_key`` is a
+    parameter to it (same path-vs-bytes reasoning as ``download-url``).
+    Same two-step authorization as the download variant.
+    """
+    session = await _get_or_404(db, session_id, current_user.id)
+    try:
+        await assert_file_belongs_to_session(
+            db, session_id=session.id, file_key=file_key,
+        )
+    except FileNotInSessionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="File is not part of this session",
+        )
+    url, expires_in = file_storage.generate_inline_url(
+        file_storage.SESSION_FILE_POLICY, file_key,
+    )
+    return PreviewUrlResponse(
+        preview_url=url, file_key=file_key, expires_in=expires_in,
     )
 
 

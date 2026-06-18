@@ -152,6 +152,17 @@ class Settings(BaseSettings):
     oss_document_bucket_name: str = Field(default="metaseq-computer", description="OSS document bucket")
     oss_skill_bucket_name: str = Field(default="axon-skills", description="OSS bucket for user-uploaded SKILL.md bundles")
     oss_endpoint: str = Field(default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL")
+    # Custom domain (CNAME) bound to the document bucket, e.g.
+    # https://files.metaseq.com.cn. Set this to make inline preview URLs
+    # render in the browser: the default ``*.aliyuncs.com`` endpoint forces
+    # ``Content-Disposition: attachment`` (download) in mainland regions and
+    # forbids overriding it, so a bound custom domain is required to serve
+    # HTML inline. Unset → inline URLs fall back to the default endpoint
+    # (they'll download, but nothing breaks). Download URLs are unaffected.
+    oss_document_domain: str | None = Field(
+        default=None,
+        description="Custom domain bound to the document bucket for inline previews, e.g. https://files.metaseq.com.cn",
+    )
     # Orphan-upload reaping (M5): presigned session-file uploads are born
     # tagged ``lifecycle=orphan``; a bucket lifecycle rule deletes objects
     # still carrying the tag after ~1 day (set up via
