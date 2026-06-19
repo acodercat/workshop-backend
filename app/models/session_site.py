@@ -49,8 +49,9 @@ class SessionSite(Base):
     # Denormalized from ``session.user_id``; nullable to mirror it, though a
     # claimed turn always carries an owner so published rows have one in
     # practice. Owner is immutable ⇒ this copy never goes stale.
+    # ``ON DELETE CASCADE`` matches the session-ownership family.
     user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("user.id"), nullable=True
+        Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )
     # Human-facing name (the ``publish_site`` ``title`` arg, capped at 80
     # chars there) — kept for a future management UI.

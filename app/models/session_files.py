@@ -34,9 +34,11 @@ from sqlalchemy import (
     Enum as SAEnum,
     ForeignKey,
     Index,
+    Integer,
     String,
     TIMESTAMP,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -70,6 +72,16 @@ class SessionFile(Base):
         Uuid,
         ForeignKey("session.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    # Denormalized owner, copied from ``session.user_id`` by the producer
+    # (immutable relationship ⇒ never stale). Nullable to mirror it —
+    # anonymous sessions carry no owner. ``ON DELETE CASCADE`` matches the
+    # session-ownership family. Lets the per-user file reads (the library,
+    # the upload quota counts) scan by owner via
+    # ``ix_session_files_user_id_created_at`` instead of driving from
+    # ``session`` — a read path adopts it by filtering this column.
+    user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )
     # OSS keys are globally unique by construction (user uploads use
     # ``session-files/{uuid4}/...`` — older rows still have the
@@ -105,6 +117,12 @@ class SessionFile(Base):
     # delete on the parent session would seq-scan ``session_files``.
     __table_args__ = (
         Index("ix_session_files_session_id", "session_id"),
+        # Per-user file library / quota counting: by owner, newest first.
+        Index(
+            "ix_session_files_user_id_created_at",
+            "user_id",
+            text("created_at DESC"),
+        ),
     )
 
     def __repr__(self) -> str:

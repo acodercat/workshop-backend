@@ -99,8 +99,11 @@ class Session(Base):
     __tablename__ = "session"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # Nullable for anonymous sessions. ``ON DELETE CASCADE`` so deleting a
+    # user wipes their sessions (and, via the session cascade, the derived
+    # message / file / site rows) — matching the owned-content user FKs.
     user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("user.id"), nullable=True
+        Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )
     # Sandbox association lives on the inverse side: each ``sandbox`` row
     # carries the session_id it serves. Look up the current sandbox via

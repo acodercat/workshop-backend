@@ -186,7 +186,7 @@ async def queue_user_message(
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
     newly_bound_keys = await _bind_session_files(
-        db, session_id=session.id, files=files,
+        db, session_id=session.id, user_id=session.user_id, files=files,
     )
 
     # Clear the prior turn's output stream (it lingers post-``agent.stopped``
@@ -276,9 +276,13 @@ async def _bind_session_files(
     db: AsyncSession,
     *,
     session_id: UUID,
+    user_id: int | None,
     files: list[FileRef],
 ) -> list[str]:
     """Bind uploaded file keys to this session exactly once.
+
+    Each new row records ``user_id`` (the session owner, ``None`` for
+    anonymous sessions) denormalized from the session for per-user queries.
 
     Returns the keys that were **newly** bound this call (a fresh
     ``session_files`` row), so the caller can clear their orphan-reaping
@@ -314,6 +318,7 @@ async def _bind_session_files(
             db.add(
                 SessionFile(
                     session_id=session_id,
+                    user_id=user_id,
                     file_key=file_key,
                     origin=SessionFileOrigin.UPLOAD,
                     filename=file_ref.filename,

@@ -41,12 +41,15 @@ async def test_bind_session_files_inserts_each_new_key_once() -> None:
     newly_bound = await _bind_session_files(
         db,
         session_id=session_id,
+        user_id=7,
         files=[_file("documents/a"), _file("documents/a"), _file("documents/b")],
     )
 
     assert [obj.file_key for obj in db.added] == ["documents/a", "documents/b"]
     assert all(isinstance(obj, SessionFile) for obj in db.added)
     assert all(obj.session_id == session_id for obj in db.added)
+    # The owner is denormalized onto every row from the session.
+    assert all(obj.user_id == 7 for obj in db.added)
     # Only freshly-bound keys are returned (for orphan-tag clearing, M5).
     assert newly_bound == ["documents/a", "documents/b"]
 
@@ -58,6 +61,7 @@ async def test_bind_session_files_skips_key_already_bound_to_same_session() -> N
     newly_bound = await _bind_session_files(
         db,
         session_id=session_id,
+        user_id=7,
         files=[_file("documents/a")],
     )
 
@@ -75,6 +79,7 @@ async def test_bind_session_files_rejects_key_bound_to_another_session() -> None
         await _bind_session_files(
             db,
             session_id=session_id,
+            user_id=7,
             files=[_file("documents/a")],
         )
 
