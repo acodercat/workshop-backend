@@ -46,6 +46,7 @@ from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_share import SessionShare
+from app.models.session_site import SessionSite
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
@@ -57,6 +58,7 @@ from app.schemas.file import (
     UploadUrlResponse,
 )
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
+from app.schemas.site import SessionSiteResponse
 from app.services import file_storage
 from app.services.file_storage import (
     SESSION_FILE_POLICY,
@@ -361,6 +363,83 @@ async def list_files(
                 session_title=row.title,
                 created_at=row.created_at,
                 origin=row.origin,
+            )
+            for row in rows
+        ],
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
+    )
+
+
+@router.get("/sessions/sites")
+async def list_sites(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> PaginatedResponse[SessionSiteResponse]:
+    """List the caller's published sites across all their sessions, newest first.
+
+    A sibling of ``GET /sessions/files`` for ``publish_site`` results.
+    Declared before ``/sessions/{session_id}`` so the literal ``sites``
+    segment isn't parsed as a session id. Paginated server-side like
+    ``GET /sessions/files``.
+
+    Scoped to the caller's non-deleted sessions. ``search`` is an optional
+    substring match on the site title or its session title, applied
+    server-side so paging stays correct. Each row's public ``url`` is
+    derived from its ``slug`` and the configured preview domain.
+    """
+    conditions = [
+        SessionSite.user_id == current_user.id,
+        Session.deleted_at.is_(None),
+    ]
+    if search:
+        # Escape LIKE wildcards so a literal "_" / "%" in the query matches
+        # literally rather than as a wildcard (mirrors ``list_files``).
+        escaped = (
+            search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        conditions.append(
+            sa.or_(
+                SessionSite.title.ilike(pattern, escape="\\"),
+                Session.title.ilike(pattern, escape="\\"),
+            )
+        )
+    filter_clause = sa.and_(*conditions)
+
+    base = (
+        select(
+            SessionSite.slug,
+            SessionSite.title,
+            SessionSite.created_at,
+            Session.id.label("session_id"),
+            Session.title.label("session_title"),
+        )
+        .join(Session, Session.id == SessionSite.session_id)
+        .where(filter_clause)
+        # Secondary sort on id keeps paging stable when timestamps tie.
+        .order_by(SessionSite.created_at.desc(), SessionSite.id.desc())
+    )
+    total = (
+        await db.execute(
+            select(func.count(SessionSite.id))
+            .join(Session, Session.id == SessionSite.session_id)
+            .where(filter_clause)
+        )
+    ).scalar() or 0
+    rows = (await db.execute(paginate(base, page, page_size))).all()
+    preview_domain = settings.oss_preview_domain
+    return PaginatedResponse(
+        items=[
+            SessionSiteResponse(
+                url=f"https://{row.slug}.{preview_domain}/",
+                slug=row.slug,
+                title=row.title,
+                session_id=row.session_id,
+                session_title=row.session_title,
+                created_at=row.created_at,
             )
             for row in rows
         ],

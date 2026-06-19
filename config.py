@@ -163,6 +163,15 @@ class Settings(BaseSettings):
         default=None,
         description="Custom domain bound to the document bucket for inline previews, e.g. https://files.metaseq.com.cn",
     )
+    # Bare host of the wildcard subdomain serving published sites — the same
+    # value the worker writes under its ``preview_domain`` key. A site
+    # published with slug ``s`` is reachable at ``https://{s}.{this}/``; the
+    # ``GET /sessions/sites`` endpoint derives that URL from each row's slug
+    # rather than storing it, so a domain change can't strand stale columns.
+    oss_preview_domain: str = Field(
+        default="live.metaseq.com.cn",
+        description="Bare host of the published-site subdomain, e.g. live.metaseq.com.cn",
+    )
     # Orphan-upload reaping (M5): presigned session-file uploads are born
     # tagged ``lifecycle=orphan``; a bucket lifecycle rule deletes objects
     # still carrying the tag after ~1 day (set up via
