@@ -125,6 +125,17 @@ def test_normalize_snapshot_requires_reserve_max_output_or_legacy() -> None:
         })
 
 
+def test_snapshot_rate_unpriced_model_raises_typed_503() -> None:
+    # An unpriced model_id must fail as a typed AppError (→ 503), not a raw
+    # KeyError that the catch-all renders as 500.
+    from app.errors import ModelUnavailableError
+
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        rates.snapshot_rate("model-with-no-rate-card")
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.error_type == "model_unavailable"
+
+
 def test_credits_from_cny_uses_sale_price(monkeypatch) -> None:
     monkeypatch.setattr(rates.settings, "credit_price_cny", 0.1)
 

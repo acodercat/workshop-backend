@@ -27,6 +27,7 @@ from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_bundle import (
     InvalidSkillBundleError as BundleInvalidError,
+    ParsedSkill,
     normalize_bundle,
     parse_bundle,
     parse_skill_md,
@@ -55,7 +56,7 @@ async def register_skill_bundle(
 
     - ``InvalidSkillBundleError`` (400) — bad extension, malformed
       archive, missing SKILL.md, or unsafe entries.
-    - ``SkillBundleTooLargeError`` (400) — over ``SKILL_POLICY.max_bytes``.
+    - ``SkillBundleTooLargeError`` (413) — over ``SKILL_POLICY.max_bytes``.
     - ``SkillQuotaExceededError`` (403) — at the per-user count cap.
     - ``SkillNameConflictError`` (409) — extracted name collides with an
       existing skill of this user.
@@ -79,19 +80,17 @@ async def register_skill_bundle(
         )
 
     # Validate structure (zip-bomb, path traversal, symlinks) **before**
-    # any path that decompresses entry bytes. ``normalize_bundle``
-    # repacks the archive and ``parse_bundle`` reads SKILL.md — both
-    # would let a malicious wrapper inflate memory if we let them run
-    # on an unvalidated input.
+    # any path that decompresses entry bytes, then parse SKILL.md. The
+    # whole block is CPU-bound (zip header inspection, an in-memory repack
+    # for wrapper bundles, a UTF-8 decode) and runs on a worst-case
+    # ``SKILL_POLICY.max_bytes`` (50 MiB) input, so it goes through
+    # ``asyncio.to_thread`` — otherwise a single large bundle would stall
+    # the event loop (and with it every SSE stream / enqueue on this
+    # process) for the duration of the unpack.
     try:
-        if is_zip:
-            validate_zip_structure(data)
-            normalized = normalize_bundle(data)
-            if normalized is not None:
-                data = normalized
-            parsed = parse_bundle(data)
-        else:
-            parsed = parse_skill_md(data)
+        data, parsed = await asyncio.to_thread(
+            _validate_and_parse, data, is_zip=is_zip,
+        )
     except BundleInvalidError as exc:
         raise InvalidSkillBundleError(str(exc)) from exc
 
@@ -140,6 +139,30 @@ async def register_skill_bundle(
         skill.id, user_id, skill.name, skill.bundle_size,
     )
     return skill
+
+
+def _validate_and_parse(data: bytes, *, is_zip: bool) -> tuple[bytes, ParsedSkill]:
+    """Structural validation + SKILL.md parse, off the event loop.
+
+    Returns the (possibly repacked) bundle bytes and the parsed
+    metadata. For a zip: validate structure FIRST — ``validate_zip_structure``
+    is header-only and rejects zip-bombs / traversal / symlinks before
+    ``normalize_bundle`` repacks or ``parse_bundle`` reads any entry, so an
+    unvalidated archive never reaches a path that allocates decompressed
+    bytes. For a bare ``.md`` the bytes are the SKILL.md content directly.
+
+    Synchronous by design (CPU-bound) — the caller runs it via
+    :func:`asyncio.to_thread`. Raises :class:`BundleInvalidError` on any
+    structural / parse failure; the caller maps that to the typed
+    ``InvalidSkillBundleError``.
+    """
+    if is_zip:
+        validate_zip_structure(data)
+        normalized = normalize_bundle(data)
+        if normalized is not None:
+            data = normalized
+        return data, parse_bundle(data)
+    return data, parse_skill_md(data)
 
 
 async def _enforce_user_quota(db: AsyncSession, user_id: int) -> None:

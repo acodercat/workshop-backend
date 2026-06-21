@@ -99,8 +99,11 @@ class Session(Base):
     __tablename__ = "session"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # Nullable for anonymous sessions. ``ON DELETE CASCADE`` so deleting a
+    # user wipes their sessions (and, via the session cascade, the derived
+    # message / file / site rows) — matching the owned-content user FKs.
     user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("user.id"), nullable=True
+        Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )
     # Sandbox association lives on the inverse side: each ``sandbox`` row
     # carries the session_id it serves. Look up the current sandbox via
@@ -167,16 +170,16 @@ class Session(Base):
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP, server_default=func.now(), nullable=False
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
     # Soft-delete tombstone. NULL = live; non-NULL = deleted (row kept
     # for billing/audit, invisible to the user). Only ever tested
-    # ``IS NULL``; tz-aware because that's the correct default for new
-    # timestamp columns (created_at/updated_at predate this and use a
-    # naive TIMESTAMP — not worth a migration to fix retroactively).
+    # ``IS NULL``. Like every timestamp column in this schema, tz-aware
+    # (the legacy naive created_at/updated_at were migrated to
+    # ``timestamptz`` in revision c7d2f9a4e1b8).
     deleted_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )

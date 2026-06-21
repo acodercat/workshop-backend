@@ -46,7 +46,7 @@ from app.models.message import Message
 from app.models.session import Session
 from app.models.session_share import SessionShare
 from app.rate_limit import limiter
-from app.schemas.file import DownloadUrlResponse
+from app.schemas.file import DownloadUrlResponse, PreviewUrlResponse
 from app.schemas.session import MessageResponse
 from app.schemas.session_share import (
     ShareAccessTokenRequest,
@@ -68,9 +68,6 @@ _share_view_bearer = HTTPBearer(auto_error=False)
 _ShareViewCredentials = Annotated[
     HTTPAuthorizationCredentials | None, Depends(_share_view_bearer)
 ]
-
-
-# ---- helpers --------------------------------------------------------------
 
 
 async def _resolve_share(
@@ -125,9 +122,6 @@ async def _require_view_access(
     if decode_share_view_token(credentials.credentials) != share.token:
         # Bound to a different share, expired, or scope-mismatched.
         raise _locked_exception()
-
-
-# ---- endpoints ------------------------------------------------------------
 
 
 @router.get("/shares/{token}", response_model=ShareDetailResponse)
@@ -251,4 +245,43 @@ async def get_share_file_url(
     )
     return DownloadUrlResponse(
         download_url=url, file_key=file_key, expires_in=expires_in,
+    )
+
+
+@router.get(
+    "/shares/{token}/files/preview-url",
+    response_model=PreviewUrlResponse,
+)
+@limiter.limit("60/minute")
+async def get_share_file_preview_url(
+    request: Request,
+    token: str,
+    file_key: Annotated[str, Query(description="OSS file key of the HTML deliverable to preview")],
+    credentials: _ShareViewCredentials = None,
+    db: AsyncSession = Depends(get_db),
+) -> PreviewUrlResponse:
+    """Mint a presigned GET URL that renders a shared HTML deliverable inline.
+
+    Share-side mirror of :func:`get_preview_url`: ``inline`` disposition
+    so the file loads as a page inside an ``<iframe src>`` on the OSS
+    origin (the iframe-nesting fix), not a save-as. Same authorization
+    gate as :func:`get_share_file_url`.
+    """
+    share, session = await _resolve_share(db, token)
+    await _require_view_access(share, credentials)
+    try:
+        await assert_file_belongs_to_session(
+            db, session_id=share.session_id, file_key=file_key,
+        )
+    except FileNotInSessionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="File is not part of this shared session",
+        )
+
+    url, expires_in = file_storage.generate_inline_url(
+        file_storage.SESSION_FILE_POLICY, file_key,
+    )
+    return PreviewUrlResponse(
+        preview_url=url, file_key=file_key, expires_in=expires_in,
     )

@@ -1,6 +1,11 @@
-"""Schemas for the file-upload / download presigned-URL endpoints."""
+"""Schemas for the file upload / download / listing endpoints."""
+
+from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+from app.models.session_files import SessionFileOrigin
 
 
 class UploadUrlRequest(BaseModel):
@@ -15,6 +20,11 @@ class UploadUrlResponse(BaseModel):
     file_key: str
     content_type: str
     expires_in: int
+    # When present, the client MUST send it as the ``x-oss-tagging`` request
+    # header on the PUT (it's signed into ``upload_url``, so omitting it would
+    # fail the signature). ``None`` when orphan-tagging is off — the client
+    # then sends no such header. See ``oss_orphan_tagging_enabled``.
+    tagging_header: str | None = None
 
 
 class DownloadUrlResponse(BaseModel):
@@ -22,3 +32,34 @@ class DownloadUrlResponse(BaseModel):
     download_url: str
     file_key: str
     expires_in: int
+
+
+class PreviewUrlResponse(BaseModel):
+    """Presigned URL the frontend loads inline in an ``<iframe src>`` to
+    preview an HTML deliverable. Distinct from ``DownloadUrlResponse``
+    because the disposition differs (inline vs attachment) and so does
+    the intent — this URL renders, it doesn't save-as."""
+    preview_url: str
+    file_key: str
+    expires_in: int
+
+
+class SessionFileResponse(BaseModel):
+    """A row in the cross-session file library. ``filename`` falls back to
+    a key-derived name for rows whose stored metadata isn't backfilled.
+    """
+    file_key: str
+    filename: str
+    mime_type: str | None
+    size_bytes: int | None
+    # Coarse file-type bucket (web / document / … / other), classified
+    # server-side from mime_type / filename (see ``file_kind_case``) so the
+    # library's type filter can run in the query.
+    kind: str
+    session_id: UUID
+    session_title: str | None
+    created_at: datetime
+    # UPLOAD (user-attached) vs DELIVERABLE (agent-produced) — drives the
+    # source filter in the library. INTERNAL never reaches here; the
+    # endpoint filters it out.
+    origin: SessionFileOrigin

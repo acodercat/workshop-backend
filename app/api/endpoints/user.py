@@ -114,7 +114,6 @@ async def change_password(
     return UserResponse.model_validate(current_user)
 
 
-# ---- email change ---------------------------------------------------------
 #
 # Two-step verify-then-commit, mirrors the registration flow:
 #

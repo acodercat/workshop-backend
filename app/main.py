@@ -225,8 +225,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await app.state.user_event_hub.stop()
-        await app.state.redis.close()
-        await app.state.redis_streaming.close()
+        await app.state.redis.aclose()
+        await app.state.redis_streaming.aclose()
         await engine.dispose()
         logger.info("API shutdown — Redis pools closed, DB engine disposed")
 

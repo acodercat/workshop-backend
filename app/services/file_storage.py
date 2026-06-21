@@ -46,6 +46,16 @@ class FileTooLargeError(ValueError):
 UPLOAD_URL_TTL_SECONDS = 15 * 60
 _DOWNLOAD_URL_TTL_SECONDS = 60 * 60
 
+# Orphan-reaping tag (M5). A presigned upload is born tagged
+# ``lifecycle=orphan``; a bucket lifecycle rule deletes objects still
+# carrying it after ~1 day, and :func:`clear_orphan_tag` removes it when the
+# upload is bound to a session. ``ORPHAN_TAGGING_HEADER`` is the OSS
+# url-encoded ``key=value`` tagging-header value the presigned PUT signs and
+# the client must echo. Gated by ``settings.oss_orphan_tagging_enabled``.
+_ORPHAN_TAG_KEY = "lifecycle"
+_ORPHAN_TAG_VALUE = "orphan"
+ORPHAN_TAGGING_HEADER = f"{_ORPHAN_TAG_KEY}={_ORPHAN_TAG_VALUE}"
+
 
 @dataclass(frozen=True)
 class UploadPolicy:
@@ -137,22 +147,34 @@ SKILL_POLICY = UploadPolicy(
 )
 
 
-_buckets: dict[str, oss2.Bucket] = {}
+_buckets: dict[tuple[str, str | None], oss2.Bucket] = {}
 _buckets_lock = threading.Lock()
 
 
-def get_bucket(bucket_name: str) -> oss2.Bucket:
-    bucket = _buckets.get(bucket_name)
+def get_bucket(bucket_name: str, *, cname_domain: str | None = None) -> oss2.Bucket:
+    """Process-wide cached bucket handle.
+
+    ``cname_domain`` signs URLs against a bound custom domain (CNAME)
+    instead of the default OSS endpoint — needed for inline previews,
+    since the default ``*.aliyuncs.com`` endpoint force-downloads HTML in
+    mainland regions. ``None`` uses the default endpoint (every caller but
+    the inline-preview one). Cached per ``(bucket, cname_domain)``."""
+    key = (bucket_name, cname_domain)
+    bucket = _buckets.get(key)
     if bucket is None:
         with _buckets_lock:
-            bucket = _buckets.get(bucket_name)
+            bucket = _buckets.get(key)
             if bucket is None:
                 auth = oss2.Auth(
                     settings.oss_access_key_id,
                     settings.oss_access_key_secret,
                 )
-                bucket = oss2.Bucket(auth, settings.oss_endpoint, bucket_name)
-                _buckets[bucket_name] = bucket
+                bucket = (
+                    oss2.Bucket(auth, cname_domain, bucket_name, is_cname=True)
+                    if cname_domain
+                    else oss2.Bucket(auth, settings.oss_endpoint, bucket_name)
+                )
+                _buckets[key] = bucket
     return bucket
 
 
@@ -177,18 +199,39 @@ def generate_upload_url(
         raise UnsupportedFileTypeError(ext, sorted(policy.allowed_types))
 
     file_key = f"{policy.key_prefix}/{key_extra}{uuid.uuid4()}/{filename}"
+    # Tag the object orphan at upload (M5) so a never-bound upload is reaped
+    # by the bucket lifecycle rule. Signed into the URL, so the client must
+    # echo the header exactly — ``tagging_header`` tells it what to send, and
+    # is omitted (no signed header) when the feature is off, keeping the
+    # client in lockstep per request.
+    sign_headers = {"Content-Type": content_type}
+    tagging_header: str | None = None
+    if settings.oss_orphan_tagging_enabled:
+        tagging_header = ORPHAN_TAGGING_HEADER
+        sign_headers["x-oss-tagging"] = tagging_header
     upload_url = get_bucket(policy.bucket_name).sign_url(
         "PUT",
         file_key,
         expires=UPLOAD_URL_TTL_SECONDS,
-        headers={"Content-Type": content_type},
+        headers=sign_headers,
     )
     return UploadUrlResponse(
         upload_url=upload_url,
         file_key=file_key,
         content_type=content_type,
         expires_in=UPLOAD_URL_TTL_SECONDS,
+        tagging_header=tagging_header,
     )
+
+
+def clear_orphan_tag(policy: UploadPolicy, file_key: str) -> None:
+    """Remove the orphan lifecycle tag so the object survives the reaper.
+
+    Called when a presigned upload is bound to a session. Idempotent: OSS
+    treats deleting tags on an untagged object as a no-op, so it's safe for
+    objects uploaded before the feature was enabled (or already cleared).
+    """
+    get_bucket(policy.bucket_name).delete_object_tagging(file_key)
 
 
 def download(policy: UploadPolicy, file_key: str) -> bytes:
@@ -230,5 +273,40 @@ def generate_download_url(
                 f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
             ),
         },
+    )
+    return url, _DOWNLOAD_URL_TTL_SECONDS
+
+
+def generate_inline_url(policy: UploadPolicy, file_key: str) -> tuple[str, int]:
+    """Presigned GET URL the browser renders **inline** — for HTML previews.
+
+    The mirror image of :func:`generate_download_url`: instead of forcing
+    ``attachment`` (save-as), it signs ``inline`` so the object loads as a
+    page inside an ``<iframe src>``. Serving it from the OSS origin — not
+    the app's — is the whole point: relative links in the delivered HTML
+    resolve against OSS, so the page can't navigate the frame back into
+    the app and render the app nested inside itself.
+
+    We deliberately do NOT override the response ``Content-Type``: Aliyun
+    OSS rejects ``response-content-type`` on a presigned GET ("Can not
+    override response header on content-type", an XSS-hardening rule), so
+    rendering relies on the object's *stored* Content-Type — delivered
+    ``.html`` is uploaded as ``text/html``. HTML-only by design; binary
+    previews (PDF / Office) fetch bytes through their own viewer and
+    ignore Content-Disposition, so they keep using the download URL.
+
+    Signs against ``oss_document_domain`` (a bound custom domain) when set
+    — required because the default ``*.aliyuncs.com`` endpoint
+    force-downloads HTML in mainland regions regardless of the ``inline``
+    disposition. Falls back to the default endpoint when unset (the URL
+    then downloads, but nothing breaks).
+    """
+    url = get_bucket(
+        policy.bucket_name, cname_domain=settings.oss_document_domain
+    ).sign_url(
+        "GET",
+        file_key,
+        expires=_DOWNLOAD_URL_TTL_SECONDS,
+        params={"response-content-disposition": "inline"},
     )
     return url, _DOWNLOAD_URL_TTL_SECONDS

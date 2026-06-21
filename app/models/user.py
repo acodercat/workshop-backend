@@ -82,7 +82,7 @@ class User(Base):
         default=UserStatus.PENDING,
         server_default=UserStatus.PENDING.value,
     )
-    last_login_at: Mapped[datetime | None] = mapped_column(TIMESTAMP, nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # The user's current default organization (mirrors OpenAI's
     # ``default_organization``). Set to the user's personal org at
@@ -111,12 +111,12 @@ class User(Base):
         BigInteger, nullable=False, default=0, server_default=text("0"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP,
+        TIMESTAMP(timezone=True),
         server_default=func.now(),
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP,
+        TIMESTAMP(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False

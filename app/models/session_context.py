@@ -46,6 +46,14 @@ class SessionContext(Base):
     messages: Mapped[list[dict]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
+    # The session's current todo checklist (``TodoItem`` dicts). Durable owner
+    # of the list: ``todo_write`` is compactable in axon, so its calls can be
+    # summarized out of ``messages`` — this separate column is never touched by
+    # compaction. The worker rewrites it each turn from ``Agent.todos`` and
+    # seeds the next run via ``Agent.run(todos=...)``.
+    todos: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )

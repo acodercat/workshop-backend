@@ -16,26 +16,52 @@ one read path:
   ``(session_id, file_key)`` is present here, no JSONB scans, no key-
   prefix parsing.
 
-The presentation copy (filename / mime_type / size_bytes) lives on
-the message blocks JSON; this table is intentionally minimal — its
-job is the FK invariant, not metadata storage.
+Beyond the FK invariant the row carries an ``origin`` tag (which
+file-library bucket it belongs to, see ``SessionFileOrigin``) and a
+denormalized copy of the file's presentation metadata (``filename`` /
+``mime_type`` / ``size_bytes``) so the library (``GET /sessions/files``) renders
+without scanning the message blocks. The blocks JSON stays the
+write-time source of truth; these columns are a read-optimized mirror,
+backfilled for history by ``scripts/backfill_session_file_metadata.py``.
 """
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    Enum as SAEnum,
     ForeignKey,
     Index,
+    Integer,
     String,
     TIMESTAMP,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.database import Base
+
+
+class SessionFileOrigin(StrEnum):
+    """Where a ``session_files`` row came from — drives which files the
+    cross-session library surfaces (``GET /sessions/files`` lists ``UPLOAD`` +
+    ``DELIVERABLE``, hides ``INTERNAL``).
+
+    - ``UPLOAD``      — a file the user attached to a message.
+    - ``DELIVERABLE`` — a tool output handed to the user (``deliver_file``,
+      a published site, …).
+    - ``INTERNAL``    — agent-side artifacts not meant for the library:
+      ``read_image`` inputs the model looked at, the office→PDF preview
+      sidecars (``{name}.preview.pdf``), and similar intermediates.
+    """
+
+    UPLOAD = "UPLOAD"
+    DELIVERABLE = "DELIVERABLE"
+    INTERNAL = "INTERNAL"
 
 
 class SessionFile(Base):
@@ -47,6 +73,16 @@ class SessionFile(Base):
         ForeignKey("session.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Denormalized owner, copied from ``session.user_id`` by the producer
+    # (immutable relationship ⇒ never stale). Nullable to mirror it —
+    # anonymous sessions carry no owner. ``ON DELETE CASCADE`` matches the
+    # session-ownership family. Lets the per-user file reads (the library,
+    # the upload quota counts) scan by owner via
+    # ``ix_session_files_user_id_created_at`` instead of driving from
+    # ``session`` — a read path adopts it by filtering this column.
+    user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
+    )
     # OSS keys are globally unique by construction (user uploads use
     # ``session-files/{uuid4}/...`` — older rows still have the
     # legacy ``documents/...`` prefix; tool outputs use
@@ -54,14 +90,39 @@ class SessionFile(Base):
     # UNIQUE constraint enforces that and gives us the read-path index
     # for free.
     file_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # Presentation metadata, denormalized from the message blocks so the
+    # file library can render name / type / size without a JSONB scan.
+    # Nullable: pre-backfill rows (and any producer that omits them) leave
+    # these null and the reader falls back to deriving a name from the key.
+    filename: Mapped[str | None] = mapped_column(String, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Which bucket this file belongs to (see ``SessionFileOrigin``).
+    # Stamped by the producer: the worker tags by bind path (output →
+    # DELIVERABLE, input + preview keys → INTERNAL); the backend's upload
+    # path tags UPLOAD.
+    origin: Mapped[SessionFileOrigin] = mapped_column(
+        SAEnum(
+            SessionFileOrigin,
+            name="session_file_origin",
+            values_callable=lambda cls: [m.value for m in cls],
+        ),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP, server_default=func.now(), nullable=False
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
     # Postgres doesn't auto-index FK columns; without this CASCADE
     # delete on the parent session would seq-scan ``session_files``.
     __table_args__ = (
         Index("ix_session_files_session_id", "session_id"),
+        # Per-user file library / quota counting: by owner, newest first.
+        Index(
+            "ix_session_files_user_id_created_at",
+            "user_id",
+            text("created_at DESC"),
+        ),
     )
 
     def __repr__(self) -> str:

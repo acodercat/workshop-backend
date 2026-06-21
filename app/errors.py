@@ -118,6 +118,16 @@ class InsufficientCreditsError(AppError):
     error_type = "insufficient_credits"
 
 
+class ModelUnavailableError(AppError):
+    """The session's ``model_id`` has no rate-card entry, so a turn can't
+    be priced. An operator-config gap (a model in
+    ``supported_session_model_ids`` but missing from ``credit_rates``), not
+    user error — surface 503 so it reads as "temporarily can't serve this"
+    rather than a generic 500, and stays diagnosable from the error type."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    error_type = "model_unavailable"
+
 
 class InvalidSkillBundleError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
@@ -152,12 +162,14 @@ class SkillQuotaExceededError(AppError):
 
 
 class SessionFileQuotaExceededError(AppError):
-    """User already has the maximum allowed number of session files.
+    """User has hit a per-user session-file upload quota — either the
+    total-size cap or the file-count backstop.
 
     Matches the ``SessionFile`` DB model name. Distinct from
     :class:`FileTooLargeError`: the individual file would have been
-    accepted, but the user has hit the count cap. The per-file size
-    cap is enforced separately in ``file_storage``.
+    accepted on its own, but it would push the user's account over the
+    quota. The per-file size cap is enforced separately in
+    ``file_storage``.
     """
 
     status_code = status.HTTP_403_FORBIDDEN

@@ -12,14 +12,24 @@ from app.database import Base
 class SandboxStatus(StrEnum):
     """Sandbox lifecycle state.
 
-    - ``RUNNING`` — default after ``create``; the container is up.
-    - ``PAUSED`` — paused between turns to save resources (OpenSandbox
-      ``pause``/``resume``).
+    - ``LIVE`` — default after ``create``; the container is up and
+      usable (the sandbox/container lifecycle, not turn state).
+    - ``PAUSED`` — a live-but-suspended sub-state, paused between turns
+      to save resources (OpenSandbox ``pause``/``resume``). No code path
+      writes it yet.
+    - ``REAPING`` — claimed by the sandbox reaper, kill in flight. A
+      transient state the reaper flips a row into *before* it kills the
+      container (re-asserting the idle predicate atomically), so a new
+      turn can't reconnect to a container that's about to die. The
+      worker's ``claim_next_turn`` excludes REAPING; a row stuck here
+      (reaper crash between claim and ``TERMINATED``) is retried on the
+      next sweep since ``last_used_at`` stays old. Ends at ``TERMINATED``.
     - ``TERMINATED`` — irreversible; the container has been killed.
     """
 
-    RUNNING = "RUNNING"
+    LIVE = "LIVE"
     PAUSED = "PAUSED"
+    REAPING = "REAPING"
     TERMINATED = "TERMINATED"
 
 
@@ -54,16 +64,23 @@ class Sandbox(Base):
     # INSERT, never updates. No DB-level FK — see class docstring.
     session_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     status: Mapped[SandboxStatus] = mapped_column(
-        SAEnum(SandboxStatus, name="sandbox_status"),
+        # ``values_callable`` so the Postgres enum holds the ``.value``
+        # strings, matching every other SAEnum in the schema (names ==
+        # values here, so this only aligns the convention).
+        SAEnum(
+            SandboxStatus,
+            name="sandbox_status",
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
         nullable=False,
-        default=SandboxStatus.RUNNING,
+        default=SandboxStatus.LIVE,
     )
     image: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP, server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
     last_used_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP, server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
     )
 
     # Worker's ``claim_next_turn`` runs a per-claim subquery against

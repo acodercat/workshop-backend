@@ -60,11 +60,9 @@ import psycopg
 from config import settings
 
 
-# ---------------------------------------------------------------------------
 # SQL — read-only. The ``%(filter_sql)s`` placeholder gets replaced with the
 # WHERE-clause fragment built by ``_build_filter`` below; psycopg parameters
 # (``%(param)s``) are passed via the ``params`` dict.
-# ---------------------------------------------------------------------------
 
 # Pass 1: same ``tool_use_id`` appearing more than once in a single message's
 # blocks array. ``WITH ORDINALITY`` lets us also surface the array positions

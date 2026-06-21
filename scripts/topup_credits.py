@@ -8,7 +8,7 @@ Usage:
     # By RMB paid (domestic recharge — converts at settings.credit_price_cny, ¥0.1/credit):
     uv run python -m scripts.topup_credits --user-id=60 --cny=100 --idempotency-key=pay-2026-05-18-alice --reason="alipay order #1234"
     # Or by exact credit count:
-    uv run python -m scripts.topup_credits --user-id=90 --credits=100000 --idempotency-key=manual-2026-06-01 --reason="trial grant"
+    uv run python -m scripts.topup_credits --user-id=206 --credits=100000 --idempotency-key=manual-2026-06-11 --reason="trial grant"
 
 Give exactly one of ``--cny`` (RMB the customer paid, converted at the
 ``credit_price_cny`` sale price) or ``--credits`` (exact whole credits).

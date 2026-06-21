@@ -54,6 +54,17 @@ class Settings(BaseSettings):
 
     # Rate limits — slowapi key is the client IP. Sized for human use;
     # raise behind authenticated identity if abuse appears.
+    #
+    # ``trust_proxy_headers``: when the API sits behind a reverse proxy,
+    # ``request.client.host`` is the proxy's IP (one shared rate-limit
+    # bucket for all clients). Enable to key on the first ``X-Forwarded-For``
+    # hop instead. Leave OFF unless a proxy that overwrites client-supplied
+    # XFF is actually in front — otherwise clients can spoof the header and
+    # bypass the limit.
+    trust_proxy_headers: bool = Field(
+        default=False,
+        description="Key rate limits on the first X-Forwarded-For hop (only behind a trusted proxy).",
+    )
     rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
     rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
@@ -141,6 +152,39 @@ class Settings(BaseSettings):
     oss_document_bucket_name: str = Field(default="metaseq-computer", description="OSS document bucket")
     oss_skill_bucket_name: str = Field(default="axon-skills", description="OSS bucket for user-uploaded SKILL.md bundles")
     oss_endpoint: str = Field(default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL")
+    # Custom domain (CNAME) bound to the document bucket, e.g.
+    # https://files.metaseq.com.cn. Set this to make inline preview URLs
+    # render in the browser: the default ``*.aliyuncs.com`` endpoint forces
+    # ``Content-Disposition: attachment`` (download) in mainland regions and
+    # forbids overriding it, so a bound custom domain is required to serve
+    # HTML inline. Unset → inline URLs fall back to the default endpoint
+    # (they'll download, but nothing breaks). Download URLs are unaffected.
+    oss_document_domain: str | None = Field(
+        default=None,
+        description="Custom domain bound to the document bucket for inline previews, e.g. https://files.metaseq.com.cn",
+    )
+    # Bare host of the wildcard subdomain serving published sites — the same
+    # value the worker writes under its ``preview_domain`` key. A site
+    # published with slug ``s`` is reachable at ``https://{s}.{this}/``; the
+    # ``GET /sessions/sites`` endpoint derives that URL from each row's slug
+    # rather than storing it, so a domain change can't strand stale columns.
+    oss_preview_domain: str = Field(
+        default="live.metaseq.com.cn",
+        description="Bare host of the published-site subdomain, e.g. live.metaseq.com.cn",
+    )
+    # Orphan-upload reaping (M5): presigned session-file uploads are born
+    # tagged ``lifecycle=orphan``; a bucket lifecycle rule deletes objects
+    # still carrying the tag after ~1 day (set up via
+    # ``scripts/setup_oss_lifecycle.py``), and the tag is cleared when the
+    # file is bound to a session. OFF by default — turning it on requires
+    # the frontend to send the signed ``x-oss-tagging`` header (it does so
+    # only when the upload-url response carries ``tagging_header``, so the
+    # two stay in lockstep per request), the bucket lifecycle rule, and a
+    # CORS ``allowed-header`` for ``x-oss-tagging``. See docs/M5 notes.
+    oss_orphan_tagging_enabled: bool = Field(
+        default=False,
+        description="Tag presigned session-file uploads for lifecycle reaping; clear the tag on bind.",
+    )
 
     # SMTP — used to send the registration / email-change verification
     # codes. Lark Suite Mail by default (smtp.larksuite.com). Defaults
@@ -198,9 +242,22 @@ class Settings(BaseSettings):
         default=100 * 1024 * 1024,
         description="Per-file upload size cap (bytes)",
     )
+    max_session_files_bytes_per_user: int = Field(
+        default=10 * 1024 * 1024 * 1024,
+        description=(
+            "Per-user total-size cap (bytes) for UPLOAD-origin session files "
+            "across all sessions. The primary upload gate — tracks OSS storage "
+            "cost. Agent-produced DELIVERABLE / INTERNAL rows are not counted "
+            "(they have no upload-time gate)."
+        ),
+    )
     max_session_files_per_user: int = Field(
-        default=1000,
-        description="Total session-file rows allowed per user across all sessions",
+        default=5000,
+        description=(
+            "Backstop cap on the COUNT of UPLOAD-origin session-file rows per "
+            "user, guarding against many-tiny-files row explosion that the "
+            "size cap alone misses. Same UPLOAD-only scope as the size cap."
+        ),
     )
 
     # Sessions
@@ -282,7 +339,7 @@ class Settings(BaseSettings):
             # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
             "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "glm-5.2":           {"in_per_1k_usd": 0.00090, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "glm-5.2":           {"in_per_1k_usd": 0.00090, "out_per_1k_usd": 0.00350, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
             # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
             # ¥0.42/M not separately tracked here; settle uses uncached rate.

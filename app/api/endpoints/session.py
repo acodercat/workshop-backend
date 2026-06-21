@@ -19,7 +19,7 @@ SSE streaming — lives in :mod:`app.services.session`.
 import logging
 import secrets
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from openai import OpenAIError
@@ -37,19 +37,28 @@ from app.auth import (
 )
 from app.database import AsyncSessionLocal
 from config import settings
-from app.common.filenames import InvalidFilenameError
+from app.common.file_kind import FILE_KINDS, file_kind_case
+from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
 from app.errors import SessionFileQuotaExceededError
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
-from app.models.session_files import SessionFile
+from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_share import SessionShare
+from app.models.session_site import SessionSite
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.schemas.file import DownloadUrlResponse, UploadUrlRequest, UploadUrlResponse
+from app.schemas.file import (
+    DownloadUrlResponse,
+    PreviewUrlResponse,
+    SessionFileResponse,
+    UploadUrlRequest,
+    UploadUrlResponse,
+)
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
+from app.schemas.site import SessionSiteResponse
 from app.services import file_storage
 from app.services.file_storage import (
     SESSION_FILE_POLICY,
@@ -74,6 +83,7 @@ from app.services.session import generate_title, queue_user_message, stream_even
 from app.services.session.exceptions import (
     FileNotInSessionError,
     GenerationInProgressError,
+    SessionGoneError,
 )
 from app.services.session.files import assert_file_belongs_to_session
 
@@ -83,7 +93,11 @@ router = APIRouter(tags=["sessions"])
 
 
 async def _get_or_404(
-    db: AsyncSession, session_id: str | uuid.UUID, user_id: int
+    db: AsyncSession,
+    session_id: str | uuid.UUID,
+    user_id: int,
+    *,
+    for_update: bool = False,
 ) -> Session:
     """Return the session row iff it exists, is not soft-deleted, AND
     the caller owns it.
@@ -92,16 +106,20 @@ async def _get_or_404(
     session ids isn't leaked. ``deleted_at IS NULL`` is folded into the
     query so every endpoint funnelling through here treats a
     soft-deleted session as gone.
+
+    ``for_update`` takes a row-level lock held until the transaction
+    ends — used by ``delete_session`` so its status check and tombstone
+    serialize against ``queue_user_message``'s own ``FOR UPDATE`` lock,
+    closing the race where a turn enqueues onto a session being deleted.
     """
-    session = (
-        await db.execute(
-            select(Session).where(
-                Session.id == session_id,
-                Session.user_id == user_id,
-                Session.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
+    stmt = select(Session).where(
+        Session.id == session_id,
+        Session.user_id == user_id,
+        Session.deleted_at.is_(None),
+    )
+    if for_update:
+        stmt = stmt.with_for_update()
+    session = (await db.execute(stmt)).scalar_one_or_none()
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
@@ -128,7 +146,10 @@ async def _load_messages(
             ),
         )
         .where(Message.session_id == session_id)
-        .order_by(Message.created_at.asc())
+        # Secondary sort on id: ``now()`` is transaction-scoped, so a USER
+        # row and the worker's ASSISTANT row committed in one transaction
+        # share a ``created_at`` — id breaks the tie in insert order.
+        .order_by(Message.created_at.asc(), Message.id.asc())
     )
     rows = (await db.execute(stmt)).all()
     return [
@@ -222,14 +243,14 @@ async def create_session_upload_url(
 
     Validates filename extension (whitelist in
     :mod:`app.services.file_storage`) and rejects oversize requests
-    before the URL is issued. Also enforces a per-user file count
-    cap so a single account can't squat OSS by accumulating files
-    across sessions. The eventual file→session binding happens when
-    the message is enqueued (``services/session/enqueue.py`` inserts
-    the ``session_files`` row); this endpoint is purely the "mint me
-    a presigned URL" step.
+    before the URL is issued. Also enforces a per-user upload quota
+    (total size, with a file-count backstop) so a single account can't
+    squat OSS by accumulating files across sessions. The eventual
+    file→session binding happens when the message is enqueued
+    (``services/session/enqueue.py`` inserts the ``session_files`` row);
+    this endpoint is purely the "mint me a presigned URL" step.
     """
-    await _enforce_session_file_quota(db, current_user.id)
+    await _enforce_session_file_quota(db, current_user.id, body.size_bytes)
     try:
         return file_storage.generate_upload_url(
             body.filename, body.size_bytes, SESSION_FILE_POLICY,
@@ -240,6 +261,190 @@ async def create_session_upload_url(
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc),
         )
+
+
+@router.get("/sessions/files")
+async def list_files(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    origin: Literal["all", "upload", "deliverable"] = Query("all"),
+    kind: str = Query("all"),
+    search: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> PaginatedResponse[SessionFileResponse]:
+    """List the caller's files across all their sessions, newest first.
+
+    Declared before ``/sessions/{session_id}`` so the literal ``files``
+    segment isn't parsed as a session id. Paginated server-side like
+    ``GET /sessions``.
+
+    Always scoped to the caller's non-deleted sessions and to user-facing
+    files (``origin IN (UPLOAD, DELIVERABLE)`` — ``INTERNAL`` agent
+    artifacts stay hidden). Optional filters, all applied server-side so
+    paging stays correct: ``origin`` (``all`` / ``upload`` /
+    ``deliverable``), ``kind`` (a file-type bucket classified from
+    ``mime_type`` / ``filename`` via :func:`file_kind_case`), and
+    ``search`` (substring match on filename or session title). ``filename``
+    falls back to a key-derived name for any row not yet backfilled.
+    """
+    if kind != "all" and kind not in FILE_KINDS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown kind: {kind!r}"
+        )
+
+    if origin == "upload":
+        origin_clause = SessionFile.origin == SessionFileOrigin.UPLOAD
+    elif origin == "deliverable":
+        origin_clause = SessionFile.origin == SessionFileOrigin.DELIVERABLE
+    else:
+        origin_clause = SessionFile.origin.in_(
+            (SessionFileOrigin.UPLOAD, SessionFileOrigin.DELIVERABLE)
+        )
+
+    kind_expr = file_kind_case(SessionFile.mime_type, SessionFile.filename)
+
+    conditions = [
+        Session.user_id == current_user.id,
+        Session.deleted_at.is_(None),
+        origin_clause,
+    ]
+    if kind != "all":
+        conditions.append(kind_expr == kind)
+    if search:
+        # Escape LIKE wildcards so a literal "_" / "%" in the query (common
+        # in filenames) matches literally rather than as a wildcard.
+        escaped = (
+            search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        conditions.append(
+            sa.or_(
+                SessionFile.filename.ilike(pattern, escape="\\"),
+                Session.title.ilike(pattern, escape="\\"),
+            )
+        )
+    filter_clause = sa.and_(*conditions)
+
+    base = (
+        select(
+            SessionFile.file_key,
+            SessionFile.filename,
+            SessionFile.mime_type,
+            SessionFile.size_bytes,
+            SessionFile.created_at,
+            SessionFile.origin,
+            kind_expr.label("kind"),
+            Session.id.label("session_id"),
+            Session.title,
+        )
+        .join(Session, Session.id == SessionFile.session_id)
+        .where(filter_clause)
+        # Secondary sort on id keeps paging stable when timestamps tie.
+        .order_by(SessionFile.created_at.desc(), SessionFile.id.desc())
+    )
+    total = (
+        await db.execute(
+            select(func.count(SessionFile.id))
+            .join(Session, Session.id == SessionFile.session_id)
+            .where(filter_clause)
+        )
+    ).scalar() or 0
+    rows = (await db.execute(paginate(base, page, page_size))).all()
+    return PaginatedResponse(
+        items=[
+            SessionFileResponse(
+                file_key=row.file_key,
+                filename=row.filename or filename_from_key(row.file_key),
+                mime_type=row.mime_type,
+                size_bytes=row.size_bytes,
+                kind=row.kind,
+                session_id=row.session_id,
+                session_title=row.title,
+                created_at=row.created_at,
+                origin=row.origin,
+            )
+            for row in rows
+        ],
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
+    )
+
+
+@router.get("/sessions/sites")
+async def list_sites(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> PaginatedResponse[SessionSiteResponse]:
+    """List the caller's published sites across all their sessions, newest first.
+
+    A sibling of ``GET /sessions/files`` for ``publish_site`` results.
+    Declared before ``/sessions/{session_id}`` so the literal ``sites``
+    segment isn't parsed as a session id. Paginated server-side like
+    ``GET /sessions/files``.
+
+    Scoped to the caller's non-deleted sessions. ``search`` is an optional
+    substring match on the site title or its session title, applied
+    server-side so paging stays correct. Each row's public ``url`` is
+    derived from its ``slug`` and the configured preview domain.
+    """
+    conditions = [
+        SessionSite.user_id == current_user.id,
+        Session.deleted_at.is_(None),
+    ]
+    if search:
+        # Escape LIKE wildcards so a literal "_" / "%" in the query matches
+        # literally rather than as a wildcard (mirrors ``list_files``).
+        escaped = (
+            search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        conditions.append(
+            sa.or_(
+                SessionSite.title.ilike(pattern, escape="\\"),
+                Session.title.ilike(pattern, escape="\\"),
+            )
+        )
+    filter_clause = sa.and_(*conditions)
+
+    base = (
+        select(
+            SessionSite.slug,
+            SessionSite.title,
+            SessionSite.created_at,
+            Session.id.label("session_id"),
+            Session.title.label("session_title"),
+        )
+        .join(Session, Session.id == SessionSite.session_id)
+        .where(filter_clause)
+        # Secondary sort on id keeps paging stable when timestamps tie.
+        .order_by(SessionSite.created_at.desc(), SessionSite.id.desc())
+    )
+    total = (
+        await db.execute(
+            select(func.count(SessionSite.id))
+            .join(Session, Session.id == SessionSite.session_id)
+            .where(filter_clause)
+        )
+    ).scalar() or 0
+    rows = (await db.execute(paginate(base, page, page_size))).all()
+    preview_domain = settings.oss_preview_domain
+    return PaginatedResponse(
+        items=[
+            SessionSiteResponse(
+                url=f"https://{row.slug}.{preview_domain}/",
+                slug=row.slug,
+                title=row.title,
+                session_id=row.session_id,
+                session_title=row.session_title,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
+    )
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
@@ -311,8 +516,15 @@ async def delete_session(
 
     Redis stream cleanup is best-effort; failure is logged, not
     raised — the worker's ``expire_stream`` TTL reaps the orphan.
+
+    The row is locked (``for_update``) so the status check + tombstone is
+    atomic against ``queue_user_message``: a concurrent enqueue either
+    commits first (we then see ``RUNNING`` and 409) or blocks on our lock
+    and finds the session gone afterward — never a turn on a deleted row.
     """
-    session = await _get_or_404(db, session_id, current_user.id)
+    session = await _get_or_404(
+        db, session_id, current_user.id, for_update=True,
+    )
     if session.status == SessionStatus.RUNNING:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -349,9 +561,11 @@ async def create_message(
     """Create a user message and enqueue LLM generation to the worker.
 
     Service-layer domain errors translate to HTTP here so the service
-    stays unaware of FastAPI: ``GenerationInProgressError`` → 409. The
-    DB-lease design has no Redis-enqueue failure path: ``publish_wake``
-    is best-effort and never raises into this handler.
+    stays unaware of FastAPI: ``GenerationInProgressError`` → 409,
+    ``SessionGoneError`` → 404 (the session was deleted between our
+    ownership check and the enqueue's row lock). The DB-lease design has
+    no Redis-enqueue failure path: ``publish_wake`` is best-effort and
+    never raises into this handler.
     """
     session = await _get_or_404(db, session_id, current_user.id)
     try:
@@ -363,6 +577,8 @@ async def create_message(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc),
         )
+    except SessionGoneError:
+        raise HTTPException(status_code=404, detail="Session not found")
     except FileNotInSessionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
@@ -477,7 +693,6 @@ async def generate_session_title(
     return TitleGenerateResponse(title=title)
 
 
-# ---- session share (owner-side) ------------------------------------------
 #
 # Singleton sub-resource of the session: one share per session.
 # Public-side read access for share recipients lives in
@@ -563,7 +778,6 @@ async def delete_share(
     await db.commit()
 
 
-# ---- session file download (presigned URL + ownership check) -------------
 #
 # Authorization is a single ``session_files`` lookup —
 # ``(session_id, file_key)`` is the FK invariant set up at write time
@@ -618,7 +832,49 @@ async def get_download_url(
     )
 
 
-# ---- per-message feedback (thumbs up / down + optional comment) ----------
+@router.get(
+    "/sessions/{session_id}/files/preview-url",
+    response_model=PreviewUrlResponse,
+)
+@limiter.limit("60/minute")
+async def get_preview_url(
+    request: Request,
+    session_id: uuid.UUID,
+    file_key: Annotated[str, Query(description="OSS file key of the HTML deliverable to preview")],
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Mint a presigned GET URL that renders an HTML deliverable inline.
+
+    Parallel to :func:`get_download_url`, but the minted URL carries
+    ``inline`` disposition so it loads as a page inside an ``<iframe
+    src>`` instead of triggering a save-as — the frontend uses it to
+    preview HTML on the OSS origin, where its relative links can't
+    navigate back into the app (the iframe-nesting fix). No ``filename``
+    param: there's no save-as name for an inline render.
+
+    ``preview-url`` is the resource being minted; ``file_key`` is a
+    parameter to it (same path-vs-bytes reasoning as ``download-url``).
+    Same two-step authorization as the download variant.
+    """
+    session = await _get_or_404(db, session_id, current_user.id)
+    try:
+        await assert_file_belongs_to_session(
+            db, session_id=session.id, file_key=file_key,
+        )
+    except FileNotInSessionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="File is not part of this session",
+        )
+    url, expires_in = file_storage.generate_inline_url(
+        file_storage.SESSION_FILE_POLICY, file_key,
+    )
+    return PreviewUrlResponse(
+        preview_url=url, file_key=file_key, expires_in=expires_in,
+    )
+
+
 #
 # One vote per user per message, enforced by ``UNIQUE(message_id,
 # user_id)``. PUT does upsert (rating + comment in one call); DELETE
@@ -727,27 +983,53 @@ async def delete_feedback(
     await db.commit()
 
 
-async def _enforce_session_file_quota(db: AsyncSession, user_id: int) -> None:
-    """Reject the upload-url mint if the user is at the per-user file cap.
+async def _enforce_session_file_quota(
+    db: AsyncSession, user_id: int, incoming_size_bytes: int
+) -> None:
+    """Reject the upload-url mint if this upload would put the user over a
+    per-user quota. Two gates, both scoped to ``UPLOAD``-origin rows on
+    non-soft-deleted sessions (deleting a session frees up quota):
 
-    Counts all ``session_files`` rows for the user — both files the
-    user uploaded directly and files LLM tool calls produced into
-    their sessions. Both occupy OSS storage on the user's behalf, so
-    a single combined cap is what bounds account-level OSS cost.
+    - **Total size** (primary): summed ``size_bytes`` plus this upload
+      must stay under ``max_session_files_bytes_per_user``. This gate
+      tracks real OSS storage cost.
+    - **Count** (backstop): guards against many-tiny-files row explosion
+      that the size gate alone wouldn't catch.
 
-    Joined to non-soft-deleted sessions only — deleting a session
-    frees up quota. Race-acceptable: two concurrent mints at the
-    boundary could both succeed, leaving the user one over. Not worth
-    a row lock for a soft policy limit.
+    Only ``UPLOAD`` rows count — files the user uploaded directly.
+    ``DELIVERABLE`` (tool outputs) and ``INTERNAL`` (``read_image``
+    inputs, office→PDF preview sidecars) are written by the worker with
+    no upload-time gate, so counting them here would let heavy agent use
+    silently exhaust a user's upload headroom.
+
+    ``size_bytes`` is the client-declared size captured at mint time (the
+    same value the per-file cap trusts); pre-backfill rows with a null
+    size contribute 0 to the sum. Race-acceptable: two concurrent mints
+    at the boundary can both pass, leaving the user slightly over — not
+    worth a row lock for a soft policy limit.
     """
-    count = await db.scalar(
-        select(func.count(SessionFile.id))
-        .join(Session, Session.id == SessionFile.session_id)
-        .where(Session.user_id == user_id)
-        .where(Session.deleted_at.is_(None))
-    ) or 0
+    count, used_bytes = (
+        await db.execute(
+            select(
+                func.count(SessionFile.id),
+                func.coalesce(func.sum(SessionFile.size_bytes), 0),
+            )
+            .join(Session, Session.id == SessionFile.session_id)
+            .where(Session.user_id == user_id)
+            .where(Session.deleted_at.is_(None))
+            .where(SessionFile.origin == SessionFileOrigin.UPLOAD)
+        )
+    ).one()
+
+    size_cap = settings.max_session_files_bytes_per_user
+    if used_bytes + incoming_size_bytes > size_cap:
+        raise SessionFileQuotaExceededError(
+            f"upload would put the user at "
+            f"{(used_bytes + incoming_size_bytes) / 1024**3:.2f} GB of "
+            f"uploaded files; per-user limit is {size_cap / 1024**3:.1f} GB"
+        )
     if count >= settings.max_session_files_per_user:
         raise SessionFileQuotaExceededError(
-            f"user already has {count} session files; "
+            f"user already has {count} uploaded files; "
             f"per-user limit is {settings.max_session_files_per_user}"
         )

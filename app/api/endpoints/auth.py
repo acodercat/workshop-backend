@@ -62,7 +62,6 @@ async def login_for_access_token(
     return AccessTokenResponse(access_token=access_token, token_type="bearer")
 
 
-# ---- email-OTP unified login + registration ------------------------------
 #
 # Single flow that handles both first-time signup and returning-user
 # login. The same code triple — ``POST /auth/verification-codes``

@@ -210,6 +210,27 @@ class TestZipBombRejections:
         with pytest.raises(InvalidSkillBundleError, match="too many files"):
             validate_zip_structure(data)
 
+    def test_total_uncompressed_too_large_rejected(self):
+        # Many entries, each at-or-under the per-entry cap and the file
+        # count well under 500, but whose declared uncompressed sizes sum
+        # past the absolute total cap. Highly compressible (zeros via
+        # DEFLATE) so it stays tiny on the wire — the total-cap check must
+        # fire *during* the scan, before the end-of-loop ratio check.
+        from app.services.skill_bundle import (
+            _MAX_TOTAL_UNCOMPRESSED,
+            _MAX_UNCOMPRESSED_PER_ENTRY,
+        )
+        entry = b"\x00" * _MAX_UNCOMPRESSED_PER_ENTRY
+        # One more entry than the cap allows at max per-entry size.
+        count = (_MAX_TOTAL_UNCOMPRESSED // _MAX_UNCOMPRESSED_PER_ENTRY) + 1
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("SKILL.md", _skill_md({"name": "n"}, "body"))
+            for i in range(count):
+                zf.writestr(f"big{i}.bin", entry)
+        with pytest.raises(InvalidSkillBundleError, match="uncompressed"):
+            validate_zip_structure(buf.getvalue())
+
     def test_suspicious_compression_ratio_rejected(self):
         # 1 MiB of zeros compressed via DEFLATE → ~1 KiB, ratio ~1000:1.
         # Stays under both size caps, must fall on the ratio check.
