@@ -106,6 +106,10 @@ async def huifu_webhook(
         logger.warning("huifu webhook: signature verification failed")
         return PlainTextResponse("FAIL", status_code=400)
 
+    logger.info(
+        "huifu webhook received: out_trade_no=%s succeeded=%s",
+        event.out_trade_no, event.succeeded,
+    )
     try:
         await payment.handle_webhook(db, event)
         await db.commit()

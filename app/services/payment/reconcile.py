@@ -46,6 +46,12 @@ async def reconcile_order(db: AsyncSession, order_id: uuid.UUID) -> bool:
         # through to the expiry check so a stale unpaid order still reaps.
         logger.info("reconcile: query failed for order=%s", order.id)
 
+    if event is not None:
+        logger.info(
+            "reconcile order=%s query: succeeded=%s amount_fen=%s",
+            order.id, event.succeeded, event.amount_fen,
+        )
+
     if event is not None and event.succeeded:
         await orders.reconcile_paid(db, order, event)
         await db.commit()

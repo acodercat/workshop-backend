@@ -47,7 +47,7 @@ _SUCCESS_TRANS_STAT = "S"
 # Gateway-level "request accepted" codes in ``resp_code``. ``00000000`` =
 # success; ``00000100`` = 受理成功/处理中 — the NORMAL response when placing a
 # scan-pay order (QR issued, payment still pending). Both mean "proceed".
-_ACCEPTED_RESP_CODES = frozenset({"00000000", "00000100"})
+_ACCEPTED_RESP_CODES = frozenset({_SUCCESS_CODE, "00000100"})
 
 # ALIPAY/WeChat "正扫" (merchant shows QR, customer scans) trade types.
 _TRADE_TYPE_BY_CHANNEL: dict[Channel, str] = {
@@ -229,12 +229,11 @@ def _require_accepted(result: Any, *, op: str) -> dict[str, Any]:
 def _event_from_business_data(data: dict[str, Any]) -> VerifiedEvent:
     """Map a Huifu business-data dict (from notify or query) to a
     :class:`VerifiedEvent`."""
-    # No default for ``trans_stat``: a missing/unknown status must read as
-    # NOT succeeded (never grant credits on an ambiguous payload).
-    succeeded = (
-        data.get("sub_resp_code") == _SUCCESS_CODE
-        and data.get("trans_stat") == _SUCCESS_TRANS_STAT
-    )
+    # ``trans_stat`` is Huifu's authoritative transaction status (P=处理中,
+    # S=成功, F=失败); ``S`` is the only "paid" signal. No default — a
+    # missing/unknown status reads as NOT succeeded (never grant on an
+    # ambiguous payload).
+    succeeded = data.get("trans_stat") == _SUCCESS_TRANS_STAT
     trans_amt = data.get("trans_amt")
     amount_fen = _yuan_to_fen(trans_amt) if trans_amt else 0
     return VerifiedEvent(
