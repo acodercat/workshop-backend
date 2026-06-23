@@ -59,9 +59,33 @@ class EmailTakenError(AppError):
     error_type = "email_taken"
 
 
-class AccountPendingError(AppError):
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "account_pending"
+class NotRegisteredError(AppError):
+    """Login attempt for an email with no account. The frontend steers
+    the user to the (invite-gated) register tab rather than auto-creating."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "not_registered"
+
+
+class InvalidInviteCodeError(AppError):
+    """Invite code doesn't exist or is disabled."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invalid_invite_code"
+
+
+class InviteExpiredError(AppError):
+    """Invite code's ``expires_at`` has passed."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invite_expired"
+
+
+class InviteExhaustedError(AppError):
+    """Invite code has reached its ``max_uses`` cap."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invite_exhausted"
 
 
 class CooldownError(AppError):
@@ -174,3 +198,39 @@ class SessionFileQuotaExceededError(AppError):
 
     status_code = status.HTTP_403_FORBIDDEN
     error_type = "session_file_quota_exceeded"
+
+
+class PaymentDisabledError(AppError):
+    """The payment/recharge feature is off (``payment_enabled`` is False
+    or Huifu credentials are unconfigured). 403 so the frontend hides the
+    top-up surface rather than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "payment_disabled"
+
+
+class PaymentAmountRangeError(AppError):
+    """Requested top-up amount is outside ``[payment_min_cny,
+    payment_max_cny]``. A client-side validation guard duplicated in the
+    service layer so it holds regardless of caller."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "payment_amount_range"
+
+
+class OrderNotFoundError(AppError):
+    """No payment order with that id is owned by the caller (or it never
+    existed). Folds the not-owned case into not-found so an order id can't
+    be probed across users."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "order_not_found"
+
+
+class PaymentProviderError(AppError):
+    """The upstream payment provider returned an error / unparseable
+    response when creating or querying an order. 502 so it reads as an
+    upstream failure the client can retry, not a client error."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "payment_provider_error"

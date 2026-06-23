@@ -9,6 +9,7 @@ dependencies = [
     "alibabacloud-dm20151123>=1.9.2",
     "asyncpg>=0.31.0",
     "bcrypt>=5.0.0",
+    "dg-sdk>=2.0.22",
     "email-validator>=2.3.0",
     "fastapi>=0.135.3",
     "greenlet>=3.4.0",

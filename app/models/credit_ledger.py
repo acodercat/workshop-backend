@@ -64,6 +64,10 @@ class CreditLedgerKind(StrEnum):
       (worker crash, cancellation, etc.). One ``+reserved`` row.
     - ``ADJUST``   — manual correction by an operator. Signed; carries
       an ``idempotency_key`` + ``reference.reason``.
+    - ``REFERRAL`` — reward granted to a referrer when someone registers
+      via their referral code. Always positive; carries an
+      ``idempotency_key`` (``referral-{invitee_id}``) +
+      ``reference.invitee_user_id``.
 
     Member values match the Postgres ``credit_ledger_kind`` enum and
     are intentionally UPPERCASE matching the project convention used
@@ -75,6 +79,7 @@ class CreditLedgerKind(StrEnum):
     SETTLE = "SETTLE"
     REFUND = "REFUND"
     ADJUST = "ADJUST"
+    REFERRAL = "REFERRAL"
 
 
 class CreditLedger(Base):

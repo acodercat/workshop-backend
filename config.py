@@ -378,6 +378,14 @@ class Settings(BaseSettings):
         default=1000,
         description="Whole credits granted to every new user at registration. Set to 0 to disable.",
     )
+    invite_referral_max_uses: int = Field(
+        default=20,
+        description="Max successful registrations per user's personal referral code. Growth-control cap; raise to widen referral reach.",
+    )
+    invite_referral_reward_credits: int = Field(
+        default=500,
+        description="Whole credits granted to the referrer for each successful registration via their referral code. Set to 0 to disable referral rewards.",
+    )
     # Customer-facing RMB sale price of ONE credit, used only to convert a
     # top-up payment (¥) into credits — the domestic-market recharge knob.
     # Deliberately distinct from the internal cost peg (1 credit ≈ $0.01 ≈
@@ -390,6 +398,48 @@ class Settings(BaseSettings):
     credit_price_cny: float = Field(
         default=0.1, gt=0.0,
         description="Customer-facing RMB price of 1 credit at top-up. ¥0.1 → ¥100 buys 1000 credits.",
+    )
+
+    # ── Payments (汇付斗拱 / Huifu Dougong) ────────────────────────────
+    # Buy-side recharge: a user pays RMB and the credit ledger is topped
+    # up via ``credits.apply_topup``. Credentials default to empty strings
+    # so dev boxes without Huifu access still boot (same stance as the
+    # DirectMail / OSS creds) — calls that need them fail loudly at request
+    # time, gated behind ``payment_enabled``, not at startup.
+    payment_enabled: bool = Field(
+        default=False,
+        description="Master switch for the payment/recharge endpoints. Off until Huifu creds are configured.",
+    )
+    huifu_merchant_id: str = Field(
+        default="", description="Huifu 商户号 (huifu_id); sent on every request, not part of SDK init",
+    )
+    huifu_sys_id: str = Field(default="", description="Huifu 系统号 (sys_id)")
+    huifu_product_id: str = Field(default="", description="Huifu 产品号 (product_id)")
+    huifu_rsa_private_key: str = Field(
+        default="", description="Merchant RSA private key (PKCS#8 base64 body); signs outbound requests",
+    )
+    huifu_rsa_public_key: str = Field(
+        default="", description="Huifu RSA public key; verifies responses + async notifications",
+    )
+    huifu_env: str = Field(
+        default="prod",
+        description="Huifu gateway env: 'prod' (api.huifu.com) or 'mertest' (sandbox opps-stbmertest.testpnr.com)",
+    )
+    huifu_notify_url: str = Field(
+        default="",
+        description="Public HTTPS async-notify URL, e.g. https://<host>/api/v1/payments/webhooks/huifu",
+    )
+    payment_min_cny: float = Field(
+        default=1.0, gt=0.0, description="Minimum single top-up amount in RMB",
+    )
+    payment_max_cny: float = Field(
+        default=10000.0, gt=0.0, description="Maximum single top-up amount in RMB",
+    )
+    payment_order_ttl_seconds: int = Field(
+        default=1800, description="How long a PENDING order / its QR stays payable",
+    )
+    payment_reconcile_interval_seconds: int = Field(
+        default=120, description="Background payment-reconciler poll interval (seconds)",
     )
 
 

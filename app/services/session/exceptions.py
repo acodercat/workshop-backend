@@ -31,3 +31,13 @@ class FileNotInSessionError(SessionServiceError):
     Surfaces both the owner-side (caller's own session) and share-side
     (recipient's accessible share) authorization miss in one shape; the
     endpoint layer turns it into 403."""
+
+
+class RecipeNotInvokableError(SessionServiceError):
+    """A ``recipe_id`` was sent that the caller can't invoke.
+
+    The recipe doesn't exist, isn't visible to this user (a CUSTOM
+    recipe they don't own), or is disabled. Unlike skills — silently
+    filtered so a stale toggle doesn't block a send — a recipe is an
+    explicit single pick, so the endpoint turns this into 400 rather
+    than dropping it silently."""

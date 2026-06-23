@@ -46,7 +46,8 @@ class TransactionKind(StrEnum):
     - **Direct** (pass-through from ``credit_ledger``):
       ``WELCOME_GRANT`` (auto-grant at registration),
       ``TOPUP`` (admin-initiated or future payment-driven),
-      ``ADJUST`` (manual correction).
+      ``ADJUST`` (manual correction),
+      ``REFERRAL`` (reward for a successful referral).
     """
 
     TURN_USED = "TURN_USED"
@@ -55,6 +56,7 @@ class TransactionKind(StrEnum):
     WELCOME_GRANT = "WELCOME_GRANT"
     TOPUP = "TOPUP"
     ADJUST = "ADJUST"
+    REFERRAL = "REFERRAL"
 
 
 class TransactionRow(NamedTuple):
@@ -120,7 +122,7 @@ _ROWS_CTE = """
             cl.reference AS ref
         FROM credit_ledger cl
         WHERE cl.user_id = :user_id
-          AND cl.kind IN ('TOPUP', 'ADJUST')
+          AND cl.kind IN ('TOPUP', 'ADJUST', 'REFERRAL')
     ),
     all_rows AS (
         SELECT * FROM reservation_rows

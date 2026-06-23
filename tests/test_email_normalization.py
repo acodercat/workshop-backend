@@ -6,6 +6,7 @@ def test_auth_email_inputs_are_lowercased() -> None:
     assert RegisterCodeRequest(email="Alice@EXAMPLE.COM").email == "alice@example.com"
     assert RegisterRequest(
         email="Alice@EXAMPLE.COM", code="123456", name="Alice",
+        invite_code="abc123",
     ).email == "alice@example.com"
     assert EmailLoginRequest(
         email="Alice@EXAMPLE.COM", code="123456",

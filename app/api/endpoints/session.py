@@ -83,6 +83,7 @@ from app.services.session import generate_title, queue_user_message, stream_even
 from app.services.session.exceptions import (
     FileNotInSessionError,
     GenerationInProgressError,
+    RecipeNotInvokableError,
     SessionGoneError,
 )
 from app.services.session.files import assert_file_belongs_to_session
@@ -571,7 +572,7 @@ async def create_message(
     try:
         await queue_user_message(
             db, redis, session, content=body.content, files=body.files,
-            skills=body.skills,
+            skills=body.skills, recipe_id=body.recipe_id,
         )
     except GenerationInProgressError as exc:
         raise HTTPException(
@@ -582,6 +583,10 @@ async def create_message(
     except FileNotInSessionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
+        )
+    except RecipeNotInvokableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
         )
     return MessageQueuedResponse()
 

@@ -22,13 +22,13 @@ if TYPE_CHECKING:
 class UserStatus(StrEnum):
     """Lifecycle status of a user account.
 
-    - ``ACTIVE`` — can log in.
+    - ``ACTIVE`` — can log in. Default for fresh inserts: a valid
+      invite code is the access grant, so registration activates
+      immediately.
     - ``DISABLED`` — manually disabled by an admin; login refused.
     - ``SUSPENDED`` — temporarily blocked (e.g. risk control); login refused.
-    - ``PENDING`` — created but not yet approved; login refused. Default
-      for fresh inserts so a new account is opt-in to access.
 
-    Only ``ACTIVE`` is allowed past :func:`authenticate_user`. Member
+    Only ``ACTIVE`` is allowed past :func:`assert_user_active`. Member
     values match the Postgres ``user_status`` enum and the Python
     member names — same convention as :class:`SessionStatus`.
     """
@@ -36,7 +36,6 @@ class UserStatus(StrEnum):
     ACTIVE = "ACTIVE"
     DISABLED = "DISABLED"
     SUSPENDED = "SUSPENDED"
-    PENDING = "PENDING"
 
 
 class User(Base):
@@ -68,10 +67,10 @@ class User(Base):
     avatar_revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
-    # Default ``PENDING`` so a freshly inserted row is locked out by
-    # default; promotion to ``ACTIVE`` is an explicit step (admin tool /
-    # seed script). Existing rows were backfilled to ``ACTIVE`` in the
-    # migration that introduced this column.
+    # Default ``ACTIVE``: registration is invite-gated, and a valid
+    # invite is itself the access grant, so a freshly inserted row can
+    # log in immediately. ``DISABLED`` / ``SUSPENDED`` are set later by
+    # admin / risk-control tooling.
     status: Mapped[UserStatus] = mapped_column(
         SAEnum(
             UserStatus,
@@ -79,8 +78,8 @@ class User(Base):
             values_callable=lambda enum_cls: [m.value for m in enum_cls],
         ),
         nullable=False,
-        default=UserStatus.PENDING,
-        server_default=UserStatus.PENDING.value,
+        default=UserStatus.ACTIVE,
+        server_default=UserStatus.ACTIVE.value,
     )
     last_login_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

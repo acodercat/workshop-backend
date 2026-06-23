@@ -1,13 +1,13 @@
 """Register orchestration.
 
-Validates the email verification code (via
-:func:`app.services.auth.verification.verify_register_code`), then
-INSERTs the new user row. The email-OTP unified flow is the only
-supported entry today: caller supplies just ``email`` + ``code`` +
-``name``, this module generates a stable ``axon_${id}`` username and
-a random password placeholder (the user can set a real password
-later in settings if they want to use the username + password
-sign-in path).
+Invite-gated email-OTP registration: the caller supplies ``email`` +
+``code`` + ``name`` + ``invite_code``. A valid invite is the access
+grant, so this module creates the user ``ACTIVE`` and issues a JWT —
+the endpoint logs them straight in. It generates a stable
+``axon_${id}`` username and a random password placeholder (the user
+can set a real password later in settings), mints the user's personal
+referral code, and records the invite redemption — all in one
+transaction.
 
 Lives in its own module so the endpoint stays thin and so the
 verification + insert path can be unit-tested without spinning up a
@@ -16,13 +16,14 @@ full FastAPI app.
 
 import logging
 import secrets
+from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_password_hash
+from app.auth import create_access_token, get_password_hash
 from app.errors import EmailTakenError
 from app.models.organization import (
     Organization,
@@ -31,7 +32,13 @@ from app.models.organization import (
     OrganizationMemberRole,
 )
 from app.models.user import User, UserStatus
+from app.schemas.auth import LoggedInResponse
 from app.services import credits
+from app.services.auth.invite import (
+    claim_invite,
+    create_referral_code,
+    record_redemption,
+)
 from app.services.auth.verification import verify_register_code
 from app.services.credits.rates import micro_from_credits
 from config import settings
@@ -45,36 +52,52 @@ async def register_user(
     *,
     email: str,
     code: str,
+    invite_code: str,
     name: str,
-) -> User:
-    """Create a new user via the email-OTP flow.
+) -> LoggedInResponse:
+    """Redeem an invite code, create an ``ACTIVE`` user, log them in.
 
-    Steps in order — fail-fast cheap checks first, expensive ones
-    last so a user with a taken email doesn't burn a code:
+    Steps in order — fail-fast cheap checks first so a bad invite or a
+    taken email doesn't burn the verification code:
 
     1. Pre-check ``email`` uniqueness.
-    2. Verify (and consume) the email verification code.
-    3. Reserve the next user id from the sequence so the auto-
-       generated ``axon_${id}`` username is known *before* INSERT.
-    4. INSERT user with ``status=PENDING``. The email is verified
-       (proof of address), but access is gated on a separate admin
-       approval step — login endpoints surface ``account_pending``
-       and refuse to issue a JWT until an admin flips the status to
-       ``ACTIVE``. Random password hash acts as a placeholder; the
-       ``POST /auth/access-tokens`` form-grant login can't
-       authenticate them with this hash anyway, which is correct:
-       new accounts are email-OTP only until the user sets a real
-       password in settings.
+    2. Hash the password placeholder (the one slow, CPU-bound step) —
+       done **before** the invite claim so the claim's row lock isn't
+       held across bcrypt.
+    3. Claim an invite slot (fenced ``UPDATE``) — **before** consuming
+       the OTP, so a code exhausted by a concurrent registration is
+       rejected without burning the verification code. The increment
+       rolls back with the transaction if a later step fails.
+    4. Consume the email verification code.
+    5. Reserve the next user id; INSERT the user ``ACTIVE`` (the invite
+       is the access grant) with the precomputed password hash.
+    6. Create the personal org + OWNER membership, the user's personal
+       referral code, and the invite redemption — all in the same
+       transaction, so a later failure rolls the whole identity back.
+    7. Issue a JWT and return the logged-in response.
     """
-    # Single SELECT — only ``email`` is user-supplied here; the
-    # generated ``axon_${id}`` is unique by construction (id is from
-    # a sequence). The code consumption in step 2 is the transactional
-    # pivot — if INSERT later races on email, we re-issue codes but no
-    # rows are created.
+    # Cheap pre-check — only ``email`` is user-supplied here; the
+    # generated ``axon_${id}`` is unique by construction (id is from a
+    # sequence). Fail fast before the expensive steps below.
     existing = await db.execute(select(User.id).where(User.email == email))
     if existing.first() is not None:
         raise EmailTakenError("Email already registered")
 
+    # bcrypt up-front (~250ms, CPU-bound) so no invite-code row lock is
+    # held across it.
+    placeholder_secret = secrets.token_urlsafe(32)
+    password_hash = await get_password_hash(placeholder_secret)
+
+    # Claim a slot BEFORE burning the OTP. The fenced UPDATE is the
+    # authoritative gate; claiming first means an exhausted/expired code
+    # never strands a verified-but-unused OTP. ``referrer_id`` is the
+    # code owner (NULL for a SYSTEM code), used for the reward below.
+    invite_id, referrer_id = await claim_invite(db, code=invite_code)
+
+    # Irreversible OTP burn (Redis delete) — the one non-transactional
+    # step. Done after the invite claim so a bad invite never consumes
+    # the code; a DB failure after this rolls back the row (and the
+    # claim) but not the OTP, so the user just re-requests a code.
     await verify_register_code(redis, email=email, code=code)
 
     # Reserve the id up-front so the username can encode it. ``nextval``
@@ -95,14 +118,13 @@ async def register_user(
     # auto-create at registration).
     user_id = await _reserve_next_user_id(db)
     username = f"axon_{user_id}"
-    placeholder_secret = secrets.token_urlsafe(32)
     user = User(
         id=user_id,
         username=username,
         name=name,
         email=email,
-        password_hash=await get_password_hash(placeholder_secret),
-        status=UserStatus.PENDING,
+        password_hash=password_hash,
+        status=UserStatus.ACTIVE,
     )
     db.add(user)
     try:
@@ -137,6 +159,24 @@ async def register_user(
         role=OrganizationMemberRole.OWNER,
     ))
     user.organization_id = organization.id
+
+    # The user's personal referral code + the invite redemption audit
+    # row ride in the same transaction as the identity above. The slot
+    # was already fence-claimed (``claim_invite``) before the OTP burn;
+    # here we just record who redeemed it.
+    await create_referral_code(db, user_id=user.id)
+    await record_redemption(
+        db,
+        invite_code_id=invite_id,
+        invitee_user_id=user.id,
+        referrer_user_id=referrer_id,
+    )
+
+    # A valid invite is the access grant, so log them straight in.
+    user.last_login_at = datetime.now(timezone.utc)
+    access_token = create_access_token(
+        data={"sub": user.username, "token_version": user.token_version},
+    )
     await db.commit()
 
     # Welcome grant — best-effort, in its own transaction. Kept
@@ -151,18 +191,23 @@ async def register_user(
     #    invalidate a registration the user already proved with email
     #    verification — they'd just have to re-verify a new code.
     #
-    # The idempotency key ``welcome-{user.id}`` is unique by
+    # The idempotency key ``welcome-{user_id}`` is unique by
     # construction (the user.id sequence is monotonic). A duplicate
     # would only happen via a manual sequence reset that re-issued an
     # old id; treat it as already-granted and continue.
+    #
+    # These post-commit grant blocks use the ``user_id`` local rather
+    # than ``user.id``: a best-effort grant may ``db.rollback()`` on
+    # failure (expiring the ORM instance), and the local can't be
+    # invalidated by that.
     welcome_credits = settings.credit_welcome_grant_credits
     if welcome_credits > 0:
         try:
             await credits.apply_topup(
                 db,
-                user_id=user.id,
+                user_id=user_id,
                 amount_micro=micro_from_credits(welcome_credits),
-                idempotency_key=f"welcome-{user.id}",
+                idempotency_key=f"welcome-{user_id}",
                 reason="welcome grant",
             )
             await db.commit()
@@ -172,12 +217,49 @@ async def register_user(
             pass
         except Exception:
             # User is created and can log in, just with a 0 balance
-            # admin needs to top up manually. Loud log so it surfaces
-            # in error-rate monitoring; nothing the user can do.
+            # admin needs to top up manually. Roll back the aborted
+            # grant tx so the session stays usable for the referral
+            # reward + the final ``db.refresh(user)``; the committed
+            # registration is untouched. Loud log so it surfaces in
+            # error-rate monitoring; nothing the user can do.
+            await db.rollback()
             logger.exception(
                 "welcome grant failed for user %s — registration committed; "
                 "manual topup required",
-                user.id,
+                user_id,
+            )
+
+    # Referral reward — credit the referrer for a successful registration
+    # via their personal code. Best-effort, in its own transaction, for
+    # the same reasons as the welcome grant above: ``apply_referral_reward``
+    # self-rolls-back on a duplicate idempotency key, which must not undo
+    # the committed registration. SYSTEM codes have no referrer, so this
+    # only fires for REFERRAL codes. The ``referral-{invitee}`` key is
+    # unique by construction (the invitee id is fresh).
+    reward_credits = settings.invite_referral_reward_credits
+    if referrer_id is not None and reward_credits > 0:
+        try:
+            await credits.apply_referral_reward(
+                db,
+                referrer_user_id=referrer_id,
+                invitee_user_id=user_id,
+                amount_micro=micro_from_credits(reward_credits),
+                idempotency_key=f"referral-{user_id}",
+            )
+            await db.commit()
+        except credits.ReferralRewardAlreadyApplied:
+            pass
+        except Exception:
+            # The invitee is registered and logged in; only the
+            # referrer's bonus failed. Roll back the aborted grant tx so
+            # the session stays usable for the final ``db.refresh(user)``;
+            # the committed registration is untouched. Loud log; nothing
+            # the invitee can do, and an admin can grant it manually.
+            await db.rollback()
+            logger.exception(
+                "referral reward failed: referrer=%s invitee=%s — "
+                "registration committed",
+                referrer_id, user_id,
             )
 
     await db.refresh(user)
@@ -188,7 +270,11 @@ async def register_user(
         user.email,
         user.organization_id,
     )
-    return user
+    return LoggedInResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=user,
+    )
 
 
 async def _reserve_next_user_id(db: AsyncSession) -> int:

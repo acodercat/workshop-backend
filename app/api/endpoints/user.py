@@ -27,8 +27,10 @@ from app.schemas.user import (
     EmailChangeRequest,
     PasswordChange,
     ProfileUpdate,
+    ReferralResponse,
     UserResponse,
 )
+from app.services.auth import get_or_create_referral_code
 from app.services.auth.email_change import (
     change_email,
     request_email_change_code,
@@ -44,6 +46,25 @@ async def get_current_user(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> UserResponse:
     return UserResponse.model_validate(current_user)
+
+
+@router.get("/me/referral")
+async def get_referral(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> ReferralResponse:
+    """The caller's personal referral code + the per-referral reward.
+
+    New users get a code at registration; this lazily mints one (and
+    commits) for accounts that predate the feature.
+    """
+    code = await get_or_create_referral_code(db, user_id=current_user.id)
+    await db.commit()
+    return ReferralResponse(
+        code=code.code,
+        reward_credits=settings.invite_referral_reward_credits,
+        invited_count=code.used_count,
+    )
 
 
 @router.patch("/me")

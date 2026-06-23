@@ -23,6 +23,16 @@ class UserResponse(BaseModel):
     updated_at: datetime
 
 
+class ReferralResponse(BaseModel):
+    """Body for ``GET /me/referral`` — the caller's personal referral
+    code plus the reward each successful registration grants them and
+    how many have redeemed it so far."""
+
+    code: str
+    reward_credits: int
+    invited_count: int
+
+
 class ProfileUpdate(BaseModel):
     """Body for ``PATCH /me``.
 

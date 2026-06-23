@@ -89,6 +89,14 @@ class SessionTurn(Base):
     skills: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
+    # Per-turn recipe snapshot, or NULL. The backend resolves the picked
+    # recipe id → its vetted ``instructions`` server-side (the client
+    # sends only ``recipe_id``, never raw text) and pins the rendered
+    # snapshot here, so a later recipe edit / delete can't strand a
+    # queued turn. The worker injects ``instructions`` verbatim as an
+    # axon ``<system-reminder>``. Shape:
+    #   {"id": int, "display_name": str, "instructions": str}
+    recipe: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # Token usage as reported by axon's ``AgentStoppedEvent.usage``,
     # written by the worker in the same fenced UPDATE that flips
     # ``status`` to ``COMPLETE`` / ``CANCELLED`` (see

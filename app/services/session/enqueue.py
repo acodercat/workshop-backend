@@ -40,6 +40,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.message import Message, MessageRole
+from app.models.recipe import Recipe, RecipeOrigin
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
@@ -56,6 +57,7 @@ from config import settings
 from app.services.session.exceptions import (
     FileNotInSessionError,
     GenerationInProgressError,
+    RecipeNotInvokableError,
     SessionGoneError,
 )
 
@@ -70,6 +72,7 @@ async def queue_user_message(
     content: str,
     files: list[FileRef],
     skills: list[str] | None = None,
+    recipe_id: int | None = None,
 ) -> None:
     """Persist the user message + session_turn, flip status, wake worker.
 
@@ -150,6 +153,14 @@ async def queue_user_message(
         db, session.user_id, skills or [],
     )
 
+    # Resolve the picked recipe server-side into a pinned snapshot — the
+    # client only sends ``recipe_id``, never the instruction text. A bad
+    # id (missing / not visible / disabled) raises rather than silently
+    # dropping, since a recipe is a single explicit pick.
+    recipe_snapshot = await _resolve_recipe_snapshot(
+        db, session.user_id, recipe_id,
+    )
+
     file_dicts = [f.model_dump() for f in files]
     # Insert the session_turn first so we have a stable ``turn_id`` to
     # attach to the credit reservation. The flush below populates
@@ -159,6 +170,7 @@ async def queue_user_message(
         query=content,
         files=file_dicts,
         skills=accepted_skills,
+        recipe=recipe_snapshot,
         status=SessionTurnStatus.PENDING,
     )
     db.add(session_turn)
@@ -399,3 +411,40 @@ async def _filter_invokable_skills(
         if existing is None or row_user_id is not None:
             by_name[name] = snapshot
     return [by_name[name] for name in requested_unique if name in by_name]
+
+
+async def _resolve_recipe_snapshot(
+    db: AsyncSession, user_id: int | None, recipe_id: int | None,
+) -> dict[str, str | int] | None:
+    """Resolve a picked recipe id into a pinned per-turn snapshot.
+
+    Returns ``{"id", "display_name", "instructions"}`` — the rendered
+    instructions captured at enqueue time so a later edit / delete of the
+    recipe can't change or strand this queued turn. The worker injects
+    ``instructions`` verbatim as an axon system-reminder.
+
+    A recipe is invokable when it's visible to the user (their own
+    CUSTOM, or any BUILTIN) AND enabled. Unlike skills — silently
+    filtered, since a stale chip shouldn't block a free-text send — a
+    recipe is a single explicit pick, so a missing / hidden / disabled id
+    raises :class:`RecipeNotInvokableError` (→ 400) rather than vanishing.
+
+    Returns ``None`` when no recipe was picked.
+    """
+    if recipe_id is None:
+        return None
+    stmt = select(Recipe.id, Recipe.display_name, Recipe.instructions).where(
+        Recipe.id == recipe_id,
+        Recipe.enabled.is_(True),
+        (Recipe.user_id == user_id) | (Recipe.origin == RecipeOrigin.BUILTIN),
+    )
+    row = (await db.execute(stmt)).first()
+    if row is None:
+        raise RecipeNotInvokableError(
+            f"recipe {recipe_id} is not available"
+        )
+    return {
+        "id": row.id,
+        "display_name": row.display_name,
+        "instructions": row.instructions,
+    }

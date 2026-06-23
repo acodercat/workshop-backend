@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import models
 from app.api.dependencies import get_db
 from app.database import AsyncSessionLocal
-from app.errors import AccountPendingError
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -61,12 +60,11 @@ async def authenticate_user(
     """Return the user iff the credentials are valid, regardless of
     status.
 
-    Status checking is left to the calling endpoint so it can
-    distinguish ``PENDING`` (surface ``account_pending`` so the user
-    sees "awaiting admin approval") from ``DISABLED`` / ``SUSPENDED``
-    (collapse to a generic 401 indistinguishable from wrong creds —
-    admin-initiated lockouts shouldn't leak account state). Existing
-    JWTs aren't revoked by a status change; bump ``token_version``
+    Status checking is left to the calling endpoint via
+    :func:`assert_user_active` — ``DISABLED`` / ``SUSPENDED`` collapse
+    to a generic 401 indistinguishable from wrong creds so
+    admin-initiated lockouts don't leak account state. Existing JWTs
+    aren't revoked by a status change; bump ``token_version``
     separately if you need immediate force-logout.
     """
     user = await get_user_by_username(db, username)
@@ -78,15 +76,12 @@ async def authenticate_user(
 def assert_user_active(user: models.User, *, inactive_detail: str) -> None:
     """Gate sign-in on account status; no-op for an ``ACTIVE`` user.
 
-    ``PENDING`` raises ``AccountPendingError`` (403) so the frontend can
-    show "awaiting admin approval". ``DISABLED`` / ``SUSPENDED`` collapse
-    to an opaque 401 carrying ``inactive_detail`` — kept generic (and,
-    for password login, identical to the wrong-credentials message) so
-    admin-initiated lockouts don't leak account state. The caller passes
-    the detail because what's "opaque" differs by flow.
+    ``DISABLED`` / ``SUSPENDED`` collapse to an opaque 401 carrying
+    ``inactive_detail`` — kept generic (and, for password login,
+    identical to the wrong-credentials message) so admin-initiated
+    lockouts don't leak account state. The caller passes the detail
+    because what's "opaque" differs by flow.
     """
-    if user.status is models.UserStatus.PENDING:
-        raise AccountPendingError("Account awaiting administrator approval")
     if user.status is not models.UserStatus.ACTIVE:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
