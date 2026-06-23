@@ -39,10 +39,15 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Huifu accepts/settles with this code in ``resp_code`` / ``sub_resp_code``;
-# a paid transaction reports ``trans_stat == 'S'``.
+# Payment-success code in ``sub_resp_code`` + ``trans_stat == 'S'`` mark a
+# completed (paid) transaction (used on the notify / query path).
 _SUCCESS_CODE = "00000000"
 _SUCCESS_TRANS_STAT = "S"
+
+# Gateway-level "request accepted" codes in ``resp_code``. ``00000000`` =
+# success; ``00000100`` = 受理成功/处理中 — the NORMAL response when placing a
+# scan-pay order (QR issued, payment still pending). Both mean "proceed".
+_ACCEPTED_RESP_CODES = frozenset({"00000000", "00000100"})
 
 # ALIPAY/WeChat "正扫" (merchant shows QR, customer scans) trade types.
 _TRADE_TYPE_BY_CHANNEL: dict[Channel, str] = {
@@ -209,7 +214,7 @@ def _require_accepted(result: Any, *, op: str) -> dict[str, Any]:
         )
         raise PaymentProviderError(f"Huifu {op} failed (status={status})")
     resp_code = result.get("resp_code")
-    if resp_code != _SUCCESS_CODE:
+    if resp_code not in _ACCEPTED_RESP_CODES:
         logger.error(
             "huifu %s: resp_code=%s desc=%s sub=%s",
             op, resp_code, result.get("resp_desc"), result.get("sub_resp_desc"),

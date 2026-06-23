@@ -81,6 +81,12 @@ def test_require_accepted_raises_on_non_dict() -> None:
         huifu._require_accepted("404 not found", op="create")
 
 
+def test_require_accepted_allows_processing_code() -> None:
+    # 00000100 (受理成功/待支付) is the normal scan-pay create code — accepted.
+    data = {"resp_code": "00000100", "qr_code": "https://qr/x"}
+    assert huifu._require_accepted(data, op="create") is data
+
+
 def test_require_accepted_raises_on_rejected_code() -> None:
     with pytest.raises(PaymentProviderError):
         huifu._require_accepted(
@@ -97,8 +103,9 @@ async def test_create_charge_maps_amount_and_extracts_qr(monkeypatch) -> None:
         captured["trade_type"] = self.trade_type
         captured["req_seq_id"] = self.req_seq_id
         captured["time_expire"] = extend_infos.get("time_expire")
-        return {"resp_code": "00000000", "qr_code": "https://qr/x",
-                "hf_seq_id": "H1", "sub_resp_code": "00000000"}
+        # 00000100 = 受理成功/待支付 — the real scan-pay create response code.
+        return {"resp_code": "00000100", "resp_desc": "下单成功",
+                "qr_code": "https://qr/x", "hf_seq_id": "H1"}
 
     monkeypatch.setattr(
         huifu.dg_sdk.V2TradePaymentJspayRequest, "post", fake_post
