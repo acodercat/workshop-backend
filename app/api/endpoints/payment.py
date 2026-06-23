@@ -92,11 +92,20 @@ async def huifu_webhook(
     (no ack) so the provider redelivers.
     """
     raw = await request.body()
+    # Log the exact inbound payload so the provider's real format is visible
+    # (the legacy notify_url async-notify is form ``resp_data``+``sign``; the
+    # console Webhook event subscription may be a different JSON/HMAC shape).
+    logger.info(
+        "huifu webhook raw: content_type=%s len=%s body=%s",
+        request.headers.get("content-type", ""),
+        len(raw),
+        raw.decode("utf-8", "replace")[:1500],
+    )
     parsed = urllib.parse.parse_qs(raw.decode("utf-8"))
     resp_data = parsed.get("resp_data", [""])[0]
     sign = parsed.get("sign", [""])[0]
     if not resp_data or not sign:
-        logger.warning("huifu webhook: missing resp_data/sign")
+        logger.warning("huifu webhook: no resp_data/sign in body (format mismatch?)")
         return PlainTextResponse("FAIL", status_code=400)
 
     provider = payment.get_provider()
