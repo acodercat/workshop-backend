@@ -219,3 +219,16 @@ def credits_from_cny(amount_cny: float | str) -> int:
     """
     credits = Decimal(str(amount_cny)) / Decimal(str(settings.credit_price_cny))
     return int(credits)  # int(Decimal) truncates toward zero == floor for ≥0
+
+
+def recharge_bonus_credits(base_credits: int) -> int:
+    """Promotional bonus credits layered on top of the paid ``base_credits``.
+
+    A fraction of the base set by ``settings.credit_bonus_rate`` (0.1 →
+    +10%), floored so a sub-credit remainder never over-grants. Kept
+    separate from :func:`credits_from_cny` so the *paid* conversion and
+    the *promo* stay independently auditable; the order freezes the sum.
+    Returns 0 when the promo is disabled (rate 0).
+    """
+    bonus = Decimal(base_credits) * Decimal(str(settings.credit_bonus_rate))
+    return int(bonus)  # floor for ≥0, mirrors credits_from_cny

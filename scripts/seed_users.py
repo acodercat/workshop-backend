@@ -31,7 +31,16 @@ from config import settings
 
 USERS = [
     # ("tianlan", "tianlan20260518"),
-    ("wu0618", "wu20260618"),
+    ("vip202601", "20260124qsc1"),
+    ("vip202602", "20260224uygx"),
+    ("vip202603", "20260324qsax"),
+    ("vip202604", "20260424q1sc"),
+    ("vip202605", "20260524azc"),
+    ("vip202606", "20260624uyc"),
+    ("vip202607", "20260724ar5"),
+    ("vip202608", "20260824qqf7"),
+    ("vip202609", "20260924azz1"),
+    ("vip202610", "20261024as9l"),
     # ("liyangmin", "liyangmin20260604"),
     # ("wangjian", "wangjian20260604"),
     # ("ligang", "ligang20260604"),

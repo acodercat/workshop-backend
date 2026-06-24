@@ -69,6 +69,11 @@ SETTLE_NOTIFY_CHANNEL = "settle:notify"
 # window. See :mod:`app.services.auth.verification`.
 EMAIL_VERIFY_PREFIX = "email_verify"
 
+# Per-(phone) registration/login verification code prefix. Same JSON
+# shape as the email prefix; namespaced separately so phone and email
+# codes for the same person can't collide.
+PHONE_VERIFY_PREFIX = "phone_verify"
+
 # Per-(new-email) email-change verification code prefix. Same JSON
 # shape as the registration prefix, but namespaced separately so a
 # pending registration can't be hijacked by an email-change request
@@ -85,6 +90,12 @@ def email_verify_key(email: str) -> str:
     for ``email``. Lowercased so casing variations of the same address
     can't be used to bypass the resend cooldown."""
     return f"{EMAIL_VERIFY_PREFIX}:{email.lower()}"
+
+
+def phone_verify_key(phone: str) -> str:
+    """Redis key holding the active registration/login verification
+    state for ``phone``."""
+    return f"{PHONE_VERIFY_PREFIX}:{phone}"
 
 
 def email_change_key(email: str) -> str:

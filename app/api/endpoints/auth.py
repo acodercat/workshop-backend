@@ -10,7 +10,7 @@ from app.auth import assert_user_active, authenticate_user, create_access_token
 from app.rate_limit import limiter
 from app.schemas.auth import (
     AccessTokenResponse,
-    EmailLoginRequest,
+    CodeLoginRequest,
     LoggedInResponse,
     RegisterCodeRequest,
     RegisterRequest,
@@ -18,7 +18,7 @@ from app.schemas.auth import (
 from app.services.auth import (
     login_by_code,
     register_user,
-    request_register_code,
+    request_verification_code,
 )
 from config import settings
 
@@ -96,11 +96,12 @@ async def create_verification_code(
     and returning users.
 
     ``CooldownError`` / ``EmailSendFailedError`` from
-    ``request_register_code`` propagate to ``app_error_handler``.
+    ``request_verification_code`` propagate to ``app_error_handler``.
     """
-    await request_register_code(
+    await request_verification_code(
         redis,
-        email=body.email,
+        channel=body.channel,
+        identifier=body.identifier,
         locale=body.locale,
     )
 
@@ -112,7 +113,7 @@ async def create_verification_code(
 @limiter.limit(settings.rate_limit_login)
 async def access_token_by_code(
     request: Request,
-    body: EmailLoginRequest,
+    body: CodeLoginRequest,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
@@ -127,7 +128,9 @@ async def access_token_by_code(
     - Email maps to ``DISABLED`` / ``SUSPENDED`` → 401 opaque, same
       as :func:`login_for_access_token`.
     """
-    return await login_by_code(db, redis, email=body.email, code=body.code)
+    return await login_by_code(
+        db, redis, channel=body.channel, identifier=body.identifier, code=body.code
+    )
 
 
 @router.post(
@@ -161,7 +164,8 @@ async def create_user(
     return await register_user(
         db,
         redis,
-        email=body.email,
+        channel=body.channel,
+        identifier=body.identifier,
         code=body.code,
         invite_code=body.invite_code,
         name=body.name,

@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.18.4",
     "alibabacloud-dm20151123>=1.9.2",
+    "alibabacloud-dysmsapi20170525>=4.5.1",
     "asyncpg>=0.31.0",
     "bcrypt>=5.0.0",
     "dg-sdk>=2.0.22",

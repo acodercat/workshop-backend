@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import PaymentProviderError
 from app.models.payment_order import PaymentOrder, PaymentOrderStatus
+from app.services import commission
 from app.services.payment import orders
 
 logger = logging.getLogger(__name__)
@@ -53,8 +54,13 @@ async def reconcile_order(db: AsyncSession, order_id: uuid.UUID) -> bool:
         )
 
     if event is not None and event.succeeded:
+        # Capture the provider key before commit — ORM attrs expire on
+        # commit, and commission accrual (post-commit, own tx) takes a
+        # primitive so it re-loads the order fresh.
+        out_trade_no = order.out_trade_no
         await orders.reconcile_paid(db, order, event)
         await db.commit()
+        await commission.accrue_for_order(db, out_trade_no=out_trade_no)
         return True
 
     if orders.is_expired(order, datetime.now(timezone.utc)):

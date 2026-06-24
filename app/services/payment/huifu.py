@@ -204,13 +204,11 @@ def _require_accepted(result: Any, *, op: str) -> dict[str, Any]:
         # not enabled, IP restriction…) is diagnosable instead of opaque.
         status = getattr(result, "status_code", None)
         body = getattr(result, "text", None)
-        url = getattr(result, "url", None)
-        headers = dict(getattr(result, "headers", {}) or {})
         if body is None and isinstance(result, str):
             body = result
         logger.error(
-            "huifu %s rejected: http_status=%s url=%s body=%s headers=%s",
-            op, status, url, (body or "")[:1000], headers,
+            "huifu %s rejected: http_status=%s body=%s",
+            op, status, (body or "")[:500],
         )
         raise PaymentProviderError(f"Huifu {op} failed (status={status})")
     resp_code = result.get("resp_code")

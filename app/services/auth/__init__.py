@@ -27,8 +27,8 @@ from app.services.auth.invite import (
 from app.services.auth.login import login_by_code
 from app.services.auth.register import register_user
 from app.services.auth.verification import (
-    request_register_code,
-    verify_register_code,
+    request_verification_code,
+    verify_verification_code,
 )
 
 __all__ = [
@@ -39,6 +39,6 @@ __all__ = [
     "login_by_code",
     "record_redemption",
     "register_user",
-    "request_register_code",
-    "verify_register_code",
+    "request_verification_code",
+    "verify_verification_code",
 ]

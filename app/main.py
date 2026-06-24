@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 from app.api.endpoints import (
     auth,
+    commission,
     credits,
     feedback,
     payment,
@@ -55,6 +56,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 ROUTERS = [
     auth.router,
+    commission.router,
     credits.router,
     feedback.router,
     payment.router,

@@ -59,6 +59,22 @@ class EmailTakenError(AppError):
     error_type = "email_taken"
 
 
+class PhoneTakenError(AppError):
+    """The phone number is already registered. Mirror of
+    :class:`EmailTakenError` for the SMS-OTP registration path."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "phone_taken"
+
+
+class SmsSendFailedError(AppError):
+    """Aliyun SMS dispatch failed. Mirror of
+    :class:`EmailSendFailedError` for the phone verification path."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "sms_send_failed"
+
+
 class NotRegisteredError(AppError):
     """Login attempt for an email with no account. The frontend steers
     the user to the (invite-gated) register tab rather than auto-creating."""
@@ -234,3 +250,40 @@ class PaymentProviderError(AppError):
 
     status_code = status.HTTP_502_BAD_GATEWAY
     error_type = "payment_provider_error"
+
+
+class CommissionDisabledError(AppError):
+    """The referral-commission wallet is off (``commission_enabled`` is
+    False). 403 so the frontend hides the withdraw/convert surface rather
+    than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "commission_disabled"
+
+
+class CommissionAmountRangeError(AppError):
+    """Requested withdrawal / conversion amount is below the configured
+    minimum (or too small to buy a whole credit). A client-side guard
+    duplicated in the service layer so it holds regardless of caller."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "commission_amount_range"
+
+
+class InsufficientCommissionError(AppError):
+    """The withdrawable commission balance can't cover the requested
+    withdrawal / conversion (frozen funds in the settlement hold don't
+    count). 400 — the client should refresh the balance and retry with a
+    smaller amount."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "insufficient_commission"
+
+
+class WithdrawalNotFoundError(AppError):
+    """No withdrawal request with that id is owned by the caller (or it
+    never existed). Folds the not-owned case into not-found so an id can't
+    be probed across users."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "withdrawal_not_found"

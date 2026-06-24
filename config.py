@@ -73,8 +73,15 @@ class Settings(BaseSettings):
         description="Per-IP share-unlock attempts (password brute-force guard)",
     )
     rate_limit_register_code: str = Field(
-        default="5/hour",
-        description="Per-IP registration code-send attempts (mail-spam guard, on top of the per-email cooldown)",
+        default="3/minute;20/hour",
+        description=(
+            "Per-IP verification-code send limit (login/register/email-change "
+            "share this code-dispatch endpoint). Two layered limits per OWASP "
+            "OTP guidance: a 3/minute burst cap + a 20/hour ceiling — generous "
+            "enough not to false-positive NAT/CGNAT-shared IPs, on top of the "
+            "per-identity 60s resend cooldown and Aliyun's own per-number flow "
+            "control. slowapi enforces every ';'-separated limit."
+        ),
     )
     rate_limit_register: str = Field(
         default="20/hour",
@@ -206,6 +213,29 @@ class Settings(BaseSettings):
     aliyun_dm_from_alias: str = Field(
         default="AXON",
         description="``发送人名称`` shown in the recipient's inbox; ≤30 chars",
+    )
+
+    # Aliyun SMS (短信服务 / dysmsapi) — phone verification codes. Keys
+    # default to empty so dev boxes without SMS access still boot; a send
+    # that needs them fails loudly at call time, not at startup. Sign name
+    # + template are operator-approved values (not secrets), so they carry
+    # sane defaults; only the AccessKey must be supplied to go live.
+    aliyun_sms_access_key_id: str = Field(
+        default="", description="AccessKey id for an account with SMS (dysms) permission",
+    )
+    aliyun_sms_access_key_secret: str = Field(
+        default="", description="AccessKey secret paired with aliyun_sms_access_key_id",
+    )
+    aliyun_sms_sign_name: str = Field(
+        default="水杉智算深圳技术",
+        description="Approved 短信签名 (SignName), without the 【】 brackets",
+    )
+    aliyun_sms_template_code: str = Field(
+        default="SMS_305451063",
+        description="Approved verification-code 模板编码 (TemplateCode), variable ${code}",
+    )
+    aliyun_sms_region: str = Field(
+        default="cn-hangzhou", description="SMS service region (endpoint dysmsapi.aliyuncs.com)",
     )
 
     # LLM — used only for light-weight synchronous calls from the
@@ -399,6 +429,15 @@ class Settings(BaseSettings):
         default=0.1, gt=0.0,
         description="Customer-facing RMB price of 1 credit at top-up. ¥0.1 → ¥100 buys 1000 credits.",
     )
+    credit_bonus_rate: float = Field(
+        default=0.1, ge=0.0,
+        description=(
+            "Promotional bonus credits granted on a recharge, as a fraction "
+            "of the paid base (0.1 → ¥100 buys 1000 + 100 bonus = 1100). "
+            "Frozen onto each order at create time. 0 disables the promo. "
+            "The frontend mirrors this in ``BONUS_RATE`` for the preview only."
+        ),
+    )
 
     # ── Payments (汇付斗拱 / Huifu Dougong) ────────────────────────────
     # Buy-side recharge: a user pays RMB and the credit ledger is topped
@@ -440,6 +479,33 @@ class Settings(BaseSettings):
     )
     payment_reconcile_interval_seconds: int = Field(
         default=120, description="Background payment-reconciler poll interval (seconds)",
+    )
+
+    # ── Referral commission (返佣提现) ────────────────────────────────
+    # When an invitee recharges, the inviter earns a withdrawable cash
+    # commission (a fraction of the paid amount), held for a settlement
+    # window before it can be withdrawn. Off by default so dev boots and
+    # the feature stays dark until rollout; amounts are in RMB cents (分)
+    # except the human-facing rate / hold knobs.
+    commission_enabled: bool = Field(
+        default=False,
+        description="Master switch for referral-commission accrual + withdrawals/conversions.",
+    )
+    commission_rate: float = Field(
+        default=0.1, ge=0.0, le=1.0,
+        description="Commission as a fraction of the invitee's paid amount (0.1 → 10%).",
+    )
+    commission_hold_days: int = Field(
+        default=7, ge=0,
+        description="Settlement hold before earned commission is withdrawable (refund-clawback window).",
+    )
+    commission_min_withdraw_fen: int = Field(
+        default=1000, gt=0,
+        description="Minimum single cash withdrawal, in RMB cents (1000 = ¥10).",
+    )
+    commission_min_convert_fen: int = Field(
+        default=100, gt=0,
+        description="Minimum single commission→credits conversion, in RMB cents (100 = ¥1).",
     )
 
 

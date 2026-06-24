@@ -35,7 +35,7 @@ from app.schemas.payment import (
     CreateOrderResponse,
     OrderStatusResponse,
 )
-from app.services import payment
+from app.services import commission, payment
 from app.services.credits.rates import credits_from_micro
 from app.services.payment.exceptions import NotifySignatureError
 from config import settings
@@ -74,6 +74,7 @@ async def create_payment_order(
         qr_code=order.reference["qr_code"],
         trade_type=order.reference["trade_type"],
         credits=credits_from_micro(order.credit_micro),
+        bonus_credits=order.reference.get("bonus_credits", 0),
         expires_at=order.expires_at,
     )
 
@@ -92,20 +93,11 @@ async def huifu_webhook(
     (no ack) so the provider redelivers.
     """
     raw = await request.body()
-    # Log the exact inbound payload so the provider's real format is visible
-    # (the legacy notify_url async-notify is form ``resp_data``+``sign``; the
-    # console Webhook event subscription may be a different JSON/HMAC shape).
-    logger.info(
-        "huifu webhook raw: content_type=%s len=%s body=%s",
-        request.headers.get("content-type", ""),
-        len(raw),
-        raw.decode("utf-8", "replace")[:1500],
-    )
     parsed = urllib.parse.parse_qs(raw.decode("utf-8"))
     resp_data = parsed.get("resp_data", [""])[0]
     sign = parsed.get("sign", [""])[0]
     if not resp_data or not sign:
-        logger.warning("huifu webhook: no resp_data/sign in body (format mismatch?)")
+        logger.warning("huifu webhook: missing resp_data/sign")
         return PlainTextResponse("FAIL", status_code=400)
 
     provider = payment.get_provider()
@@ -127,6 +119,11 @@ async def huifu_webhook(
         # is idempotent, so a retry is safe). get_db rolls the tx back.
         logger.exception("huifu webhook: processing failed for %s", event.out_trade_no)
         return PlainTextResponse("FAIL", status_code=500)
+
+    # Best-effort referral commission, after the top-up is durably committed.
+    # Self-gates on PAID status + own transaction, so it never affects the
+    # buyer's recharge or the ack (idempotent across the provider's retries).
+    await commission.accrue_for_order(db, out_trade_no=event.out_trade_no)
 
     return PlainTextResponse(provider.ack(event.out_trade_no))
 

@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import create_access_token, get_password_hash
-from app.errors import EmailTakenError
+from app.errors import EmailTakenError, PhoneTakenError
 from app.models.organization import (
     Organization,
     OrganizationKind,
@@ -39,7 +39,7 @@ from app.services.auth.invite import (
     create_referral_code,
     record_redemption,
 )
-from app.services.auth.verification import verify_register_code
+from app.services.auth.verification import Channel, verify_verification_code
 from app.services.credits.rates import micro_from_credits
 from config import settings
 
@@ -50,7 +50,8 @@ async def register_user(
     db: AsyncSession,
     redis: aioredis.Redis,
     *,
-    email: str,
+    channel: Channel,
+    identifier: str,
     code: str,
     invite_code: str,
     name: str,
@@ -79,9 +80,15 @@ async def register_user(
     # Cheap pre-check — only ``email`` is user-supplied here; the
     # generated ``axon_${id}`` is unique by construction (id is from a
     # sequence). Fail fast before the expensive steps below.
-    existing = await db.execute(select(User.id).where(User.email == email))
+    id_column = User.phone if channel == "phone" else User.email
+    taken_error = (
+        PhoneTakenError("Phone already registered")
+        if channel == "phone"
+        else EmailTakenError("Email already registered")
+    )
+    existing = await db.execute(select(User.id).where(id_column == identifier))
     if existing.first() is not None:
-        raise EmailTakenError("Email already registered")
+        raise taken_error
 
     # bcrypt up-front (~250ms, CPU-bound) so no invite-code row lock is
     # held across it.
@@ -98,7 +105,9 @@ async def register_user(
     # step. Done after the invite claim so a bad invite never consumes
     # the code; a DB failure after this rolls back the row (and the
     # claim) but not the OTP, so the user just re-requests a code.
-    await verify_register_code(redis, email=email, code=code)
+    await verify_verification_code(
+        redis, channel=channel, identifier=identifier, code=code
+    )
 
     # Reserve the id up-front so the username can encode it. ``nextval``
     # bumps the sequence atomically; if the subsequent INSERT fails for
@@ -122,9 +131,9 @@ async def register_user(
         id=user_id,
         username=username,
         name=name,
-        email=email,
         password_hash=password_hash,
         status=UserStatus.ACTIVE,
+        **{channel: identifier},
     )
     db.add(user)
     try:
@@ -136,8 +145,8 @@ async def register_user(
         await db.flush()
     except IntegrityError as exc:
         await db.rollback()
-        logger.info("register race: email=%s", email)
-        raise EmailTakenError("Email already registered") from exc
+        logger.info("register race: %s=%s", channel, identifier)
+        raise taken_error from exc
 
     # Org + member inserts can't trip a uniqueness constraint (org has
     # no UNIQUE on (name, owner) and the member's
@@ -264,10 +273,11 @@ async def register_user(
 
     await db.refresh(user)
     logger.info(
-        "user registered: id=%s username=%s email=%s organization_id=%s",
+        "user registered: id=%s username=%s %s=%s organization_id=%s",
         user.id,
         user.username,
-        user.email,
+        channel,
+        identifier,
         user.organization_id,
     )
     return LoggedInResponse(

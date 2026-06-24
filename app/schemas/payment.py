@@ -33,7 +33,11 @@ class CreateOrderResponse(BaseModel):
     order_id: uuid.UUID
     qr_code: str
     trade_type: str
+    # ``credits`` is the full grant that lands on PAID (paid base + promo
+    # bonus); ``bonus_credits`` is the bonus portion, for the "incl. N bonus"
+    # line. ``bonus_credits == 0`` when the promo is off.
     credits: int
+    bonus_credits: int
     expires_at: datetime
 
 

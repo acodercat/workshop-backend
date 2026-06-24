@@ -185,6 +185,19 @@ wheels = [
 ]
 
 [[package]]
+name = "alibabacloud-dysmsapi20170525"
+version = "4.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "alibabacloud-tea-openapi" },
+    { name = "darabonba-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/89/a0/834946f7df298ddd14bc4c490e9bf5aaad698988bcc2125f201e0421a781/alibabacloud_dysmsapi20170525-4.5.1.tar.gz", hash = "sha256:57d7e9fba88991d5f9b5ff90ece66f4de41cdc9d45654e81ab63f2d09e3a3d04", size = 91905, upload-time = "2026-04-07T19:23:57.81Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3a/db/d3a5e2bedbba433031bed16aafdbcce3c7fdcb8341fb9b298c9da0573f00/alibabacloud_dysmsapi20170525-4.5.1-py3-none-any.whl", hash = "sha256:64bc21fec3b43884d9c2ca2254b667706d1b825d7417234fd668f750f917f9b8", size = 258136, upload-time = "2026-04-07T19:23:56.286Z" },
+]
+
+[[package]]
 name = "alibabacloud-gateway-spi"
 version = "0.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1352,6 +1365,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "alembic" },
     { name = "alibabacloud-dm20151123" },
+    { name = "alibabacloud-dysmsapi20170525" },
     { name = "asyncpg" },
     { name = "bcrypt" },
     { name = "dg-sdk" },
@@ -1389,6 +1403,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.18.4" },
     { name = "alibabacloud-dm20151123", specifier = ">=1.9.2" },
+    { name = "alibabacloud-dysmsapi20170525", specifier = ">=4.5.1" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "bcrypt", specifier = ">=5.0.0" },
     { name = "dg-sdk", specifier = ">=2.0.22" },

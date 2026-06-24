@@ -31,7 +31,11 @@ from app.models.payment_order import (
     PaymentProvider,
 )
 from app.services.credits import TopupAlreadyApplied, apply_topup
-from app.services.credits.rates import credits_from_cny, micro_from_credits
+from app.services.credits.rates import (
+    credits_from_cny,
+    micro_from_credits,
+    recharge_bonus_credits,
+)
 from app.services.payment.huifu import HuifuGateway
 from app.services.payment.provider import Channel, PaymentGateway, VerifiedEvent
 from config import settings
@@ -102,7 +106,12 @@ async def create_order(
         )
 
     amount_fen = int((Decimal(str(amount_cny)) * 100).to_integral_value())
-    credit_micro = micro_from_credits(credits_from_cny(amount_cny))
+    # Freeze paid base + promo bonus onto the order. ``credit_micro`` is the
+    # single grant ``apply_topup`` posts on PAID; the base/bonus split is
+    # kept in ``reference`` for audit + the response's "incl. bonus" line.
+    base_credits = credits_from_cny(amount_cny)
+    bonus_credits = recharge_bonus_credits(base_credits)
+    credit_micro = micro_from_credits(base_credits + bonus_credits)
     out_trade_no = "hf" + uuid.uuid4().hex
     # Huifu wants Beijing-time strings derived from the same instant as our
     # ``expires_at``: ``req_date`` is the calendar day, ``time_expire`` the
@@ -120,7 +129,12 @@ async def create_order(
         amount_fen=amount_fen,
         credit_micro=credit_micro,
         status=PaymentOrderStatus.PENDING,
-        reference={"req_date": req_date, "channel": channel},
+        reference={
+            "req_date": req_date,
+            "channel": channel,
+            "base_credits": base_credits,
+            "bonus_credits": bonus_credits,
+        },
         expires_at=expires_at,
     )
     db.add(order)

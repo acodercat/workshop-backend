@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 from jwt.exceptions import InvalidTokenError
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -198,11 +198,20 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
 
 
 async def authenticate_and_get_user(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     token: str = Depends(oauth2_scheme),
 ) -> models.User:
-    """FastAPI dependency: extract Bearer token from header and validate."""
-    return await _decode_and_get_user(db, token)
+    """FastAPI dependency: extract Bearer token from header and validate.
+
+    Stamps the resolved id onto ``request.state.user_id`` so the rate
+    limiter keys authenticated requests on the user rather than the
+    client IP (NAT/CGNAT-shared IPs otherwise share one bucket). See
+    :func:`app.rate_limit._rate_limit_key`.
+    """
+    user = await _decode_and_get_user(db, token)
+    request.state.user_id = user.id
+    return user
 
 
 async def authenticate_for_streaming(

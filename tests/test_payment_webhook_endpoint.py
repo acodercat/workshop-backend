@@ -18,7 +18,6 @@ from app.services.payment.provider import VerifiedEvent
 class _FakeRequest:
     def __init__(self, body: bytes) -> None:
         self._body = body
-        self.headers: dict[str, str] = {}
 
     async def body(self) -> bytes:
         return self._body

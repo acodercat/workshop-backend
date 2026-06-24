@@ -56,6 +56,11 @@ class User(Base):
     # registrations always populate it. ``UNIQUE`` is partial (only
     # enforced on non-NULL rows) — see migration ``12dc6d69a9ad``.
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    # China-mainland mobile for SMS verification + login. ``NULL`` for
+    # users created via the email flow / before phone support. ``UNIQUE``
+    # is partial (only enforced on non-NULL rows), exactly like ``email``
+    # — see migration ``e5c1a9b7d2f4``.
+    phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
     # Avatar variant counter. ``0`` is the default look derived from
     # ``id`` alone; each "shuffle" click in the settings UI bumps it
     # by 1, picking a different deterministic variant. The renderer
@@ -107,6 +112,16 @@ class User(Base):
     # millions of rows). All writes go through
     # :mod:`app.services.credits._internal` so the invariant holds.
     credit_balance: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0"),
+    )
+    # Referral-commission wallet balance, in **RMB cents (整数分)** — real,
+    # withdrawable cash (a distinct liability class from ``credit_balance``,
+    # which is prepaid service credit). Cached materialization of
+    # ``SUM(commission_ledger.amount_fen WHERE user_id = self.id)``; the
+    # ledger is the source of truth. ``bigint`` keeps all arithmetic
+    # integer. All writes go through
+    # :mod:`app.services.commission._internal` so the invariant holds.
+    commission_balance_fen: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default=text("0"),
     )
     created_at: Mapped[datetime] = mapped_column(

@@ -18,7 +18,7 @@ from app.auth import assert_user_active, create_access_token
 from app.errors import NotRegisteredError
 from app.models.user import User
 from app.schemas.auth import LoggedInResponse
-from app.services.auth.verification import verify_register_code
+from app.services.auth.verification import Channel, verify_verification_code
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,8 @@ async def login_by_code(
     db: AsyncSession,
     redis: aioredis.Redis,
     *,
-    email: str,
+    channel: Channel,
+    identifier: str,
     code: str,
 ) -> LoggedInResponse:
     """Verify the OTP and log an existing user in.
@@ -41,20 +42,25 @@ async def login_by_code(
     """
     # Peek mode — validates the code, increments attempts on mismatch
     # (brute-force stays rate-limited), but doesn't delete on success.
-    await verify_register_code(redis, email=email, code=code, consume=False)
+    await verify_verification_code(
+        redis, channel=channel, identifier=identifier, code=code, consume=False
+    )
 
+    id_column = User.phone if channel == "phone" else User.email
     existing = (
-        await db.execute(select(User).where(User.email == email))
+        await db.execute(select(User).where(id_column == identifier))
     ).scalar_one_or_none()
     if existing is None:
-        raise NotRegisteredError("No account for this email")
+        raise NotRegisteredError("No account for this identifier")
 
     assert_user_active(existing, inactive_detail="Account is not active")
 
     # Existing ACTIVE user: consume the code now and issue the JWT. If the
-    # code vanished between the peek and now, ``verify_register_code``
+    # code vanished between the peek and now, ``verify_verification_code``
     # raises ``InvalidVerificationCodeError`` for the global handler.
-    await verify_register_code(redis, email=email, code=code, consume=True)
+    await verify_verification_code(
+        redis, channel=channel, identifier=identifier, code=code, consume=True
+    )
 
     existing.last_login_at = datetime.now(timezone.utc)
     access_token = create_access_token(

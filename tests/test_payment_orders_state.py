@@ -120,7 +120,11 @@ async def test_create_order_freezes_grant_and_calls_provider(monkeypatch) -> Non
     )
 
     assert order.amount_fen == 10000
-    assert order.credit_micro == _MICRO_1000_CREDITS
+    # ¥100 → 1000 paid base + 10% promo bonus (default credit_bonus_rate)
+    # = 1100 credits, frozen on the order; the split is kept in reference.
+    assert order.credit_micro == 1100 * 10_000_000
+    assert order.reference["base_credits"] == 1000
+    assert order.reference["bonus_credits"] == 100
     assert order.reference["qr_code"] == "https://qr"
     assert order.status == PaymentOrderStatus.PENDING
     fake_provider.create_charge.assert_awaited_once()
