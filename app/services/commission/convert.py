@@ -13,6 +13,7 @@ commit** — the caller (endpoint) owns the transaction.
 """
 
 import logging
+from decimal import Decimal
 from typing import NamedTuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,11 +27,17 @@ from app.models.commission_ledger import CommissionLedgerKind
 from app.services import credits
 from app.services.commission._internal import insert_ledger_and_bump_balance
 from app.services.commission.balance import lock_withdrawable_fen
-from app.services.commission.rates import cny_from_fen
-from app.services.credits.rates import credits_from_cny, micro_from_credits
+from app.services.credits.rates import micro_from_credits
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _fen_per_credit() -> int:
+    """RMB cents that buy one credit at the sale-price peg
+    (``credit_price_cny``; ¥0.1 → 10 分). ``Decimal`` so 0.1 doesn't drift;
+    the peg is whole-分 by configuration."""
+    return int((Decimal(str(settings.credit_price_cny)) * 100).to_integral_value())
 
 
 class ConvertResult(NamedTuple):
@@ -58,7 +65,14 @@ async def convert_to_credits(
             f"Conversion below the ¥{settings.commission_min_convert_fen / 100:.2f} minimum"
         )
 
-    granted_credits = credits_from_cny(cny_from_fen(amount_fen))
+    # Conservation-exact: convert only the part that maps to whole credits
+    # and debit exactly that. The sub-credit remainder (amount_fen %
+    # fen_per_credit) stays in the wallet, so cash-out == credits-in at the
+    # peg — an internal wallet→wallet transfer must not leak value. All
+    # integer 分 math (no float hop).
+    fen_per_credit = _fen_per_credit()
+    granted_credits = amount_fen // fen_per_credit
+    spent_fen = granted_credits * fen_per_credit
     if granted_credits <= 0:
         raise CommissionAmountRangeError(
             "Conversion amount is too small to buy a whole credit"
@@ -75,7 +89,7 @@ async def convert_to_credits(
     entry = await insert_ledger_and_bump_balance(
         db,
         user_id=user_id,
-        amount_fen=-amount_fen,
+        amount_fen=-spent_fen,
         kind=CommissionLedgerKind.CONVERT,
         reference={"granted_credits": granted_credits},
     )
@@ -89,6 +103,6 @@ async def convert_to_credits(
     entry.reference = {**entry.reference, "credit_ledger_id": ledger.id}
     logger.info(
         "commission converted: user=%s spent_fen=%s granted_credits=%s",
-        user_id, amount_fen, granted_credits,
+        user_id, spent_fen, granted_credits,
     )
-    return ConvertResult(spent_fen=amount_fen, granted_credits=granted_credits)
+    return ConvertResult(spent_fen=spent_fen, granted_credits=granted_credits)

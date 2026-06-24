@@ -63,6 +63,22 @@ async def test_convert_insufficient(monkeypatch, enabled) -> None:
         await convert.convert_to_credits(MagicMock(), user_id=1, amount_fen=10000)
 
 
+async def test_convert_floors_and_debits_exact(monkeypatch, enabled) -> None:
+    # ¥5.55 (555 分) at ¥0.1/credit → 55 credits (¥5.50); the 5-分 remainder
+    # must stay in the wallet — debit the floored value, not the requested.
+    monkeypatch.setattr(convert, "lock_withdrawable_fen", AsyncMock(return_value=10000))
+    entry = MagicMock(id=1, reference={})
+    insert = AsyncMock(return_value=entry)
+    monkeypatch.setattr(convert, "insert_ledger_and_bump_balance", insert)
+    monkeypatch.setattr(convert.credits, "apply_topup", AsyncMock(return_value=MagicMock(id=9)))
+
+    result = await convert.convert_to_credits(MagicMock(), user_id=1, amount_fen=555)
+
+    assert result.granted_credits == 55
+    assert result.spent_fen == 550  # not 555 — the 5-分 remainder stays
+    assert insert.await_args.kwargs["amount_fen"] == -550
+
+
 async def test_balance_splits_total_minus_frozen() -> None:
     db = MagicMock()
     db.scalar = AsyncMock(side_effect=[1000, 300])  # total, then frozen sum
