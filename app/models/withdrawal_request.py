@@ -1,8 +1,8 @@
 """Cash-out requests against the referral-commission wallet.
 
 A ``withdrawal_request`` is the durable record of a user asking to
-withdraw their commission balance to a real payout account (支付宝 /
-银行卡). v1 settlement is **manual**: the operator reviews PENDING
+withdraw their commission balance to their 支付宝 account (Alipay-only
+for now). v1 settlement is **manual**: the operator reviews PENDING
 requests and pays them out in a batch (``scripts/process_withdrawals.py``),
 flipping each to PAID with a payout reference or REJECTED with a reason.
 
@@ -61,20 +61,6 @@ class WithdrawalStatus(StrEnum):
     REJECTED = "REJECTED"
 
 
-class WithdrawalPayoutChannel(StrEnum):
-    """Where the operator sends the payout.
-
-    - ``ALIPAY`` — 支付宝 account.
-    - ``BANK``   — bank card.
-
-    Member values match the Postgres ``withdrawal_payout_channel`` enum;
-    UPPERCASE per project convention.
-    """
-
-    ALIPAY = "ALIPAY"
-    BANK = "BANK"
-
-
 class WithdrawalRequest(Base):
     __tablename__ = "withdrawal_request"
 
@@ -96,16 +82,8 @@ class WithdrawalRequest(Base):
         nullable=False,
         server_default=text("'PENDING'"),
     )
-    payout_channel: Mapped[WithdrawalPayoutChannel] = mapped_column(
-        SAEnum(
-            WithdrawalPayoutChannel,
-            name="withdrawal_payout_channel",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
-        ),
-        nullable=False,
-    )
-    # Payout destination the user supplied (支付宝账号 / 银行卡号) + the
-    # account holder's name, for the operator's manual transfer.
+    # The user's 支付宝 account + the account holder's name, for the
+    # operator's manual transfer. Payouts are Alipay-only.
     payout_account: Mapped[str] = mapped_column(String(128), nullable=False)
     payout_name: Mapped[str] = mapped_column(String(64), nullable=False)
     # Back-link to the ``WITHDRAW`` ledger row that debited the funds,

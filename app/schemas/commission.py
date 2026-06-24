@@ -10,7 +10,7 @@ stay whole-credit integers, same as the credit endpoints.
 
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -43,15 +43,13 @@ class CommissionTransactionEntry(BaseModel):
 
 
 class WithdrawalRequestBody(BaseModel):
-    """Body of ``POST /commissions/withdrawals``.
-
-    ``amount_cny`` is bounded server-side against
-    ``commission_min_withdraw_fen`` and the withdrawable balance
-    (``gt=0`` here is only a sanity floor). ``payout_channel`` picks
-    where the operator sends the money."""
+    """Body of ``POST /commissions/withdrawals``. Payouts are
+    Alipay-only: ``payout_account`` is the 支付宝 account, ``payout_name``
+    the account holder. ``amount_cny`` is bounded server-side against
+    ``commission_min_withdraw_fen`` and the withdrawable balance (``gt=0``
+    here is only a sanity floor)."""
 
     amount_cny: float = Field(gt=0, description="Withdrawal amount in RMB")
-    payout_channel: Literal["ALIPAY", "BANK"]
     payout_account: str = Field(min_length=1, max_length=128)
     payout_name: str = Field(min_length=1, max_length=64)
 
@@ -62,7 +60,6 @@ class WithdrawalResponse(BaseModel):
     id: uuid.UUID
     amount_cny: float
     status: str
-    payout_channel: str
     payout_account: str
     payout_name: str
     payout_ref: str | None

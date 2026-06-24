@@ -47,8 +47,7 @@ async def _list(db: AsyncSession) -> int:
         print(
             f"  {req.id}\n"
             f"    user_id={req.user_id} ({name})  amount=¥{cny_from_fen(req.amount_fen):.2f}\n"
-            f"    channel={req.payout_channel.value}  account={req.payout_account}  "
-            f"name={req.payout_name}\n"
+            f"    alipay={req.payout_account}  name={req.payout_name}\n"
             f"    created={req.created_at.isoformat()}\n"
         )
     return 0

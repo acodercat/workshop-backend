@@ -11,7 +11,6 @@ from app.errors import (
     CommissionDisabledError,
     InsufficientCommissionError,
 )
-from app.models.withdrawal_request import WithdrawalPayoutChannel
 from app.services.commission import balance, convert, withdraw
 from config import settings
 
@@ -26,7 +25,6 @@ def enabled(monkeypatch):
 async def _request(amount_fen):
     return await withdraw.request_withdrawal(
         MagicMock(), user_id=1, amount_fen=amount_fen,
-        payout_channel=WithdrawalPayoutChannel.ALIPAY,
         payout_account="alice@example.com", payout_name="Alice",
     )
 

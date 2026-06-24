@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.models.user import User
-from app.models.withdrawal_request import WithdrawalPayoutChannel, WithdrawalRequest
+from app.models.withdrawal_request import WithdrawalRequest
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.commission import (
@@ -45,7 +45,6 @@ def _to_withdrawal_response(request: WithdrawalRequest) -> WithdrawalResponse:
         id=request.id,
         amount_cny=cny_from_fen(request.amount_fen),
         status=request.status.value,
-        payout_channel=request.payout_channel.value,
         payout_account=request.payout_account,
         payout_name=request.payout_name,
         payout_ref=request.payout_ref,
@@ -115,7 +114,6 @@ async def create_withdrawal(
         db,
         user_id=current_user.id,
         amount_fen=fen_from_cny(body.amount_cny),
-        payout_channel=WithdrawalPayoutChannel(body.payout_channel),
         payout_account=body.payout_account,
         payout_name=body.payout_name,
     )

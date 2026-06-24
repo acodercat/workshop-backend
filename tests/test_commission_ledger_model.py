@@ -2,10 +2,7 @@
 values + ledger row shape. No DB."""
 
 from app.models.commission_ledger import CommissionLedger, CommissionLedgerKind
-from app.models.withdrawal_request import (
-    WithdrawalPayoutChannel,
-    WithdrawalStatus,
-)
+from app.models.withdrawal_request import WithdrawalStatus
 
 
 def test_ledger_kind_values_are_uppercase() -> None:
@@ -16,9 +13,8 @@ def test_ledger_kind_values_are_uppercase() -> None:
     assert all(v == v.upper() for v in values)
 
 
-def test_withdrawal_enums_values() -> None:
+def test_withdrawal_status_values() -> None:
     assert [m.value for m in WithdrawalStatus] == ["PENDING", "PAID", "REJECTED"]
-    assert [m.value for m in WithdrawalPayoutChannel] == ["ALIPAY", "BANK"]
 
 
 def test_ledger_row_carries_signed_fen() -> None:

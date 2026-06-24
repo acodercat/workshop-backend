@@ -31,11 +31,7 @@ from app.errors import (
     WithdrawalNotFoundError,
 )
 from app.models.commission_ledger import CommissionLedgerKind
-from app.models.withdrawal_request import (
-    WithdrawalPayoutChannel,
-    WithdrawalRequest,
-    WithdrawalStatus,
-)
+from app.models.withdrawal_request import WithdrawalRequest, WithdrawalStatus
 from app.services.commission._internal import insert_ledger_and_bump_balance
 from app.services.commission.balance import lock_withdrawable_fen
 from config import settings
@@ -48,7 +44,6 @@ async def request_withdrawal(
     *,
     user_id: int,
     amount_fen: int,
-    payout_channel: WithdrawalPayoutChannel,
     payout_account: str,
     payout_name: str,
 ) -> WithdrawalRequest:
@@ -76,7 +71,6 @@ async def request_withdrawal(
         user_id=user_id,
         amount_fen=amount_fen,
         status=WithdrawalStatus.PENDING,
-        payout_channel=payout_channel,
         payout_account=payout_account,
         payout_name=payout_name,
     )

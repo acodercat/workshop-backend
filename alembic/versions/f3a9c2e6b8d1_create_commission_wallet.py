@@ -42,14 +42,12 @@ _LEDGER_KIND_VALUES = (
 )
 _WITHDRAWAL_STATUS_NAME = "withdrawal_status"
 _WITHDRAWAL_STATUS_VALUES = ("PENDING", "PAID", "REJECTED")
-_PAYOUT_CHANNEL_NAME = "withdrawal_payout_channel"
-_PAYOUT_CHANNEL_VALUES = ("ALIPAY", "BANK")
 
 
 def upgrade() -> None:
     # Raw SQL CREATE TYPE — sa.Enum's metadata-bound auto-create has
     # surprising interactions with create_table when create_type=False
-    # is set on the column-side enum, so emit all three explicitly here.
+    # is set on the column-side enum, so emit both explicitly here.
     op.execute(
         f"CREATE TYPE {_LEDGER_KIND_NAME} AS ENUM "
         f"({', '.join(repr(v) for v in _LEDGER_KIND_VALUES)})"
@@ -57,10 +55,6 @@ def upgrade() -> None:
     op.execute(
         f"CREATE TYPE {_WITHDRAWAL_STATUS_NAME} AS ENUM "
         f"({', '.join(repr(v) for v in _WITHDRAWAL_STATUS_VALUES)})"
-    )
-    op.execute(
-        f"CREATE TYPE {_PAYOUT_CHANNEL_NAME} AS ENUM "
-        f"({', '.join(repr(v) for v in _PAYOUT_CHANNEL_VALUES)})"
     )
 
     op.create_table(
@@ -132,15 +126,6 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text(f"'PENDING'::{_WITHDRAWAL_STATUS_NAME}"),
         ),
-        sa.Column(
-            "payout_channel",
-            postgresql.ENUM(
-                *_PAYOUT_CHANNEL_VALUES,
-                name=_PAYOUT_CHANNEL_NAME,
-                create_type=False,
-            ),
-            nullable=False,
-        ),
         sa.Column("payout_account", sa.String(length=128), nullable=False),
         sa.Column("payout_name", sa.String(length=64), nullable=False),
         sa.Column(
@@ -202,6 +187,5 @@ def downgrade() -> None:
     )
     op.drop_table("commission_ledger")
 
-    op.execute(f"DROP TYPE IF EXISTS {_PAYOUT_CHANNEL_NAME}")
     op.execute(f"DROP TYPE IF EXISTS {_WITHDRAWAL_STATUS_NAME}")
     op.execute(f"DROP TYPE IF EXISTS {_LEDGER_KIND_NAME}")

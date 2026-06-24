@@ -37,6 +37,10 @@ class _FakeProvider:
 def patched(monkeypatch):
     monkeypatch.setattr(ep.payment, "get_provider", lambda: _FakeProvider())
     monkeypatch.setattr(ep.payment, "handle_webhook", AsyncMock())
+    # The post-commit referral-commission hook is a separate concern; stub
+    # it so this test pins only the webhook's parse/verify/ack contract
+    # (and so it's independent of whether ``commission_enabled`` is set).
+    monkeypatch.setattr(ep.commission, "accrue_for_order", AsyncMock())
 
 
 def _db() -> MagicMock:
