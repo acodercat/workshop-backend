@@ -42,7 +42,12 @@ from app.services.email import (
     send_html_email,
 )
 from app.services.email.templates import Locale
-from app.services.redis import email_change_key, email_verify_key, phone_verify_key
+from app.services.redis import (
+    email_change_key,
+    email_verify_key,
+    phone_change_key,
+    phone_verify_key,
+)
 from app.services.sms import SmsSendError, send_verification_sms
 from config import settings
 
@@ -244,4 +249,29 @@ async def verify_email_change_code(
         identifier=email,
         code=code,
         log_label="email_change",
+    )
+
+
+async def send_phone_change_code(redis: aioredis.Redis, *, phone: str) -> None:
+    """Generate + send a phone-change verification code (via Aliyun SMS)
+    to ``phone`` (the *new* number the user wants to switch to). The
+    SMS-channel sibling of :func:`send_email_change_code`; same failure
+    modes as :func:`request_verification_code`'s phone channel."""
+    await _request_code(
+        redis, key=phone_change_key(phone), send=_sms_sender(phone)
+    )
+    logger.info("phone_change code issued: phone=%s", phone)
+
+
+async def verify_phone_change_code(
+    redis: aioredis.Redis, *, phone: str, code: str
+) -> None:
+    """Verify and consume the pending phone-change code for ``phone``.
+    See :func:`_verify_code` for failure modes."""
+    await _verify_code(
+        redis,
+        key=phone_change_key(phone),
+        identifier=phone,
+        code=code,
+        log_label="phone_change",
     )

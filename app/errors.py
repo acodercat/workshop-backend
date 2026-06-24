@@ -138,6 +138,11 @@ class SameEmailError(AppError):
     error_type = "same_email"
 
 
+class SamePhoneError(AppError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "same_phone"
+
+
 class SamePasswordError(AppError):
     """Refused no-op: the new password matches the current one. A
     silent accept would still bump ``token_version`` and log every

@@ -80,6 +80,11 @@ PHONE_VERIFY_PREFIX = "phone_verify"
 # (or vice versa) targeting the same address.
 EMAIL_CHANGE_PREFIX = "email_change"
 
+# Per-(new-phone) phone-change verification code prefix. The SMS-channel
+# sibling of ``EMAIL_CHANGE_PREFIX``; namespaced separately from
+# registration/login phone codes for the same reason.
+PHONE_CHANGE_PREFIX = "phone_change"
+
 
 def stream_key(prefix: str, entity_id: str) -> str:
     return f"{prefix}:{entity_id}"
@@ -103,6 +108,12 @@ def email_change_key(email: str) -> str:
     for the *new* address. Lowercased for the same reason as
     :func:`email_verify_key`."""
     return f"{EMAIL_CHANGE_PREFIX}:{email.lower()}"
+
+
+def phone_change_key(phone: str) -> str:
+    """Redis key holding the pending phone-change verification state
+    for the *new* number."""
+    return f"{PHONE_CHANGE_PREFIX}:{phone}"
 
 
 def cancel_channel(session_id: str) -> str:
