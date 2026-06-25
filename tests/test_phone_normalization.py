@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.common.phone import normalize_phone
 from app.schemas.auth import CodeLoginRequest, RegisterCodeRequest
+from app.schemas.user import PhoneChangeCodeRequest, PhoneChangeRequest
 
 
 def test_normalize_phone_strips_separators() -> None:
@@ -37,3 +38,16 @@ def test_identifier_body_requires_exactly_one() -> None:
         RegisterCodeRequest(email="a@example.com", phone="13800138000")
     with pytest.raises(ValidationError):
         RegisterCodeRequest()
+
+
+def test_phone_change_inputs_are_normalized() -> None:
+    assert (
+        PhoneChangeCodeRequest(
+            new_phone="138 0013 8000", current_password="pw"
+        ).new_phone
+        == "13800138000"
+    )
+    assert (
+        PhoneChangeRequest(new_phone="138-0013-8000", code="123456").new_phone
+        == "13800138000"
+    )
