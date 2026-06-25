@@ -24,6 +24,7 @@ from app.services.payment.orders import (
     get_order,
     get_provider,
     handle_webhook,
+    list_paid_orders,
 )
 from app.services.payment.reconcile import reconcile_order
 
@@ -32,5 +33,6 @@ __all__ = [
     "get_order",
     "get_provider",
     "handle_webhook",
+    "list_paid_orders",
     "reconcile_order",
 ]

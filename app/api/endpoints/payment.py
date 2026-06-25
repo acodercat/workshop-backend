@@ -21,7 +21,7 @@ import logging
 import urllib.parse
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,10 +30,12 @@ from app.auth import authenticate_and_get_user
 from app.errors import PaymentDisabledError
 from app.models.user import User
 from app.rate_limit import limiter
+from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.payment import (
     CreateOrderRequest,
     CreateOrderResponse,
     OrderStatusResponse,
+    PaymentOrderEntry,
 )
 from app.services import commission, payment
 from app.services.credits.rates import credits_from_micro
@@ -76,6 +78,39 @@ async def create_payment_order(
         credits=credits_from_micro(order.credit_micro),
         bonus_credits=order.reference.get("bonus_credits", 0),
         expires_at=order.expires_at,
+    )
+
+
+@router.get(
+    "/payments/orders", response_model=PaginatedResponse[PaymentOrderEntry],
+)
+async def list_payment_orders(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> PaginatedResponse[PaymentOrderEntry]:
+    """Recharge / billing history — the caller's PAID orders, newest first.
+
+    Not gated by ``payment_enabled``: viewing past recharges stays
+    available even if new top-ups are turned off.
+    """
+    rows, total = await payment.list_paid_orders(
+        db, user_id=current_user.id, page=page, page_size=page_size,
+    )
+    return PaginatedResponse(
+        items=[
+            PaymentOrderEntry(
+                order_id=o.id,
+                amount_cny=o.amount_fen / 100,
+                credits=credits_from_micro(o.credit_micro),
+                channel=o.reference.get("channel", ""),
+                out_trade_no=o.out_trade_no,
+                created_at=o.created_at,
+            )
+            for o in rows
+        ],
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 
 

@@ -20,9 +20,10 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.pagination import paginate
 from app.errors import OrderNotFoundError, PaymentAmountRangeError
 from app.models.credit_ledger import CreditLedger
 from app.models.payment_order import (
@@ -176,6 +177,29 @@ async def get_order(
     ):
         order.status = PaymentOrderStatus.EXPIRED
     return order
+
+
+async def list_paid_orders(
+    db: AsyncSession, *, user_id: int, page: int, page_size: int,
+) -> tuple[list[PaymentOrder], int]:
+    """One newest-first page of the user's PAID orders + the total count —
+    the recharge / billing history. Abandoned (EXPIRED) and failed orders
+    are excluded; this is the list of actual top-ups. Offset pagination via
+    :func:`app.common.pagination.paginate`, count + page sharing one filter."""
+    filter_clause = and_(
+        PaymentOrder.user_id == user_id,
+        PaymentOrder.status == PaymentOrderStatus.PAID,
+    )
+    total = (
+        await db.execute(select(func.count(PaymentOrder.id)).where(filter_clause))
+    ).scalar() or 0
+    base = (
+        select(PaymentOrder)
+        .where(filter_clause)
+        .order_by(PaymentOrder.created_at.desc())
+    )
+    rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
+    return list(rows), total
 
 
 async def handle_webhook(db: AsyncSession, event: VerifiedEvent) -> None:

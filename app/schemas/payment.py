@@ -50,3 +50,19 @@ class OrderStatusResponse(BaseModel):
     amount_cny: float
     credits: int
     expires_at: datetime
+
+
+class PaymentOrderEntry(BaseModel):
+    """One row of the recharge / billing history (``GET /payments/orders``).
+
+    Only PAID orders are listed — the actual recharges, not abandoned QR
+    sessions. ``channel`` is the pay method (``ALIPAY`` / ``WECHAT``);
+    ``out_trade_no`` is the provider-facing order id for reconciliation /
+    support."""
+
+    order_id: uuid.UUID
+    amount_cny: float
+    credits: int
+    channel: str
+    out_trade_no: str
+    created_at: datetime
