@@ -6,12 +6,19 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.models.session_files import SessionFileOrigin
+from config import settings
 
 
 class UploadUrlRequest(BaseModel):
     """Body for POST endpoints that mint presigned upload URLs."""
     filename: str = Field(..., description="Name of the file to upload")
-    size_bytes: int = Field(..., ge=0, description="Declared file size in bytes")
+    # Per-file cap enforced here too (not just on ``MessageCreate``), so the
+    # mint path can't accept an oversized — or bogus, quota-tripping —
+    # declared size. ``ge=0`` keeps empty files valid.
+    size_bytes: int = Field(
+        ..., ge=0, le=settings.max_file_bytes,
+        description="Declared file size in bytes",
+    )
 
 
 class UploadUrlResponse(BaseModel):

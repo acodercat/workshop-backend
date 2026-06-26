@@ -206,19 +206,23 @@ class SkillQuotaExceededError(AppError):
     error_type = "skill_quota_exceeded"
 
 
-class SessionFileQuotaExceededError(AppError):
-    """User has hit a per-user session-file upload quota — either the
-    total-size cap or the file-count backstop.
-
-    Matches the ``SessionFile`` DB model name. Distinct from
-    :class:`FileTooLargeError`: the individual file would have been
-    accepted on its own, but it would push the user's account over the
-    quota. The per-file size cap is enforced separately in
-    ``file_storage``.
+class FileSizeQuotaExceededError(AppError):
+    """The upload would push the user past their per-user total-size quota
+    (``max_session_files_bytes_per_user``). The individual file is fine on
+    its own; it just doesn't fit the account's remaining storage headroom.
+    The per-file size cap is enforced separately at the schema layer.
     """
 
     status_code = status.HTTP_403_FORBIDDEN
-    error_type = "session_file_quota_exceeded"
+    error_type = "file_size_quota_exceeded"
+
+
+class FileCountQuotaExceededError(AppError):
+    """The user has hit the per-user file-count backstop
+    (``max_session_files_per_user``)."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_count_quota_exceeded"
 
 
 class PaymentDisabledError(AppError):

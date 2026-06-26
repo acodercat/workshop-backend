@@ -40,7 +40,10 @@ from config import settings
 from app.common.file_kind import FILE_KINDS, file_kind_case
 from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
-from app.errors import SessionFileQuotaExceededError
+from app.errors import (
+    FileCountQuotaExceededError,
+    FileSizeQuotaExceededError,
+)
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
@@ -1028,13 +1031,13 @@ async def _enforce_session_file_quota(
 
     size_cap = settings.max_session_files_bytes_per_user
     if used_bytes + incoming_size_bytes > size_cap:
-        raise SessionFileQuotaExceededError(
+        raise FileSizeQuotaExceededError(
             f"upload would put the user at "
             f"{(used_bytes + incoming_size_bytes) / 1024**3:.2f} GB of "
             f"uploaded files; per-user limit is {size_cap / 1024**3:.1f} GB"
         )
     if count >= settings.max_session_files_per_user:
-        raise SessionFileQuotaExceededError(
+        raise FileCountQuotaExceededError(
             f"user already has {count} uploaded files; "
             f"per-user limit is {settings.max_session_files_per_user}"
         )

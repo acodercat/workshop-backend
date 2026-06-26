@@ -260,7 +260,7 @@ class Settings(BaseSettings):
         description="Per-file upload size cap (bytes)",
     )
     max_session_files_bytes_per_user: int = Field(
-        default=10 * 1024 * 1024 * 1024,
+        default=20 * 1024 * 1024 * 1024,
         description=(
             "Per-user total-size cap (bytes) for UPLOAD-origin session files "
             "across all sessions. The primary upload gate — tracks OSS storage "
@@ -269,7 +269,7 @@ class Settings(BaseSettings):
         ),
     )
     max_session_files_per_user: int = Field(
-        default=5000,
+        default=10000,
         description=(
             "Backstop cap on the COUNT of UPLOAD-origin session-file rows per "
             "user, guarding against many-tiny-files row explosion that the "
