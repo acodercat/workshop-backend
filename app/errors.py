@@ -296,3 +296,21 @@ class WithdrawalNotFoundError(AppError):
 
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "withdrawal_not_found"
+
+
+class CheckInDisabledError(AppError):
+    """Daily check-in is off (``checkin_reward_credits`` is 0). 403 so the
+    frontend hides the check-in surface rather than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "check_in_disabled"
+
+
+class AlreadyCheckedInError(AppError):
+    """The user already claimed today's check-in. 409 (conflict) — the
+    client refreshes the status and shows the already-claimed state. The
+    double-guard (``check_in`` UNIQUE + ``CHECKIN`` ledger idempotency
+    key) makes this race-safe."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "already_checked_in"

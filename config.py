@@ -418,6 +418,18 @@ class Settings(BaseSettings):
         default=500,
         description="Whole credits granted to the referrer for each successful registration via their referral code. Set to 0 to disable referral rewards.",
     )
+    # Daily check-in: a user claims a fixed credit reward once per business
+    # day. Set the reward to 0 to disable the feature (403 on claim). The
+    # "day" is the calendar day in ``checkin_timezone`` — computed
+    # server-side so an early-morning claim lands on the right day.
+    checkin_reward_credits: int = Field(
+        default=100,
+        description="Whole credits granted per daily check-in. Set to 0 to disable check-in.",
+    )
+    checkin_timezone: str = Field(
+        default="Asia/Shanghai",
+        description="Business timezone whose calendar day defines one check-in per day.",
+    )
     # Customer-facing RMB sale price of ONE credit, used only to convert a
     # top-up payment (¥) into credits — the domestic-market recharge knob.
     # Deliberately distinct from the internal cost peg (1 credit ≈ $0.01 ≈

@@ -11,7 +11,8 @@ from app.database import Base
 for module_info in pkgutil.iter_modules(__path__):
     importlib.import_module(f"{__name__}.{module_info.name}")
 
-from app.models.invite_code import InviteCode, InviteCodeOrigin  # re-exports for convenience
+from app.models.check_in import CheckIn  # re-exports for convenience
+from app.models.invite_code import InviteCode, InviteCodeOrigin
 from app.models.invite_redemption import InviteRedemption
 from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
@@ -28,6 +29,7 @@ from app.models.user_skill_preference import UserSkillPreference
 
 __all__ = [
     "Base",
+    "CheckIn",
     "FeedbackStatus",
     "InviteCode",
     "InviteCodeOrigin",
