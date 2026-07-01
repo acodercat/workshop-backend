@@ -84,6 +84,7 @@ from app.services import credits
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import generate_title, queue_user_message, stream_events
 from app.services.session.exceptions import (
+    ConcurrentTaskLimitError,
     FileNotInSessionError,
     GenerationInProgressError,
     RecipeNotInvokableError,
@@ -566,6 +567,7 @@ async def create_message(
 
     Service-layer domain errors translate to HTTP here so the service
     stays unaware of FastAPI: ``GenerationInProgressError`` → 409,
+    ``ConcurrentTaskLimitError`` → 429 (user at their running-task cap),
     ``SessionGoneError`` → 404 (the session was deleted between our
     ownership check and the enqueue's row lock). The DB-lease design has
     no Redis-enqueue failure path: ``publish_wake`` is best-effort and
@@ -580,6 +582,10 @@ async def create_message(
     except GenerationInProgressError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc),
+        )
+    except ConcurrentTaskLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc),
         )
     except SessionGoneError:
         raise HTTPException(status_code=404, detail="Session not found")

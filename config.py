@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
     rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
+    max_concurrent_running_tasks: int = Field(
+        default=10, ge=1,
+        description="Max simultaneously RUNNING tasks (sessions) per user; a new turn past this is rejected (429).",
+    )
     rate_limit_share_unlock: str = Field(
         default="5/5minute",
         description="Per-IP share-unlock attempts (password brute-force guard)",

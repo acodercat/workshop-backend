@@ -36,7 +36,7 @@ import logging
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.message import Message, MessageRole
@@ -55,6 +55,7 @@ from app.services.redis import (
 )
 from config import settings
 from app.services.session.exceptions import (
+    ConcurrentTaskLimitError,
     FileNotInSessionError,
     GenerationInProgressError,
     RecipeNotInvokableError,
@@ -121,6 +122,8 @@ async def queue_user_message(
             endpoint's ownership check and this lock.
         InsufficientCreditsError: user's balance is below the
             estimated max cost.
+        ConcurrentTaskLimitError: the user is already at
+            ``settings.max_concurrent_running_tasks`` running tasks.
     """
     session = await _lock_session(db, session.id)
     if session.status == SessionStatus.RUNNING:
@@ -189,6 +192,7 @@ async def queue_user_message(
             turn_id=session_turn.id,
             model_id=session.model_id,
         )
+        await _enforce_concurrent_task_limit(db, session.user_id)
 
     user_msg = Message(
         session_id=session.id,
@@ -253,6 +257,33 @@ async def _clear_orphan_tags(file_keys: list[str]) -> None:
                 "lifecycle rule; re-clear within the window",
                 key, exc_info=result,
             )
+
+
+async def _enforce_concurrent_task_limit(db: AsyncSession, user_id: int) -> None:
+    """Reject if the user is already at their running-task cap.
+
+    Must be called **after** ``reserve_for_turn`` so it runs under the
+    reservation's user-row ``FOR UPDATE`` lock: two concurrent enqueues for
+    the same user then serialize on that lock, so the count can't overshoot
+    (the second sees the first's committed ``RUNNING`` flip). The session
+    being enqueued isn't ``RUNNING`` yet, so ``>=`` rejects the would-be
+    (limit+1)-th; raising rolls the whole transaction back (turn +
+    reservation), leaving no trace.
+    """
+    running_count = await db.scalar(
+        select(func.count())
+        .select_from(Session)
+        .where(
+            Session.user_id == user_id,
+            Session.status == SessionStatus.RUNNING,
+            Session.deleted_at.is_(None),
+        )
+    )
+    if running_count >= settings.max_concurrent_running_tasks:
+        raise ConcurrentTaskLimitError(
+            f"user {user_id} already has {running_count} running task(s) "
+            f"(max {settings.max_concurrent_running_tasks})"
+        )
 
 
 async def _lock_session(db: AsyncSession, session_id: str) -> Session:

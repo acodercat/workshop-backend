@@ -14,6 +14,15 @@ class GenerationInProgressError(SessionServiceError):
     """A new turn was requested while one is still running."""
 
 
+class ConcurrentTaskLimitError(SessionServiceError):
+    """The user already has the max number of simultaneously RUNNING tasks.
+
+    A per-user resource cap (``settings.max_concurrent_running_tasks``)
+    checked at enqueue under the reservation's user-row lock, so two racing
+    enqueues for the same user can't both slip past. The endpoint turns it
+    into 429 (Too Many Requests)."""
+
+
 class SessionGoneError(SessionServiceError):
     """The session was soft-deleted (or hard-deleted) out from under an
     in-flight enqueue.
