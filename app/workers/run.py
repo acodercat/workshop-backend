@@ -1,4 +1,4 @@
-"""Entrypoint for the standalone background-settle process.
+"""Entrypoint for the standalone background process.
 
 Run as:
 
@@ -6,7 +6,7 @@ Run as:
 
 The web server (``app.main:app``) no longer starts background settle
 work in its lifespan — separation of concerns. Production deploys
-both processes side-by-side (see ``scripts/deploy.sh settle``);
+both processes side-by-side (see ``scripts/deploy.sh background``);
 multi-node deploys run this on every host and rely on Postgres
 advisory locks (``app.workers.settle_sweeper._LOCK_KEY``) to ensure
 exactly one host actually polls per tick.
@@ -77,11 +77,13 @@ async def _run() -> None:
 def main() -> None:
     setup_logging(log_dir="logs", level="INFO")
     logger = logging.getLogger(__name__)
-    logger.info("background-settle process starting (sweeper + subscriber)")
+    logger.info(
+        "background process starting (settle sweeper + subscriber + reconciler)"
+    )
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
-        logger.info("background-settle process exiting (KeyboardInterrupt)")
+        logger.info("background process exiting (KeyboardInterrupt)")
 
 
 if __name__ == "__main__":

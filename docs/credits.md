@@ -654,12 +654,12 @@ Two entry points:
 Each visits at most a handful of OPEN reservations per call
 (partial index keeps the lookup cheap).
 
-### Background-settle process (sweeper + subscriber)
+### Background process (settle sweeper + subscriber + payment reconciler)
 
-One process, two concurrent async tasks (`app/workers/run.py` with
+One process, three concurrent async tasks (`app/workers/run.py` with
 an `asyncio.TaskGroup`). Standalone entrypoint:
 `uv run python -m app.workers.run`. Lifecycle commands:
-`bash scripts/deploy.sh settle {start|stop|restart|status|logs}`.
+`bash scripts/deploy.sh background {start|stop|restart|status|logs}`.
 
 #### Sweeper (`app/workers/settle_sweeper.run_forever`)
 
@@ -803,7 +803,7 @@ WHERE locktype = 'advisory';
 ```
 
 `objid = 6004508124021867856` (= `0x53544c5357454550`, bytes
-`b"STLSWEEP"`) is the background-settle lock.
+`b"STLSWEEP"`) is the settle-sweeper advisory lock.
 
 ### Run the sweeper manually
 
@@ -818,7 +818,7 @@ print(asyncio.run(_tick()), 'reservations processed')
 # As the long-running process:
 uv run python -m app.workers.run
 # or via the deploy script:
-bash scripts/deploy.sh settle start
+bash scripts/deploy.sh background start
 ```
 
 ### Find users who never got the welcome grant
@@ -866,7 +866,7 @@ See [`credits-future.md`](credits-future.md) for the design of each:
 | **V1** | Initial design: `credit_ledger`, `credit_reservation`, `user.credit_balance`. Reserve / settle / refund / topup / adjust primitives. Lazy sweep on user actions. Settle source = Redis stream tail. SSE eager-settle hook. |
 | **V1.5 cleanup** | `align unique indexes as constraints` migration (cosmetic — DB layout aligned with model declarations) |
 | **V2** | Durable usage on `session_turn.input_tokens/output_tokens/terminated_at`, written by the worker in its fenced terminal transaction. Backend settle reads from there, no longer from the ephemeral Redis stream. SSE eager-settle hook removed (Redis was the only reason it existed). |
-| **V2 → sibling-process** | Sweeper extracted from the FastAPI lifespan into a standalone process (`app/workers/run.py`), deployed via `deploy.sh settle`. Web returns to pure HTTP responsibility. Multi-node coordinated via Postgres advisory lock. |
+| **V2 → sibling-process** | Sweeper extracted from the FastAPI lifespan into a standalone process (`app/workers/run.py`), deployed via `deploy.sh background`. Web returns to pure HTTP responsibility. Multi-node coordinated via Postgres advisory lock. |
 | **V2 billing cleanup** | Open reservation uniqueness is enforced with `uq_credit_reservation_open_session`; unused `credit_reservation.kind` / `sandbox_id` were removed after turn-level three-factor billing made the reserved sandbox variant obsolete. |
 | **V3** | Organization concept (mirrors OpenAI). Personal org auto-created at registration. Welcome grant config (default 100_000 credits) — runs as a separate, best-effort transaction after the user/org/member commit. Note: billing still attaches to `user_id`; org-level billing is a V4 migration documented in `credits-future.md`. |
 | **V4 (planned)** | One of: worker-side cost cap, multi-tier org billing, payment integration. Driven by business need. |
@@ -887,7 +887,7 @@ See [`credits-future.md`](credits-future.md) for the design of each:
 | Rate card + cost math | `app/services/credits/rates.py` |
 | Sweeper (poll loop) | `app/workers/settle_sweeper.py` |
 | Subscriber (push, `settle:notify`) | `app/workers/settle_subscriber.py` |
-| Background-settle process entry | `app/workers/run.py` |
+| Background process entry | `app/workers/run.py` |
 | Lazy-sweep call site (enqueue) | `app/services/session/enqueue.py::queue_user_message` |
 | Lazy-sweep call site (read) | `app/api/endpoints/credits.py` |
 | Welcome grant call site | `app/services/auth/register.py::register_user` |

@@ -15,22 +15,24 @@ uv sync
 # Dev server (API on :8005, root_path="/api/v1")
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
 
-# Background-settle process (separate from the web server; closes out
-# open credit reservations). Run alongside the API in its own terminal:
+# Background process (separate from the web server; runs the credit-settle
+# sweeper + subscriber and the payment reconciler). Run alongside the API in
+# its own terminal:
 uv run python -m app.workers.run
 
-# Production — single-host manual deploy via scripts/deploy.sh
-bash scripts/deploy.sh deploy       # web: stop + uv sync + alembic upgrade + start
-bash scripts/deploy.sh restart      # web: code-only restart (no deps / no migration)
-bash scripts/deploy.sh status       # report state of BOTH web (:8005) and settle
+# Production — single-host manual deploy via scripts/deploy.sh. Top-level
+# commands act on BOTH siblings (web + background):
+bash scripts/deploy.sh deploy       # stop both + uv sync + alembic upgrade + start both
+bash scripts/deploy.sh restart      # code-only restart of both (no deps / no migration)
+bash scripts/deploy.sh status       # report state of BOTH web (:8005) and background
 bash scripts/deploy.sh logs         # tail -f logs/uvicorn.log
-bash scripts/deploy.sh settle start|stop|restart|status|logs   # the settle sibling process
-# Web truth source is ``lsof -t -i:8005``; settle's is ``pgrep -f 'app.workers.run'``
+bash scripts/deploy.sh background start|stop|restart|status|logs   # the background process alone
+# Web truth source is ``lsof -t -i:8005``; background's is ``pgrep -f 'app.workers.run'``
 # (no port). Neither uses a PID file, so both tolerate instances started
-# outside the script. uvicorn stdout → logs/uvicorn.log, settle stdout →
-# logs/settle.log; loguru/stdlib app logs go elsewhere under logs/ per
+# outside the script. uvicorn stdout → logs/uvicorn.log, background stdout →
+# logs/background.log; loguru/stdlib app logs go elsewhere under logs/ per
 # app/logging_config.py. Multi-node: run both processes on every host —
-# the sweeper self-elects one active poller via a Postgres advisory lock.
+# the settle sweeper self-elects one active poller via a Postgres advisory lock.
 
 # HTTPS / custom port — script's defaults won't fit; use uvicorn directly:
 uv run uvicorn app.main:app --host 0.0.0.0 --port 9090 --workers 1 \
@@ -189,7 +191,7 @@ Per-turn lifecycle:
 
 Two trigger paths for settle, push + pull halves of one responsibility:
 - **Lazy sweep** (`settle_open_for_user`): user-facing endpoints (`GET /credits/*`, `queue_user_message`) settle that user's open reservations on every hit — covers any user who comes back.
-- **Background-settle process** (`python -m app.workers.run`, deployed as the `settle` sibling): the `settle_sweeper` polls every 60s (correctness backstop for users who never return — API clients, abandoned sessions, workers that crashed between reserve and the terminal write), and `settle_subscriber` listens on the `settle:notify` pub/sub channel (latency optimization — worker publishes on terminal write, settle fires sub-second). Pub/sub loss is expected and harmless; the sweeper backstops it. The sweeper uses a Postgres advisory lock so exactly one host polls per tick in a multi-node deploy; connection loss auto-releases it.
+- **Background process** (`python -m app.workers.run`, deployed as the `background` sibling): the `settle_sweeper` polls every 60s (correctness backstop for users who never return — API clients, abandoned sessions, workers that crashed between reserve and the terminal write), and `settle_subscriber` listens on the `settle:notify` pub/sub channel (latency optimization — worker publishes on terminal write, settle fires sub-second). Pub/sub loss is expected and harmless; the sweeper backstops it. The sweeper uses a Postgres advisory lock so exactly one host polls per tick in a multi-node deploy; connection loss auto-releases it.
 
 `apply_topup` and `apply_adjust` (signed correction) are the only balance-increase paths; both are idempotent on a caller-supplied key. `apply_topup` is driven by the admin `topup_credits` script **and** by the payment webhook (see Payments below). See `docs/credits-future.md` for deferred work.
 

@@ -20,7 +20,7 @@ OPEN reservation per session, removed unused
 `settle_subscriber` push path alongside the existing `settle_sweeper`
 poll.
 
-## Shipped — Background-settle process
+## Shipped — Background process
 
 Both `app/workers/settle_sweeper.py` and `settle_subscriber.py` run
 together as one sibling process (see `app/workers/run.py`), coordinated

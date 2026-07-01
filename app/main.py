@@ -228,11 +228,11 @@ async def lifespan(app: FastAPI):
     app.state.user_event_hub = UserEventHub(app.state.redis)
     await app.state.user_event_hub.start()
 
-    # Background-settle process (sweeper + subscriber) runs as a
-    # **sibling**, not inside this event loop — see ``app/workers/run.py``
-    # and ``scripts/deploy.sh settle``. Web's lifespan is HTTP-only
-    # again: separating background settle work from request handling
-    # lets each scale, restart, and fail independently.
+    # Background process (settle sweeper + subscriber + payment reconciler)
+    # runs as a **sibling**, not inside this event loop — see
+    # ``app/workers/run.py`` and ``scripts/deploy.sh background``. Web's
+    # lifespan is HTTP-only again: separating background work from request
+    # handling lets each scale, restart, and fail independently.
 
     logger.info("API started")
     try:
