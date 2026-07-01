@@ -252,15 +252,15 @@ class Settings(BaseSettings):
     # baked into the per-file ``size_bytes`` Pydantic validator on
     # ``MessageCreate``.
     max_message_files: int = Field(
-        default=30,
+        default=100,
         description="Max attachments per single user message",
     )
     max_file_bytes: int = Field(
-        default=100 * 1024 * 1024,
+        default=600 * 1024 * 1024,
         description="Per-file upload size cap (bytes)",
     )
     max_session_files_bytes_per_user: int = Field(
-        default=20 * 1024 * 1024 * 1024,
+        default=100 * 1024 * 1024 * 1024,
         description=(
             "Per-user total-size cap (bytes) for UPLOAD-origin session files "
             "across all sessions. The primary upload gate — tracks OSS storage "
@@ -269,7 +269,7 @@ class Settings(BaseSettings):
         ),
     )
     max_session_files_per_user: int = Field(
-        default=10000,
+        default=50000,
         description=(
             "Backstop cap on the COUNT of UPLOAD-origin session-file rows per "
             "user, guarding against many-tiny-files row explosion that the "
@@ -291,6 +291,7 @@ class Settings(BaseSettings):
             "deepseek-v4-flash",
             "glm-5.2",
             "MiniMax/MiniMax-M2.7",
+            "kimi-k2-code",
         }),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
     )
@@ -302,7 +303,7 @@ class Settings(BaseSettings):
     # ``credit_rates`` below — ``create_session`` re-checks the whitelist.
     session_tier_models: dict[str, str] = Field(
         default_factory=lambda: {
-            "FAST": "deepseek-v4-flash",
+            "FAST": "kimi-k2-code",
             "STANDARD": "kimi-k2",
             "ADVANCED": "glm-5.2",
         },
@@ -336,6 +337,7 @@ class Settings(BaseSettings):
             "claude-opus-4-6":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096},
             "claude-sonnet-4-6": {"in_per_1k_usd": 0.003,   "out_per_1k_usd": 0.015,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "kimi-k2-code":      {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             # DashScope-hosted models. USD COGS derived from Aliyun 百炼 pricing pages
@@ -352,7 +354,7 @@ class Settings(BaseSettings):
             # tokens (≈$0.14/$0.28 per M), no promo expiry. Cheaper than
             # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
             "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "glm-5.2":           {"in_per_1k_usd": 0.00090, "out_per_1k_usd": 0.00350, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "glm-5.2":           {"in_per_1k_usd": 0.00020, "out_per_1k_usd": 0.00080, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
             # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
             # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
             # ¥0.42/M not separately tracked here; settle uses uncached rate.
