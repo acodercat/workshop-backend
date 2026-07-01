@@ -90,7 +90,7 @@ def snapshot_rate(model_id: str) -> RateSnapshot:
     )
 
 
-def _normalize_rate_snapshot(raw: dict) -> RateSnapshot:
+def normalize_rate_snapshot(raw: dict) -> RateSnapshot:
     """Coerce a (possibly legacy) JSONB snapshot into a current
     :class:`RateSnapshot`.
 

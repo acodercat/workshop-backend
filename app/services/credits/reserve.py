@@ -84,20 +84,14 @@ async def reserve_for_turn(
             f"Insufficient credits: balance={balance} reserved={reserved}"
         )
 
-    await insert_ledger_and_bump_balance(
-        db,
-        user_id=user_id,
-        amount=-reserved,
-        kind=CreditLedgerKind.RESERVE,
-        reference={
-            "session_id": str(session_id),
-            "turn_id": turn_id,
-            "model_id": model_id,
-        },
-    )
-    # Derived (see ``_EXPIRY_TO_MAX_TURN_RATIO``); defaults to 1860s × 8 ≈
-    # 4.1h. A heartbeat-based passive cancel (docs/credits-future.md) is the
-    # real fix and removes the need for any fixed timeout.
+    # Create the reservation first so its id can stamp the RESERVE ledger
+    # row's ``reservation_id`` — every row of the turn's credit trail then
+    # links back through that one column. Both writes are in the caller's
+    # transaction, so a rollback drops the pair together.
+    #
+    # ``expires_at`` is derived (see ``_EXPIRY_TO_MAX_TURN_RATIO``); defaults
+    # to 1860s × 8 ≈ 4.1h. A heartbeat-based passive cancel
+    # (docs/credits-future.md) is the real fix and removes the fixed timeout.
     expiry_seconds = (
         settings.credit_reserve_max_turn_seconds * _EXPIRY_TO_MAX_TURN_RATIO
     )
@@ -111,7 +105,20 @@ async def reserve_for_turn(
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=expiry_seconds),
     )
     db.add(reservation)
-    await db.flush()  # populate reservation.id for downstream callers
+    await db.flush()  # populate reservation.id for the ledger FK + callers
+
+    await insert_ledger_and_bump_balance(
+        db,
+        user_id=user_id,
+        amount=-reserved,
+        kind=CreditLedgerKind.RESERVE,
+        reservation_id=reservation.id,
+        reference={
+            "session_id": str(session_id),
+            "turn_id": turn_id,
+            "model_id": model_id,
+        },
+    )
 
     logger.info(
         "credit reserved: user=%s session=%s turn=%s reservation=%s reserved=%s",
