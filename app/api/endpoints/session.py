@@ -263,7 +263,7 @@ async def create_session_upload_url(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except FileTooLargeError as exc:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc),
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc),
         )
 
 

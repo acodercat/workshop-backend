@@ -190,7 +190,7 @@ class SkillNameConflictError(AppError):
 
 
 class SkillBundleTooLargeError(AppError):
-    status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
     error_type = "skill_bundle_too_large"
 
 
