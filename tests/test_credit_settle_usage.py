@@ -15,6 +15,9 @@ class _Result:
     def one_or_none(self):
         return self._row
 
+    def scalar_one_or_none(self):
+        return self._row
+
 
 class _Db:
     def __init__(self, row) -> None:
@@ -53,6 +56,27 @@ async def test_read_usage_returns_none_when_tokens_are_missing() -> None:
     usage = await settle._read_usage_and_duration_from_session_turn(db, 99)
 
     assert usage is None
+
+
+# ── _load_reservation_for_update: double-settle concurrency guard ────────────
+
+
+async def test_load_for_update_refreshes_stale_identity_map_state() -> None:
+    """The FOR UPDATE reservation load must carry ``populate_existing`` so it
+    reads the row's *current* state after acquiring the lock — not the stale
+    copy ``settle_open_for_session`` pre-loaded into the same session.
+
+    Dropping it silently reintroduces the double-settle race: a concurrent
+    settle that committed ``state = SETTLED`` while we blocked on the lock
+    would be invisible, the ``state is OPEN`` guard would pass on stale data,
+    and the settle rows would double-post. A real two-session race needs a DB
+    (integration tier); this pins the load-bearing option so a refactor can't
+    remove it by accident."""
+    db = _Db(row=None)
+
+    await settle._load_reservation_for_update(db, reservation_id=6069)
+
+    assert db.statement.get_execution_options().get("populate_existing") is True
 
 
 # ── settle_open_for_session: pre-terminal safety ────────────────────────────

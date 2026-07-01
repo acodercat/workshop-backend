@@ -64,11 +64,26 @@ def _is_session_terminal(status: SessionStatus | None) -> bool:
 async def _load_reservation_for_update(
     db: AsyncSession, reservation_id: int,
 ) -> CreditReservation | None:
-    """Lock a reservation row by id. Returns ``None`` if missing."""
+    """Lock a reservation row by id and read its **current** state.
+
+    ``populate_existing`` is load-bearing for correctness under concurrency.
+    ``settle_open_for_session`` pre-loads the reservation into this session's
+    identity map (its ``SELECT`` runs before the lock). Without a forced
+    refresh, ``FOR UPDATE`` still takes the row lock, but the ORM hands back
+    that stale cached instance — so if a concurrent settle committed
+    ``state = SETTLED`` while we were blocked on the lock, we don't see it,
+    the ``state is OPEN`` guard in :func:`settle_turn` / :func:`refund_reservation`
+    passes on stale data, and the settle rows get double-posted. Refreshing
+    the attributes from the just-locked tuple is what makes the
+    lock-then-check read-modify-write actually serialize.
+
+    Returns ``None`` if the row is missing.
+    """
     result = await db.execute(
         select(CreditReservation)
         .where(CreditReservation.id == reservation_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
