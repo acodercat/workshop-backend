@@ -208,6 +208,15 @@ class AgentStoppedEvent(_EventBase):
       when the agent loop died before emitting its own stopped event) —
       only ``content`` (typically empty string).
 
+    ``termination_reason`` is the worker's persisted why-it-ended
+    (mirrors ``session_turn.termination_reason``; values from
+    :class:`app.models.session_turn.TerminationReason`). Orthogonal to
+    ``stop_reason`` (axon's agent-level finish reason): a budget-enforcer
+    stop and a user stop both carry ``stop_reason="cancelled"`` but
+    differ here (``insufficient_credits`` vs ``user_cancelled``), which
+    is what lets the frontend pick the right copy. Absent on
+    pre-rollout events.
+
     Everything except ``content`` is ``NotRequired``.
     """
     type: Literal["agent.stopped"]
@@ -215,6 +224,7 @@ class AgentStoppedEvent(_EventBase):
     turns: NotRequired[str]
     elapsed: NotRequired[str]
     stop_reason: NotRequired[str]
+    termination_reason: NotRequired[str]
     usage: NotRequired[str]
     total_model_latency: NotRequired[str]
 

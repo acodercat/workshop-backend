@@ -11,9 +11,10 @@ multi-node deploys run this on every host and rely on Postgres
 advisory locks (``app.workers.settle_sweeper._LOCK_KEY``) to ensure
 exactly one host actually polls per tick.
 
-This process owns **three** concurrent background tasks. Two are the
-push and pull halves of the same settle responsibility; the third is
-the pull backstop for payment notifications:
+This process owns up to **four** concurrent background tasks. Two are
+the push and pull halves of the same settle responsibility; the third
+is the pull backstop for payment notifications; the fourth (flag-gated)
+enforces mid-turn spend:
 
 - :mod:`app.workers.settle_sweeper` — periodic 60s poll, the
   correctness backstop. Catches missed pub/sub messages, expired
@@ -26,6 +27,10 @@ the pull backstop for payment notifications:
   PENDING payment orders against the provider, settling ones whose async
   notification was lost and reaping expired ones. Its own advisory lock,
   independent of the settle sweeper's.
+- :mod:`app.workers.budget_enforcer` — only when
+  ``budget_enforcer_enabled``: prices each running turn's
+  heartbeat-reported interim usage and cancels turns outrunning their
+  user's balance. Its own advisory lock as well.
 
 All are wrapped in :class:`asyncio.TaskGroup` so a fatal exception in
 either tears the process down (systemd / scripts/deploy.sh restart
@@ -45,7 +50,12 @@ import logging
 import redis.asyncio as aioredis
 
 from app.logging_config import setup_logging
-from app.workers import payment_reconciler, settle_sweeper, settle_subscriber
+from app.workers import (
+    budget_enforcer,
+    payment_reconciler,
+    settle_sweeper,
+    settle_subscriber,
+)
 from config import settings
 
 
@@ -70,6 +80,8 @@ async def _run() -> None:
             tg.create_task(settle_sweeper.run_forever())
             tg.create_task(settle_subscriber.run_forever(redis))
             tg.create_task(payment_reconciler.run_forever())
+            if settings.budget_enforcer_enabled:
+                tg.create_task(budget_enforcer.run_forever(redis))
     finally:
         await redis.aclose()
 

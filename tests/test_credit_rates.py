@@ -152,3 +152,28 @@ def test_credits_from_cny_uses_sale_price(monkeypatch) -> None:
 def test_credits_from_cny_respects_configured_price(monkeypatch) -> None:
     monkeypatch.setattr(rates.settings, "credit_price_cny", 0.05)
     assert rates.credits_from_cny(100) == 2000   # ¥0.05/credit → ¥100 = 2000
+
+
+# ── reserve_est_input_tokens: per-model reserve sizing ───────────────────────
+
+
+def test_reserve_est_input_tokens_reads_per_model_value(monkeypatch) -> None:
+    """A model whose rate-card entry carries ``reserve_est_input_tokens``
+    sizes its hold from that per-model figure."""
+    monkeypatch.setattr(
+        rates.settings, "credit_rates",
+        {"m": {"reserve_est_input_tokens": 425_000}},
+    )
+
+    assert rates.reserve_est_input_tokens("m") == 425_000
+
+
+def test_reserve_est_input_tokens_falls_back_to_global(monkeypatch) -> None:
+    """Entries without the key (and unknown models) fall back to the global
+    ``credit_reserve_max_input_tokens`` — a card edit can't silently zero
+    the reserve estimate."""
+    monkeypatch.setattr(rates.settings, "credit_rates", {"m": {}})
+    monkeypatch.setattr(rates.settings, "credit_reserve_max_input_tokens", 16_000)
+
+    assert rates.reserve_est_input_tokens("m") == 16_000
+    assert rates.reserve_est_input_tokens("unknown-model") == 16_000

@@ -333,17 +333,26 @@ class Settings(BaseSettings):
     #   - ``reserve_max_output_tokens``: pessimistic upper bound on
     #     output, used at reserve time. Settle multi-refunds the unused
     #     portion from actual usage.
+    #   - ``reserve_est_input_tokens``: realistic estimate of a turn's
+    #     *cumulative* input tokens, used at reserve time (per-model p50
+    #     from production data — an agent turn re-sends its growing
+    #     context on every LLM call, so the cumulative figure is far
+    #     above any single call's prompt). Sizes the reserve hold to
+    #     ≈ the model's median turn cost: an entry gate + concurrency
+    #     throttle, NOT a worst-case bound — mid-turn overruns are the
+    #     budget enforcer's job (``app/workers/budget_enforcer.py``).
+    #     Missing → falls back to ``credit_reserve_max_input_tokens``.
     # The per-second knob (β) is global, not per-model — see
     # ``credit_per_second_credits`` below.
     credit_rates: dict[str, dict[str, float]] = Field(
         default_factory=lambda: {
-            "claude-opus-4-7":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096},
-            "claude-opus-4-6":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096},
-            "claude-sonnet-4-6": {"in_per_1k_usd": 0.003,   "out_per_1k_usd": 0.015,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "kimi-k2-code":      {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "claude-opus-4-7":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096, "reserve_est_input_tokens": 50000},
+            "claude-opus-4-6":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096, "reserve_est_input_tokens": 50000},
+            "claude-sonnet-4-6": {"in_per_1k_usd": 0.003,   "out_per_1k_usd": 0.015,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 250000},
+            "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
+            "kimi-k2-code":      {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 225000},
+            "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
+            "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
             # DashScope-hosted models. USD COGS derived from Aliyun 百炼 pricing pages
             # (CNY converted at ~1 USD = 7.2 CNY). Conservative: glm-5.1 uses the
             # <32K-context tier; longer turns nominally cost ~33% more on the wire
@@ -352,17 +361,17 @@ class Settings(BaseSettings):
             # officially published, expected ≤3.6's). deepseek-v4-pro uses post-promo
             # standard rates ($1.74/$3.48 per M) to avoid charging below COGS once
             # the 2026-05-31 promo expires.
-            "qwen3.7-max":       {"in_per_1k_usd": 0.0013,  "out_per_1k_usd": 0.0078, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "deepseek-v4-pro":   {"in_per_1k_usd": 0.00174, "out_per_1k_usd": 0.00348,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "qwen3.7-max":       {"in_per_1k_usd": 0.0013,  "out_per_1k_usd": 0.0078, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 45000},
+            "deepseek-v4-pro":   {"in_per_1k_usd": 0.00174, "out_per_1k_usd": 0.00348,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 225000},
             # deepseek-v4-flash budget tier — permanent ¥1/¥2 per M
             # tokens (≈$0.14/$0.28 per M), no promo expiry. Cheaper than
             # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
-            "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "glm-5.2":           {"in_per_1k_usd": 0.00020, "out_per_1k_usd": 0.00080, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 2000},
+            "glm-5.2":           {"in_per_1k_usd": 0.00020, "out_per_1k_usd": 0.00080, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 425000},
             # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
             # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
             # ¥0.42/M not separately tracked here; settle uses uncached rate.
-            "MiniMax/MiniMax-M2.7": {"in_per_1k_usd": 0.000292, "out_per_1k_usd": 0.00117, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "MiniMax/MiniMax-M2.7": {"in_per_1k_usd": 0.000292, "out_per_1k_usd": 0.00117, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 60000},
         },
         description="Per-model rate card for credit billing. Snapshotted onto each credit_reservation at reserve time so a config change can't re-price open turns.",
     )
@@ -392,13 +401,32 @@ class Settings(BaseSettings):
         default=1860, gt=0,
         description="Upper bound on turn_seconds assumed at reserve time. Settle uses actual.",
     )
-    # Pessimistic estimate for the prompt size at reserve time, used when
-    # we can't measure the worker's compacted context cheaply from the
-    # backend side. Real cost is settled from the worker's actual
-    # ``usage.prompt_tokens`` post-turn.
+    # Fallback input-token estimate at reserve time, for models whose
+    # rate-card entry lacks ``reserve_est_input_tokens`` (the data-driven
+    # per-model figure above). Real cost is settled from the worker's
+    # actual ``usage.prompt_tokens`` post-turn.
     credit_reserve_max_input_tokens: int = Field(
         default=16_000,
-        description="Upper bound on input tokens assumed at reserve time. Settle uses actual usage.",
+        description="Fallback input-token estimate at reserve time for models without a per-model reserve_est_input_tokens. Settle uses actual usage.",
+    )
+    # Budget enforcer (``app/workers/budget_enforcer.py``) — the mid-turn
+    # half of spend control. Prices each running turn's heartbeat-reported
+    # interim usage and stops turns that would leave their user's projected
+    # post-settle balance at/below the buffer. Default OFF for staged
+    # rollout: the worker must be reporting interim usage (deploy it first)
+    # before enforcement makes sense. Fail-open — disabled or crashed, the
+    # system degrades to reserve-gate-only semantics.
+    budget_enforcer_enabled: bool = Field(
+        default=False,
+        description="Run the mid-turn budget enforcer in the background process.",
+    )
+    budget_enforcer_interval_seconds: int = Field(
+        default=15, gt=0,
+        description="Seconds between budget-enforcer ticks. With the worker's 20s heartbeat, worst-case overrun detection latency is roughly one heartbeat + one tick.",
+    )
+    budget_enforcer_buffer_credits: int = Field(
+        default=0, ge=0,
+        description="Stop turns once the user's projected post-settle balance falls to this many credits. 0 = stop at exactly zero, tolerating one detection window of overshoot (Manus-style).",
     )
     # Auto-grant on registration. 500 credits at the post-redenomination
     # peg (1 credit = $0.01) is $5 of headroom — same USD value as the

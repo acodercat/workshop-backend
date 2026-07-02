@@ -38,7 +38,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from app.models.session import Session, SessionStatus
-from app.models.session_turn import SessionTurn, SessionTurnStatus
+from app.models.session_turn import (
+    SessionTurn,
+    SessionTurnStatus,
+    TerminationReason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,7 @@ async def fail_abandoned_turn(
         )
         .values(
             status=SessionTurnStatus.FAILED,
+            termination_reason=TerminationReason.WORKER_LOST,
             lease_expires_at=None,
             terminated_at=func.now(),
         )

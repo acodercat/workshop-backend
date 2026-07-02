@@ -32,7 +32,11 @@ from app.services.credits._internal import (
     insert_ledger_and_bump_balance,
     lock_user_balance,
 )
-from app.services.credits.rates import reserve_micro_credits, snapshot_rate
+from app.services.credits.rates import (
+    reserve_est_input_tokens,
+    reserve_micro_credits,
+    snapshot_rate,
+)
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -57,11 +61,14 @@ async def reserve_for_turn(
 ) -> CreditReservation:
     """Reserve credits for one agent turn. Returns the open reservation.
 
-    ``max_input_tokens`` for the estimate comes from
-    :attr:`config.Settings.credit_reserve_max_input_tokens` — a single
-    knob that biases pessimism. Settling later multi-refunds the
-    unused portion based on actual usage, so over-reserving doesn't
-    permanently overcharge.
+    The hold is sized from the model's data-driven input estimate
+    (:func:`~app.services.credits.rates.reserve_est_input_tokens`) —
+    ≈ the model's median turn cost. It is an entry gate + per-user
+    concurrency throttle (the FOR UPDATE debit serializes concurrent
+    reserves against one balance), not a worst-case bound: mid-turn
+    overruns are the budget enforcer's job. Settling later refunds the
+    unused portion from actual usage, so over-reserving never
+    permanently overcharges.
 
     Raises:
         InsufficientCreditsError: balance below the estimated max
@@ -74,7 +81,7 @@ async def reserve_for_turn(
     balance = await lock_user_balance(db, user_id)
     rate = snapshot_rate(model_id)
     reserved = reserve_micro_credits(
-        rate, max_input_tokens=settings.credit_reserve_max_input_tokens,
+        rate, max_input_tokens=reserve_est_input_tokens(model_id),
     )
     if balance < reserved:
         # The exception message is dev-facing only; the wire payload

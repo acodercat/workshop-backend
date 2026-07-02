@@ -51,7 +51,11 @@ WORKER_NOTIFY_CHANNEL = "notify:worker"
 # Pub/Sub channel prefix for per-session cancel signals. Mirrored in
 # ``agent-worker/agent_worker/runtime/cancellation.py``; fire-and-forget
 # ``PUBLISH cancel:{session_id}`` reaches the worker holding that
-# session (if any) and fires :meth:`Agent.cancel` on its loop.
+# session (if any), which cancels the agent and stamps the payload as
+# ``session_turn.termination_reason`` (a ``TerminationReason`` value:
+# ``user_cancelled`` from the cancel endpoint, ``insufficient_credits``
+# from the budget enforcer; empty/unknown falls back to
+# ``user_cancelled``, so either side can deploy first).
 CANCEL_CHANNEL_PREFIX = "cancel"
 
 # Pub/Sub channel the worker publishes to after committing a terminal

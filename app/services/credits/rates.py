@@ -90,6 +90,26 @@ def snapshot_rate(model_id: str) -> RateSnapshot:
     )
 
 
+def reserve_est_input_tokens(model_id: str) -> int:
+    """Input-token estimate for sizing ``model_id``'s reserve hold.
+
+    Reads the model's ``reserve_est_input_tokens`` rate-card key — a
+    data-driven per-model p50 of a turn's *cumulative* input tokens (an
+    agent turn re-sends its growing context every LLM call, so per-model
+    medians span 2k–425k; no single global figure fits). Falls back to
+    the global ``credit_reserve_max_input_tokens`` for entries that don't
+    carry the key.
+
+    Reserve-time-only input — deliberately NOT part of the
+    :class:`RateSnapshot`: the hold amount it produces is frozen as
+    ``reservation.reserved``, so settle never needs the estimate.
+    """
+    card = settings.credit_rates.get(model_id, {})
+    return int(
+        card.get("reserve_est_input_tokens", settings.credit_reserve_max_input_tokens)
+    )
+
+
 def normalize_rate_snapshot(raw: dict) -> RateSnapshot:
     """Coerce a (possibly legacy) JSONB snapshot into a current
     :class:`RateSnapshot`.

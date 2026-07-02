@@ -48,6 +48,7 @@ from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
+from app.models.session_turn import TerminationReason
 from app.models.session_share import SessionShare
 from app.models.session_site import SessionSite
 from app.models.user import User
@@ -619,6 +620,12 @@ async def cancel_session(
     :meth:`axon.Agent.cancel`, and the final ``agent.stopped`` event
     (with ``stop_reason="cancelled"``) arrives to the client via the
     existing SSE stream. Completed / failed sessions 409.
+
+    The payload is the :class:`TerminationReason` the worker stamps on
+    the turn — ``user_cancelled`` here; the budget enforcer publishes
+    ``insufficient_credits`` on the same channel. The worker treats an
+    empty/unknown payload as ``user_cancelled``, so the two sides can
+    deploy independently.
     """
     session = await _get_or_404(db, session_id, current_user.id)
     if session.status != SessionStatus.RUNNING:
@@ -626,7 +633,9 @@ async def cancel_session(
             status_code=status.HTTP_409_CONFLICT,
             detail="Session is not running",
         )
-    await redis.publish(cancel_channel(str(session_id)), "")
+    await redis.publish(
+        cancel_channel(str(session_id)), TerminationReason.USER_CANCELLED.value,
+    )
 
 
 @router.get("/sessions/{session_id}/stream")
