@@ -58,6 +58,8 @@ from app.workers import (
 )
 from config import settings
 
+logger = logging.getLogger(__name__)
+
 
 async def _run() -> None:
     # Subscriber connection: a pub/sub ``get_message``/``listen`` is a long
@@ -80,17 +82,28 @@ async def _run() -> None:
             tg.create_task(settle_sweeper.run_forever())
             tg.create_task(settle_subscriber.run_forever(redis))
             tg.create_task(payment_reconciler.run_forever())
+            # Flag-gated (default off). Log the resolved state either way so a
+            # restart makes it unambiguous whether enforcement is live — the
+            # enforcer is otherwise silent until it actually stops a turn.
             if settings.budget_enforcer_enabled:
+                logger.info(
+                    "budget enforcer: ENABLED (interval=%ds buffer=%d credits)",
+                    settings.budget_enforcer_interval_seconds,
+                    settings.budget_enforcer_buffer_credits,
+                )
                 tg.create_task(budget_enforcer.run_forever(redis))
+            else:
+                logger.info("budget enforcer: disabled")
     finally:
         await redis.aclose()
 
 
 def main() -> None:
     setup_logging(log_dir="logs", level="INFO")
-    logger = logging.getLogger(__name__)
     logger.info(
-        "background process starting (settle sweeper + subscriber + reconciler)"
+        "background process starting (settle sweeper + subscriber + reconciler"
+        "%s)",
+        " + budget enforcer" if settings.budget_enforcer_enabled else "",
     )
     try:
         asyncio.run(_run())
