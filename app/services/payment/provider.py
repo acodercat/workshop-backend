@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 # The payment channel the user picked. Providers map it to their own
-# trade-type codes (汇付: ALIPAY→A_NATIVE, WECHAT→T_NATIVE).
+# trade-type codes (汇付: ALIPAY→A_NATIVE, WECHAT→W_NATIVE).
 Channel = Literal["ALIPAY", "WECHAT"]
 
 

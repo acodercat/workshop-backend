@@ -49,10 +49,11 @@ _SUCCESS_TRANS_STAT = "S"
 # scan-pay order (QR issued, payment still pending). Both mean "proceed".
 _ACCEPTED_RESP_CODES = frozenset({_SUCCESS_CODE, "00000100"})
 
-# ALIPAY/WeChat "正扫" (merchant shows QR, customer scans) trade types.
+# "正扫" (merchant shows QR, customer scans) trade types, per Huifu's
+# jspay ``trade_type``: A_=Alipay, W_=WeChat, T_=UnionPay.
 _TRADE_TYPE_BY_CHANNEL: dict[Channel, str] = {
     "ALIPAY": "A_NATIVE",
-    "WECHAT": "T_NATIVE",
+    "WECHAT": "W_NATIVE",
 }
 
 # ``DGClient.mer_config`` is a process-global class attribute; initialise it
