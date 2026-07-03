@@ -412,12 +412,12 @@ class Settings(BaseSettings):
     # Budget enforcer (``app/workers/budget_enforcer.py``) — the mid-turn
     # half of spend control. Prices each running turn's heartbeat-reported
     # interim usage and stops turns that would leave their user's projected
-    # post-settle balance at/below the buffer. Default OFF for staged
-    # rollout: the worker must be reporting interim usage (deploy it first)
-    # before enforcement makes sense. Fail-open — disabled or crashed, the
-    # system degrades to reserve-gate-only semantics.
+    # post-settle balance at/below the buffer. On by default now that it's
+    # validated; set False to fall back to reserve-gate-only. Requires the
+    # worker to be reporting interim usage (deploy it first). Fail-open —
+    # disabled or crashed, the system degrades to reserve-gate-only semantics.
     budget_enforcer_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Run the mid-turn budget enforcer in the background process.",
     )
     budget_enforcer_interval_seconds: int = Field(
