@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.errors import SkillBundleTooLargeError
-from app.models.skill import Skill, SkillOrigin
+from app.models.skill import PLATFORM_ORIGINS, Skill
 from app.models.user import User
 from app.models.user_skill_preference import UserSkillPreference
 from app.rate_limit import limiter
@@ -103,12 +103,12 @@ async def list_skills(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> list[SkillResponse]:
     """Return skills visible to the authenticated user: their own
-    CUSTOM uploads + all BUILTIN skills. Newest first.
+    CUSTOM uploads + all platform skills (SYSTEM/OFFICIAL). Newest first.
 
     The ``enabled`` field in the response is the **effective** state
     for this user: a ``user_skill_preference`` row overrides
     ``skill.enabled`` when present. That row only ever exists for
-    BUILTINs the user has toggled (CUSTOM uses ``skill.enabled``
+    platform skills the user has toggled (CUSTOM uses ``skill.enabled``
     directly, owner-mutated).
     """
     stmt = (
@@ -122,7 +122,7 @@ async def list_skills(
         )
         .where(
             (Skill.user_id == current_user.id)
-            | (Skill.origin == SkillOrigin.BUILTIN)
+            | (Skill.origin.in_(PLATFORM_ORIGINS))
         )
         .order_by(Skill.created_at.desc())
     )
@@ -149,10 +149,10 @@ async def update_skill(
 
     - **CUSTOM owned by caller** — full edit (display_name, description,
       enabled all writable on the ``skill`` row).
-    - **BUILTIN** — only ``enabled`` is writable, via a per-user
-      ``user_skill_preference`` row (the platform row stays shared).
-      ``display_name`` / ``description`` reject with 403 because they'd
-      need to mutate the shared row.
+    - **Platform (SYSTEM/OFFICIAL)** — only ``enabled`` is writable, via
+      a per-user ``user_skill_preference`` row (the platform row stays
+      shared). ``display_name`` / ``description`` reject with 403 because
+      they'd need to mutate the shared row.
     - **CUSTOM not owned** — 404 via :func:`_get_visible_skill`.
 
     The bundle itself is immutable on every path — re-upload for content
@@ -160,11 +160,11 @@ async def update_skill(
     """
     skill = await _get_visible_skill(db, skill_id, current_user.id)
 
-    if skill.origin == SkillOrigin.BUILTIN:
+    if skill.origin in PLATFORM_ORIGINS:
         if body.display_name is not None or body.description is not None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot edit metadata of a BUILTIN skill",
+                detail="Cannot edit metadata of a platform skill",
             )
         if body.enabled is not None:
             await _upsert_preference(
@@ -241,7 +241,7 @@ async def get_skill_download_url(
     client-side (JSZip for .zip, plain text for .md) to render the
     file tree + content preview.
 
-    Accessible for BUILTIN skills (visible to everyone) AND the user's
+    Accessible for platform skills (visible to everyone) AND the user's
     own CUSTOM skills — mirrors the visibility of ``GET /skills``.
     """
     skill = await _get_visible_skill(db, skill_id, current_user.id)
@@ -280,15 +280,15 @@ async def _get_owned_skill(
 async def _get_visible_skill(
     db: AsyncSession, skill_id: int, user_id: int,
 ) -> Skill:
-    """Fetch a skill visible to ``user_id`` (own CUSTOM or any BUILTIN).
+    """Fetch a skill visible to ``user_id`` (own CUSTOM or any platform).
 
-    Used by PATCH (BUILTIN toggle path uses ``user_skill_preference``;
+    Used by PATCH (platform toggle path uses ``user_skill_preference``;
     the row itself is shared) and GET /skills/{id}/download-url — both
     operate on the wider "visible" set than the owner-only ``_get_owned_skill``.
     """
     stmt = select(Skill).where(
         Skill.id == skill_id,
-        or_(Skill.user_id == user_id, Skill.origin == SkillOrigin.BUILTIN),
+        or_(Skill.user_id == user_id, Skill.origin.in_(PLATFORM_ORIGINS)),
     )
     result = await db.execute(stmt)
     skill = result.scalar_one_or_none()

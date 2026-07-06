@@ -42,7 +42,7 @@ class RecipeUpdate(BaseModel):
     """Body of ``PATCH /api/recipes/{id}`` — edit a CUSTOM recipe.
 
     Unlike a skill bundle, ``instructions`` are editable in place (plain
-    text, no staging step). ``name`` is immutable. BUILTIN recipes are
+    text, no staging step). ``name`` is immutable. OFFICIAL recipes are
     not editable through this surface (operator-managed).
     """
 

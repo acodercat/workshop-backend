@@ -1,12 +1,16 @@
 """Skill — uploaded SKILL.md bundle (ZIP) metadata.
 
-Two origins:
-- ``BUILTIN`` — platform-shipped, visible to all users, no owner
+Three origins:
+- ``SYSTEM`` — always-on core skills shipped by the platform, no owner
+  (``user_id IS NULL``). Managed by operators / seed scripts.
+- ``OFFICIAL`` — platform-published skills a user opts into, no owner
   (``user_id IS NULL``). Managed by operators / seed scripts.
 - ``CUSTOM`` — user-uploaded, scoped to one user (``user_id`` set).
   Managed via ``/api/skills`` endpoints.
 
-The worker stages both into the sandbox at session start and axon's
+``SYSTEM`` and ``OFFICIAL`` are platform-owned (see
+:data:`PLATFORM_ORIGINS`); the worker stages those plus the user's
+CUSTOM skills into the sandbox at session start and axon's
 ``use_skill`` tool surfaces the merged set to the LLM.
 """
 
@@ -34,8 +38,15 @@ from app.database import Base
 
 
 class SkillOrigin(StrEnum):
-    BUILTIN = "BUILTIN"
+    SYSTEM = "SYSTEM"
+    OFFICIAL = "OFFICIAL"
     CUSTOM = "CUSTOM"
+
+
+#: Platform-owned origins (``user_id IS NULL``): visible to every user
+#: and operator-managed. ``CUSTOM`` is the sole user-owned origin, so
+#: "is this a platform skill?" is ``origin in PLATFORM_ORIGINS``.
+PLATFORM_ORIGINS = (SkillOrigin.SYSTEM, SkillOrigin.OFFICIAL)
 
 
 class Skill(Base):
@@ -77,24 +88,24 @@ class Skill(Base):
     __table_args__ = (
         # CUSTOM skills: per-user name uniqueness.
         UniqueConstraint("user_id", "name", name="uq_skill_user_id_name"),
-        # BUILTIN skills: user_id IS NULL → the composite unique above
-        # won't prevent duplicates (NULL ≠ NULL in SQL). This partial
-        # index enforces name uniqueness within the BUILTIN set.
+        # Platform skills (SYSTEM/OFFICIAL): user_id IS NULL → the
+        # composite unique above won't prevent duplicates (NULL ≠ NULL in
+        # SQL). This partial index enforces name uniqueness across the
+        # whole platform-owned set.
         Index(
-            "uq_skill_builtin_name", "name",
+            "uq_skill_platform_name", "name",
             unique=True,
             postgresql_where=text("user_id IS NULL"),
         ),
-        # ``origin`` and ``user_id`` must agree. Worker visibility uses
-        # ``(user_id = $1 OR origin = 'BUILTIN')``, so an orphan row with
-        # ``origin='BUILTIN' AND user_id=<someone>`` would be visible to
-        # *every* user — letting one customer's CUSTOM bundle leak as
-        # the platform default. A reversed mistake
-        # (``origin='CUSTOM' AND user_id IS NULL``) is invisible to
-        # everyone. Both are nonsense; reject at the DB so neither code
-        # nor manual SQL can introduce them.
+        # ``origin`` and ``user_id`` must agree. Worker/API visibility
+        # uses ``(user_id = $1 OR origin IN ('SYSTEM', 'OFFICIAL'))``, so
+        # an orphan row with a platform origin AND an owner would be
+        # visible to *every* user — letting one customer's CUSTOM bundle
+        # leak as a platform default. The reverse (``origin='CUSTOM' AND
+        # user_id IS NULL``) is invisible to everyone. Both are nonsense;
+        # reject at the DB so neither code nor manual SQL can introduce them.
         CheckConstraint(
-            "(origin = 'BUILTIN' AND user_id IS NULL) "
+            "(origin IN ('SYSTEM', 'OFFICIAL') AND user_id IS NULL) "
             "OR (origin = 'CUSTOM' AND user_id IS NOT NULL)",
             name="ck_skill_origin_user_id_consistent",
         ),

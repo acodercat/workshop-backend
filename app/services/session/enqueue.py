@@ -44,7 +44,7 @@ from app.models.recipe import Recipe, RecipeOrigin
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
-from app.models.skill import Skill, SkillOrigin
+from app.models.skill import PLATFORM_ORIGINS, Skill
 from app.models.user_skill_preference import UserSkillPreference
 from app.schemas.session import FileRef
 from app.services import credits, file_storage
@@ -388,12 +388,12 @@ async def _filter_invokable_skills(
     skill row that existed at enqueue time so the worker loads the
     exact bundle bytes the user picked, even if the row is later
     mutated (delete / re-upload / a same-named CUSTOM appearing and
-    overriding a BUILTIN). The ``id`` pins the lineage; the
+    overriding a platform skill). The ``id`` pins the lineage; the
     ``bundle_key`` pins the bytes; ``name`` rides along for log and
     LLM-reminder display.
 
     A skill is invokable when it's visible to the user (their own
-    CUSTOM, or any BUILTIN) AND its effective enabled state — the
+    CUSTOM, or any platform skill) AND its effective enabled state — the
     per-user preference override taking precedence over the skill's
     default — is true. Unknown / hidden / disabled names are silently
     dropped rather than raising; the user's intent (a free-text
@@ -401,7 +401,7 @@ async def _filter_invokable_skills(
     surfacing a 4xx mid-conversation would be a worse UX than gracefully
     proceeding without that skill.
 
-    Slug collisions between CUSTOM + BUILTIN resolve CUSTOM-wins, matching
+    Slug collisions between CUSTOM + platform resolve CUSTOM-wins, matching
     the worker repo's ``ORDER BY (user_id IS NULL) ASC`` rule. Order is
     preserved from the request so the worker's reminder lists skills in
     the order the user picked them.
@@ -428,13 +428,13 @@ async def _filter_invokable_skills(
         )
         .where(
             Skill.name.in_(requested_unique),
-            (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.BUILTIN),
+            (Skill.user_id == user_id) | (Skill.origin.in_(PLATFORM_ORIGINS)),
             (pref_enabled.is_(True)) | (pref_enabled.is_(None) & Skill.enabled),
         )
     )
     result = await db.execute(stmt)
     # CUSTOM-wins: keep the row owned by this user when both a CUSTOM
-    # and a BUILTIN of the same name pass the filter.
+    # and a platform skill of the same name pass the filter.
     by_name: dict[str, dict[str, str | int]] = {}
     for skill_id, name, bundle_key, row_user_id in result.all():
         snapshot = {"id": skill_id, "name": name, "bundle_key": bundle_key}
@@ -455,7 +455,7 @@ async def _resolve_recipe_snapshot(
     ``instructions`` verbatim as an axon system-reminder.
 
     A recipe is invokable when it's visible to the user (their own
-    CUSTOM, or any BUILTIN) AND enabled. Unlike skills — silently
+    CUSTOM, or any OFFICIAL) AND enabled. Unlike skills — silently
     filtered, since a stale chip shouldn't block a free-text send — a
     recipe is a single explicit pick, so a missing / hidden / disabled id
     raises :class:`RecipeNotInvokableError` (→ 400) rather than vanishing.
@@ -467,7 +467,7 @@ async def _resolve_recipe_snapshot(
     stmt = select(Recipe.id, Recipe.display_name, Recipe.instructions).where(
         Recipe.id == recipe_id,
         Recipe.enabled.is_(True),
-        (Recipe.user_id == user_id) | (Recipe.origin == RecipeOrigin.BUILTIN),
+        (Recipe.user_id == user_id) | (Recipe.origin == RecipeOrigin.OFFICIAL),
     )
     row = (await db.execute(stmt)).first()
     if row is None:

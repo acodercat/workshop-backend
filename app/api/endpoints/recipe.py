@@ -7,8 +7,8 @@ bundle — create / edit are plain JSON, and ``instructions`` are mutable
 in place.
 
 Visibility mirrors skills: a user sees their own CUSTOM recipes plus all
-BUILTIN ones. BUILTIN recipes are operator-managed and read-only through
-this surface.
+OFFICIAL ones. OFFICIAL recipes are operator-managed and read-only
+through this surface.
 """
 
 import logging
@@ -50,7 +50,7 @@ async def create_recipe(
     """
     # Race-acceptable like the skill cap: two concurrent creates could
     # each pass and put the user one over. Not worth a row lock for a
-    # soft policy limit. BUILTIN rows have ``user_id IS NULL`` so they
+    # soft policy limit. OFFICIAL rows have ``user_id IS NULL`` so they
     # don't count against a user.
     used = await db.scalar(
         select(func.count(Recipe.id)).where(Recipe.user_id == current_user.id)
@@ -88,7 +88,7 @@ async def list_recipes(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> list[RecipeResponse]:
     """Return recipes visible to the caller: their own CUSTOM recipes +
-    all BUILTIN recipes. Newest first.
+    all OFFICIAL recipes. Newest first.
 
     ``enabled`` is the recipe's own flag (no per-user override table —
     recipes are picked ad-hoc, not toggled like ambient skills).
@@ -97,7 +97,7 @@ async def list_recipes(
         select(Recipe)
         .where(
             (Recipe.user_id == current_user.id)
-            | (Recipe.origin == RecipeOrigin.BUILTIN)
+            | (Recipe.origin == RecipeOrigin.OFFICIAL)
         )
         .order_by(Recipe.created_at.desc())
     )
@@ -118,14 +118,14 @@ async def update_recipe(
     """Edit a CUSTOM recipe owned by the caller.
 
     ``display_name`` / ``description`` / ``instructions`` / ``enabled``
-    are all writable. BUILTIN recipes are operator-managed → 403; a
+    are all writable. OFFICIAL recipes are operator-managed → 403; a
     CUSTOM recipe owned by someone else → 404 (invisible here).
     """
     recipe = await _get_visible_recipe(db, recipe_id, current_user.id)
-    if recipe.origin == RecipeOrigin.BUILTIN:
+    if recipe.origin == RecipeOrigin.OFFICIAL:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot edit a BUILTIN recipe",
+            detail="Cannot edit an OFFICIAL recipe",
         )
 
     # Collect non-null fields and apply them in a single UPDATE — avoids
@@ -173,7 +173,7 @@ async def _get_owned_recipe(
     """Fetch a CUSTOM recipe that belongs to ``user_id``.
 
     Used by DELETE — only the owner can drop their CUSTOM recipe.
-    BUILTIN recipes (no owner) never match, so a DELETE on one 404s
+    OFFICIAL recipes (no owner) never match, so a DELETE on one 404s
     rather than removing a shared platform row.
     """
     stmt = select(Recipe).where(
@@ -191,15 +191,15 @@ async def _get_owned_recipe(
 async def _get_visible_recipe(
     db: AsyncSession, recipe_id: int, user_id: int,
 ) -> Recipe:
-    """Fetch a recipe visible to ``user_id`` (own CUSTOM or any BUILTIN).
+    """Fetch a recipe visible to ``user_id`` (own CUSTOM or any OFFICIAL).
 
-    Used by PATCH — the caller then rejects the BUILTIN case with 403,
+    Used by PATCH — the caller then rejects the OFFICIAL case with 403,
     distinguishing "exists but you can't edit it" from a plain 404 on a
     CUSTOM recipe owned by someone else.
     """
     stmt = select(Recipe).where(
         Recipe.id == recipe_id,
-        (Recipe.user_id == user_id) | (Recipe.origin == RecipeOrigin.BUILTIN),
+        (Recipe.user_id == user_id) | (Recipe.origin == RecipeOrigin.OFFICIAL),
     )
     result = await db.execute(stmt)
     recipe = result.scalar_one_or_none()

@@ -168,7 +168,7 @@ def _validate_and_parse(data: bytes, *, is_zip: bool) -> tuple[bytes, ParsedSkil
 async def _enforce_user_quota(db: AsyncSession, user_id: int) -> None:
     """Reject the upload if the user is at the per-user skill count cap.
 
-    Counts the user's CUSTOM rows only — BUILTIN rows have
+    Counts the user's CUSTOM rows only — platform rows have
     ``user_id IS NULL`` so they don't count. Race-acceptable: two
     concurrent uploads at the boundary could both succeed, leaving
     the user one over. Not worth a row lock for a soft policy limit.

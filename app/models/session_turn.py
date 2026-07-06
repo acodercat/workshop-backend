@@ -127,10 +127,14 @@ class SessionTurn(Base):
     # ``{"id": int, "name": str, "bundle_key": str}`` taken at enqueue
     # time so the worker loads the exact bundle the user picked, even
     # if the row is later mutated (delete / re-upload / a same-named
-    # CUSTOM overriding a BUILTIN). The ``id`` pins the lineage; the
-    # ``bundle_key`` pins the bytes; ``name`` is kept for log / reminder
-    # display so we don't need an extra JOIN to render the LLM-facing
-    # message.
+    # CUSTOM overriding a platform skill). The ``id`` pins the lineage;
+    # the ``bundle_key`` pins the bytes; ``name`` is kept for log /
+    # reminder display so we don't need an extra JOIN to render the
+    # LLM-facing message.
+    #
+    # A collection (0..N): NOT NULL DEFAULT '[]' so "no skills" is the
+    # empty array, never NULL — readers iterate without a null-guard.
+    # Contrast ``recipe`` below: an optional single value that IS NULL.
     skills: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
@@ -141,6 +145,10 @@ class SessionTurn(Base):
     # queued turn. The worker injects ``instructions`` verbatim as an
     # axon ``<system-reminder>``. Shape:
     #   {"id": int, "display_name": str, "instructions": str}
+    #
+    # An optional single value (0 or 1): nullable, NULL = "no recipe".
+    # No DEFAULT — an empty ``{}`` isn't a valid recipe, so unlike the
+    # ``skills`` array above there's no meaningful empty value to default to.
     recipe: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # Token usage as reported by axon's ``AgentStoppedEvent.usage``,
     # written by the worker in the same fenced UPDATE that flips

@@ -7,8 +7,10 @@ kept separate from the user's query — the *what*. The per-turn snapshot
 lives on ``session_turn.recipe``; the worker injects ``instructions``
 verbatim.
 
-Two origins (mirrors :class:`Skill`):
-- ``BUILTIN`` — platform-shipped, visible to all users, no owner
+Two origins (mirrors :class:`Skill`; a recipe is always user-picked, so
+its platform tier is ``OFFICIAL`` — there is no always-on ``SYSTEM``
+recipe the way skills have one):
+- ``OFFICIAL`` — platform-shipped, visible to all users, no owner
   (``user_id IS NULL``). Managed by operators / seed scripts.
 - ``CUSTOM`` — user-authored, scoped to one user (``user_id`` set).
   Managed via ``/api/recipes`` endpoints.
@@ -41,7 +43,7 @@ from app.database import Base
 
 
 class RecipeOrigin(StrEnum):
-    BUILTIN = "BUILTIN"
+    OFFICIAL = "OFFICIAL"
     CUSTOM = "CUSTOM"
 
 
@@ -65,7 +67,7 @@ class Recipe(Base):
         nullable=False,
         server_default=text("'CUSTOM'"),
     )
-    # Stable internal identifier (kebab for BUILTIN, opaque for CUSTOM).
+    # Stable internal identifier (kebab for OFFICIAL, opaque for CUSTOM).
     # Drives the uniqueness model; the human title is ``display_name``.
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -88,20 +90,20 @@ class Recipe(Base):
     __table_args__ = (
         # CUSTOM recipes: per-user name uniqueness.
         UniqueConstraint("user_id", "name", name="uq_recipe_user_id_name"),
-        # BUILTIN recipes: user_id IS NULL → the composite unique above
+        # OFFICIAL recipes: user_id IS NULL → the composite unique above
         # won't prevent duplicates (NULL ≠ NULL in SQL). This partial
-        # index enforces name uniqueness within the BUILTIN set.
+        # index enforces name uniqueness within the platform set.
         Index(
-            "uq_recipe_builtin_name", "name",
+            "uq_recipe_platform_name", "name",
             unique=True,
             postgresql_where=text("user_id IS NULL"),
         ),
         # ``origin`` and ``user_id`` must agree — same invariant as
-        # ``skill``: a BUILTIN row with an owner would leak one user's
+        # ``skill``: an OFFICIAL row with an owner would leak one user's
         # recipe as a platform default; a CUSTOM row without an owner is
         # invisible to everyone. Reject both at the DB.
         CheckConstraint(
-            "(origin = 'BUILTIN' AND user_id IS NULL) "
+            "(origin = 'OFFICIAL' AND user_id IS NULL) "
             "OR (origin = 'CUSTOM' AND user_id IS NOT NULL)",
             name="ck_recipe_origin_user_id_consistent",
         ),
