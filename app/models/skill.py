@@ -1,17 +1,18 @@
 """Skill — uploaded SKILL.md bundle (ZIP) metadata.
 
 Three origins:
-- ``SYSTEM`` — always-on core skills shipped by the platform, no owner
-  (``user_id IS NULL``). Managed by operators / seed scripts.
-- ``OFFICIAL`` — platform-published skills a user opts into, no owner
-  (``user_id IS NULL``). Managed by operators / seed scripts.
+- ``SYSTEM`` — system-level, always-on skills for the agent, no owner
+  (``user_id IS NULL``). **Hidden from users**: never returned by the
+  user-facing ``/api/skills`` endpoints. Managed by operators.
+- ``OFFICIAL`` — platform-published skills a user browses and opts into,
+  no owner (``user_id IS NULL``). Managed by operators / seed scripts.
 - ``CUSTOM`` — user-uploaded, scoped to one user (``user_id`` set).
   Managed via ``/api/skills`` endpoints.
 
-``SYSTEM`` and ``OFFICIAL`` are platform-owned (see
-:data:`PLATFORM_ORIGINS`); the worker stages those plus the user's
-CUSTOM skills into the sandbox at session start and axon's
-``use_skill`` tool surfaces the merged set to the LLM.
+User-facing visibility is ``OFFICIAL`` + the caller's own ``CUSTOM``;
+``SYSTEM`` is agent-only. ``SYSTEM`` and ``OFFICIAL`` are both
+platform-owned (``user_id IS NULL``). The worker stages all three into
+the sandbox so axon's ``use_skill`` tool can surface them to the LLM.
 """
 
 from datetime import datetime
@@ -41,12 +42,6 @@ class SkillOrigin(StrEnum):
     SYSTEM = "SYSTEM"
     OFFICIAL = "OFFICIAL"
     CUSTOM = "CUSTOM"
-
-
-#: Platform-owned origins (``user_id IS NULL``): visible to every user
-#: and operator-managed. ``CUSTOM`` is the sole user-owned origin, so
-#: "is this a platform skill?" is ``origin in PLATFORM_ORIGINS``.
-PLATFORM_ORIGINS = (SkillOrigin.SYSTEM, SkillOrigin.OFFICIAL)
 
 
 class Skill(Base):
