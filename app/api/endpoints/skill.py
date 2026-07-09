@@ -15,7 +15,16 @@ import asyncio
 import logging
 import os
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from sqlalchemy import and_, func, or_, select, update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +40,11 @@ from app.schemas.file import DownloadUrlResponse
 from app.schemas.skill import SkillResponse, SkillUpdate
 from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
+from app.services.skill_i18n import (
+    DEFAULT_LOCALE,
+    normalize_locale,
+    resolve_display_name,
+)
 from app.services.skill_registration import register_skill_bundle
 
 logger = logging.getLogger(__name__)
@@ -101,11 +115,17 @@ async def register_skill(
 async def list_skills(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
+    locale: str = Query(default=DEFAULT_LOCALE),
 ) -> list[SkillResponse]:
     """Return skills visible to the authenticated user: their own
     CUSTOM uploads + all OFFICIAL skills. Newest first.
 
     SYSTEM skills are agent-only and never returned here.
+
+    ``display_name`` is resolved for the ``locale`` query param (the frontend
+    proxy forwards the app UI language): an OFFICIAL skill with a
+    ``display_name_i18n`` map returns its localized name, everything else the
+    stored default. The i18n map itself is never exposed.
 
     The ``enabled`` field in the response is the **effective** state
     for this user: a ``user_skill_preference`` row overrides
@@ -113,6 +133,7 @@ async def list_skills(
     OFFICIAL skills the user has toggled (CUSTOM uses ``skill.enabled``
     directly, owner-mutated).
     """
+    resolved_locale = normalize_locale(locale)
     stmt = (
         select(Skill, UserSkillPreference.enabled.label("preference_enabled"))
         .outerjoin(
@@ -132,6 +153,9 @@ async def list_skills(
     responses: list[SkillResponse] = []
     for skill, preference_enabled in result.all():
         response = SkillResponse.model_validate(skill)
+        response.display_name = resolve_display_name(
+            skill.display_name, skill.display_name_i18n, resolved_locale
+        )
         if preference_enabled is not None:
             response.enabled = preference_enabled
         responses.append(response)
@@ -187,6 +211,11 @@ async def update_skill(
         for field, value in body.model_dump(exclude_unset=True).items()
         if value is not None
     }
+    # An explicit rename must win over a bundle-shipped locale map — the
+    # list endpoint resolves ``display_name_i18n`` first, so leaving a
+    # stale map in place would silently shadow the edit.
+    if "display_name" in updates:
+        updates["display_name_i18n"] = None
     if updates:
         await db.execute(
             sql_update(Skill).where(Skill.id == skill.id).values(**updates)

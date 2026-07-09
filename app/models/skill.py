@@ -32,6 +32,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -65,7 +66,20 @@ class Skill(Base):
         server_default=text("'CUSTOM'"),
     )
     name: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Canonical display name + the API fallback (CUSTOM skills, and OFFICIAL
+    # skills with no translation for the request locale).
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Optional per-locale overrides ``{locale: name}``, populated when the
+    # bundle's SKILL.md ships a ``metadata.display_name`` map (the platform
+    # catalog's localization path; a CUSTOM bundle may carry one too). NULL
+    # otherwise. The API resolves it against the request locale (see
+    # ``skill_i18n``); a PATCH rename clears it so explicit edits win.
+    # ``none_as_null`` so a Python ``None`` persists as SQL ``NULL`` (the
+    # "no map" state) instead of a JSONB ``'null'`` literal, keeping
+    # ``IS NULL`` filters honest.
+    display_name_i18n: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True,
+    )
     description: Mapped[str] = mapped_column(Text, nullable=False)
     bundle_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     bundle_size: Mapped[int] = mapped_column(BigInteger, nullable=False)

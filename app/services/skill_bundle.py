@@ -27,6 +27,9 @@ import io
 import re
 import zipfile
 from dataclasses import dataclass
+from typing import Any
+
+from app.services.skill_i18n import parse_display_name
 
 # Bounds the ``---`` … ``---`` frontmatter block; the body between the
 # fences is parsed with ``yaml.safe_load`` (see ``_split_frontmatter``).
@@ -83,6 +86,8 @@ class InvalidSkillBundleError(ValueError):
 class ParsedSkill:
     """Metadata extracted from a validated bundle's ``SKILL.md``."""
     name: str
+    display_name: str
+    display_name_i18n: dict[str, str] | None
     description: str
 
 
@@ -148,7 +153,13 @@ def parse_bundle(data: bytes) -> ParsedSkill:
         meta.get("description") or _first_nonempty_line(body) or name,
         _MAX_DESCRIPTION_CHARS,
     )
-    return ParsedSkill(name=name, description=description)
+    display_name, display_name_i18n = _extract_display_name(meta, name)
+    return ParsedSkill(
+        name=name,
+        display_name=display_name,
+        display_name_i18n=display_name_i18n,
+        description=description,
+    )
 
 
 def normalize_bundle(data: bytes) -> bytes | None:
@@ -224,7 +235,13 @@ def parse_skill_md(data: bytes) -> ParsedSkill:
         meta.get("description") or _first_nonempty_line(body) or name,
         _MAX_DESCRIPTION_CHARS,
     )
-    return ParsedSkill(name=name, description=description)
+    display_name, display_name_i18n = _extract_display_name(meta, name)
+    return ParsedSkill(
+        name=name,
+        display_name=display_name,
+        display_name_i18n=display_name_i18n,
+        description=description,
+    )
 
 
 def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
@@ -340,7 +357,7 @@ def _locate_skill_md(zf: zipfile.ZipFile) -> str:
     )
 
 
-def _split_frontmatter(content: str) -> tuple[dict[str, str], str]:
+def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Parse YAML frontmatter between ``---`` fences.
 
     Uses ``yaml.safe_load`` to handle multiline scalars (``>-``, ``|``,
@@ -357,8 +374,35 @@ def _split_frontmatter(content: str) -> tuple[dict[str, str], str]:
         raw = None
     if not isinstance(raw, dict):
         return {}, content[match.end():]
-    meta = {str(k): str(v) for k, v in raw.items() if v is not None}
+    # Everything is coerced to ``str`` (the common case: name / description,
+    # which callers treat as strings) — EXCEPT the Agent Skills spec's
+    # ``metadata`` block, kept structured so callers can read author-defined
+    # fields like ``metadata.display_name`` instead of a stringified dict.
+    # Scoping the exception to ``metadata`` keeps a malformed scalar field
+    # (e.g. ``name:`` given an object) a clean validation reject, not a crash.
+    meta: dict[str, Any] = {}
+    for k, v in raw.items():
+        if v is None:
+            continue
+        key = str(k)
+        meta[key] = v if key == "metadata" and isinstance(v, dict) else str(v)
     return meta, content[match.end():]
+
+
+def _extract_display_name(
+    meta: dict[str, Any], name: str
+) -> tuple[str, dict[str, str] | None]:
+    """Read ``metadata.display_name`` (string or ``{locale: name}`` map) into a
+    ``(default, per-locale map)`` pair.
+
+    The Agent Skills spec reserves the ``metadata`` block for author-defined
+    fields, so a bundle can ship a localized title while ``name`` stays an
+    ASCII slug. Shape handling lives in :mod:`app.services.skill_i18n`; falls
+    back to ``name`` when absent or unusable.
+    """
+    metadata = meta.get("metadata")
+    raw = metadata.get("display_name") if isinstance(metadata, dict) else None
+    return parse_display_name(raw, name)
 
 
 def _first_nonempty_line(body: str) -> str:

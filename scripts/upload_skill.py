@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
@@ -70,6 +71,9 @@ def main() -> None:
         sys.exit(f"Invalid skill bundle: {e}")
 
     print(f"  name: {parsed.name}")
+    print(f"  display_name: {parsed.display_name}")
+    if parsed.display_name_i18n:
+        print(f"  display_name_i18n: {parsed.display_name_i18n}")
     print(f"  description: {parsed.description}")
 
     file_key = f"{args.origin.lower()}/{parsed.name}/{uuid.uuid4()}/{zip_path.name}"
@@ -85,20 +89,23 @@ def main() -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO skill (user_id, origin, name, display_name, description,
+                INSERT INTO skill (user_id, origin, name, display_name,
+                                   display_name_i18n, description,
                                    bundle_key, bundle_size, enabled)
-                VALUES (NULL, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (NULL, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (name) WHERE user_id IS NULL
                 DO UPDATE SET origin = EXCLUDED.origin,
                               description = EXCLUDED.description,
                               display_name = EXCLUDED.display_name,
+                              display_name_i18n = EXCLUDED.display_name_i18n,
                               bundle_key = EXCLUDED.bundle_key,
                               bundle_size = EXCLUDED.bundle_size,
                               enabled = EXCLUDED.enabled,
                               updated_at = now()
                 """,
-                (args.origin, parsed.name, parsed.name, parsed.description,
-                 file_key, len(data), enabled),
+                (args.origin, parsed.name, parsed.display_name,
+                 Jsonb(parsed.display_name_i18n) if parsed.display_name_i18n else None,
+                 parsed.description, file_key, len(data), enabled),
             )
         conn.commit()
 
