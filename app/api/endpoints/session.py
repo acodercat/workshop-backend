@@ -237,7 +237,7 @@ async def list_sessions(
 # dispatching to a session handler) — but keeping the literal route first
 # is the explicit, order-independent guarantee.
 @router.post("/sessions/upload-url")
-@limiter.limit("60/minute")
+@limiter.limit(settings.rate_limit_upload_url)
 async def create_session_upload_url(
     request: Request,
     body: UploadUrlRequest,

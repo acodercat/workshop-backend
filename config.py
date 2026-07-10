@@ -68,6 +68,18 @@ class Settings(BaseSettings):
     rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
     rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
+    rate_limit_upload_url: str = Field(
+        default="300/minute",
+        description=(
+            "Per-user presigned upload-URL mint rate. The composer mints one "
+            "URL per attached file, in parallel, up to the per-message file "
+            "cap — so this must sit comfortably above ``max_message_files`` to "
+            "leave headroom for a user attaching a full batch (and re-adding / "
+            "retrying) within one window. OSS storage abuse is gated by the "
+            "per-user size/count quota (``_enforce_session_file_quota``), not "
+            "by this request-rate limit."
+        ),
+    )
     max_concurrent_running_tasks: int = Field(
         default=10, ge=1,
         description="Max simultaneously RUNNING tasks (sessions) per user; a new turn past this is rejected (429).",
@@ -264,7 +276,7 @@ class Settings(BaseSettings):
         description="Per-file upload size cap (bytes)",
     )
     max_session_files_bytes_per_user: int = Field(
-        default=100 * 1024 * 1024 * 1024,
+        default=1000 * 1024 * 1024 * 1024,
         description=(
             "Per-user total-size cap (bytes) for UPLOAD-origin session files "
             "across all sessions. The primary upload gate — tracks OSS storage "
@@ -273,7 +285,7 @@ class Settings(BaseSettings):
         ),
     )
     max_session_files_per_user: int = Field(
-        default=50000,
+        default=500000,
         description=(
             "Backstop cap on the COUNT of UPLOAD-origin session-file rows per "
             "user, guarding against many-tiny-files row explosion that the "
@@ -307,8 +319,8 @@ class Settings(BaseSettings):
     # ``credit_rates`` below — ``create_session`` re-checks the whitelist.
     session_tier_models: dict[str, str] = Field(
         default_factory=lambda: {
-            "FAST": "kimi-k2-code",
-            "STANDARD": "kimi-k2",
+            "FAST": "glm-5.2",
+            "STANDARD": "glm-5.2",
             "ADVANCED": "glm-5.2",
         },
         description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
@@ -367,7 +379,7 @@ class Settings(BaseSettings):
             # tokens (≈$0.14/$0.28 per M), no promo expiry. Cheaper than
             # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
             "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 2000},
-            "glm-5.2":           {"in_per_1k_usd": 0.00020, "out_per_1k_usd": 0.00080, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 425000},
+            "glm-5.2":           {"in_per_1k_usd": 0.00070, "out_per_1k_usd": 0.00080, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 425000},
             # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
             # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
             # ¥0.42/M not separately tracked here; settle uses uncached rate.
@@ -421,11 +433,11 @@ class Settings(BaseSettings):
         description="Run the mid-turn budget enforcer in the background process.",
     )
     budget_enforcer_interval_seconds: int = Field(
-        default=15, gt=0,
+        default=5, gt=0,
         description="Seconds between budget-enforcer ticks. With the worker's 20s heartbeat, worst-case overrun detection latency is roughly one heartbeat + one tick.",
     )
     budget_enforcer_buffer_credits: int = Field(
-        default=0, ge=0,
+        default=80, ge=0,
         description="Stop turns once the user's projected post-settle balance falls to this many credits. 0 = stop at exactly zero, tolerating one detection window of overshoot (Manus-style).",
     )
     # Auto-grant on registration. 500 credits at the post-redenomination
