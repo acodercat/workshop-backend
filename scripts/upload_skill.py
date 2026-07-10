@@ -6,6 +6,17 @@ inserts a platform ``skill`` row (``user_id=NULL``) with the chosen
 ``origin`` (``SYSTEM`` by default, ``--origin OFFICIAL`` for opt-in
 skills).
 
+``enabled`` is derived from the origin. SYSTEM skills land enabled —
+they are agent-only and reach the worker through the same effective-
+enabled read as everything else, so disabled means invisible to the
+agent (``--disabled`` exists for staging a bundle without exposing
+it). OFFICIAL skills always land **disabled**: ``skill.enabled`` is
+the default every user who never touched the toggle falls back to
+(``COALESCE(pref.enabled, skill.enabled)``), and an enabled-by-default
+official skill would push its metadata into every user's every-turn
+LLM context. Users opt in from the skills page — or just pick the
+skill in the composer, which doesn't consult the toggle at all.
+
 Idempotent by name: if a platform skill with the same name already
 exists, the row is updated (new bundle_key + description + origin)
 rather than duplicated.
@@ -46,7 +57,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--disabled", action="store_true",
-        help="Insert with enabled=false (skill exists in DB but not offered to users).",
+        help="SYSTEM only: insert with enabled=false (bundle exists in DB "
+             "but stays invisible to the agent). OFFICIAL is always "
+             "disabled — the toggle default is per-user opt-in.",
     )
     args = parser.parse_args()
 
@@ -83,7 +96,7 @@ def main() -> None:
     # Upsert DB row. psycopg uses the sync ``postgresql://`` URL, so
     # strip the SQLAlchemy ``+asyncpg`` driver suffix that the app's
     # async session uses.
-    enabled = not args.disabled
+    enabled = args.origin == "SYSTEM" and not args.disabled
     db_uri = re.sub(r"postgresql\+\w+", "postgresql", settings.db_uri)
     with psycopg.connect(db_uri) as conn:
         with conn.cursor() as cur:

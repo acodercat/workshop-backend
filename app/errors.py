@@ -206,6 +206,20 @@ class SkillQuotaExceededError(AppError):
     error_type = "skill_quota_exceeded"
 
 
+class SkillEnableQuotaExceededError(AppError):
+    """User already has the maximum allowed number of skills *enabled*.
+
+    Distinct from :class:`SkillQuotaExceededError` (upload/storage cap):
+    enabled skills cost LLM context every turn, so simultaneously
+    enabled CUSTOM + OFFICIAL skills are capped separately. Disabling
+    one (or just picking the skill per-turn in the composer, which is
+    uncapped) frees a slot.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "skill_enable_quota_exceeded"
+
+
 class FileSizeQuotaExceededError(AppError):
     """The upload would push the user past their per-user total-size quota
     (``max_session_files_bytes_per_user``). The individual file is fine on

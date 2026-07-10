@@ -40,6 +40,7 @@ from app.schemas.file import DownloadUrlResponse
 from app.schemas.skill import SkillResponse, SkillUpdate
 from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
+from app.services.skill_enablement import ensure_enable_capacity
 from app.services.skill_i18n import (
     DEFAULT_LOCALE,
     normalize_locale,
@@ -181,10 +182,20 @@ async def update_skill(
       need to mutate the shared row.
     - **CUSTOM not owned / SYSTEM** — 404 via :func:`_get_visible_skill`.
 
+    Enabling is capped at ``skill_enablement.MAX_ENABLED_SKILLS``
+    simultaneously enabled skills (403 ``skill_enable_quota_exceeded``).
     The bundle itself is immutable on every path — re-upload for content
     changes.
     """
     skill = await _get_visible_skill(db, skill_id, current_user.id)
+
+    # Enabling costs an ambient-context slot (the skill's metadata rides
+    # in every turn); cap simultaneously enabled skills. Excluding this
+    # skill from the count keeps re-enabling an already-on skill a no-op.
+    if body.enabled:
+        await ensure_enable_capacity(
+            db, current_user.id, exclude_skill_id=skill.id,
+        )
 
     if skill.origin == SkillOrigin.OFFICIAL:
         if body.display_name is not None or body.description is not None:

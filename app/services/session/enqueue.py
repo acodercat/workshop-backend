@@ -36,7 +36,7 @@ import logging
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from sqlalchemy import and_, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.message import Message, MessageRole
@@ -45,7 +45,6 @@ from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.models.skill import Skill, SkillOrigin
-from app.models.user_skill_preference import UserSkillPreference
 from app.schemas.session import FileRef
 from app.services import credits, file_storage
 from app.services.redis import (
@@ -147,11 +146,11 @@ async def queue_user_message(
     else:
         await credits.settle_open_for_user(db, session.user_id)
 
-    # Reject ``skills`` the user can't actually invoke — visible to
-    # them AND effective-enabled. Without this check, a client could
-    # POST ``skills: ["some-disabled-name"]`` and the worker's
-    # ``extra_names`` bypass would happily load it, defeating the
-    # toggle's "off means off" semantics.
+    # Drop ``skills`` the user can't see (someone else's CUSTOM, or a
+    # hidden SYSTEM row). Visibility is the only gate here: an explicit
+    # per-turn pick is its own authorization, so the enable toggle —
+    # which governs ambient auto-discovery, not manual selection — is
+    # deliberately not consulted.
     accepted_skills = await _filter_invokable_skills(
         db, session.user_id, skills or [],
     )
@@ -392,10 +391,12 @@ async def _filter_invokable_skills(
     ``bundle_key`` pins the bytes; ``name`` rides along for log and
     LLM-reminder display.
 
-    A skill is invokable when it's visible to the user (their own
-    CUSTOM, or any OFFICIAL skill) AND its effective enabled state — the
-    per-user preference override taking precedence over the skill's
-    default — is true. Unknown / hidden / disabled names are silently
+    A skill is invokable when it's visible to the user: their own
+    CUSTOM, or any OFFICIAL skill. The enable toggle is deliberately
+    **not** checked — it governs ambient auto-discovery (whether the
+    skill's metadata rides in the LLM context every turn, see the
+    worker's ``list_enabled``), while an explicit composer pick is its
+    own per-turn authorization. Unknown / hidden names are silently
     dropped rather than raising; the user's intent (a free-text
     composer prompt) is still useful even if one chip was stale, and
     surfacing a 4xx mid-conversation would be a worse UX than gracefully
@@ -412,25 +413,9 @@ async def _filter_invokable_skills(
     # the snapshot list and the LLM reminder.
     requested_unique = list(dict.fromkeys(requested))
 
-    # Effective enabled = ``COALESCE(pref.enabled, skill.enabled)`` —
-    # mirrors the same expression used by the worker repo and the
-    # ``GET /skills`` endpoint so all three reads of "is this skill
-    # active for this user" agree.
-    pref_enabled = UserSkillPreference.enabled
-    stmt = (
-        select(Skill.id, Skill.name, Skill.bundle_key, Skill.user_id)
-        .outerjoin(
-            UserSkillPreference,
-            and_(
-                UserSkillPreference.skill_id == Skill.id,
-                UserSkillPreference.user_id == user_id,
-            ),
-        )
-        .where(
-            Skill.name.in_(requested_unique),
-            (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.OFFICIAL),
-            (pref_enabled.is_(True)) | (pref_enabled.is_(None) & Skill.enabled),
-        )
+    stmt = select(Skill.id, Skill.name, Skill.bundle_key, Skill.user_id).where(
+        Skill.name.in_(requested_unique),
+        (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.OFFICIAL),
     )
     result = await db.execute(stmt)
     # CUSTOM-wins: keep the row owned by this user when both a CUSTOM
