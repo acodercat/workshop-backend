@@ -37,6 +37,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
     Index,
@@ -146,6 +147,27 @@ class CommissionLedger(Base):
             "user_id",
             "available_at",
             postgresql_where=text("kind = 'COMMISSION'"),
+        ),
+        # DB backstop for the per-kind sign conventions documented on
+        # :class:`CommissionLedgerKind` — a stray manual ``psql`` UPDATE
+        # or buggy operator script can't silently corrupt a cash-payable
+        # balance. Enforced in Python by the ``_internal`` funnel; this
+        # mirrors ``ck_credit_ledger_amount_sign`` (migration
+        # ``b2d6f1a8c4e3``).
+        CheckConstraint(
+            "(kind = 'COMMISSION'      AND amount_fen > 0)  OR "
+            "(kind = 'WITHDRAW'        AND amount_fen < 0)  OR "
+            "(kind = 'WITHDRAW_REFUND' AND amount_fen > 0)  OR "
+            "(kind = 'CONVERT'         AND amount_fen < 0)  OR "
+            "(kind = 'CLAWBACK'        AND amount_fen < 0)  OR "
+            "(kind = 'ADJUST'          AND amount_fen <> 0)",
+            name="ck_commission_ledger_amount_sign",
+        ),
+        # The settlement hold rides on ``COMMISSION`` rows and only on
+        # them (see the module docstring); same migration.
+        CheckConstraint(
+            "(kind = 'COMMISSION') = (available_at IS NOT NULL)",
+            name="ck_commission_ledger_kind_available_at",
         ),
     )
 

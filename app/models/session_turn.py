@@ -234,6 +234,18 @@ class SessionTurn(Base):
             postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
         ),
         Index("ix_session_turn_session_id", "session_id"),
+        # DB backstop for "at most one non-terminal turn per session" —
+        # the invariant enqueue enforces via the session row lock (409 on
+        # ``status == RUNNING``) and both recovery paths rely on when they
+        # flip by ``session_id`` alone. A future writer that skips the
+        # lock discipline fails here instead of silently double-queueing.
+        # Mirrors ``uq_credit_reservation_open_session``.
+        Index(
+            "uq_session_turn_open_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
+        ),
     )
 
     def __repr__(self) -> str:

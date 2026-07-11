@@ -20,9 +20,9 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    BigInteger,
     Enum as SAEnum,
     ForeignKey,
-    Index,
     Integer,
     Text,
     TIMESTAMP,
@@ -45,8 +45,10 @@ class MessageFeedback(Base):
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True
     )
+    # BigInteger to match ``message.id`` (widened together in migration
+    # ``d5b1f7c3a9e2``).
     message_id: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("message.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -56,7 +58,13 @@ class MessageFeedback(Base):
         nullable=False,
     )
     rating: Mapped[FeedbackRating] = mapped_column(
-        SAEnum(FeedbackRating, name="message_feedback_rating"),
+        SAEnum(
+            FeedbackRating,
+            name="message_feedback_rating",
+            # Persist by value, matching the schema-wide native-enum
+            # convention (names == values, so purely convention alignment).
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
         nullable=False,
     )
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -71,14 +79,14 @@ class MessageFeedback(Base):
     )
 
     __table_args__ = (
+        # ``message_id`` leads, so this constraint's backing index also
+        # serves the FK CASCADE scan from ``message`` and every
+        # message-scoped read — no separate single-column index needed
+        # (the redundant ``ix_message_feedback_message_id`` was dropped
+        # in migration ``e1c5a9d7b3f4``).
         UniqueConstraint(
             "message_id", "user_id", name="uq_message_feedback_user"
         ),
-        # Postgres doesn't auto-index FK columns; without this CASCADE
-        # delete on the parent message would seq-scan ``message_feedback``.
-        # The composite UNIQUE above doubles as the (message_id, user_id)
-        # read-path index.
-        Index("ix_message_feedback_message_id", "message_id"),
     )
 
     def __repr__(self) -> str:

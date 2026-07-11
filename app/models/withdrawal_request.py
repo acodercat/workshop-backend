@@ -87,12 +87,15 @@ class WithdrawalRequest(Base):
     payout_account: Mapped[str] = mapped_column(String(128), nullable=False)
     payout_name: Mapped[str] = mapped_column(String(64), nullable=False)
     # Back-link to the ``WITHDRAW`` ledger row that debited the funds,
-    # set atomically with the PENDING insert. ``RESTRICT`` because the
+    # set atomically with the PENDING insert. NOT NULL (migration
+    # ``e1c5a9d7b3f4``) makes that atomicity a DB contract: a request
+    # whose funds were never held — the double-spend the up-front debit
+    # exists to prevent — can't be inserted. ``RESTRICT`` because the
     # ledger is append-only (a row is never deleted, so this never dangles).
-    ledger_id: Mapped[int | None] = mapped_column(
+    ledger_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("commission_ledger.id", ondelete="RESTRICT"),
-        nullable=True,
+        nullable=False,
     )
     # The operator's transfer reference, filled when paid. NULL until PAID.
     payout_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)

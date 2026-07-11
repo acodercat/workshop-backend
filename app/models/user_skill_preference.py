@@ -18,6 +18,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     ForeignKey,
+    Index,
     Integer,
     TIMESTAMP,
 )
@@ -47,6 +48,14 @@ class UserSkillPreference(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False,
         server_default=func.now(), onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        # The composite PK leads with ``user_id``, so it can't serve the
+        # ``ON DELETE CASCADE`` from ``skill`` (deleting a CUSTOM skill is
+        # a real API path). Postgres doesn't auto-index FK columns —
+        # without this the cascade seq-scans the table.
+        Index("ix_user_skill_preference_skill_id", "skill_id"),
     )
 
     def __repr__(self) -> str:

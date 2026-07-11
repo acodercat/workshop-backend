@@ -37,6 +37,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
     Index,
@@ -155,6 +156,25 @@ class CreditLedger(Base):
             "ix_credit_ledger_reservation_id",
             "reservation_id",
             postgresql_where=text("reservation_id IS NOT NULL"),
+        ),
+        # DB backstop for the per-kind sign conventions (enforced in
+        # Python by the ``_internal`` funnel). Text matches the live
+        # constraint exactly — created in ``f5d2c8a1e9b4``, extended for
+        # REFERRAL in ``d8b3f6a1c402`` and CHECKIN in ``c1e5b8a3d7f2``.
+        # SETTLE is deliberately unconstrained: two paired rows per
+        # settle (``+reserved`` reversal, ``-actual`` debit), and actual
+        # can be 0 for a zero-token turn. Declared here (not only in the
+        # migrations) so a ``create_all``-built DB carries the same
+        # guardrails and the model documents its own contract.
+        CheckConstraint(
+            "(kind = 'TOPUP'    AND amount > 0)  OR "
+            "(kind = 'RESERVE'  AND amount < 0)  OR "
+            "(kind = 'REFUND'   AND amount > 0)  OR "
+            "(kind = 'ADJUST'   AND amount <> 0) OR "
+            "(kind = 'REFERRAL' AND amount > 0)  OR "
+            "(kind = 'CHECKIN'  AND amount > 0)  OR "
+            "(kind = 'SETTLE')",
+            name="ck_credit_ledger_amount_sign",
         ),
     )
 

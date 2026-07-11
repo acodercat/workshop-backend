@@ -67,24 +67,32 @@ async def request_withdrawal(
             "Withdrawal exceeds the withdrawable commission balance"
         )
 
-    request = WithdrawalRequest(
-        user_id=user_id,
-        amount_fen=amount_fen,
-        status=WithdrawalStatus.PENDING,
-        payout_account=payout_account,
-        payout_name=payout_name,
-    )
-    db.add(request)
-    await db.flush()  # populate request.id for the ledger back-reference
-
+    # The request id is generated client-side (rather than letting the
+    # column default fill it at flush) so the ledger row's back-reference
+    # can be built *before* the request is inserted. Ledger first, then
+    # the request already carrying ``ledger_id`` — the row is never in
+    # the DB without its debit, which is what lets ``ledger_id`` be
+    # NOT NULL (migration ``e1c5a9d7b3f4``). Same transaction either way;
+    # only the intra-tx insert order changed.
+    request_id = uuid.uuid4()
     entry = await insert_ledger_and_bump_balance(
         db,
         user_id=user_id,
         amount_fen=-amount_fen,
         kind=CommissionLedgerKind.WITHDRAW,
-        reference={"withdrawal_id": str(request.id)},
+        reference={"withdrawal_id": str(request_id)},
     )
-    request.ledger_id = entry.id
+    request = WithdrawalRequest(
+        id=request_id,
+        user_id=user_id,
+        amount_fen=amount_fen,
+        status=WithdrawalStatus.PENDING,
+        payout_account=payout_account,
+        payout_name=payout_name,
+        ledger_id=entry.id,
+    )
+    db.add(request)
+    await db.flush()
     return request
 
 

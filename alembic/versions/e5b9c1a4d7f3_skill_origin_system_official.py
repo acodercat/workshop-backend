@@ -14,8 +14,14 @@ the same migration, so we swap the enum type (matching
 platform origins, and the platform-name partial unique index is renamed
 off the old ``builtin`` label.
 
-Data-safe and reversible: downgrade collapses SYSTEM/OFFICIAL back to
-BUILTIN (both are ``user_id IS NULL``, so the legacy constraint holds).
+Downgrade is schema-safe but **lossy on a round-trip**: it collapses
+SYSTEM and OFFICIAL back to a single BUILTIN (both are ``user_id IS
+NULL``, so the legacy constraint holds), and a subsequent re-upgrade
+maps every BUILTIN row to SYSTEM — previously-OFFICIAL skills would
+come back hidden from all user-facing surfaces and treated as always-on
+agent skills. If a downgrade is ever actually run, re-tag the OFFICIAL
+rows afterwards (``scripts/upload_skill.py`` /
+``scripts/backfill_official_skill_i18n.py`` know which those are).
 
 Revision ID: e5b9c1a4d7f3
 Revises: a9d3e7f5c2b1

@@ -76,10 +76,16 @@ class SessionFile(Base):
     # Denormalized owner, copied from ``session.user_id`` by the producer
     # (immutable relationship ⇒ never stale). Nullable to mirror it —
     # anonymous sessions carry no owner. ``ON DELETE CASCADE`` matches the
-    # session-ownership family. Lets the per-user file reads (the library,
-    # the upload quota counts) scan by owner via
-    # ``ix_session_files_user_id_created_at`` instead of driving from
-    # ``session`` — a read path adopts it by filtering this column.
+    # session-ownership family.
+    #
+    # Column + ``ix_session_files_user_id_created_at`` are **future-only**
+    # today: no read path filters it. The existing per-user reads (the
+    # file library, the upload quota count) can't simply switch — they
+    # join ``session`` anyway for ``deleted_at IS NULL`` (a soft-deleted
+    # session's files must read as gone) and the library's title search,
+    # and pre-backfill rows may carry NULL here. A future adopter (e.g.
+    # an admin all-files-by-user view) must either not care about
+    # soft-delete or keep the join alongside this filter.
     user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )

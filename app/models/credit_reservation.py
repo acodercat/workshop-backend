@@ -23,6 +23,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
     Index,
@@ -117,6 +118,16 @@ class CreditReservation(Base):
             postgresql_where=text(
                 "state = 'OPEN' AND session_id IS NOT NULL"
             ),
+        ),
+        # ``settled_at`` coherence with ``state`` — both terminal
+        # transitions stamp ``settled_at = now()``. Text matches the live
+        # constraint from ``f5d2c8a1e9b4``; declared here so a
+        # ``create_all``-built DB carries the same guardrail and the
+        # model documents its own contract.
+        CheckConstraint(
+            "(state = 'OPEN' AND settled_at IS NULL) OR "
+            "(state IN ('SETTLED', 'CANCELLED') AND settled_at IS NOT NULL)",
+            name="ck_credit_reservation_state_settled_at",
         ),
     )
 
