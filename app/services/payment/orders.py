@@ -164,11 +164,26 @@ async def get_order(
 ) -> PaymentOrder:
     """Fetch a caller-owned order, lazily expiring it if its TTL elapsed
     while still PENDING. Raises :class:`OrderNotFoundError` (folds
-    not-owned into not-found). Caller commits to persist a lazy expiry."""
+    not-owned into not-found). Caller commits to persist a lazy expiry.
+
+    The row is taken ``FOR UPDATE`` — the same lock the webhook and the
+    reconciler hold — so the PENDING → EXPIRED flip is decided against the
+    committed state, never a stale read. Without it a poll that raced a
+    paying customer could read PENDING, then commit EXPIRED *over* a PAID
+    the webhook wrote in the gap, dropping the order out of recharge
+    history and permanently skipping the referrer's commission (accrual
+    re-reads the order and only fires on PAID). Under the lock the two
+    serialize: if the success notification wins, the poll re-reads PAID
+    and skips expiry; if the poll wins, it expires and a genuine later
+    notification still resurrects the order to PAID (``_mark_paid`` is
+    status-unconditional). Either way an order that was actually paid
+    never ends EXPIRED."""
     order = await db.scalar(
-        select(PaymentOrder).where(
+        select(PaymentOrder)
+        .where(
             PaymentOrder.id == order_id, PaymentOrder.user_id == user_id,
         )
+        .with_for_update()
     )
     if order is None:
         raise OrderNotFoundError(f"Order {order_id} not found")

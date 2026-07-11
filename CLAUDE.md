@@ -140,7 +140,7 @@ Startup uses `_ping_db` / `_ping_redis` with exponential backoff (`startup_probe
 ### Enqueue ordering (`app/services/session/enqueue.py`)
 
 `queue_user_message` has a load-bearing sequence:
-1. `SELECT ... FOR UPDATE` the session row (`deleted_at IS NULL` in the predicate). Reject 409 (`GenerationInProgressError`) if `status == RUNNING`; raise `SessionGoneError` → 404 if the row is gone (a `delete_session` committed in the window). The lock serializes concurrent enqueues **and** `delete_session` (which takes the same lock before tombstoning).
+1. `SELECT ... FOR UPDATE` the session row (`deleted_at IS NULL` in the predicate). Reject 409 (`GenerationInProgressError`) if `status == RUNNING`; raise `SessionGoneError` → 404 if the row is gone (a `delete_session` committed in the window). The lock serializes concurrent enqueues **and** `delete_session` (which takes the same lock before tombstoning). If the send carries `agent_type` (the one-way LITE→FULL mode upgrade — the composer's mode pick is local until the user sends), apply it here under the lock so the flip commits atomically with the turn; FULL→LITE rejects 400 (`AgentTypeDowngradeError`). This is the only `agent_type` mutation path.
 2. Lazy-sweep this user's open credit reservations into terminal state.
 3. INSERT the `session_turn` (status `PENDING`) and flush for its auto-generated `turn_id`.
 4. Reserve credits — raises `InsufficientCreditsError` → 402 if the estimate would push the balance negative; the whole tx rolls back (no message, no turn).
@@ -168,9 +168,9 @@ slowapi, **keyed on the authenticated user when present, else the client IP** (`
 
 A session owner mints a share record with a password. Recipients hit a public unlock endpoint that swaps the password for a short-TTL **share-view token** (`share_view_token_expire_minutes`, default 15) — a JWT bound to that share, distinct from a normal user access token. The session's blocks are served read-only against that token. Short TTL because the recipient is actively viewing; re-prompting after idle limits the blast radius of a leaked URL.
 
-### Feedback (`app/api/endpoints/feedback.py`)
+### Feedback (`app/api/endpoints/feedback.py`, `session.py`)
 
-Two tables, two shapes. `user_feedback` is freeform product feedback. `message_feedback` is per-assistant-message thumbs/comment with a unique `(user_id, message_id)` constraint enforced via `IntegrityError → 409` in the handler.
+Two tables, two shapes. `user_feedback` is freeform product feedback (`POST /feedback` in `feedback.py`). `message_feedback` is per-assistant-message thumbs/comment with a unique `(user_id, message_id)` constraint enforced via `IntegrityError → 409` — its endpoints live in `session.py` (as `/sessions/{id}/messages/...` sub-resources), not `feedback.py`.
 
 ### File storage (`app/services/file_storage.py`)
 

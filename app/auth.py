@@ -63,9 +63,10 @@ async def authenticate_user(
     Status checking is left to the calling endpoint via
     :func:`assert_user_active` — ``DISABLED`` / ``SUSPENDED`` collapse
     to a generic 401 indistinguishable from wrong creds so
-    admin-initiated lockouts don't leak account state. Existing JWTs
-    aren't revoked by a status change; bump ``token_version``
-    separately if you need immediate force-logout.
+    admin-initiated lockouts don't leak account state. A status flip
+    also blocks any *existing* JWT at its next request (see the status
+    gate in :func:`_decode_and_get_user`); ``token_version`` is still the
+    lever for force-logout on a password / email change.
     """
     user = await get_user_by_username(db, username)
     if user is None or not await verify_password(password, user.password_hash):
@@ -193,6 +194,13 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
 
     user = await get_user_by_username(db, username=username)
     if user is None or user.token_version != token_version:
+        raise credentials_exception
+    if user.status is not models.UserStatus.ACTIVE:
+        # A flip to DISABLED / SUSPENDED takes effect on the very next
+        # request — no ``token_version`` bump required. The row is already
+        # loaded, so this is a free in-memory check. Same opaque 401 as a
+        # bad token so a lockout never leaks account state (mirrors
+        # :func:`assert_user_active`).
         raise credentials_exception
     return user
 

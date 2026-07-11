@@ -17,10 +17,10 @@ catalog. ``message`` is an English developer-facing fallback —
 terse, declarative, no "please ..." imperatives — shown only when
 the client has no localized override.
 
-All subclasses today are auth-flow errors; the module is at
-``app/errors.py`` (not ``app/services/auth/errors.py``) so future
-non-auth domains (sessions, shares, files) can add typed errors here
-without a circular dependency.
+Subclasses span every domain — auth, credits, payments, commission,
+skills, check-in, sessions. The module lives at ``app/errors.py`` (not
+under any one domain package) precisely so any of them can add typed
+errors here without a circular dependency.
 
 To add a new error kind:
 
@@ -328,3 +328,13 @@ class AlreadyCheckedInError(AppError):
 
     status_code = status.HTTP_409_CONFLICT
     error_type = "already_checked_in"
+
+
+class AgentTypeDowngradeError(AppError):
+    """A message send carried a FULL → LITE ``agent_type``. Only the
+    LITE → FULL upgrade exists (a downgrade would strand the session's
+    sandbox and files); the UI never offers it, so this is a client
+    programming error — 400."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "agent_type_downgrade"

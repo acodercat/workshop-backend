@@ -15,6 +15,8 @@ asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 from app.common.event_types import EventType
 from app.services.session import streaming
 from app.services.session.streaming import (
@@ -22,6 +24,17 @@ from app.services.session.streaming import (
     _Liveness,
     _safe_cursor,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_turn_filter(monkeypatch):
+    """Default the turn-id filter off (no DB) so the existing stream tests
+    stay offline — they carry no ``turn_id`` on their entries anyway, so
+    ``None`` (filter disabled) is the correct baseline. The turn-filter
+    tests override this with a concrete current turn id."""
+    monkeypatch.setattr(
+        streaming, "_current_turn_id", AsyncMock(return_value=None),
+    )
 
 
 async def _collect(gen, limit: int = 20) -> list[dict]:
@@ -167,6 +180,53 @@ async def test_replay_spans_multiple_pages_in_order(monkeypatch):
     # Each call resumed strictly after the previous page's last entry.
     mins = [c.kwargs["min"] for c in redis.xrange.await_args_list]
     assert mins == ["-", "(2-0", "(4-0"]
+
+
+def test_is_stale_entry_logic():
+    # Mismatch → stale; match → not; missing stamp or unresolved current
+    # turn → never stale (fail-open, so a real event is never dropped).
+    assert streaming._is_stale_entry({"turn_id": "5"}, "6") is True
+    assert streaming._is_stale_entry({"turn_id": "6"}, "6") is False
+    assert streaming._is_stale_entry({}, "6") is False
+    assert streaming._is_stale_entry({"turn_id": "5"}, None) is False
+
+
+async def test_replay_drops_stale_turn_entries(monkeypatch):
+    """A zombie worker (turn 19) leaked events — including a stale terminal —
+    into the stream key the current turn (20) recreated. The stale entries
+    are dropped, the stale ``agent.stopped`` does NOT close the stream, and
+    the internal ``turn_id`` stamp never reaches the client."""
+    monkeypatch.setattr(
+        streaming, "_current_turn_id", AsyncMock(return_value="20"),
+    )
+    redis = AsyncMock()
+    redis.xrange = AsyncMock(side_effect=[[
+        ("1-0", {"type": "agent.message_chunk", "content": "ghost",
+                 "ts": "1", "turn_id": "19"}),
+        ("2-0", {"type": "agent.message_chunk", "content": "real",
+                 "ts": "1", "turn_id": "20"}),
+        ("3-0", {"type": "agent.stopped", "content": "stale",
+                 "ts": "1", "turn_id": "19"}),
+        ("4-0", {"type": "agent.stopped", "content": "done",
+                 "ts": "1", "turn_id": "20"}),
+    ]])
+    monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))
+
+    events = await _collect(streaming.stream_events(redis, "sess-1"))
+
+    contents = [
+        json.loads(e["data"])["content"]
+        for e in events if e["event"] == "agent.message_chunk"
+    ]
+    assert contents == ["real"]  # turn-19 ghost dropped
+    terminals = [e for e in events if e["event"] == EventType.AGENT_STOPPED.value]
+    assert len(terminals) == 1  # stale terminal didn't close us
+    assert json.loads(terminals[0]["data"])["content"] == "done"
+    # The routing stamp is stripped from every forwarded payload.
+    assert all(
+        "turn_id" not in json.loads(e["data"])
+        for e in events if e.get("data")
+    )
 
 
 async def test_replay_terminal_returns_before_paging_on(monkeypatch):

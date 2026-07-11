@@ -68,7 +68,7 @@ async def request_phone_change_code(
     if existing.first() is not None:
         raise PhoneTakenError("Phone already in use")
 
-    await send_phone_change_code(redis, phone=new_phone)
+    await send_phone_change_code(redis, user_id=user.id, phone=new_phone)
 
 
 async def change_phone(
@@ -87,7 +87,9 @@ async def change_phone(
     *current* session is the legitimate user. Bumping ``token_version``
     forces every active session, including this one, to re-login.
     """
-    await verify_phone_change_code(redis, phone=new_phone, code=code)
+    await verify_phone_change_code(
+        redis, user_id=user.id, phone=new_phone, code=code,
+    )
 
     user.phone = new_phone
     revoke_user_tokens(user)

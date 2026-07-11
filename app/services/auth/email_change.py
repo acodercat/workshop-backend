@@ -78,7 +78,9 @@ async def request_email_change_code(
     if existing.first() is not None:
         raise EmailTakenError("Email already in use")
 
-    await send_email_change_code(redis, email=new_email, locale=locale)
+    await send_email_change_code(
+        redis, user_id=user.id, email=new_email, locale=locale,
+    )
 
 
 async def change_email(
@@ -99,7 +101,9 @@ async def change_email(
     forces every active session, including this one, to re-login at
     the next request.
     """
-    await verify_email_change_code(redis, email=new_email, code=code)
+    await verify_email_change_code(
+        redis, user_id=user.id, email=new_email, code=code,
+    )
 
     user.email = new_email
     revoke_user_tokens(user)

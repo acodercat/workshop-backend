@@ -354,6 +354,14 @@ async def settle_open_for_user(
             CreditReservation.user_id == user_id,
             CreditReservation.state == CreditReservationState.OPEN,
         )
+        # Deterministic lock order. Each iteration below takes the
+        # reservation-row ``FOR UPDATE`` then the user-row lock and holds
+        # both to the caller's commit; without a stable order two
+        # concurrent sweeps for the same user (a ``GET /credits`` racing
+        # ``queue_user_message``) could grab the same two reservations in
+        # opposite orders and deadlock. Mirrors ``settle_sweeper``'s
+        # ordered candidate scan.
+        .order_by(CreditReservation.id.asc())
     )
     for reservation_id, turn_id, session_id, session_status in rows.all():
         if session_id is None:

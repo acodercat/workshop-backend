@@ -255,13 +255,15 @@ StreamEvent = (
 
 
 # Header fields stripped from the per-event ``data`` payload sent over SSE.
-# ``type`` is redundant with the SSE ``event:`` line. ``ts`` stays on the
-# wire — it's the worker's emit-time clock (see
-# ``agent_worker/wire/session_events.py``) and the
+# ``type`` is redundant with the SSE ``event:`` line. ``turn_id`` is a
+# backend-only routing stamp — the SSE generator uses it to drop a zombie
+# worker's stale-turn events (see ``streaming._is_stale_entry``); it must
+# not leak to the frontend. ``ts`` stays on the wire — it's the worker's
+# emit-time clock (see ``agent_worker/wire/session_events.py``) and the
 # frontend uses it for elapsed-time displays. Keeping it here instead
 # of deriving from the SSE ``id:`` field avoids coupling the frontend to
 # the Redis Streams entry-id format.
-_INTERNAL_FIELDS = frozenset({"type"})
+_INTERNAL_FIELDS = frozenset({"type", "turn_id"})
 
 
 class SSEMessage(TypedDict, total=False):

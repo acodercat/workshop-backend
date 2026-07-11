@@ -30,9 +30,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["recipes"])
 
 # Per-user cap on CUSTOM recipes — bounds account-level abuse so one
-# account can't flood the picker / table. Higher than the skill cap
-# (20): a recipe is a small text row with no OSS bundle behind it, so
-# the storage budget that bounds skills doesn't apply here.
+# account can't flood the picker / table. Matches the skill *upload*
+# cap (``skill_registration._MAX_SKILLS_PER_USER`` = 100), not the much
+# smaller *enabled* cap (``skill_enablement.MAX_ENABLED_SKILLS`` = 20,
+# which exists to bound ambient LLM context — a concern recipes don't
+# have, since a recipe is picked per-turn, never auto-loaded).
 _MAX_RECIPES_PER_USER = 100
 
 

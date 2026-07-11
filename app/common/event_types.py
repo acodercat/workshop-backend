@@ -41,6 +41,7 @@ class EventType(StrEnum):
     AGENT_TOOL_USE = "agent.tool_use"
     AGENT_TOOL_PROGRESS = "agent.tool_progress"
     AGENT_TOOL_RESULT = "agent.tool_result"
+    AGENT_TODO_UPDATE = "agent.todo_update"
     AGENT_STATUS = "agent.status"
     AGENT_ERROR = "agent.error"
     AGENT_STOPPED = "agent.stopped"

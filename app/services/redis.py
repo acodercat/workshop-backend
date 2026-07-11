@@ -107,17 +107,20 @@ def phone_verify_key(phone: str) -> str:
     return f"{PHONE_VERIFY_PREFIX}:{phone}"
 
 
-def email_change_key(email: str) -> str:
-    """Redis key holding the pending email-change verification state
-    for the *new* address. Lowercased for the same reason as
-    :func:`email_verify_key`."""
-    return f"{EMAIL_CHANGE_PREFIX}:{email.lower()}"
+def email_change_key(user_id: int, email: str) -> str:
+    """Redis key holding the pending email-change verification state for
+    ``user_id`` switching to the *new* address. Bound to the requesting
+    user (not the address alone) so two users targeting the same new
+    address can't consume each other's code. Lowercased for the same
+    reason as :func:`email_verify_key`."""
+    return f"{EMAIL_CHANGE_PREFIX}:{user_id}:{email.lower()}"
 
 
-def phone_change_key(phone: str) -> str:
-    """Redis key holding the pending phone-change verification state
-    for the *new* number."""
-    return f"{PHONE_CHANGE_PREFIX}:{phone}"
+def phone_change_key(user_id: int, phone: str) -> str:
+    """Redis key holding the pending phone-change verification state for
+    ``user_id`` switching to the *new* number. User-bound for the same
+    reason as :func:`email_change_key`."""
+    return f"{PHONE_CHANGE_PREFIX}:{user_id}:{phone}"
 
 
 def cancel_channel(session_id: str) -> str:

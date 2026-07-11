@@ -142,6 +142,19 @@ def test_generate_inline_url_signs_against_custom_domain_when_set(monkeypatch):
     }
 
 
+def test_generate_inline_url_refuses_svg():
+    # An SVG served inline on the OSS document origin is stored XSS (SVG can
+    # carry <script>). The single-chokepoint minter must refuse it before
+    # signing, so neither preview endpoint can mint one.
+    with patch("app.services.file_storage.get_bucket") as get_bucket:
+        with pytest.raises(file_storage.InlinePreviewNotAllowedError):
+            file_storage.generate_inline_url(
+                file_storage.SESSION_FILE_POLICY, "session-files/x/diagram.SVG"
+            )
+    # Rejected before any bucket access — case-insensitive on the extension.
+    get_bucket.assert_not_called()
+
+
 def test_generate_download_url_keeps_attachment_disposition():
     # Guards the distinction from ``generate_inline_url``: the download
     # button must still save-as, never render inline.

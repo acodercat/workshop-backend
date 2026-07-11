@@ -6,7 +6,11 @@ the steps in a specific order:
 1. Lock the session row and reject if a live generation is in progress
    (:class:`GenerationInProgressError`). The lock serialises concurrent
    enqueue requests for the same session so the second one always sees
-   the first's ``running`` status.
+   the first's ``running`` status. Apply the one-way LITE → FULL
+   ``agent_type`` upgrade here when the send carries one — under the
+   same lock, committed atomically with the turn, so the worker's
+   claim (which JOINs ``session.agent_type``) runs this very turn in
+   the upgraded mode.
 2. In one transaction:
    - Lazy-sweep this user's open credit reservations into terminal
       state (settles from durable ``session_turn`` usage, or refunds
@@ -39,9 +43,10 @@ import redis.asyncio as aioredis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import AgentTypeDowngradeError
 from app.models.message import Message, MessageRole
 from app.models.recipe import Recipe, RecipeOrigin
-from app.models.session import Session, SessionStatus
+from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.models.skill import Skill, SkillOrigin
@@ -56,6 +61,7 @@ from config import settings
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
     FileNotInSessionError,
+    FileNotUploadedError,
     GenerationInProgressError,
     RecipeNotInvokableError,
     SessionGoneError,
@@ -73,6 +79,7 @@ async def queue_user_message(
     files: list[FileRef],
     skills: list[str] | None = None,
     recipe_id: int | None = None,
+    agent_type: AgentType | None = None,
 ) -> None:
     """Persist the user message + session_turn, flip status, wake worker.
 
@@ -82,7 +89,11 @@ async def queue_user_message(
        enqueues for the same session, then reject if status is already
        ``running``. PostgreSQL holds the lock until the transaction
        commits, so two racing requests pass through one at a time and
-       the second sees the first's ``running`` status.
+       the second sees the first's ``running`` status. ``agent_type``
+       (the send's one-way LITE → FULL mode upgrade; ``None`` = keep)
+       is applied here so the flip and the turn commit atomically —
+       the worker's claim JOINs ``session.agent_type`` post-commit, so
+       this very turn runs in the upgraded mode.
     2. Lazy-sweep this user's open credit reservations into terminal
        state. Settle reads durable ``session_turn.input_tokens`` /
        ``output_tokens`` / ``terminated_at`` written by the worker,
@@ -123,12 +134,14 @@ async def queue_user_message(
             estimated max cost.
         ConcurrentTaskLimitError: the user is already at
             ``settings.max_concurrent_running_tasks`` running tasks.
+        AgentTypeDowngradeError: ``agent_type`` asked for FULL → LITE.
     """
     session = await _lock_session(db, session.id)
     if session.status == SessionStatus.RUNNING:
         raise GenerationInProgressError(
             "A completion is already in progress for this session"
         )
+    _apply_agent_type_upgrade(session, agent_type)
 
     # Lazy sweep: settle any of this user's reservations from prior
     # turns whose session is already terminal. Source of truth is
@@ -258,6 +271,27 @@ async def _clear_orphan_tags(file_keys: list[str]) -> None:
             )
 
 
+def _apply_agent_type_upgrade(
+    session: Session, requested: AgentType | None,
+) -> None:
+    """Apply the send's one-way LITE → FULL mode upgrade, if any.
+
+    ``None`` (no preference) and same-as-current are no-ops, so resends
+    are idempotent. A FULL → LITE request is rejected — only the upgrade
+    exists (a downgrade would strand the session's sandbox and files),
+    and the UI never offers it, so hitting this is a client programming
+    error. Runs on the locked session row, before the turn insert, so
+    the flip commits atomically with the turn.
+    """
+    if requested is None or requested == session.agent_type:
+        return
+    if requested is not AgentType.FULL:
+        raise AgentTypeDowngradeError(
+            "A session can only switch from LITE to FULL"
+        )
+    session.agent_type = requested
+
+
 async def _enforce_concurrent_task_limit(db: AsyncSession, user_id: int) -> None:
     """Reject if the user is already at their running-task cap.
 
@@ -353,28 +387,62 @@ async def _bind_session_files(
         file_key: owner_session_id for file_key, owner_session_id in rows.all()
     }
 
-    newly_bound: list[str] = []
+    # Classify first (reject cross-session rebinds, skip idempotent
+    # same-session ones), then insert only the genuinely new keys.
+    to_insert: list[FileRef] = []
     for file_key, file_ref in unique_files.items():
         owner_session_id = existing.get(file_key)
         if owner_session_id is None:
-            db.add(
-                SessionFile(
-                    session_id=session_id,
-                    user_id=user_id,
-                    file_key=file_key,
-                    origin=SessionFileOrigin.UPLOAD,
-                    filename=file_ref.filename,
-                    mime_type=file_ref.mime_type,
-                    size_bytes=file_ref.size_bytes,
-                )
+            to_insert.append(file_ref)
+        elif owner_session_id != session_id:
+            raise FileNotInSessionError(
+                f"file_key {file_key!r} is already bound to another session"
             )
-            newly_bound.append(file_key)
-            continue
-        if owner_session_id == session_id:
-            continue
-        raise FileNotInSessionError(
-            f"file_key {file_key!r} is already bound to another session"
+        # owner_session_id == session_id → idempotent rebind, skip.
+    if not to_insert:
+        return []
+
+    # ``size_bytes`` is client-declared and untrusted: a low declaration
+    # slips past the per-file cap AND the per-user quota (which SUMs this
+    # column). The object provably exists in OSS only now, at bind, so
+    # reconcile against its true size here — the one place the persisted
+    # value becomes trustworthy. ``head_size`` is blocking oss2; thread it
+    # and fan out so N attachments cost ~one HEAD's latency, not N serial.
+    sizes = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                file_storage.head_size, file_storage.SESSION_FILE_POLICY,
+                file_ref.file_key,
+            )
+            for file_ref in to_insert
+        ),
+        return_exceptions=True,
+    )
+
+    newly_bound: list[str] = []
+    for file_ref, size in zip(to_insert, sizes):
+        if isinstance(size, file_storage.FileObjectNotFoundError):
+            raise FileNotUploadedError(
+                f"file_key {file_ref.file_key!r} was not uploaded"
+            )
+        if isinstance(size, BaseException):
+            raise size  # unexpected OSS/other error — surface as 500
+        if size > file_storage.SESSION_FILE_POLICY.max_bytes:
+            raise file_storage.FileTooLargeError(
+                size, file_storage.SESSION_FILE_POLICY.max_bytes
+            )
+        db.add(
+            SessionFile(
+                session_id=session_id,
+                user_id=user_id,
+                file_key=file_ref.file_key,
+                origin=SessionFileOrigin.UPLOAD,
+                filename=file_ref.filename,
+                mime_type=file_ref.mime_type,
+                size_bytes=size,
+            )
         )
+        newly_bound.append(file_ref.file_key)
     return newly_bound
 
 

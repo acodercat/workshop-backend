@@ -42,6 +42,15 @@ class FileNotInSessionError(SessionServiceError):
     endpoint layer turns it into 403."""
 
 
+class FileNotUploadedError(SessionServiceError):
+    """A message referenced a ``file_key`` with no object in OSS.
+
+    Raised at bind time when the real-size lookup (``head_size``) finds
+    the object missing — the presigned upload never completed. Binding a
+    phantom file would let a zero-size row through the quota, so the
+    endpoint turns this into 400."""
+
+
 class RecipeNotInvokableError(SessionServiceError):
     """A ``recipe_id`` was sent that the caller can't invoke.
 

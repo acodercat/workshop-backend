@@ -67,6 +67,7 @@ from app.services import file_storage
 from app.services.file_storage import (
     SESSION_FILE_POLICY,
     FileTooLargeError,
+    InlinePreviewNotAllowedError,
     UnsupportedFileTypeError,
 )
 from app.schemas.session import (
@@ -83,10 +84,16 @@ from app.schemas.session import (
 from app.schemas.session_share import ShareCreate, ShareResponse
 from app.services import credits
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
-from app.services.session import generate_title, queue_user_message, stream_events
+from app.services.session import (
+    cancel_unclaimed_turn,
+    generate_title,
+    queue_user_message,
+    stream_events,
+)
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
     FileNotInSessionError,
+    FileNotUploadedError,
     GenerationInProgressError,
     RecipeNotInvokableError,
     SessionGoneError,
@@ -579,6 +586,7 @@ async def create_message(
         await queue_user_message(
             db, redis, session, content=body.content, files=body.files,
             skills=body.skills, recipe_id=body.recipe_id,
+            agent_type=body.agent_type,
         )
     except GenerationInProgressError as exc:
         raise HTTPException(
@@ -593,6 +601,14 @@ async def create_message(
     except FileNotInSessionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
+        )
+    except FileNotUploadedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        )
+    except FileTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc),
         )
     except RecipeNotInvokableError as exc:
         raise HTTPException(
@@ -626,6 +642,12 @@ async def cancel_session(
     ``insufficient_credits`` on the same channel. The worker treats an
     empty/unknown payload as ``user_cancelled``, so the two sides can
     deploy independently.
+
+    A turn still ``PENDING`` in the queue has no worker listening on the
+    cancel channel, so the pub/sub signal would be dropped and the turn
+    later claimed and billed. :func:`cancel_unclaimed_turn` hard-cancels
+    (and refunds) that case directly in the DB; only a claimed/``RUNNING``
+    turn takes the pub/sub path for graceful mid-turn shutdown.
     """
     session = await _get_or_404(db, session_id, current_user.id)
     if session.status != SessionStatus.RUNNING:
@@ -633,6 +655,9 @@ async def cancel_session(
             status_code=status.HTTP_409_CONFLICT,
             detail="Session is not running",
         )
+    if await cancel_unclaimed_turn(db, session_id=session_id):
+        await db.commit()
+        return
     await redis.publish(
         cancel_channel(str(session_id)), TerminationReason.USER_CANCELLED.value,
     )
@@ -890,9 +915,14 @@ async def get_preview_url(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="File is not part of this session",
         )
-    url, expires_in = file_storage.generate_inline_url(
-        file_storage.SESSION_FILE_POLICY, file_key,
-    )
+    try:
+        url, expires_in = file_storage.generate_inline_url(
+            file_storage.SESSION_FILE_POLICY, file_key,
+        )
+    except InlinePreviewNotAllowedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc),
+        )
     return PreviewUrlResponse(
         preview_url=url, file_key=file_key, expires_in=expires_in,
     )

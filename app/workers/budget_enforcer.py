@@ -234,7 +234,15 @@ async def _priced_turns_by_user(
             .where(
                 CreditReservation.state == CreditReservationState.OPEN,
                 Session.status == SessionStatus.RUNNING,
+                # Only turns that have reported a heartbeat. The worker
+                # writes both interim columns together, so in practice
+                # input-not-null implies output-not-null — but the columns
+                # are independently nullable, and a single NULL output
+                # would make ``cost_micro_credits`` do ``None / 1000`` and
+                # crash the whole tick (fleet-wide enforcement pause). The
+                # symmetric filter makes that structurally impossible.
                 SessionTurn.interim_input_tokens.is_not(None),
+                SessionTurn.interim_output_tokens.is_not(None),
             )
         )
     ).all()

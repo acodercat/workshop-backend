@@ -68,6 +68,12 @@ class MessageCreate(BaseModel):
     # to a pinned snapshot on ``session_turn.recipe``; its instructions
     # ride to the worker as a system-reminder. ``None`` = no recipe.
     recipe_id: int | None = Field(default=None, ge=1)
+    # One-way LITE → FULL mode upgrade, committed atomically with this
+    # send (the composer's mode pick is local until the user actually
+    # sends). ``None`` = keep the session's current mode; FULL → LITE
+    # is rejected. Unlike ``skills``/``recipe_id`` (per-turn selections)
+    # this persists on the session.
+    agent_type: AgentType | None = None
 
     @field_validator("files")
     @classmethod

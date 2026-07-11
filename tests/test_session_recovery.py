@@ -10,7 +10,8 @@ import uuid
 
 from sqlalchemy.dialects import postgresql
 
-from app.services.session.recovery import fail_abandoned_turn
+from app.services.session import recovery
+from app.services.session.recovery import cancel_unclaimed_turn, fail_abandoned_turn
 
 
 class _FakeResult:
@@ -90,4 +91,74 @@ async def test_session_flip_is_running_guarded() -> None:
     # a racing real terminal write is never clobbered.
     assert "status = 'RUNNING'" in session_sql
     assert "'FAILED'" in session_sql
+    assert str(session_id) in session_sql
+
+
+# --- cancel_unclaimed_turn (user stops a turn still PENDING in the queue) ---
+
+
+def _patch_settle(monkeypatch) -> list[uuid.UUID]:
+    """Stub out ``settle_open_for_session`` (own tests cover it) and record
+    the session_ids it was asked to settle."""
+    settled: list[uuid.UUID] = []
+
+    async def _fake_settle(db, session_id):
+        settled.append(session_id)
+
+    monkeypatch.setattr(recovery, "settle_open_for_session", _fake_settle)
+    return settled
+
+
+async def test_cancel_flips_turn_session_and_settles(monkeypatch) -> None:
+    # PENDING turn touched → session flips CANCELLED and the reservation
+    # is settled (refunded), returns True.
+    settled = _patch_settle(monkeypatch)
+    db = _FakeDb(rowcounts=[1])
+    session_id = uuid.uuid4()
+
+    result = await cancel_unclaimed_turn(db, session_id=session_id)
+
+    assert result is True
+    assert len(db.statements) == 2  # turn UPDATE, then session UPDATE
+    assert settled == [session_id]  # refund path invoked exactly once
+
+
+async def test_cancel_noop_when_turn_already_claimed(monkeypatch) -> None:
+    # No PENDING turn (a worker claimed it → RUNNING, or it's terminal) →
+    # no session flip, no settle, returns False so the caller falls back to
+    # the pub/sub cancel signal for the running worker.
+    settled = _patch_settle(monkeypatch)
+    db = _FakeDb(rowcounts=[0])
+
+    result = await cancel_unclaimed_turn(db, session_id=uuid.uuid4())
+
+    assert result is False
+    assert len(db.statements) == 1  # only the turn UPDATE ran
+    assert settled == []  # nothing refunded
+
+
+async def test_cancel_turn_update_targets_only_pending(monkeypatch) -> None:
+    _patch_settle(monkeypatch)
+    db = _FakeDb(rowcounts=[1])
+    await cancel_unclaimed_turn(db, session_id=uuid.uuid4())
+
+    turn_sql = _sql(db.statements[0])
+    # Only an *unclaimed* (PENDING) turn is hard-cancelled — a RUNNING turn
+    # must go through pub/sub so the worker can persist partial output.
+    assert "status = 'PENDING'" in turn_sql
+    assert "status='CANCELLED'" in turn_sql
+    assert "termination_reason='user_cancelled'" in turn_sql
+    assert "lease_expires_at=NULL" in turn_sql
+    assert "terminated_at=now()" in turn_sql
+
+
+async def test_cancel_session_flip_running_guarded(monkeypatch) -> None:
+    _patch_settle(monkeypatch)
+    db = _FakeDb(rowcounts=[1])
+    session_id = uuid.uuid4()
+    await cancel_unclaimed_turn(db, session_id=session_id)
+
+    session_sql = _sql(db.statements[1])
+    assert "status = 'RUNNING'" in session_sql
+    assert "'CANCELLED'" in session_sql
     assert str(session_id) in session_sql

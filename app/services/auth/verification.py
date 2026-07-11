@@ -60,6 +60,37 @@ Channel = Literal["email", "phone"]
 # on failure (the code is not persisted, so the user can retry).
 _SendFn = Callable[[str], Awaitable[None]]
 
+# Atomic compare-and-(consume|increment) for a verification code, run
+# server-side so N concurrent wrong guesses can't each read ``attempts``
+# before any writes it back — the read-modify-write that made the
+# per-code attempt cap defeatable when done in Python. One round trip;
+# ``KEEPTTL`` preserves the original expiry so a wrong guess never
+# extends validity. Returns one of the ``_VERIFY_*`` sentinels.
+#
+#   KEYS[1] = state key   ARGV[1] = submitted code
+#   ARGV[2] = max_attempts (int)   ARGV[3] = "1" consume / "0" peek
+_VERIFY_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 'EXPIRED' end
+local state = cjson.decode(raw)
+if state.code == ARGV[1] then
+    if ARGV[3] == '1' then redis.call('DEL', KEYS[1]) end
+    return 'OK'
+end
+local attempts = state.attempts + 1
+if attempts >= tonumber(ARGV[2]) then
+    redis.call('DEL', KEYS[1])
+    return 'LOCKED'
+end
+state.attempts = attempts
+redis.call('SET', KEYS[1], cjson.encode(state), 'KEEPTTL')
+return 'BAD'
+"""
+_VERIFY_EXPIRED = "EXPIRED"
+_VERIFY_OK = "OK"
+_VERIFY_LOCKED = "LOCKED"
+_VERIFY_BAD = "BAD"
+
 
 def _generate_code() -> str:
     """Cryptographically random 6-digit code, zero-padded."""
@@ -140,31 +171,33 @@ async def _verify_code(
     ``too_many_attempts`` (peek mode never weakens the brute-force
     defense). ``identifier`` is taken only so logs carry the
     human-readable destination.
+
+    The compare-and-(consume|increment) runs atomically via
+    :data:`_VERIFY_LUA`, so concurrent wrong guesses can't each read a
+    stale ``attempts`` and slip past the cap.
     """
-    raw = await redis.get(key)
-    if raw is None:
+    result = await redis.eval(
+        _VERIFY_LUA,
+        1,
+        key,
+        code,
+        str(settings.register_code_max_attempts),
+        "1" if consume else "0",
+    )
+    if isinstance(result, bytes):
+        result = result.decode()
+
+    if result == _VERIFY_OK:
+        return
+    if result == _VERIFY_EXPIRED:
         raise InvalidVerificationCodeError(
             "Verification code expired or not found"
         )
-    state = json.loads(raw)
-
-    if state["code"] == code:
-        if consume:
-            await redis.delete(key)
-        return
-
-    attempts = state["attempts"] + 1
-    if attempts >= settings.register_code_max_attempts:
-        await redis.delete(key)
+    if result == _VERIFY_LOCKED:
         logger.info("%s code locked after max attempts: %s", log_label, identifier)
         raise TooManyVerificationAttemptsError(
             "Too many incorrect verification attempts"
         )
-
-    # Preserve the original TTL — a wrong guess must not extend validity.
-    ttl = await redis.ttl(key)
-    state["attempts"] = attempts
-    await redis.set(key, json.dumps(state), ex=max(ttl, 1))
     raise InvalidVerificationCodeError("Incorrect verification code")
 
 
@@ -225,52 +258,56 @@ async def verify_verification_code(
 
 
 async def send_email_change_code(
-    redis: aioredis.Redis, *, email: str, locale: Locale = "zh-CN"
+    redis: aioredis.Redis, *, user_id: int, email: str, locale: Locale = "zh-CN"
 ) -> None:
     """Generate + send an email-change verification code to ``email``
-    (the *new* address the user wants to switch to). Same failure modes
-    as :func:`request_verification_code`'s email channel."""
+    (the *new* address ``user_id`` wants to switch to). The code is
+    bound to the requesting user (see :func:`email_change_key`). Same
+    failure modes as :func:`request_verification_code`'s email channel."""
     await _request_code(
         redis,
-        key=email_change_key(email),
+        key=email_change_key(user_id, email),
         send=_email_sender(email, render_email_change_verification, locale),
     )
-    logger.info("email_change code issued: email=%s", email)
+    logger.info("email_change code issued: user_id=%s email=%s", user_id, email)
 
 
 async def verify_email_change_code(
-    redis: aioredis.Redis, *, email: str, code: str
+    redis: aioredis.Redis, *, user_id: int, email: str, code: str
 ) -> None:
-    """Verify and consume the pending email-change code for ``email``.
-    See :func:`_verify_code` for failure modes."""
+    """Verify and consume the pending email-change code for ``user_id``'s
+    switch to ``email``. See :func:`_verify_code` for failure modes."""
     await _verify_code(
         redis,
-        key=email_change_key(email),
+        key=email_change_key(user_id, email),
         identifier=email,
         code=code,
         log_label="email_change",
     )
 
 
-async def send_phone_change_code(redis: aioredis.Redis, *, phone: str) -> None:
+async def send_phone_change_code(
+    redis: aioredis.Redis, *, user_id: int, phone: str
+) -> None:
     """Generate + send a phone-change verification code (via Aliyun SMS)
-    to ``phone`` (the *new* number the user wants to switch to). The
-    SMS-channel sibling of :func:`send_email_change_code`; same failure
-    modes as :func:`request_verification_code`'s phone channel."""
+    to ``phone`` (the *new* number ``user_id`` wants to switch to). The
+    code is bound to the requesting user (see :func:`phone_change_key`).
+    The SMS-channel sibling of :func:`send_email_change_code`; same
+    failure modes as :func:`request_verification_code`'s phone channel."""
     await _request_code(
-        redis, key=phone_change_key(phone), send=_sms_sender(phone)
+        redis, key=phone_change_key(user_id, phone), send=_sms_sender(phone)
     )
-    logger.info("phone_change code issued: phone=%s", phone)
+    logger.info("phone_change code issued: user_id=%s phone=%s", user_id, phone)
 
 
 async def verify_phone_change_code(
-    redis: aioredis.Redis, *, phone: str, code: str
+    redis: aioredis.Redis, *, user_id: int, phone: str, code: str
 ) -> None:
-    """Verify and consume the pending phone-change code for ``phone``.
-    See :func:`_verify_code` for failure modes."""
+    """Verify and consume the pending phone-change code for ``user_id``'s
+    switch to ``phone``. See :func:`_verify_code` for failure modes."""
     await _verify_code(
         redis,
-        key=phone_change_key(phone),
+        key=phone_change_key(user_id, phone),
         identifier=phone,
         code=code,
         log_label="phone_change",

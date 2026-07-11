@@ -3,17 +3,29 @@
 monkeypatched (the credit-funnel + SQL are tested elsewhere); these tests
 pin the routing + guard logic."""
 
+import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
-from app.errors import PaymentAmountRangeError
+from app.errors import OrderNotFoundError, PaymentAmountRangeError
 from app.models.payment_order import PaymentOrder, PaymentOrderStatus
 from app.services.credits import TopupAlreadyApplied
 from app.services.payment import orders
 from app.services.payment.provider import ChargeResult, VerifiedEvent
 
 _MICRO_1000_CREDITS = 1000 * 10_000_000
+
+
+def _sql(statement) -> str:
+    return str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
 
 
 def _order(status=PaymentOrderStatus.PENDING, amount_fen=10000) -> PaymentOrder:
@@ -137,9 +149,65 @@ async def test_create_order_rejects_amount_below_minimum() -> None:
         )
 
 
-def test_is_expired_respects_grace() -> None:
-    from datetime import datetime, timedelta, timezone
+def _reapable_expires_at() -> datetime:
+    """An ``expires_at`` safely past ``expires_at + grace`` — reapable now."""
+    return datetime.now(timezone.utc) - timedelta(
+        seconds=orders._EXPIRE_GRACE_SECONDS + 5,
+    )
 
+
+async def test_get_order_takes_row_lock() -> None:
+    # The lazy-expiry read must lock the row so a poll can't clobber a
+    # PAID the webhook committed in the gap (see get_order docstring).
+    order = _order()
+    order.expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    captured: dict = {}
+
+    async def _scalar(stmt):
+        captured["stmt"] = stmt
+        return order
+
+    db = MagicMock()
+    db.scalar = _scalar
+
+    await orders.get_order(db, order_id=uuid.uuid4(), user_id=1)
+
+    assert "FOR UPDATE" in _sql(captured["stmt"])
+
+
+async def test_get_order_does_not_expire_a_paid_order() -> None:
+    # The webhook won the lock and wrote PAID; a poll reading it (even past
+    # the grace window) must never flip it to EXPIRED — the core of the fix.
+    order = _order(status=PaymentOrderStatus.PAID)
+    order.expires_at = _reapable_expires_at()
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=order)
+
+    result = await orders.get_order(db, order_id=uuid.uuid4(), user_id=1)
+
+    assert result.status == PaymentOrderStatus.PAID
+
+
+async def test_get_order_lazily_expires_pending_past_grace() -> None:
+    order = _order()
+    order.expires_at = _reapable_expires_at()
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=order)
+
+    result = await orders.get_order(db, order_id=uuid.uuid4(), user_id=1)
+
+    assert result.status == PaymentOrderStatus.EXPIRED
+
+
+async def test_get_order_missing_raises_not_found() -> None:
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=None)
+
+    with pytest.raises(OrderNotFoundError):
+        await orders.get_order(db, order_id=uuid.uuid4(), user_id=1)
+
+
+def test_is_expired_respects_grace() -> None:
     now = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
     order = _order()
     # Just past expires_at but within the grace → not yet reapable, so the

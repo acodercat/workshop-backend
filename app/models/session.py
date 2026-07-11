@@ -64,12 +64,16 @@ class AgentType(StrEnum):
     - ``FULL`` — sandbox-backed agent (code execution, file tools, skills).
     - ``LITE`` — sandbox-free Q&A + web search.
 
-    Stamped at ``create_session``, never mutated; the worker reads it at
-    claim time to pick the agent harness. Member values match the
-    Postgres ``agent_type`` enum and the worker's
-    ``agent_worker.infra.database.AgentType`` — a closed Python / DB
-    contract. UPPERCASE matches the ``session_status`` / ``sandbox_status``
-    convention.
+    Stamped at ``create_session``; the only mutation is the one-way
+    LITE → FULL upgrade riding a message send (``queue_user_message``,
+    committed atomically with the turn — never the reverse, which would
+    strand the session's sandbox and files). Safe to flip between turns
+    because the worker re-reads it at every claim to pick the agent
+    harness, and the stored conversation context is mode-agnostic.
+    Member values match the Postgres ``agent_type`` enum and the
+    worker's ``agent_worker.infra.database.AgentType`` — a closed
+    Python / DB contract. UPPERCASE matches the ``session_status`` /
+    ``sandbox_status`` convention.
     """
 
     FULL = "FULL"
@@ -138,10 +142,12 @@ class Session(Base):
     # explicitly (the migration backfilled existing rows to FALSE).
     thinking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # Which agent kind this session runs (FULL = sandbox agent, LITE =
-    # Q&A + web search). Stamped at creation like ``model_id``, never
-    # mutated; the worker reads it at claim time (JOINed onto the turn) to
-    # pick the harness. No Python-side ``default=`` — ``create_session``
-    # sets it explicitly (the migration backfilled existing rows to FULL).
+    # Q&A + web search). Stamped at creation like ``model_id``; the only
+    # mutation is the one-way LITE → FULL upgrade riding a message send
+    # (see the ``AgentType`` docstring). The worker reads it at claim
+    # time (JOINed onto the turn) to pick the harness. No Python-side
+    # ``default=`` — ``create_session`` sets it explicitly (the migration
+    # backfilled existing rows to FULL).
     agent_type: Mapped[AgentType] = mapped_column(
         SAEnum(
             AgentType,
