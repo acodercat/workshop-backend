@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.common.filenames import validate_input_filename
 from app.models.session import AgentType, SessionStatus, Tier
@@ -59,7 +59,12 @@ class FileRef(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str = Field(..., min_length=1, max_length=100000)
+    # No ``min_length``: an attachments-only turn (files but no typed text)
+    # is a legal message — e.g. the user attaches a document, or a long
+    # paste was diverted to a ``.txt`` attachment, and sends without typing.
+    # ``_has_content`` below rejects the truly-empty case (no text, no
+    # files). ``.strip()`` on the way in so whitespace-only isn't "content".
+    content: str = Field(default="", max_length=100000)
     files: list[FileRef] = Field(
         default_factory=list, max_length=settings.max_message_files,
     )
@@ -75,12 +80,26 @@ class MessageCreate(BaseModel):
     # this persists on the session.
     agent_type: AgentType | None = None
 
+    @field_validator("content")
+    @classmethod
+    def _strip_content(cls, value: str) -> str:
+        return value.strip()
+
     @field_validator("files")
     @classmethod
     def _files_have_declared_sizes(cls, value: list[FileRef]) -> list[FileRef]:
         if any(file_ref.size_bytes is None for file_ref in value):
             raise ValueError("Each file must include size_bytes")
         return value
+
+    @model_validator(mode="after")
+    def _has_content(self) -> "MessageCreate":
+        # A turn must carry something to act on: typed text or at least
+        # one attachment. Runs after ``_strip_content``, so whitespace-only
+        # text with no files is rejected.
+        if not self.content and not self.files:
+            raise ValueError("A message must have text or at least one file")
+        return self
 
 
 class MessageQueuedResponse(BaseModel):
