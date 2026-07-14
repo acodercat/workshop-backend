@@ -227,7 +227,7 @@ class Settings(BaseSettings):
         description="Verified sender address (must be approved + SPF/DKIM passed in DM console)",
     )
     aliyun_dm_from_alias: str = Field(
-        default="AXON",
+        default="PPIG",
         description="``发送人名称`` shown in the recipient's inbox; ≤30 chars",
     )
 
