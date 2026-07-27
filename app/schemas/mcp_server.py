@@ -37,8 +37,32 @@ class ConnectorResponse(BaseModel):
     # True unless this is an OAuth connector still awaiting authorization.
     # Set by the endpoint layer (the ORM has no such column).
     authorized: bool = True
+    # The official catalog entry this was instantiated from, else None. The
+    # client joins the directory on it to tell "already added" from "add me".
+    catalog_id: int | None = None
+    # Derived from ``catalog_id`` by the endpoint layer — never a stored column,
+    # so it cannot drift from the thing it describes.
+    origin: str = "CUSTOM"
     created_at: datetime
     updated_at: datetime
+
+
+class ConnectorCatalogEntryResponse(BaseModel):
+    """One official Connector offered in the directory (a template).
+
+    Operator-side columns (``published``, ``sort_order``) stay server-side: the
+    client only ever sees entries it is allowed to add.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    key: str
+    name: str
+    url: str
+    auth_type: str
+    description: str | None
+    icon_url: str | None
 
 
 class _ConnectorAuthFields(BaseModel):
@@ -59,13 +83,55 @@ class _ConnectorAuthFields(BaseModel):
 
 
 class ConnectorCreate(_ConnectorAuthFields):
-    name: str = Field(min_length=1, max_length=64)
-    url: str = Field(min_length=1, max_length=2048)
+    """A Connector is created from exactly one of two sources.
+
+    - **Catalog**: ``catalog_id`` alone — every other field is copied from the
+      official entry, so sending one alongside is rejected rather than silently
+      ignored (same footgun :class:`ConnectorUpdate` guards).
+    - **Custom**: ``name`` + ``url`` (+ the auth fields above).
+    """
+
+    catalog_id: int | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    url: str | None = Field(default=None, min_length=1, max_length=2048)
     # OAuth (auth_type=OAUTH) — all optional. With no client_id we use Dynamic
     # Client Registration; provide id/secret for servers that don't support it.
     oauth_client_id: str | None = Field(default=None, max_length=512)
     oauth_client_secret: str | None = Field(default=None, max_length=2048)
     oauth_scope: str | None = Field(default=None, max_length=1024)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "ConnectorCreate":
+        if self.catalog_id is None:
+            if not (self.name and self.url):
+                raise ValueError("name and url are required without a catalog_id.")
+            return self
+
+        # ``auth_type`` carries a NONE default, so "absent" and "explicitly NONE"
+        # are indistinguishable — treat NONE as absent rather than inventing a
+        # sentinel for a field the catalog owns anyway.
+        conflicting = [
+            field
+            for field, value in (
+                ("name", self.name),
+                ("url", self.url),
+                ("credential", self.credential),
+                ("header_name", self.header_name),
+                ("oauth_client_id", self.oauth_client_id),
+                ("oauth_client_secret", self.oauth_client_secret),
+                ("oauth_scope", self.oauth_scope),
+            )
+            if value is not None
+        ]
+        if self.auth_type != MCPServerAuthType.NONE:
+            conflicting.append("auth_type")
+        if conflicting:
+            raise ValueError(
+                "catalog_id defines the connector; remove "
+                + ", ".join(sorted(conflicting))
+                + "."
+            )
+        return self
 
 
 class ConnectionTestRequest(_ConnectorAuthFields):

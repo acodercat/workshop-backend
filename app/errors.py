@@ -245,6 +245,15 @@ class ConnectorNameConflictError(AppError):
     error_type = "connector_name_conflict"
 
 
+class ConnectorCatalogEntryNotFoundError(AppError):
+    """No such entry in the official Connector directory — the id is unknown or
+    the entry has been unpublished. 404 rather than 403 for an unpublished one:
+    an unlisted entry should read as absent, not as "exists but withheld"."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "connector_catalog_entry_not_found"
+
+
 class ConnectorOAuthError(AppError):
     """An OAuth step failed — metadata discovery, dynamic client registration,
     or the authorization-code exchange. 502: reads as an upstream/provider

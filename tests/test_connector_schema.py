@@ -34,6 +34,34 @@ class TestCreateAuthValidation:
         assert ok.header_name == "X-Api-Key"
 
 
+class TestCreateSourceValidation:
+    """A Connector comes from exactly one source: the catalog or a custom URL."""
+
+    def test_catalog_id_alone_is_valid(self):
+        c = ConnectorCreate(catalog_id=3)
+        assert c.catalog_id == 3 and c.name is None and c.url is None
+
+    def test_neither_source_rejected(self):
+        with pytest.raises(ValidationError):
+            ConnectorCreate()
+
+    def test_url_without_name_rejected(self):
+        with pytest.raises(ValidationError):
+            ConnectorCreate(url="https://mcp.gh.dev/x")
+
+    @pytest.mark.parametrize("extra", [
+        {"name": "gh"},
+        {"url": "https://mcp.gh.dev/x"},
+        {"auth_type": "BEARER", "credential": "tok"},
+        {"oauth_scope": "read"},
+    ])
+    def test_catalog_id_rejects_fields_the_entry_owns(self, extra):
+        # Silently ignoring them would let a caller think they overrode the
+        # official definition.
+        with pytest.raises(ValidationError):
+            ConnectorCreate(catalog_id=3, **extra)
+
+
 class TestUpdateAuthValidation:
     def test_auth_untouched_when_type_omitted(self):
         u = ConnectorUpdate(name="renamed")  # no auth_type → no credential needed

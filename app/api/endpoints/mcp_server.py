@@ -28,13 +28,14 @@ from app.schemas.mcp_server import (
     ConnectionTestRequest,
     ConnectionTestResponse,
     ConnectorAuthorizationResponse,
+    ConnectorCatalogEntryResponse,
     ConnectorCreate,
     ConnectorResponse,
     ConnectorUpdate,
     OAuthCallbackRequest,
 )
 from app.services.crypto import decrypt_secret, encrypt_secret
-from app.services.mcp import oauth
+from app.services.mcp import catalog, oauth
 from app.services.mcp.probe import probe
 from app.services.redis import oauth_state_key
 from config import settings
@@ -55,6 +56,21 @@ async def create_connection_test(
     return ConnectionTestResponse(server_name=result.server_name, tools=result.tools)
 
 
+@router.get("/connectors/catalog")
+async def list_connector_catalog(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> list[ConnectorCatalogEntryResponse]:
+    """The official Connector directory — templates the caller can add.
+
+    User-independent (every caller sees the same published entries); the client
+    joins it against ``GET /connectors`` on ``catalog_id`` to tell an entry it
+    has already added from one it hasn't.
+    """
+    entries = await catalog.list_published(db)
+    return [ConnectorCatalogEntryResponse.model_validate(e) for e in entries]
+
+
 @router.post("/connectors", status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/minute")
 async def create_connector(
@@ -63,9 +79,16 @@ async def create_connector(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ConnectorResponse:
-    """Persist a Connector. Probes the server first (except OAuth, which can't be
-    probed until the user authorizes — see ``/connectors/{id}/authorizations``)."""
-    if body.auth_type == MCPServerAuthType.OAUTH:
+    """Persist a Connector, from the official catalog or a custom definition.
+
+    Probes the server first, except for OAuth — which can't be probed until the
+    user authorizes (see ``/connectors/{id}/authorizations``). Adding the same
+    catalog entry twice collides on the per-user name uniqueness and surfaces as
+    the usual 409.
+    """
+    if body.catalog_id is not None:
+        connector = await _build_catalog_connector(db, body.catalog_id, current_user.id)
+    elif body.auth_type == MCPServerAuthType.OAUTH:
         connector = await _build_oauth_connector(body, current_user.id)
     else:
         credential = _credential_plaintext(
@@ -85,7 +108,9 @@ async def create_connector(
         )
 
     db.add(connector)
-    await _commit_or_conflict(db, body.name)
+    # ``connector.name``, not ``body.name`` — the catalog path takes its name
+    # from the entry, so the body's is None there.
+    await _commit_or_conflict(db, connector.name)
     await db.refresh(connector)
     return _to_response(connector)
 
@@ -283,27 +308,75 @@ async def delete_connector(
     await db.commit()
 
 
+async def _build_catalog_connector(
+    db: AsyncSession, catalog_id: int, user_id: int,
+) -> MCPServer:
+    """Instantiate an official catalog entry as this user's own Connector.
+
+    Same two paths as a hand-added Connector, just with the fields copied from
+    the entry: OAuth registers its client now (``/authorizations`` needs one
+    stored), everything else is probed so a broken entry fails at add time.
+    """
+    entry = await catalog.get_published_entry(db, catalog_id)
+    connector = catalog.build_connector(entry, user_id)
+    # Reject a re-add *before* the OAuth registration below: DCR mints a client
+    # at the provider, and a client created for a row that then 409s on the name
+    # index is orphaned — never stored, never revoked. The unique index is still
+    # the authority; this check just keeps the common retry off the network.
+    await _reject_duplicate_name(db, user_id, connector.name)
+    if connector.auth_type == MCPServerAuthType.OAUTH:
+        connector.oauth_client_encrypted = await _register_oauth_client(
+            url=connector.url, scope=connector.oauth_scope,
+        )
+    else:
+        result = await probe(connector.url, connector.auth_type, None)
+        connector.tool_count = len(result.tools)
+        connector.tools_preview = result.tools
+    return connector
+
+
 async def _build_oauth_connector(body: ConnectorCreate, user_id: int) -> MCPServer:
     """Discover metadata + register/prepare the OAuth client (no tokens yet)."""
-    redirect_uri = _require_redirect_uri()
-    metadata = await oauth.discover_metadata(body.url)
-    client = await oauth.ensure_client(
-        metadata,
-        redirect_uri=redirect_uri,
-        scope=body.oauth_scope,
-        client_id=body.oauth_client_id,
-        client_secret=body.oauth_client_secret,
-    )
     return MCPServer(
         user_id=user_id,
         name=body.name,
         url=body.url,
         auth_type=MCPServerAuthType.OAUTH,
-        oauth_client_encrypted=encrypt_secret(client.model_dump_json()),
+        oauth_client_encrypted=await _register_oauth_client(
+            url=body.url,
+            scope=body.oauth_scope,
+            client_id=body.oauth_client_id,
+            client_secret=body.oauth_client_secret,
+        ),
         oauth_scope=body.oauth_scope,
         enabled=False,  # inactive until authorized
         tool_count=0,
     )
+
+
+async def _register_oauth_client(
+    *,
+    url: str,
+    scope: str | None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> str:
+    """The encrypted OAuth client for *url* — the manual one, else via DCR.
+
+    Shared by the custom and catalog paths so both store a client in the same
+    shape; ``/authorizations`` reads it back and would fail loudly on a row
+    without one.
+    """
+    redirect_uri = _require_redirect_uri()
+    metadata = await oauth.discover_metadata(url)
+    client = await oauth.ensure_client(
+        metadata,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    return encrypt_secret(client.model_dump_json())
 
 
 def _require_redirect_uri() -> str:
@@ -318,6 +391,9 @@ def _to_response(connector: MCPServer) -> ConnectorResponse:
         connector.auth_type != MCPServerAuthType.OAUTH
         or connector.oauth_tokens_encrypted is not None
     )
+    # Derived, not stored: came from the catalog ⇒ official. Keeping it out of
+    # the table is what stops it drifting from ``catalog_id``.
+    response.origin = "OFFICIAL" if connector.catalog_id is not None else "CUSTOM"
     return response
 
 
@@ -369,6 +445,21 @@ async def _get_owned_connector(
             status_code=status.HTTP_404_NOT_FOUND, detail="connector not found",
         )
     return connector
+
+
+async def _reject_duplicate_name(db: AsyncSession, user_id: int, name: str) -> None:
+    """Raise the same 409 the unique index would, without hitting the network.
+
+    Advisory only — a concurrent insert still lands on
+    ``uq_mcp_server_user_id_name`` in :func:`_commit_or_conflict`.
+    """
+    stmt = select(MCPServer.id).where(
+        MCPServer.user_id == user_id, MCPServer.name == name,
+    )
+    if (await db.execute(stmt)).first() is not None:
+        raise ConnectorNameConflictError(
+            f"a connector named {name!r} already exists for this user"
+        )
 
 
 async def _commit_or_conflict(db: AsyncSession, name: str) -> None:

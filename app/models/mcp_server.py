@@ -50,6 +50,17 @@ class MCPServer(Base):
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Set when this row was instantiated from an official catalog entry; NULL
+    # for a user's own Connector. That NULL-ness *is* the origin — the API
+    # derives ``OFFICIAL``/``CUSTOM`` from it rather than storing a second,
+    # driftable column. ON DELETE SET NULL: retiring a catalog entry demotes
+    # existing rows to custom ones that keep working, since url / auth_type /
+    # credentials all live here, not on the template.
+    catalog_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("mcp_server_catalog.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     url: Mapped[str] = mapped_column(String, nullable=False)
     auth_type: Mapped[MCPServerAuthType] = mapped_column(

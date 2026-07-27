@@ -15,6 +15,7 @@ from app.models.check_in import CheckIn  # re-exports for convenience
 from app.models.invite_code import InviteCode, InviteCodeOrigin
 from app.models.invite_redemption import InviteRedemption
 from app.models.mcp_server import MCPServer, MCPServerAuthType
+from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
 from app.models.recipe import Recipe, RecipeOrigin
@@ -37,6 +38,7 @@ __all__ = [
     "InviteRedemption",
     "MCPServer",
     "MCPServerAuthType",
+    "MCPServerCatalogEntry",
     "Message",
     "MessageFeedback",
     "Recipe",
