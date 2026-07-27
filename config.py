@@ -30,6 +30,25 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = Field(description="Secret key for JWT encoding")
+    # Fernet key (44-char urlsafe base64) for encrypting Connector credentials
+    # at rest. Generate with ``Fernet.generate_key()``. Empty default so a
+    # deploy without the Connector feature still boots; connector create/probe
+    # fails loudly at call time if unset. MUST match the worker's value.
+    credential_encryption_key: str = Field(
+        default="",
+        description="Fernet key for encrypting MCP Connector credentials at rest",
+    )
+    # OAuth Connector redirect URI — the public callback the provider sends the
+    # browser back to. Must match a route the frontend serves and be registered
+    # (for manual OAuth apps). Empty default → OAuth connectors fail loudly at
+    # authorize time (the huifu_notify_url convention).
+    # e.g. https://app.example.com/api/connectors/oauth/callback
+    oauth_redirect_uri: str = Field(
+        default="", description="Public OAuth callback URL for MCP Connectors",
+    )
+    oauth_state_ttl_seconds: int = Field(
+        default=600, description="TTL for the pending-OAuth-authorization Redis state",
+    )
     algorithm: str = Field(default="HS256", description="Algorithm for JWT")
     access_token_expire_minutes: int = Field(
         default=MINUTES_PER_WEEK,

@@ -44,6 +44,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import AgentTypeDowngradeError
+from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.recipe import Recipe, RecipeOrigin
 from app.models.session import AgentType, Session, SessionStatus
@@ -168,6 +169,10 @@ async def queue_user_message(
         db, session.user_id, skills or [],
     )
 
+    # Snapshot the user's enabled Connectors (enabled = active). Credentials are
+    # NOT snapshotted — the worker resolves url + decrypted credential live by id.
+    accepted_connectors = await _resolve_mcp_servers(db, session.user_id)
+
     # Resolve the picked recipe server-side into a pinned snapshot — the
     # client only sends ``recipe_id``, never the instruction text. A bad
     # id (missing / not visible / disabled) raises rather than silently
@@ -185,6 +190,7 @@ async def queue_user_message(
         query=content,
         files=file_dicts,
         skills=accepted_skills,
+        mcp_servers=accepted_connectors,
         recipe=recipe_snapshot,
         status=SessionTurnStatus.PENDING,
     )
@@ -495,6 +501,29 @@ async def _filter_invokable_skills(
         if existing is None or row_user_id is not None:
             by_name[name] = snapshot
     return [by_name[name] for name in requested_unique if name in by_name]
+
+
+async def _resolve_mcp_servers(
+    db: AsyncSession, user_id: int | None,
+) -> list[dict[str, str | int]]:
+    """Return per-turn snapshots ``{"id", "name"}`` for the user's ENABLED Connectors.
+
+    Connectors follow an "enabled = active" model (like Claude / ChatGPT
+    connectors): every enabled Connector's tools are available each turn, so the
+    enable toggle *is* the per-turn control. Snapshotting the enabled set at
+    enqueue pins it for the turn (a later toggle can't change an in-flight turn);
+    the worker resolves url + decrypted credential live by id, so credentials
+    never sit on the ``session_turn`` row and a rotation is picked up.
+    """
+    if user_id is None:
+        return []
+    stmt = (
+        select(MCPServer.id, MCPServer.name)
+        .where(MCPServer.user_id == user_id, MCPServer.enabled.is_(True))
+        .order_by(MCPServer.created_at)
+    )
+    result = await db.execute(stmt)
+    return [{"id": row_id, "name": name} for row_id, name in result.all()]
 
 
 async def _resolve_recipe_snapshot(

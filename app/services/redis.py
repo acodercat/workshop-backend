@@ -90,8 +90,19 @@ EMAIL_CHANGE_PREFIX = "email_change"
 PHONE_CHANGE_PREFIX = "phone_change"
 
 
+# Per-``state`` pending OAuth-authorization state for MCP Connectors. Holds the
+# PKCE code_verifier + connector_id + user_id for the redirect round-trip; the
+# opaque random ``state`` is the key. One-shot: deleted on callback consume.
+OAUTH_STATE_PREFIX = "connector_oauth_state"
+
+
 def stream_key(prefix: str, entity_id: str) -> str:
     return f"{prefix}:{entity_id}"
+
+
+def oauth_state_key(state: str) -> str:
+    """Redis key holding the pending OAuth-authorization state for ``state``."""
+    return f"{OAUTH_STATE_PREFIX}:{state}"
 
 
 def email_verify_key(email: str) -> str:

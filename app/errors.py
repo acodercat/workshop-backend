@@ -220,6 +220,40 @@ class SkillEnableQuotaExceededError(AppError):
     error_type = "skill_enable_quota_exceeded"
 
 
+class InvalidConnectorUrlError(AppError):
+    """The Connector URL isn't a usable public https endpoint — wrong scheme,
+    unresolvable host, or it resolves to a private / loopback / link-local
+    address (the SSRF guard). 400: the client must supply a different URL."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invalid_connector_url"
+
+
+class ConnectorUnreachableError(AppError):
+    """Couldn't complete the MCP handshake with the remote server (connect /
+    initialize / list-tools failed or timed out, or auth was rejected). 502 —
+    reads as an upstream failure the user can retry after fixing the server."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "connector_unreachable"
+
+
+class ConnectorNameConflictError(AppError):
+    """The user already has a Connector with this name (``uq_mcp_server_user_id_name``)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "connector_name_conflict"
+
+
+class ConnectorOAuthError(AppError):
+    """An OAuth step failed — metadata discovery, dynamic client registration,
+    or the authorization-code exchange. 502: reads as an upstream/provider
+    failure the user can retry after fixing the server or their OAuth app."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "connector_oauth_failed"
+
+
 class FileSizeQuotaExceededError(AppError):
     """The upload would push the user past their per-user total-size quota
     (``max_session_files_bytes_per_user``). The individual file is fine on

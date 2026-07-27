@@ -138,6 +138,18 @@ class SessionTurn(Base):
     skills: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
+    # Per-turn Connector selection. Each element is a snapshot
+    # ``{"id": int, "name": str}`` taken at enqueue time. The ``id`` pins
+    # the ``mcp_server`` row the worker resolves live (url + decrypted
+    # credential) — credentials are deliberately NOT snapshotted here, so a
+    # credential rotation is picked up and secrets never sit on this row.
+    # ``name`` is kept for the tool namespace / reminder display.
+    #
+    # A collection (0..N): NOT NULL DEFAULT '[]' so "no connectors" is the
+    # empty array, never NULL — mirrors ``skills`` above.
+    mcp_servers: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+    )
     # Per-turn recipe snapshot, or NULL. The backend resolves the picked
     # recipe id → its vetted ``instructions`` server-side (the client
     # sends only ``recipe_id``, never raw text) and pins the rendered
