@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # at rest. Generate with ``Fernet.generate_key()``. Empty default so a
     # deploy without the Connector feature still boots; connector create/probe
     # fails loudly at call time if unset. MUST match the worker's value.
-    credential_encryption_key: str = Field(
+    mcp_credential_encryption_key: str = Field(
         default="",
         description="Fernet key for encrypting MCP Connector credentials at rest",
     )
@@ -43,10 +43,10 @@ class Settings(BaseSettings):
     # (for manual OAuth apps). Empty default → OAuth connectors fail loudly at
     # authorize time (the huifu_notify_url convention).
     # e.g. https://app.example.com/api/connectors/oauth/callback
-    oauth_redirect_uri: str = Field(
+    mcp_oauth_redirect_uri: str = Field(
         default="", description="Public OAuth callback URL for MCP Connectors",
     )
-    oauth_state_ttl_seconds: int = Field(
+    mcp_oauth_state_ttl_seconds: int = Field(
         default=600, description="TTL for the pending-OAuth-authorization Redis state",
     )
     algorithm: str = Field(default="HS256", description="Algorithm for JWT")

@@ -8,7 +8,7 @@ from app.services import crypto
 
 def test_encrypt_decrypt_roundtrip(monkeypatch):
     key = Fernet.generate_key().decode()
-    monkeypatch.setattr(crypto.settings, "credential_encryption_key", key)
+    monkeypatch.setattr(crypto.settings, "mcp_credential_encryption_key", key)
     crypto._cipher.cache_clear()
     try:
         ciphertext = crypto.encrypt_secret("s3cr3t-token")
@@ -19,7 +19,7 @@ def test_encrypt_decrypt_roundtrip(monkeypatch):
 
 
 def test_missing_key_raises(monkeypatch):
-    monkeypatch.setattr(crypto.settings, "credential_encryption_key", "")
+    monkeypatch.setattr(crypto.settings, "mcp_credential_encryption_key", "")
     crypto._cipher.cache_clear()
     try:
         with pytest.raises(RuntimeError, match="not set"):

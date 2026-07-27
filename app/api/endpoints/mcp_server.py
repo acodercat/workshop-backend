@@ -125,7 +125,7 @@ async def create_connector_authorization(
             # without repeating the multi-request discovery against the server.
             "metadata": metadata.model_dump_json(),
         }),
-        ex=settings.oauth_state_ttl_seconds,
+        ex=settings.mcp_oauth_state_ttl_seconds,
     )
     authorization_url = oauth.build_authorization_url(
         metadata, client,
@@ -307,9 +307,9 @@ async def _build_oauth_connector(body: ConnectorCreate, user_id: int) -> MCPServ
 
 
 def _require_redirect_uri() -> str:
-    if not settings.oauth_redirect_uri:
-        raise ConnectorOAuthError("OAuth is not configured (oauth_redirect_uri).")
-    return settings.oauth_redirect_uri
+    if not settings.mcp_oauth_redirect_uri:
+        raise ConnectorOAuthError("OAuth is not configured (mcp_oauth_redirect_uri).")
+    return settings.mcp_oauth_redirect_uri
 
 
 def _to_response(connector: MCPServer) -> ConnectorResponse:
