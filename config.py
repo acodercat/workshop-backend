@@ -340,7 +340,7 @@ class Settings(BaseSettings):
         default_factory=lambda: {
             "FAST": "glm-5.2",
             "STANDARD": "glm-5.2",
-            "ADVANCED": "glm-5.2",
+            "ADVANCED": "deepseek-v4-pro",
         },
         description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
     )
