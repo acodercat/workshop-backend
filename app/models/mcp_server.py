@@ -6,9 +6,12 @@ authenticate (``auth_type`` + Fernet-encrypted ``encrypted_credential``), and a
 cached tool listing for display. The worker resolves url + credential live by
 ``id`` at turn time — the credential is never snapshotted onto ``session_turn``.
 
-v1 is user-owned only: every row has a ``user_id`` (no platform/OFFICIAL
-directory yet), and its own ``enabled`` flag is the on/off switch (no separate
-preference table — that existed for skills only to override *shared* rows).
+Always user-owned: every row has a ``user_id``, and its own ``connected`` flag
+is the on/off switch (no separate preference table — that existed for skills
+only to override *shared* rows). Connectors offered in the platform directory
+are **copied** onto a row of the user's own at connect time
+(``catalog_id`` points back), never shared, because everything that makes a
+Connector usable — tokens, credentials, the switch — is per-user anyway.
 """
 
 from datetime import datetime
@@ -50,12 +53,11 @@ class MCPServer(Base):
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
     )
-    # Set when this row was instantiated from an official catalog entry; NULL
-    # for a user's own Connector. That NULL-ness *is* the origin — the API
-    # derives ``OFFICIAL``/``CUSTOM`` from it rather than storing a second,
-    # driftable column. ON DELETE SET NULL: retiring a catalog entry demotes
-    # existing rows to custom ones that keep working, since url / auth_type /
-    # credentials all live here, not on the template.
+    # The directory entry this row was copied from; NULL for a Connector the
+    # user defined themselves. Clients join the directory on it to tell an entry
+    # they have already connected from one still on offer. ON DELETE SET NULL:
+    # retiring an entry leaves existing Connectors working as custom ones, since
+    # url / auth_type / credentials all live here, not on the template.
     catalog_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("mcp_server_catalog.id", ondelete="SET NULL"),
@@ -94,7 +96,12 @@ class MCPServer(Base):
     tools_preview: Mapped[list[dict[str, str]] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True,
     )
-    enabled: Mapped[bool] = mapped_column(
+    # Whether the user currently has this Connector connected — i.e. whether its
+    # tools are handed to the agent each turn. Distinct from ``authorized``
+    # (OAuth tokens present): a Connector can hold valid tokens and still be
+    # disconnected, which is the point — disconnecting keeps the credentials so
+    # reconnecting costs nothing, whereas deleting throws them away.
+    connected: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"),
     )
     created_at: Mapped[datetime] = mapped_column(

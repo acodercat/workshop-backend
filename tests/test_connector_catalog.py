@@ -31,14 +31,14 @@ class TestBuildConnector:
         assert connector.auth_type == MCPServerAuthType.OAUTH
         assert connector.oauth_scope == "read"
 
-    def test_oauth_starts_disabled_until_authorized(self):
+    def test_oauth_starts_disconnected_until_authorized(self):
         # Same rule as a hand-added OAuth Connector: no tokens yet, so it must
         # not be handed to the agent.
-        assert build_connector(_entry(), user_id=1).enabled is False
+        assert build_connector(_entry(), user_id=1).connected is False
 
-    def test_non_oauth_starts_enabled(self):
+    def test_non_oauth_starts_connected(self):
         entry = _entry(auth_type=MCPServerAuthType.NONE, oauth_scope=None)
-        assert build_connector(entry, user_id=1).enabled is True
+        assert build_connector(entry, user_id=1).connected is True
 
     @pytest.mark.parametrize(
         "auth_type", [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER],

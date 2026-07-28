@@ -219,7 +219,7 @@ async def oauth_callback(
     except Exception:
         pass
 
-    connector.enabled = True
+    connector.connected = True
     await db.commit()
     return {"ok": True}
 
@@ -253,8 +253,8 @@ async def update_connector(
 
     if body.name is not None:
         connector.name = body.name
-    if body.enabled is not None:
-        connector.enabled = body.enabled
+    if body.connected is not None:
+        connector.connected = body.connected
 
     # Switching an existing connector to OAuth needs the full discover +
     # client-registration + browser-authorize flow (see create); a PATCH can't
@@ -349,7 +349,7 @@ async def _build_oauth_connector(body: ConnectorCreate, user_id: int) -> MCPServ
             client_secret=body.oauth_client_secret,
         ),
         oauth_scope=body.oauth_scope,
-        enabled=False,  # inactive until authorized
+        connected=False,  # not handed to the agent until authorized
         tool_count=0,
     )
 
@@ -391,9 +391,6 @@ def _to_response(connector: MCPServer) -> ConnectorResponse:
         connector.auth_type != MCPServerAuthType.OAUTH
         or connector.oauth_tokens_encrypted is not None
     )
-    # Derived, not stored: came from the catalog ⇒ official. Keeping it out of
-    # the table is what stops it drifting from ``catalog_id``.
-    response.origin = "OFFICIAL" if connector.catalog_id is not None else "CUSTOM"
     return response
 
 

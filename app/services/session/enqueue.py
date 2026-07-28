@@ -169,7 +169,7 @@ async def queue_user_message(
         db, session.user_id, skills or [],
     )
 
-    # Snapshot the user's enabled Connectors (enabled = active). Credentials are
+    # Snapshot the user's connected Connectors. Credentials are
     # NOT snapshotted — the worker resolves url + decrypted credential live by id.
     accepted_connectors = await _resolve_mcp_servers(db, session.user_id)
 
@@ -506,11 +506,11 @@ async def _filter_invokable_skills(
 async def _resolve_mcp_servers(
     db: AsyncSession, user_id: int | None,
 ) -> list[dict[str, str | int]]:
-    """Return per-turn snapshots ``{"id", "name"}`` for the user's ENABLED Connectors.
+    """Return per-turn snapshots ``{"id", "name"}`` for the user's CONNECTED Connectors.
 
-    Connectors follow an "enabled = active" model (like Claude / ChatGPT
-    connectors): every enabled Connector's tools are available each turn, so the
-    enable toggle *is* the per-turn control. Snapshotting the enabled set at
+    Connectors follow a "connected = active" model (like Claude / ChatGPT
+    connectors): every connected Connector's tools are available each turn, so
+    the connect toggle *is* the per-turn control. Snapshotting the connected set at
     enqueue pins it for the turn (a later toggle can't change an in-flight turn);
     the worker resolves url + decrypted credential live by id, so credentials
     never sit on the ``session_turn`` row and a rotation is picked up.
@@ -519,7 +519,7 @@ async def _resolve_mcp_servers(
         return []
     stmt = (
         select(MCPServer.id, MCPServer.name)
-        .where(MCPServer.user_id == user_id, MCPServer.enabled.is_(True))
+        .where(MCPServer.user_id == user_id, MCPServer.connected.is_(True))
         .order_by(MCPServer.created_at)
     )
     result = await db.execute(stmt)

@@ -7,7 +7,7 @@ router — not re-deriving these rules.
 Instantiating **copies** the template onto a new user-owned ``mcp_server`` row
 rather than referencing it live. That is what keeps a Connector working after
 its catalog entry is edited or retired, and what lets every existing per-user
-path (authorize, token refresh, the ``enabled`` toggle, delete) stay untouched.
+path (authorize, token refresh, the ``connected`` toggle, delete) stay untouched.
 """
 
 from sqlalchemy import select
@@ -88,6 +88,6 @@ def build_connector(entry: MCPServerCatalogEntry, user_id: int) -> MCPServer:
         oauth_scope=entry.oauth_scope,
         # OAUTH starts inactive until authorized — same rule as a hand-added
         # OAuth Connector.
-        enabled=entry.auth_type != MCPServerAuthType.OAUTH,
+        connected=entry.auth_type != MCPServerAuthType.OAUTH,
         tool_count=0,
     )

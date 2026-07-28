@@ -112,6 +112,39 @@ class TestSsrfGuard:
             )
 
 
+class TestBuildOAuthConnector:
+    """The row a custom OAuth Connector is created as.
+
+    Regression cover for the create path itself: it builds an ``MCPServer``
+    positionally by keyword, so a column rename that misses it raises
+    ``TypeError`` at request time while every other test still passes.
+    """
+
+    async def test_builds_a_disconnected_row(self, monkeypatch):
+        from app.api.endpoints import mcp_server as endpoint
+        from app.models.mcp_server import MCPServerAuthType
+        from app.schemas.mcp_server import ConnectorCreate
+
+        async def fake_register(**_kwargs):
+            return "encrypted-client"
+
+        monkeypatch.setattr(endpoint, "_register_oauth_client", fake_register)
+
+        connector = await endpoint._build_oauth_connector(
+            ConnectorCreate(
+                name="Notion", url="https://mcp.notion.com/mcp",
+                auth_type=MCPServerAuthType.OAUTH, oauth_scope="read",
+            ),
+            user_id=42,
+        )
+
+        assert connector.user_id == 42
+        assert connector.auth_type == MCPServerAuthType.OAUTH
+        assert connector.oauth_client_encrypted == "encrypted-client"
+        # Not handed to the agent until the user comes back from the provider.
+        assert connector.connected is False
+
+
 class TestStateAndPkce:
     def test_state_is_unique(self):
         assert new_state() != new_state()

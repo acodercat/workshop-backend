@@ -6,7 +6,7 @@ show in the directory. Adding one instantiates an ordinary user-owned
 ``mcp_server`` row copied from it (``mcp_server.catalog_id`` points back).
 
 Templates rather than shared rows because almost everything a live Connector
-carries is per-user — OAuth tokens, credentials, the ``enabled`` switch, the
+carries is per-user — OAuth tokens, credentials, the ``connected`` switch, the
 cached tool listing. A shared row would have to push all of those into a
 per-user table, leaving a "shared" row that is only ever a template anyway.
 Instantiating keeps every existing per-user path (authorize, refresh, toggle,
@@ -64,9 +64,9 @@ class MCPServerCatalogEntry(Base):
     # Operator-set so a new entry needs no frontend deploy; the card falls back
     # to its generic icon when NULL.
     icon_url: Mapped[str | None] = mapped_column(String, nullable=True)
-    # Directory visibility. Deliberately NOT called ``enabled``:
-    # ``mcp_server.enabled`` already means "this user's on/off switch", and
-    # reusing the word for "listed in the directory" would conflate the two.
+    # Directory visibility. Deliberately its own word: whether an entry is
+    # offered is the operator's call, whereas ``mcp_server.connected`` is each
+    # user's own switch — one name for both would conflate them.
     # Unpublishing hides the entry without deleting it, so the FK from rows
     # already instantiated stays intact.
     published: Mapped[bool] = mapped_column(

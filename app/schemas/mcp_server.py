@@ -33,16 +33,15 @@ class ConnectorResponse(BaseModel):
     auth_type: str
     tool_count: int
     tools_preview: list[dict[str, str]] | None
-    enabled: bool
+    # Whether the agent currently gets this Connector's tools. Disconnecting
+    # keeps the credentials, so reconnecting is one click; deleting discards them.
+    connected: bool
     # True unless this is an OAuth connector still awaiting authorization.
     # Set by the endpoint layer (the ORM has no such column).
     authorized: bool = True
-    # The official catalog entry this was instantiated from, else None. The
-    # client joins the directory on it to tell "already added" from "add me".
+    # The directory entry this was connected from, else None. The client joins
+    # the directory on it to tell an already-connected entry from one on offer.
     catalog_id: int | None = None
-    # Derived from ``catalog_id`` by the endpoint layer — never a stored column,
-    # so it cannot drift from the thing it describes.
-    origin: str = "CUSTOM"
     created_at: datetime
     updated_at: datetime
 
@@ -165,7 +164,7 @@ class ConnectorUpdate(BaseModel):
     auth_type: MCPServerAuthType | None = None
     credential: str | None = Field(default=None, max_length=8192)
     header_name: str | None = Field(default=None, max_length=128)
-    enabled: bool | None = None
+    connected: bool | None = None
 
     @model_validator(mode="after")
     def _auth_fields_consistent(self) -> "ConnectorUpdate":
