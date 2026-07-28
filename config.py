@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     mcp_oauth_state_ttl_seconds: int = Field(
         default=600, description="TTL for the pending-OAuth-authorization Redis state",
     )
+    # Public URL of our OAuth Client ID Metadata Document (CIMD): the URL *is*
+    # the client_id, and the authorization server fetches it instead of us
+    # registering. Must be HTTPS with a non-root path, and must resolve to this
+    # API's ``GET /connectors/client-metadata``. Empty default → fall back to
+    # Dynamic Client Registration, which is the only option for servers that
+    # don't advertise CIMD anyway.
+    # e.g. https://api.example.com/api/connectors/client-metadata
+    mcp_client_metadata_url: str = Field(
+        default="", description="Public URL of our OAuth client metadata document (CIMD)",
+    )
     algorithm: str = Field(default="HS256", description="Algorithm for JWT")
     access_token_expire_minutes: int = Field(
         default=MINUTES_PER_WEEK,

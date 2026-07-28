@@ -1,8 +1,8 @@
-"""mcp_server_catalog: the platform's directory of official Connectors.
+"""mcp_server_catalog: the platform's catalog of official Connectors.
 
 One row is a **template**, not a usable connection: the endpoint (``url``), how
 to authenticate (``auth_type`` + ``oauth_scope``) and the picker metadata we
-show in the directory. Adding one instantiates an ordinary user-owned
+show in the catalog. Adding one instantiates an ordinary user-owned
 ``mcp_server`` row copied from it (``mcp_server.catalog_id`` points back).
 
 Templates rather than shared rows because almost everything a live Connector
@@ -54,7 +54,7 @@ class MCPServerCatalogEntry(Base):
         SAEnum(
             MCPServerAuthType,
             name="mcp_server_auth_type",
-            values_callable=lambda cls: [m.value for m in cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
         server_default=text("'NONE'"),
@@ -64,7 +64,7 @@ class MCPServerCatalogEntry(Base):
     # Operator-set so a new entry needs no frontend deploy; the card falls back
     # to its generic icon when NULL.
     icon_url: Mapped[str | None] = mapped_column(String, nullable=True)
-    # Directory visibility. Deliberately its own word: whether an entry is
+    # Catalog visibility. Deliberately its own word: whether an entry is
     # offered is the operator's call, whereas ``mcp_server.connected`` is each
     # user's own switch — one name for both would conflate them.
     # Unpublishing hides the entry without deleting it, so the FK from rows
@@ -84,7 +84,7 @@ class MCPServerCatalogEntry(Base):
     )
 
     __table_args__ = (
-        # The directory is only ever read published-first in display order.
+        # The catalog is only ever read published-first in display order.
         Index(
             "ix_mcp_server_catalog_published_sort_order",
             "published",

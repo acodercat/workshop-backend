@@ -1,4 +1,4 @@
-"""Manage the official Connector directory (``mcp_server_catalog``).
+"""Manage the official Connector catalog (``mcp_server_catalog``).
 
 The catalog is operator data, not code — this is how entries get in and out
 until the admin console grows a CRUD for it. Publishing state is a flag rather
@@ -120,7 +120,7 @@ def _parse_args() -> argparse.Namespace:
     sub.add_parser("list", help="list every entry, published or not")
 
     for name, help_text in (
-        ("publish", "list an entry in the directory"),
+        ("publish", "list an entry in the catalog"),
         ("unpublish", "hide an entry without deleting it"),
     ):
         cmd = sub.add_parser(name, help=help_text)

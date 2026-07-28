@@ -1,4 +1,4 @@
-"""The official Connector directory: read the catalog, instantiate an entry.
+"""The official Connector catalog: read the catalog, instantiate an entry.
 
 The only module that reads ``mcp_server_catalog``. Endpoints and the operator
 script both go through here, so adding an admin CRUD later means adding a
@@ -27,7 +27,7 @@ INSTANTIABLE_AUTH_TYPES = frozenset(
 
 
 async def list_published(db: AsyncSession) -> list[MCPServerCatalogEntry]:
-    """Every entry offered in the directory, in display order.
+    """Every entry offered in the catalog, in display order.
 
     Unpublished entries are invisible here but keep their rows, so Connectors
     already instantiated from them retain their ``catalog_id``.
@@ -65,14 +65,11 @@ async def get_published_entry(
 def build_connector(entry: MCPServerCatalogEntry, user_id: int) -> MCPServer:
     """An unsaved user-owned Connector copied from *entry*.
 
-    Credentials are deliberately absent: OAUTH entries get their client + tokens
-    from the authorize flow, and the catalog never carries secrets. The caller
-    commits (and, for non-OAUTH entries, probes first).
-
-    Which is exactly why only :data:`INSTANTIABLE_AUTH_TYPES` can be offered —
-    BEARER/HEADER need a per-user secret that neither the catalog nor the add
-    flow can supply, so such an entry would yield a credential-less Connector
-    that probes fine and then 401s on every real tool call.
+    Credentials are deliberately absent — the catalog never carries secrets,
+    and OAUTH entries get theirs from the authorize flow. That is why only
+    :data:`INSTANTIABLE_AUTH_TYPES` can be offered: BEARER/HEADER need a
+    per-user secret nobody here can supply, so the Connector would probe fine
+    and then 401 on every real tool call.
     """
     if entry.auth_type not in INSTANTIABLE_AUTH_TYPES:
         raise ConnectorCatalogEntryNotFoundError(

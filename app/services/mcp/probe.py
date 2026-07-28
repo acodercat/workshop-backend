@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 
 from mcp import ClientSession
+from mcp.types import Implementation
 from mcp.client.streamable_http import streamablehttp_client
 
 from app.errors import ConnectorUnreachableError
@@ -21,10 +22,16 @@ _CONNECT_TIMEOUT = 20.0
 _LIST_TIMEOUT = 20.0
 
 
+# An icon is rendered by the browser, so an oversize ``data:`` URI would bloat
+# every connector-list response for no visual gain. Comfortably fits a real SVG.
+_MAX_ICON_SRC_LEN = 4096
+
+
 @dataclass(frozen=True)
 class ProbeResult:
     server_name: str
     tools: list[dict[str, str]]  # ``[{"name": ..., "description": ...}]``
+    icon_url: str | None = None  # from ``serverInfo.icons`` (SEP-973), if usable
 
 
 def build_auth_headers(auth_type: MCPServerAuthType, credential: str | None) -> dict[str, str]:
@@ -64,7 +71,7 @@ async def probe(
             httpx_client_factory=guarded_client,
         ) as (read_stream, write_stream, _get_session_id):
             async with ClientSession(read_stream, write_stream) as session:
-                init_result = await asyncio.wait_for(
+                initialize_result = await asyncio.wait_for(
                     session.initialize(), _CONNECT_TIMEOUT
                 )
                 list_result = await asyncio.wait_for(
@@ -75,9 +82,34 @@ async def probe(
             f"Could not reach the MCP server: {exc}"
         ) from exc
 
-    server_name = init_result.serverInfo.name if init_result.serverInfo else url
+    server_info = initialize_result.serverInfo
+    server_name = server_info.name if server_info else url
     tools = [
         {"name": tool.name, "description": tool.description or ""}
         for tool in list_result.tools
     ]
-    return ProbeResult(server_name=server_name, tools=tools)
+    return ProbeResult(
+        server_name=server_name,
+        tools=tools,
+        icon_url=_usable_icon(server_info),
+    )
+
+
+def _usable_icon(server_info: Implementation | None) -> str | None:
+    """The server's own icon (SEP-973), if it offers one we can safely render.
+
+    Takes the first icon whose ``src`` the browser can load directly: an https
+    URL or an inline ``data:image/`` URI. Anything else — other schemes, or a
+    payload past :data:`_MAX_ICON_SRC_LEN` — is skipped, and the caller falls
+    back to the built-in glyph. No SSRF concern: the browser fetches this, our
+    server never does.
+    """
+    if server_info is None:
+        return None
+    for icon in server_info.icons or []:
+        src = icon.src.strip()
+        if len(src) > _MAX_ICON_SRC_LEN:
+            continue
+        if src.startswith("https://") or src.startswith("data:image/"):
+            return src
+    return None

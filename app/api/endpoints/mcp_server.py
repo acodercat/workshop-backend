@@ -16,7 +16,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from mcp.shared.auth import OAuthClientInformationFull, OAuthMetadata
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthMetadata,
+    OAuthToken,
+)
 
 from app.api.dependencies import get_db, get_redis
 from app.auth import authenticate_and_get_user
@@ -36,7 +40,7 @@ from app.schemas.mcp_server import (
 )
 from app.services.crypto import decrypt_secret, encrypt_secret
 from app.services.mcp import catalog, oauth
-from app.services.mcp.probe import probe
+from app.services.mcp.probe import ProbeResult, probe
 from app.services.redis import oauth_state_key
 from config import settings
 
@@ -56,19 +60,39 @@ async def create_connection_test(
     return ConnectionTestResponse(server_name=result.server_name, tools=result.tools)
 
 
+@router.get("/connectors/client-metadata")
+@limiter.exempt
+async def get_client_metadata() -> dict:
+    """Our OAuth client metadata document, fetched by authorization servers (CIMD).
+
+    Public by nature — the caller is a third-party authorization server
+    resolving our ``client_id``, which *is* this URL. Rate-limit exempt because
+    every user authorizing a Connector drives a fetch from the same provider IP.
+    404 when unconfigured, so a half-configured deploy can't publish an identity
+    naming a redirect URI it doesn't serve.
+    """
+    if not settings.mcp_client_metadata_url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="CIMD is not configured",
+        )
+    return oauth.client_metadata_document(
+        settings.mcp_client_metadata_url, redirect_uri=_require_redirect_uri(),
+    )
+
+
 @router.get("/connectors/catalog")
 async def list_connector_catalog(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> list[ConnectorCatalogEntryResponse]:
-    """The official Connector directory — templates the caller can add.
+    """The official Connector catalog — templates the caller can add.
 
     User-independent (every caller sees the same published entries); the client
     joins it against ``GET /connectors`` on ``catalog_id`` to tell an entry it
     has already added from one it hasn't.
     """
     entries = await catalog.list_published(db)
-    return [ConnectorCatalogEntryResponse.model_validate(e) for e in entries]
+    return [ConnectorCatalogEntryResponse.model_validate(entry) for entry in entries]
 
 
 @router.post("/connectors", status_code=status.HTTP_201_CREATED)
@@ -103,9 +127,8 @@ async def create_connector(
             encrypted_credential=(
                 encrypt_secret(credential) if credential is not None else None
             ),
-            tool_count=len(result.tools),
-            tools_preview=result.tools,
         )
+        _apply_probe(connector, result)
 
     db.add(connector)
     # ``connector.name``, not ``body.name`` — the catalog path takes its name
@@ -136,7 +159,8 @@ async def create_connector_authorization(
             detail="connector is not an OAuth connector",
         )
     redirect_uri = _require_redirect_uri()
-    metadata = await oauth.discover_metadata(connector.url)
+    discovered = await oauth.discover_authorization(connector.url)
+    metadata = discovered.metadata
     client = _load_oauth_client(connector)
     pkce = oauth.new_pkce()
     state = oauth.new_state()
@@ -154,7 +178,9 @@ async def create_connector_authorization(
     )
     authorization_url = oauth.build_authorization_url(
         metadata, client,
-        redirect_uri=redirect_uri, scope=connector.oauth_scope,
+        server_url=connector.url,
+        redirect_uri=redirect_uri,
+        scope=discovered.scope_for(connector.oauth_scope),
         state=state, pkce=pkce,
     )
     return ConnectorAuthorizationResponse(authorization_url=authorization_url)
@@ -198,12 +224,12 @@ async def oauth_callback(
     metadata = (
         OAuthMetadata.model_validate_json(cached_metadata)
         if cached_metadata
-        else await oauth.discover_metadata(connector.url)
+        else (await oauth.discover_authorization(connector.url)).metadata
     )
     client = _load_oauth_client(connector)
     tokens = await oauth.exchange_code(
         metadata, client,
-        code=body.code, redirect_uri=redirect_uri,
+        code=body.code, server_url=connector.url, redirect_uri=redirect_uri,
         code_verifier=pending["code_verifier"],
     )
     connector.oauth_tokens_encrypted = encrypt_secret(tokens.model_dump_json())
@@ -214,12 +240,13 @@ async def oauth_callback(
         result = await probe(
             connector.url, MCPServerAuthType.BEARER, tokens.access_token,
         )
-        connector.tool_count = len(result.tools)
-        connector.tools_preview = result.tools
+        _apply_probe(connector, result)
     except Exception:
         pass
 
     connector.connected = True
+    # A fresh grant is exactly what the flag was asking for.
+    connector.oauth_reauthorization_required = False
     await db.commit()
     return {"ok": True}
 
@@ -255,6 +282,10 @@ async def update_connector(
         connector.name = body.name
     if body.connected is not None:
         connector.connected = body.connected
+    if body.disabled_tools is not None:
+        # Not validated against the live tool list: that would cost a network
+        # round-trip on every PATCH, and an unmatched name is inert anyway.
+        connector.disabled_tools = body.disabled_tools
 
     # Switching an existing connector to OAuth needs the full discover +
     # client-registration + browser-authorize flow (see create); a PATCH can't
@@ -288,10 +319,36 @@ async def update_connector(
     # connectors are probed here.
     if (url_changed or auth_changed) and connector.auth_type != MCPServerAuthType.OAUTH:
         result = await probe(connector.url, connector.auth_type, credential)
-        connector.tool_count = len(result.tools)
-        connector.tools_preview = result.tools
+        _apply_probe(connector, result)
 
     await _commit_or_conflict(db, connector.name)
+    await db.refresh(connector)
+    return _to_response(connector)
+
+
+@router.post("/connectors/{connector_id}/tool-listings")
+@limiter.limit("30/minute")
+async def create_connector_tool_listing(
+    request: Request,
+    connector_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> ConnectorResponse:
+    """Re-list a saved Connector's tools and refresh the cached preview.
+
+    ``tools_preview`` is only written at create (non-OAuth) and by the OAuth
+    callback's best-effort probe, so it can be empty or lag the server — and
+    the per-tool switches are rendered from it. This is how a user gets a
+    current list without disconnecting and reconnecting.
+
+    Probes with the stored credential; for OAuth the access token is the
+    bearer, exactly as the callback does.
+    """
+    connector = await _get_owned_connector(db, connector_id, current_user.id)
+    auth_type, credential = _probe_credential(connector)
+    result = await probe(connector.url, auth_type, credential)
+    _apply_probe(connector, result)
+    await db.commit()
     await db.refresh(connector)
     return _to_response(connector)
 
@@ -330,8 +387,7 @@ async def _build_catalog_connector(
         )
     else:
         result = await probe(connector.url, connector.auth_type, None)
-        connector.tool_count = len(result.tools)
-        connector.tools_preview = result.tools
+        _apply_probe(connector, result)
     return connector
 
 
@@ -368,13 +424,14 @@ async def _register_oauth_client(
     without one.
     """
     redirect_uri = _require_redirect_uri()
-    metadata = await oauth.discover_metadata(url)
+    discovered = await oauth.discover_authorization(url)
     client = await oauth.ensure_client(
-        metadata,
+        discovered.metadata,
         redirect_uri=redirect_uri,
-        scope=scope,
+        scope=discovered.scope_for(scope),
         client_id=client_id,
         client_secret=client_secret,
+        client_metadata_url=settings.mcp_client_metadata_url or None,
     )
     return encrypt_secret(client.model_dump_json())
 
@@ -392,6 +449,40 @@ def _to_response(connector: MCPServer) -> ConnectorResponse:
         or connector.oauth_tokens_encrypted is not None
     )
     return response
+
+
+def _apply_probe(connector: MCPServer, result: ProbeResult) -> None:
+    """Copy everything a probe learned onto the row.
+
+    Five paths probe a Connector (create, catalog add, OAuth callback, auth
+    change, explicit re-list). Adding a probe-derived field to only some of them
+    is a silent staleness bug, so they all go through here.
+    """
+    connector.tool_count = len(result.tools)
+    connector.tools_preview = result.tools
+    connector.advertised_icon_url = result.icon_url
+
+
+def _probe_credential(
+    connector: MCPServer,
+) -> tuple[MCPServerAuthType, str | None]:
+    """How to authenticate a probe of *connector*, as (auth_type, secret).
+
+    OAuth is probed as a bearer carrying the stored access token — the MCP
+    server takes it the same way either route, and ``probe`` has no OAuth path
+    of its own. Raises when an OAuth Connector holds no tokens yet, since a
+    probe would then be indistinguishable from an unauthenticated one.
+    """
+    if connector.auth_type != MCPServerAuthType.OAUTH:
+        return connector.auth_type, _decrypt_or_none(connector.encrypted_credential)
+    if not connector.oauth_tokens_encrypted:
+        raise ConnectorOAuthError(
+            "This Connector is not authorized yet; authorize it first."
+        )
+    tokens = OAuthToken.model_validate_json(
+        decrypt_secret(connector.oauth_tokens_encrypted)
+    )
+    return MCPServerAuthType.BEARER, tokens.access_token
 
 
 def _credential_plaintext(

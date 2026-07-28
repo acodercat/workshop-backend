@@ -8,7 +8,7 @@ cached tool listing for display. The worker resolves url + credential live by
 
 Always user-owned: every row has a ``user_id``, and its own ``connected`` flag
 is the on/off switch (no separate preference table — that existed for skills
-only to override *shared* rows). Connectors offered in the platform directory
+only to override *shared* rows). Connectors offered in the platform catalog
 are **copied** onto a row of the user's own at connect time
 (``catalog_id`` points back), never shared, because everything that makes a
 Connector usable — tokens, credentials, the switch — is per-user anyway.
@@ -53,8 +53,8 @@ class MCPServer(Base):
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
     )
-    # The directory entry this row was copied from; NULL for a Connector the
-    # user defined themselves. Clients join the directory on it to tell an entry
+    # The catalog entry this row was copied from; NULL for a Connector the
+    # user defined themselves. Clients join the catalog on it to tell an entry
     # they have already connected from one still on offer. ON DELETE SET NULL:
     # retiring an entry leaves existing Connectors working as custom ones, since
     # url / auth_type / credentials all live here, not on the template.
@@ -69,7 +69,7 @@ class MCPServer(Base):
         SAEnum(
             MCPServerAuthType,
             name="mcp_server_auth_type",
-            values_callable=lambda cls: [m.value for m in cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
         server_default=text("'NONE'"),
@@ -96,6 +96,18 @@ class MCPServer(Base):
     tools_preview: Mapped[list[dict[str, str]] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True,
     )
+    # What the server advertises for itself in ``serverInfo.icons`` (SEP-973),
+    # captured at probe time. The UI prefers a curated catalog icon over this,
+    # and falls back to the built-in glyph when neither exists.
+    advertised_icon_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Bare server-side names of the tools the user switched off; everything else
+    # the server exposes stays available. Exceptions rather than a selection, so
+    # a tool the server adds later is available at once and one it drops leaves
+    # an inert entry. Not folded into ``tools_preview`` — that is overwritten
+    # wholesale on every re-probe and would erase the switches.
+    disabled_tools: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+    )
     # Whether the user currently has this Connector connected — i.e. whether its
     # tools are handed to the agent each turn. Distinct from ``authorized``
     # (OAuth tokens present): a Connector can hold valid tokens and still be
@@ -103,6 +115,16 @@ class MCPServer(Base):
     # reconnecting costs nothing, whereas deleting throws them away.
     connected: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"),
+    )
+    # Set by the worker when the stored OAuth grant stops working — revoked at
+    # the provider, refresh token expired, or a rotated one rejected. Kept apart
+    # from ``connected`` on purpose: that is the user's switch, this is the
+    # provider's verdict, and only the pair distinguishes "I turned it off" from
+    # "it needs reconnecting". Cleared on the next successful connect, so a
+    # transient misread heals itself. ``oauth_``-prefixed like its siblings —
+    # only the OAuth path can set it.
+    oauth_reauthorization_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"),
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),

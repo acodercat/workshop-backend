@@ -23,14 +23,14 @@ class TestValidatePublicUrl:
     def test_accepts_public(self, monkeypatch):
         monkeypatch.setattr(
             url_guard.socket, "getaddrinfo",
-            lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))],
+            lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
         )
         url_guard.validate_public_url("https://mcp.example.com/x")  # no raise
 
     def test_unresolvable_host_rejected(self, monkeypatch):
         import socket
 
-        def boom(*a, **k):
+        def boom(*args, **kwargs):
             raise socket.gaierror("nope")
 
         monkeypatch.setattr(url_guard.socket, "getaddrinfo", boom)
@@ -46,7 +46,7 @@ class TestPinnedResolveTransport:
         # socket.getaddrinfo, so patching it drives the async resolution.)
         monkeypatch.setattr(
             url_guard.socket, "getaddrinfo",
-            lambda *a, **k: [(2, 1, 6, "", ("10.0.0.5", 443))],
+            lambda *args, **kwargs: [(2, 1, 6, "", ("10.0.0.5", 443))],
         )
         transport = url_guard._PinnedResolveTransport()
         with pytest.raises(InvalidConnectorUrlError):

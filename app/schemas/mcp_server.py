@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.mcp_server import MCPServerAuthType
@@ -22,6 +24,14 @@ def _require_auth_credentials(
         raise ValueError("HEADER auth requires header_name and credential.")
 
 
+# MCP caps tool names at 128 characters; the list is bounded too so a PATCH
+# can't push an unbounded blob into the JSONB column. Both limits sit well above
+# any real server — the largest published catalogues are a few dozen tools.
+_MAX_TOOL_NAME_LEN = 128
+_MAX_DISABLED_TOOLS = 256
+ToolName = Annotated[str, Field(min_length=1, max_length=_MAX_TOOL_NAME_LEN)]
+
+
 class ConnectorResponse(BaseModel):
     """A Connector as returned to the client. Never exposes the credential."""
 
@@ -33,21 +43,33 @@ class ConnectorResponse(BaseModel):
     auth_type: str
     tool_count: int
     tools_preview: list[dict[str, str]] | None
+    # The server's own icon, when it advertises one (SEP-973). Distinct from
+    # the catalog entry's curated ``icon_url``, which the client prefers.
+    advertised_icon_url: str | None = None
+    # Bare server-side names the user switched off. Same name as the column on
+    # purpose, like ``oauth_reauthorization_required`` below.
+    disabled_tools: list[ToolName] = Field(default_factory=list)
     # Whether the agent currently gets this Connector's tools. Disconnecting
     # keeps the credentials, so reconnecting is one click; deleting discards them.
     connected: bool
+    # The provider's verdict, not the user's: the stored OAuth grant stopped
+    # working and only a fresh authorization fixes it. Orthogonal to
+    # ``connected``, so the card can stay on the page with a reconnect badge.
+    # Same name as the column on purpose — ``model_validate`` maps by attribute,
+    # so a renamed field here would silently serialize as ``false``.
+    oauth_reauthorization_required: bool = False
     # True unless this is an OAuth connector still awaiting authorization.
     # Set by the endpoint layer (the ORM has no such column).
     authorized: bool = True
-    # The directory entry this was connected from, else None. The client joins
-    # the directory on it to tell an already-connected entry from one on offer.
+    # The catalog entry this was connected from, else None. The client joins
+    # the catalog on it to tell an already-connected entry from one on offer.
     catalog_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
 
 class ConnectorCatalogEntryResponse(BaseModel):
-    """One official Connector offered in the directory (a template).
+    """One official Connector offered in the catalog (a template).
 
     Operator-side columns (``published``, ``sort_order``) stay server-side: the
     client only ever sees entries it is allowed to add.
@@ -165,6 +187,12 @@ class ConnectorUpdate(BaseModel):
     credential: str | None = Field(default=None, max_length=8192)
     header_name: str | None = Field(default=None, max_length=128)
     connected: bool | None = None
+    # Replaces the switched-off set wholesale — the client always holds the full
+    # list, so a merge would only add a way for two tabs to disagree. Names the
+    # server no longer exposes are accepted and simply never match.
+    disabled_tools: list[ToolName] | None = Field(
+        default=None, max_length=_MAX_DISABLED_TOOLS,
+    )
 
     @model_validator(mode="after")
     def _auth_fields_consistent(self) -> "ConnectorUpdate":

@@ -33,7 +33,11 @@ class _FakeSession:
         return False
 
     async def initialize(self):
-        return SimpleNamespace(serverInfo=SimpleNamespace(name="Demo Server"))
+        # ``icons`` mirrors the real ``Implementation``; leaving it off would
+        # only prove the code tolerates a fake that can't occur.
+        return SimpleNamespace(
+            serverInfo=SimpleNamespace(name="Demo Server", icons=None)
+        )
 
     async def list_tools(self):
         return SimpleNamespace(tools=[
@@ -50,11 +54,13 @@ class TestProbe:
         monkeypatch.setattr(probe_mod, "guard_public_url", _guard_ok)
 
         @asynccontextmanager
-        async def fake_shc(*a, **k):
+        async def fake_shc(*args, **kwargs):
             yield ("r", "w", lambda: None)
 
         monkeypatch.setattr(probe_mod, "streamablehttp_client", fake_shc)
-        monkeypatch.setattr(probe_mod, "ClientSession", lambda r, w: _FakeSession())
+        monkeypatch.setattr(
+            probe_mod, "ClientSession", lambda read, write: _FakeSession()
+        )
 
         result = await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
 
@@ -77,10 +83,68 @@ class TestProbe:
         monkeypatch.setattr(probe_mod, "guard_public_url", _guard_ok)
 
         @asynccontextmanager
-        async def boom(*a, **k):
+        async def boom(*args, **kwargs):
             raise RuntimeError("connection refused")
             yield  # pragma: no cover
 
         monkeypatch.setattr(probe_mod, "streamablehttp_client", boom)
         with pytest.raises(ConnectorUnreachableError):
             await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
+
+
+class TestServerIcon:
+    """``serverInfo.icons`` (SEP-973) gives a connector its own artwork; only
+    sources the browser can load directly are kept."""
+
+    def _server_info(self, *srcs):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            icons=[SimpleNamespace(src=src) for src in srcs]
+        )
+
+    def test_takes_an_https_icon(self):
+        from app.services.mcp.probe import _usable_icon
+
+        assert _usable_icon(self._server_info("https://cdn.example.com/i.png")) == (
+            "https://cdn.example.com/i.png"
+        )
+
+    def test_takes_an_inline_image_data_uri(self):
+        from app.services.mcp.probe import _usable_icon
+
+        src = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="
+        assert _usable_icon(self._server_info(src)) == src
+
+    def test_skips_sources_the_browser_should_not_load(self):
+        from app.services.mcp.probe import _usable_icon
+
+        for bad in (
+            "http://cdn.example.com/i.png",       # plaintext
+            "javascript:alert(1)",                 # not an image at all
+            "data:text/html,<script>x</script>",   # data URI, wrong type
+            "file:///etc/passwd",
+        ):
+            assert _usable_icon(self._server_info(bad)) is None
+
+    def test_skips_an_oversize_payload(self):
+        from app.services.mcp.probe import _MAX_ICON_SRC_LEN, _usable_icon
+
+        assert _usable_icon(
+            self._server_info("data:image/png;base64," + "A" * _MAX_ICON_SRC_LEN)
+        ) is None
+
+    def test_falls_through_to_the_first_usable_one(self):
+        from app.services.mcp.probe import _usable_icon
+
+        assert _usable_icon(
+            self._server_info("file:///x", "https://ok.example.com/i.png")
+        ) == "https://ok.example.com/i.png"
+
+    def test_no_icons_is_not_an_error(self):
+        from types import SimpleNamespace
+
+        from app.services.mcp.probe import _usable_icon
+
+        assert _usable_icon(SimpleNamespace(icons=None)) is None
+        assert _usable_icon(None) is None

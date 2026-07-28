@@ -509,8 +509,9 @@ async def _resolve_mcp_servers(
     """Return per-turn snapshots ``{"id", "name"}`` for the user's CONNECTED Connectors.
 
     Connectors follow a "connected = active" model (like Claude / ChatGPT
-    connectors): every connected Connector's tools are available each turn, so
-    the connect toggle *is* the per-turn control. Snapshotting the connected set at
+    connectors): every connected Connector's tools are available each turn,
+    minus the ones the user switched off individually (``disabled_tools``,
+    resolved live by the worker rather than snapshotted here). Snapshotting the connected set at
     enqueue pins it for the turn (a later toggle can't change an in-flight turn);
     the worker resolves url + decrypted credential live by id, so credentials
     never sit on the ``session_turn`` row and a rotation is picked up.
