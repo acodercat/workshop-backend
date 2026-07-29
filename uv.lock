@@ -1527,7 +1527,7 @@ requires-dist = [
     { name = "gunicorn", specifier = ">=25.3.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "loguru", specifier = ">=0.7.3" },
-    { name = "mcp", specifier = ">=1.28.1" },
+    { name = "mcp", specifier = ">=1.28.1,<2" },
     { name = "openai", specifier = ">=2.32.0" },
     { name = "orjson", specifier = ">=3.11.9" },
     { name = "oss2", specifier = ">=2.19.1" },
