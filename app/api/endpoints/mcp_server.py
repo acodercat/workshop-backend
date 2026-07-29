@@ -10,6 +10,8 @@ callback flow obtains and stores the tokens (see ``app.services.mcp.oauth``).
 """
 
 import json
+import logging
+import time
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -39,10 +41,12 @@ from app.schemas.mcp_server import (
     OAuthCallbackRequest,
 )
 from app.services.crypto import decrypt_secret, encrypt_secret
-from app.services.mcp import catalog, oauth
+from app.services.mcp import catalog, grant, oauth
 from app.services.mcp.probe import ProbeResult, probe
-from app.services.redis import oauth_state_key
+from app.services.redis import oauth_current_state_key, oauth_state_key
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["connectors"])
 
@@ -55,7 +59,9 @@ async def create_connection_test(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ConnectionTestResponse:
     """Probe a remote MCP server without saving — validates URL and lists tools."""
-    credential = _credential_plaintext(body.auth_type, body.credential, body.header_name)
+    credential = _credential_plaintext(
+        body.auth_type, body.credential, body.header_name
+    )
     result = await probe(body.url, body.auth_type, credential)
     return ConnectionTestResponse(server_name=result.server_name, tools=result.tools)
 
@@ -161,7 +167,7 @@ async def create_connector_authorization(
     redirect_uri = _require_redirect_uri()
     discovered = await oauth.discover_authorization(connector.url)
     metadata = discovered.metadata
-    client = _load_oauth_client(connector)
+    client = await _client_for_authorization(connector, discovered, db)
     pkce = oauth.new_pkce()
     state = oauth.new_state()
     await redis.set(
@@ -170,10 +176,23 @@ async def create_connector_authorization(
             "connector_id": connector.id,
             "user_id": current_user.id,
             "code_verifier": pkce.code_verifier,
-            # Cache the discovered metadata so the callback exchanges the code
-            # without repeating the multi-request discovery against the server.
-            "metadata": metadata.model_dump_json(),
+            # Recorded with the verifier because RFC 9207 says so: the check
+            # is only worth anything if the expected issuer came from the
+            # metadata document this flow validated, not from the response.
+            "issuer": discovered.issuer_as_published,
+            "iss_advertised": discovered.iss_parameter_supported,
+            # Carried so the callback exchanges the code without repeating the
+            # multi-request discovery, and then stores it on the row for the
+            # token refresher to aim rotations at.
+            "discovered": discovered.as_stored(),
         }),
+        ex=settings.mcp_oauth_state_ttl_seconds,
+    )
+    # Supersedes any flow already in the air for this Connector; the callback
+    # checks it, so an older tab finishing later cannot land on top of this.
+    await redis.set(
+        oauth_current_state_key(connector.id),
+        state,
         ex=settings.mcp_oauth_state_ttl_seconds,
     )
     authorization_url = oauth.build_authorization_url(
@@ -210,6 +229,17 @@ async def oauth_callback(
         )
     await redis.delete(key)  # one-shot
     pending = json.loads(raw)
+    # First thing the record is used for: a response from an authorization
+    # server other than the one this flow was started with must not be acted
+    # on at all — not exchanged, and not reported back from. Ahead of the
+    # staleness check below, which is about which of two honest flows the user
+    # meant; this one is about whether to trust the response at all.
+    oauth.require_matching_issuer(
+        body.iss,
+        recorded=pending.get("issuer"),
+        advertised=bool(pending.get("iss_advertised")),
+    )
+    await _reject_a_superseded_authorization(redis, body.state, pending)
 
     connector = await db.get(MCPServer, pending["connector_id"])
     if connector is None or connector.user_id != pending["user_id"]:
@@ -218,35 +248,38 @@ async def oauth_callback(
         )
 
     redirect_uri = _require_redirect_uri()
-    # Reuse the metadata discovered in /authorize (cached in the state) so we
-    # don't repeat discovery; fall back to a fresh discovery if it's absent.
-    cached_metadata = pending.get("metadata")
-    metadata = (
-        OAuthMetadata.model_validate_json(cached_metadata)
-        if cached_metadata
-        else (await oauth.discover_authorization(connector.url)).metadata
-    )
+    # Reuse what /authorize discovered (carried in the state) rather than
+    # repeating it; rediscover only if the state predates this field.
+    stored = pending.get("discovered") or (
+        await oauth.discover_authorization(connector.url)
+    ).as_stored()
+    metadata = OAuthMetadata.model_validate(stored["authorization_server"])
     client = _load_oauth_client(connector)
     tokens = await oauth.exchange_code(
         metadata, client,
         code=body.code, server_url=connector.url, redirect_uri=redirect_uri,
         code_verifier=pending["code_verifier"],
     )
-    connector.oauth_tokens_encrypted = encrypt_secret(tokens.model_dump_json())
-
-    # Now that we hold an access token, list the tools (best-effort) so the card
-    # shows a count. The access token is a bearer for the probe.
-    try:
-        result = await probe(
-            connector.url, MCPServerAuthType.BEARER, tokens.access_token,
-        )
-        _apply_probe(connector, result)
-    except Exception:
-        pass
-
+    # Asked again, now that the exchange is behind us. The first ask was before
+    # a round-trip to someone else's token endpoint, which can take as long as
+    # they like — long enough for the user to start the flow this one is being
+    # measured against, and finish it.
+    await _reject_a_superseded_authorization(redis, body.state, pending)
+    grant.store_tokens(connector, tokens, rotation=False)
+    # Where the token refresher will aim its rotations. Without it there is
+    # nothing safe to guess from, so it would leave the Connector alone.
+    connector.oauth_metadata = stored
     connector.connected = True
     # A fresh grant is exactly what the flag was asking for.
     connector.oauth_reauthorization_required = False
+    # Committed before the probe, not after it. The probe is a round-trip to
+    # someone else's server and can take as long as they like; holding the
+    # grant behind it means two authorizations racing — a second tab finishing
+    # while the first is still probing — end with whichever *probe* returned
+    # last, not whichever grant is newer.
+    await db.commit()
+
+    await _probe_after_authorization(connector, tokens.access_token)
     await db.commit()
     return {"ok": True}
 
@@ -277,6 +310,9 @@ async def update_connector(
 ) -> ConnectorResponse:
     """Update a Connector; re-probe when a non-OAuth URL or auth changes."""
     connector = await _get_owned_connector(db, connector_id, current_user.id)
+    url_changed = body.url is not None and body.url != connector.url
+    auth_changed = body.auth_type is not None
+    _reject_unprovisionable(connector, body, url_changed=url_changed)
 
     if body.name is not None:
         connector.name = body.name
@@ -286,44 +322,80 @@ async def update_connector(
         # Not validated against the live tool list: that would cost a network
         # round-trip on every PATCH, and an unmatched name is inert anyway.
         connector.disabled_tools = body.disabled_tools
-
-    # Switching an existing connector to OAuth needs the full discover +
-    # client-registration + browser-authorize flow (see create); a PATCH can't
-    # provision it, and letting it through would leave the row unauthorizable.
-    if body.auth_type == MCPServerAuthType.OAUTH:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="changing a connector to OAuth isn't supported; create a new OAuth connector",
-        )
-
-    url_changed = body.url is not None and body.url != connector.url
-    auth_changed = body.auth_type is not None
     if url_changed:
+        # Guarded by ``probe`` below, which every surviving URL change reaches:
+        # OAuth rows are refused above, and no other auth type skips the probe.
         connector.url = body.url
-
-    if auth_changed:
-        credential = _credential_plaintext(body.auth_type, body.credential, body.header_name)
-        connector.auth_type = body.auth_type
-        connector.encrypted_credential = (
-            encrypt_secret(credential) if credential is not None else None
-        )
-        # New auth type is non-OAuth (guarded above), so any prior OAuth
-        # client/tokens/scope are now meaningless — drop them.
-        connector.oauth_client_encrypted = None
-        connector.oauth_tokens_encrypted = None
-        connector.oauth_scope = None
-    else:
-        credential = _decrypt_or_none(connector.encrypted_credential)
+    credential = (
+        _apply_auth_change(connector, body) if auth_changed
+        else _decrypt_or_none(connector.encrypted_credential)
+    )
 
     # OAuth re-probe needs a live token (re-authorize instead); only non-OAuth
     # connectors are probed here.
     if (url_changed or auth_changed) and connector.auth_type != MCPServerAuthType.OAUTH:
-        result = await probe(connector.url, connector.auth_type, credential)
-        _apply_probe(connector, result)
+        _apply_probe(
+            connector, await probe(connector.url, connector.auth_type, credential),
+        )
 
     await _commit_or_conflict(db, connector.name)
     await db.refresh(connector)
     return _to_response(connector)
+
+
+def _reject_unprovisionable(
+    connector: MCPServer, body: ConnectorUpdate, *, url_changed: bool,
+) -> None:
+    """Refuse the two changes a ``PATCH`` cannot carry out.
+
+    Both need the full discover + client-registration + browser-authorize flow
+    that ``create`` runs, and both would otherwise leave a row nothing can
+    re-provision — authorizable only by deleting it and starting over.
+
+    Switching *to* OAuth is one: there would be no client registration to
+    authorize against. Repointing an OAuth Connector's URL is the other, for
+    the mirror reason — an OAuth grant belongs to the resource it was issued
+    for (that URL is literally the RFC 8707 ``resource`` the token is bound
+    to), so moving it has to drop the grant, and the client registration under
+    it, which the old authorization server issued and may have given a secret.
+
+    Refusing says so up front, rather than half-clearing the row and leaving
+    the user to discover that Reconnect now fails.
+    """
+    if body.auth_type == MCPServerAuthType.OAUTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "changing a connector to OAuth isn't supported; "
+                "create a new OAuth connector"
+            ),
+        )
+    if url_changed and connector.auth_type == MCPServerAuthType.OAUTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "changing an OAuth connector's URL isn't supported; "
+                "create a new OAuth connector"
+            ),
+        )
+
+
+def _apply_auth_change(connector: MCPServer, body: ConnectorUpdate) -> str | None:
+    """Swap the Connector's credential, returning the plaintext for the probe.
+
+    The new auth type is never OAuth (:func:`_reject_unprovisionable` refused
+    that), so whatever OAuth state the row still carries is now unreachable and
+    goes with it.
+    """
+    credential = _credential_plaintext(
+        body.auth_type, body.credential, body.header_name
+    )
+    connector.auth_type = body.auth_type
+    connector.encrypted_credential = (
+        encrypt_secret(credential) if credential is not None else None
+    )
+    _clear_oauth_state(connector)
+    return credential
 
 
 @router.post("/connectors/{connector_id}/tool-listings")
@@ -382,8 +454,10 @@ async def _build_catalog_connector(
     # the authority; this check just keeps the common retry off the network.
     await _reject_duplicate_name(db, user_id, connector.name)
     if connector.auth_type == MCPServerAuthType.OAUTH:
-        connector.oauth_client_encrypted = await _register_oauth_client(
-            url=connector.url, scope=connector.oauth_scope,
+        connector.oauth_client_encrypted, connector.oauth_metadata = (
+            await _register_oauth_client(
+                url=connector.url, scope=connector.oauth_scope,
+            )
         )
     else:
         result = await probe(connector.url, connector.auth_type, None)
@@ -393,17 +467,19 @@ async def _build_catalog_connector(
 
 async def _build_oauth_connector(body: ConnectorCreate, user_id: int) -> MCPServer:
     """Discover metadata + register/prepare the OAuth client (no tokens yet)."""
+    client, authorization = await _register_oauth_client(
+        url=body.url,
+        scope=body.oauth_scope,
+        client_id=body.oauth_client_id,
+        client_secret=body.oauth_client_secret,
+    )
     return MCPServer(
         user_id=user_id,
         name=body.name,
         url=body.url,
         auth_type=MCPServerAuthType.OAUTH,
-        oauth_client_encrypted=await _register_oauth_client(
-            url=body.url,
-            scope=body.oauth_scope,
-            client_id=body.oauth_client_id,
-            client_secret=body.oauth_client_secret,
-        ),
+        oauth_client_encrypted=client,
+        oauth_metadata=authorization,
         oauth_scope=body.oauth_scope,
         connected=False,  # not handed to the agent until authorized
         tool_count=0,
@@ -416,12 +492,18 @@ async def _register_oauth_client(
     scope: str | None,
     client_id: str | None = None,
     client_secret: str | None = None,
-) -> str:
-    """The encrypted OAuth client for *url* — the manual one, else via DCR.
+) -> tuple[str, dict]:
+    """The encrypted OAuth client for *url*, and the documents that minted it.
 
     Shared by the custom and catalog paths so both store a client in the same
     shape; ``/authorizations`` reads it back and would fail loudly on a row
     without one.
+
+    The documents are returned with it, and stored, because a client belongs to
+    the authorization server that issued it — a DCR secret is *that server's*
+    secret. Without recording which one that was, a later authorization has no
+    way to notice that the MCP server now points somewhere else, and would
+    present the credential to whoever it points at now.
     """
     redirect_uri = _require_redirect_uri()
     discovered = await oauth.discover_authorization(url)
@@ -433,7 +515,7 @@ async def _register_oauth_client(
         client_secret=client_secret,
         client_metadata_url=settings.mcp_client_metadata_url or None,
     )
-    return encrypt_secret(client.model_dump_json())
+    return encrypt_secret(client.model_dump_json()), discovered.as_stored()
 
 
 def _require_redirect_uri() -> str:
@@ -451,6 +533,53 @@ def _to_response(connector: MCPServer) -> ConnectorResponse:
     return response
 
 
+def _clear_oauth_state(connector: MCPServer) -> None:
+    """Strip everything that makes a row an OAuth Connector.
+
+    Every ``oauth_*`` column, not just the secrets. The stored authorization
+    metadata matters as much: it is what the token refresher aims a rotation
+    at, and a row that keeps it is a row the refresher would keep working on
+    after the user replaced its credential.
+
+    One function rather than a run of assignments so "did we clear all of it?"
+    has somewhere to be answered, and a column added later has somewhere
+    obvious to be added.
+    """
+    connector.oauth_client_encrypted = None
+    connector.oauth_tokens_encrypted = None
+    connector.oauth_tokens_expires_at = None
+    connector.oauth_scope = None
+    connector.oauth_metadata = None
+    # A verdict about a grant that no longer exists. Left standing, the card
+    # offers "Reconnect" on a Connector whose authorize endpoint now 400s.
+    connector.oauth_reauthorization_required = False
+
+
+async def _probe_after_authorization(
+    connector: MCPServer, access_token: str,
+) -> None:
+    """List the freshly-authorized Connector's tools, recording either outcome.
+
+    Unlike the other probe call sites this one cannot raise — the user is
+    mid-redirect and the grant is already stored, so failing the request would
+    strand a Connector that is in fact authorized. But it must not report
+    health it hasn't demonstrated either: holding a token says nothing about
+    whether the server accepts its audience, or is up at all. So a failure is
+    recorded rather than swallowed, and clears on the first turn that connects.
+    """
+    try:
+        _apply_probe(
+            connector,
+            await probe(connector.url, MCPServerAuthType.BEARER, access_token),
+        )
+    except Exception:
+        logger.warning(
+            "Connector %s authorized but could not be reached; marking it",
+            connector.id, exc_info=True,
+        )
+        connector.last_connect_failed = True
+
+
 def _apply_probe(connector: MCPServer, result: ProbeResult) -> None:
     """Copy everything a probe learned onto the row.
 
@@ -461,6 +590,11 @@ def _apply_probe(connector: MCPServer, result: ProbeResult) -> None:
     connector.tool_count = len(result.tools)
     connector.tools_preview = result.tools
     connector.advertised_icon_url = result.icon_url
+    # Reaching here means the handshake completed, which is what the worker's
+    # per-turn connect proves too — so a user who fixes a broken URL sees the
+    # badge go at once rather than after the next turn. Never set here: a
+    # failed probe raises, and tells the user directly.
+    connector.last_connect_failed = False
 
 
 def _probe_credential(
@@ -501,6 +635,164 @@ def _credential_plaintext(
 
 def _decrypt_or_none(ciphertext: str | None) -> str | None:
     return decrypt_secret(ciphertext) if ciphertext else None
+
+
+async def _reject_a_superseded_authorization(
+    redis: aioredis.Redis, state: str, pending: dict,
+) -> None:
+    """Refuse a flow the user has since restarted for the same Connector.
+
+    Two authorizations in the air at once is not exotic — a second tab, or a
+    first attempt that looked stuck — and each ``state`` stays independently
+    valid, so the winner would otherwise be whichever *finished* last. Choosing
+    an account in the newer tab and then having the older one quietly overwrite
+    it leaves the Connector signed in as someone the user did not last pick,
+    with nothing on screen saying so.
+
+    Not fatal, and phrased so: the flow that is still current will go through.
+
+    Asked twice — before the code exchange and again after it — because each
+    ask is a read, and what it guards is a write several awaits later. Twice
+    leaves only the commit itself inside the window instead of a third party's
+    network round-trip, which is the difference between a race that needs two
+    tabs interleaved to the millisecond and one that needs only a slow token
+    endpoint. Closing it outright means deciding it where the write happens: a
+    generation on the row, CAS-ed in the same statement that stores the grant.
+    That is a column, and this is not worth one.
+    """
+    current = await redis.get(oauth_current_state_key(pending["connector_id"]))
+    if current is None or current == state:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            "a newer authorization was started for this connector; "
+            "finish that one instead"
+        ),
+    )
+
+
+async def _client_for_authorization(
+    connector: MCPServer,
+    discovered: oauth.DiscoveredAuthorization,
+    db: AsyncSession,
+) -> OAuthClientInformationFull:
+    """The client this authorization should use — the stored one, or a fresh one.
+
+    Two things disqualify the stored client, and they disqualify it the same
+    way: the credential it holds no longer opens the door we are about to knock
+    on. Either it has passed its own ``client_secret_expires_at`` and the server
+    now answers ``invalid_client``, or an authorization server other than the
+    one the MCP server names today minted it — a DCR ``client_secret`` is *that*
+    server's secret, and presenting it here would be the resource server
+    collecting our credentials by a route the discovery guards cannot cover,
+    since every URL involved is legitimately public.
+
+    Neither is fatal. A client an authorization server minted can be minted
+    again, against whichever server is authoritative now; the old one is never
+    sent anywhere, so this is exactly as safe as the new Connector the user
+    would otherwise have to build by hand. Only a manually configured client
+    cannot be replaced — it is the operator's own OAuth app, and there is no
+    way to make another.
+    """
+    client = _load_oauth_client(connector)
+    unusable = _why_the_stored_client_is_unusable(connector, client, discovered)
+    if unusable is None:
+        return client
+    if not _issued_by_an_authorization_server(client):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{unusable}; create a new OAuth connector",
+        )
+    logger.info("Connector %s: %s; registering again", connector.id, unusable)
+    connector.oauth_client_encrypted = encrypt_secret(
+        (
+            await oauth.ensure_client(
+                discovered.metadata,
+                redirect_uri=_require_redirect_uri(),
+                scope=discovered.scope_for(connector.oauth_scope),
+                client_metadata_url=settings.mcp_client_metadata_url or None,
+            )
+        ).model_dump_json()
+    )
+    # Stored with it: a client belongs to the server that issued it, and for a
+    # row that had no issuer recorded at all, this reconnect is what gives it
+    # one. Without this the row would arrive here again every time.
+    connector.oauth_metadata = discovered.as_stored()
+    await db.commit()
+    return _load_oauth_client(connector)
+
+
+def _why_the_stored_client_is_unusable(
+    connector: MCPServer,
+    client: OAuthClientInformationFull,
+    discovered: oauth.DiscoveredAuthorization,
+) -> str | None:
+    """Why this authorization cannot reuse the stored client, or ``None``.
+
+    The no-issuer case is not the same question as the changed-issuer case, and
+    they get different answers on purpose. A row with no issuer recorded is
+    every OAuth connector that exists when this ships — the column is new, and
+    an absent record is evidence of nothing. What is being protected is a
+    credential, so a client that holds none is not what the rule is about: a
+    bare client id (CIMD's is a public URL) offered to the wrong server is
+    simply rejected there, and nothing of ours travels. A *changed* issuer is
+    positive evidence that the MCP server repointed, which is worth stopping
+    for whether or not a secret is at stake.
+    """
+    if _secret_expired(client):
+        return "this connector's client registration expired"
+    registered_issuer = (
+        (connector.oauth_metadata or {}).get("authorization_server", {}).get("issuer")
+    )
+    if not registered_issuer:
+        if not client.client_secret:
+            return None
+        return "this connector predates authorization-server binding"
+    if str(discovered.metadata.issuer) != registered_issuer:
+        return "this connector's authorization server changed"
+    return None
+
+
+def _issued_by_an_authorization_server(client: OAuthClientInformationFull) -> bool:
+    """Whether a server minted this client, rather than an operator configuring it.
+
+    Both fields come from a registration response (RFC 7591 §3.2.1) and from
+    nowhere else — :func:`oauth.ensure_client` builds a manual client out of the
+    operator's id and secret alone — so either one present is proof. Note the
+    ``is not None``, where :func:`_secret_expired` reads the same field for
+    truthiness: ``client_secret_expires_at=0`` is a server saying "never
+    expires", which is no deadline but is still a server having spoken.
+
+    A registration that states neither is read as manual, and its client is
+    kept rather than replaced. That is the safe way to be wrong: the user is
+    asked to make a new Connector, instead of an operator's OAuth app being
+    swapped out behind their back.
+
+    What this does not catch: an authorization server that revokes a registered
+    client *early*, having stated no expiry. The refresher sees ``invalid_client``
+    and flags the row, the user presses Reconnect, and the dead registration is
+    handed back to them — deleting and re-creating the Connector is the only way
+    out. Acting on that would mean re-minting whenever the row is flagged, and
+    the flag does not say which of the two permanent errors set it: for
+    ``invalid_grant`` — the ordinary "your grant expired, sign in again" — the
+    client is in perfect health. Left alone rather than guessed at, for a case
+    that needs a server to both omit the expiry and cancel the client anyway.
+    """
+    return (
+        client.client_id_issued_at is not None
+        or client.client_secret_expires_at is not None
+    )
+
+
+def _secret_expired(client: OAuthClientInformationFull) -> bool:
+    """Whether the client's own credential has passed its stated expiry.
+
+    ``0`` means "never expires" per RFC 7591 §3.2.1, and absent means the same;
+    only a non-zero value is a deadline.
+    """
+    expires_at = client.client_secret_expires_at
+    return bool(expires_at) and expires_at <= int(time.time())
 
 
 def _load_oauth_client(connector: MCPServer) -> OAuthClientInformationFull:

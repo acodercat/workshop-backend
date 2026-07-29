@@ -39,11 +39,14 @@ class _FakeSession:
             serverInfo=SimpleNamespace(name="Demo Server", icons=None)
         )
 
-    async def list_tools(self):
-        return SimpleNamespace(tools=[
-            SimpleNamespace(name="search", description="Search things"),
-            SimpleNamespace(name="create", description=None),
-        ])
+    async def list_tools(self, cursor=None):
+        return SimpleNamespace(
+            tools=[
+                SimpleNamespace(name="search", description="Search things"),
+                SimpleNamespace(name="create", description=None),
+            ],
+            nextCursor=None,
+        )
 
 
 class TestProbe:
@@ -148,3 +151,147 @@ class TestServerIcon:
 
         assert _usable_icon(SimpleNamespace(icons=None)) is None
         assert _usable_icon(None) is None
+
+
+class TestProbePagination:
+    """One page is not the catalog — the worker paginates, so a probe that
+    stops at page one caches tools the user can't see or switch off."""
+
+    class _PagingSession:
+        def __init__(self, pages):
+            self._pages = pages
+            self.cursors_seen = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def initialize(self):
+            return SimpleNamespace(
+                serverInfo=SimpleNamespace(name="Paged", icons=None)
+            )
+
+        async def list_tools(self, cursor=None):
+            self.cursors_seen.append(cursor)
+            names, next_cursor = self._pages[len(self.cursors_seen) - 1]
+            return SimpleNamespace(
+                tools=[SimpleNamespace(name=n, description="") for n in names],
+                nextCursor=next_cursor,
+            )
+
+    async def test_every_page_is_collected(self, monkeypatch):
+        from app.models.mcp_server import MCPServerAuthType
+        from app.services.mcp import probe as probe_mod
+
+        session = self._PagingSession(
+            [(["search"], "c1"), (["delete_account"], None)]
+        )
+        _install(monkeypatch, session)
+
+        result = await probe_mod.probe(
+            "https://mcp.example.com/mcp", MCPServerAuthType.NONE, None
+        )
+
+        assert [tool["name"] for tool in result.tools] == ["search", "delete_account"]
+        assert session.cursors_seen == [None, "c1"]
+
+    async def test_a_repeated_cursor_is_refused_rather_than_truncated(
+        self, monkeypatch,
+    ):
+        # Storing what arrived would be indistinguishable from a whole catalog:
+        # the card would read healthy while the tools past the loop are simply
+        # gone, with nothing saying which or why.
+        from app.errors import ConnectorUnreachableError
+        from app.models.mcp_server import MCPServerAuthType
+        from app.services.mcp import probe as probe_mod
+
+        session = self._PagingSession([(["a"], "same"), (["b"], "same")])
+        _install(monkeypatch, session)
+
+        with pytest.raises(ConnectorUnreachableError):
+            await probe_mod.probe(
+                "https://mcp.example.com/mcp", MCPServerAuthType.NONE, None
+            )
+
+
+class TestStoredListingIsSwitchable:
+    """``tools_preview`` exists to be rendered and switched off, so it is
+    bounded by what ``disabled_tools`` will accept rather than by bytes."""
+
+    class _OneShotSession(TestProbePagination._PagingSession):
+        def __init__(self, tools):
+            super().__init__([(None, None)])
+            self._tools = tools
+
+        async def list_tools(self, cursor=None):
+            self.cursors_seen.append(cursor)
+            return SimpleNamespace(tools=self._tools, nextCursor=None)
+
+    async def _probe(self, monkeypatch, tools):
+        from app.models.mcp_server import MCPServerAuthType
+        from app.services.mcp import probe as probe_mod
+
+        _install(monkeypatch, self._OneShotSession(tools))
+        return await probe_mod.probe(
+            "https://mcp.example.com/mcp", MCPServerAuthType.NONE, None
+        )
+
+    async def test_an_unswitchable_name_is_dropped(self, monkeypatch, caplog):
+        # Past the limit the schema rejects, so it could only ever render a
+        # switch that cannot be thrown.
+        from app.schemas.mcp_server import MAX_TOOL_NAME_LEN
+
+        result = await self._probe(monkeypatch, [
+            SimpleNamespace(name="search", description="ok"),
+            SimpleNamespace(name="x" * (MAX_TOOL_NAME_LEN + 1), description=""),
+        ])
+
+        assert [tool["name"] for tool in result.tools] == ["search"]
+
+    async def test_a_long_description_is_truncated_not_dropped(self, monkeypatch):
+        # Unlike axon, which needs a whole schema or none, this copy only reads.
+        from app.services.mcp.probe import _MAX_DESCRIPTION_CHARS
+
+        result = await self._probe(monkeypatch, [
+            SimpleNamespace(name="search", description="d" * 10_000),
+        ])
+
+        assert len(result.tools) == 1
+        assert len(result.tools[0]["description"]) == _MAX_DESCRIPTION_CHARS
+
+    async def test_the_listing_stops_at_the_switchable_count(self, monkeypatch):
+        from app.schemas.mcp_server import MAX_DISABLED_TOOLS
+
+        result = await self._probe(monkeypatch, [
+            SimpleNamespace(name=f"t{index}", description="")
+            for index in range(MAX_DISABLED_TOOLS + 50)
+        ])
+
+        assert len(result.tools) == MAX_DISABLED_TOOLS
+
+    async def test_an_ordinary_catalog_is_untouched(self, monkeypatch):
+        result = await self._probe(monkeypatch, [
+            SimpleNamespace(name="search", description="Find things"),
+            SimpleNamespace(name="create", description="Make things"),
+        ])
+
+        assert result.tools == [
+            {"name": "search", "description": "Find things"},
+            {"name": "create", "description": "Make things"},
+        ]
+
+
+def _install(monkeypatch, session):
+    """Point ``probe`` at *session*, bypassing the guard and the transport."""
+    async def _guard_ok(url):
+        return None
+
+    @asynccontextmanager
+    async def fake_shc(*args, **kwargs):
+        yield ("r", "w", lambda: None)
+
+    monkeypatch.setattr(probe_mod, "guard_public_url", _guard_ok)
+    monkeypatch.setattr(probe_mod, "streamablehttp_client", fake_shc)
+    monkeypatch.setattr(probe_mod, "ClientSession", lambda read, write: session)

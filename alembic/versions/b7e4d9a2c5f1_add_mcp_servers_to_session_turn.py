@@ -1,9 +1,13 @@
-"""session_turn.mcp_servers: per-turn snapshot of the run's enabled Connectors
+"""session_turn.mcp_servers: per-turn snapshot of the run's connected Connectors
 
-Adds the enqueue-time snapshot (id/name/... per Connector) the worker resolves
-at connect time, so a later ``mcp_server`` row edit can't change which servers
-an already-queued turn connects. Defaults to an empty JSONB array so every
-existing/in-flight turn reads as "no Connectors".
+Adds the enqueue-time snapshot (``{id, name}`` per Connector) the worker turns
+back into live config at connect time. It caps the set — a Connector connected
+after enqueue cannot join a queued turn — but it is not a freeze: the worker
+re-reads each row by id, deliberately, so a rotated credential or a renamed
+server takes effect, and one disconnected between enqueue and claim drops out.
+
+Defaults to an empty JSONB array so every existing/in-flight turn reads as
+"no Connectors".
 
 Revision ID: b7e4d9a2c5f1
 Revises: a3f8c2d6e1b4

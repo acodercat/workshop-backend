@@ -511,10 +511,18 @@ async def _resolve_mcp_servers(
     Connectors follow a "connected = active" model (like Claude / ChatGPT
     connectors): every connected Connector's tools are available each turn,
     minus the ones the user switched off individually (``disabled_tools``,
-    resolved live by the worker rather than snapshotted here). Snapshotting the connected set at
-    enqueue pins it for the turn (a later toggle can't change an in-flight turn);
-    the worker resolves url + decrypted credential live by id, so credentials
-    never sit on the ``session_turn`` row and a rotation is picked up.
+    resolved live by the worker rather than snapshotted here).
+
+    The snapshot caps the set — connecting a Connector after enqueue cannot add
+    it to a queued turn — but it does not freeze it: the worker re-reads each
+    row by id at connect time, so credentials never sit on the ``session_turn``
+    row, a rotation is picked up, and one disconnected before the claim drops
+    out. Only ``id`` is read; ``name`` rides along to keep a queued row legible
+    in psql, and the worker must not use it either — the tool namespace has to
+    come from the row actually connected to, or a Connector renamed between
+    enqueue and claim would expose its tools under a name that no longer
+    exists. (Contrast the skills snapshot, whose ``bundle_key`` *is*
+    load-bearing.)
     """
     if user_id is None:
         return []

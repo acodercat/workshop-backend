@@ -4,8 +4,10 @@ We drive the two-legged web redirect (authorize → browser → callback) oursel
 — the SDK's ``OAuthClientProvider`` is built for a blocking local-browser client
 — but reuse the SDK's low-level ``mcp.client.auth.oauth2`` helpers for metadata
 discovery, client identity (CIMD or dynamic registration), and PKCE, so no
-OAuth crypto is hand-written. The worker does the non-interactive connect +
-token refresh via ``OAuthClientProvider`` + our DB-backed ``TokenStorage``.
+OAuth crypto is hand-written. Rotating a stored grant afterwards is
+:mod:`app.workers.connector_token_refresher`'s job, through
+:func:`refresh_tokens` here — never the agent worker's, which only presents
+whatever access token it finds.
 
 All failures collapse to :class:`ConnectorOAuthError` so the endpoint layer needs
 no translation.
@@ -13,11 +15,15 @@ no translation.
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import logging
 import secrets
 from dataclasses import dataclass
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
+from pydantic import AnyUrl
 from mcp.client.auth.oauth2 import (
     PKCEParameters,
     resource_url_from_server_url,
@@ -25,6 +31,8 @@ from mcp.client.auth.oauth2 import (
     build_protected_resource_metadata_discovery_urls,
     create_client_registration_request,
     create_oauth_metadata_request,
+    extract_resource_metadata_from_www_auth,
+    extract_scope_from_www_auth,
     handle_auth_metadata_response,
     handle_protected_resource_response,
     handle_registration_response,
@@ -36,13 +44,28 @@ from mcp.shared.auth import (
     OAuthClientMetadata,
     OAuthMetadata,
     OAuthToken,
+    ProtectedResourceMetadata,
 )
+from mcp.shared.auth_utils import check_resource_allowed
 
 from app.errors import ConnectorOAuthError, InvalidConnectorUrlError
 from app.services.mcp.url_guard import guard_public_url, guarded_client
 
+logger = logging.getLogger(__name__)
+
 _HTTP_TIMEOUT = 20.0
+# Ceiling on a whole discovery, not on each of its requests. ``httpx.Timeout``
+# bounds a read; a server answering a byte every nineteen seconds resets that
+# clock forever, and this runs on an interactive endpoint holding a request and
+# a database session. One discovery is at most six requests (the 401 challenge,
+# two protected-resource candidates, three authorization-server ones), so a
+# per-call bound would let a working-but-slow server take two minutes.
+_DISCOVERY_TIMEOUT = 30.0
 _CLIENT_NAME = "Metaseq Connector"
+# The scope that asks for a refresh token (SEP-2207). Requested whenever the
+# authorization server advertises it; without one, every access-token expiry
+# becomes a browser round-trip.
+_OFFLINE_ACCESS = "offline_access"
 
 
 def new_state() -> str:
@@ -54,25 +77,170 @@ def new_pkce() -> PKCEParameters:
     return PKCEParameters.generate()
 
 
+def require_matching_issuer(
+    returned: str | None, *, recorded: str | None, advertised: bool,
+) -> None:
+    """Check who issued an authorization response, before its code is spent.
+
+    RFC 9207 §2.4, which MCP makes a client MUST. It closes the *mix-up*
+    attack, whose precondition is exactly this service's shape: one client, one
+    redirect URI, many unrelated authorization servers.
+
+    The attack: a Connector the user was talked into adding points at the
+    attacker's authorization server, so the flow under ``state`` S is recorded
+    as theirs. The attacker replays S — and the ``code_challenge`` they saw in
+    the URL we opened for them — into an authorization request at the user's
+    *real* provider. The real provider redirects a real code to this callback
+    under S, and without this check we would post that code, and the PKCE
+    verifier with it, to the attacker's token endpoint. PKCE does not help:
+    it guards a code intercepted *without* the verifier, and here we hand the
+    verifier over ourselves.
+
+    Four cases, per the RFC's table:
+
+    ============================  ==============  ========================
+    ``iss`` advertised            ``iss`` present  action
+    ============================  ==============  ========================
+    yes                           yes              compare
+    yes                           no               reject
+    no                            yes              compare anyway
+    no                            no               proceed
+    ============================  ==============  ========================
+
+    The third row is the RFC's local-policy provision, which MCP takes: servers
+    that emit ``iss`` before advertising it still get checked.
+
+    Compared byte for byte. The RFC forbids case folding, default-port elision,
+    trailing-slash and percent-encoding normalisation, so *recorded* has to be
+    the string the metadata document published — see
+    :attr:`DiscoveredAuthorization.issuer_as_published`.
+
+    A ``recorded`` of ``None`` only happens for a pending authorization started
+    before this check existed; it fails closed, costing that user one more
+    click on Connect within the state's ten-minute life.
+    """
+    if advertised and returned is None:
+        raise ConnectorOAuthError(
+            "authorization server advertises the iss parameter but omitted it."
+        )
+    if returned is None:
+        return
+    if returned != recorded:
+        raise ConnectorOAuthError(
+            "authorization response came from a different authorization server "
+            "than the one this flow was started with."
+        )
+
+
+def _split(scope: str | None) -> list[str]:
+    """A space-delimited ``scope`` value as its individual scopes."""
+    return scope.split() if scope else []
+
+
+def _deduplicate(scopes: list[str]) -> list[str]:
+    """*scopes* without repeats, first occurrence winning.
+
+    Order is kept because the challenge comes first, which puts what the server
+    actually asked for at the front of what the user is shown consenting to.
+    """
+    return list(dict.fromkeys(scopes))
+
+
 @dataclass(frozen=True)
 class DiscoveredAuthorization:
     """How to authorize against one MCP server, as its metadata declares it."""
 
     metadata: OAuthMetadata
-    scopes_supported: list[str] | None = None
+    #: The server's RFC 9728 document. Required, not merely usual: it is the
+    #: only thing that names the authorization server.
+    resource: ProtectedResourceMetadata
+    #: ``scope`` from the server's 401 challenge, when it issued one.
+    challenge_scope: str | None = None
+    #: ``issuer`` exactly as the document published it. RFC 9207 forbids
+    #: normalising either side before comparison, and :attr:`metadata`'s went
+    #: through pydantic's ``AnyUrl``, which canonicalises — a bare origin gains
+    #: a trailing slash. Comparing against that would reject every provider
+    #: whose issuer is a bare origin.
+    issuer_as_published: str | None = None
+    #: Whether the server advertises RFC 9207 ``iss`` on authorization
+    #: responses. Not modelled by the SDK, so it is read from the document.
+    #: Both fields go when the SDK reaches 2.x, which models this one and stops
+    #: canonicalising the other.
+    iss_parameter_supported: bool = False
+
+    @property
+    def scopes_supported(self) -> list[str] | None:
+        """What the resource says it can grant, if it said."""
+        return self.resource.scopes_supported
+
+    def as_stored(self) -> dict:
+        """Both documents, in the shape ``mcp_server.oauth_metadata`` holds.
+
+        Kept so a refresh knows where to send itself without rediscovering
+        anything: the token endpoint to post to, and the resource its indicator
+        must name. Read back by
+        :func:`app.workers.connector_token_refresher._stored_authorization`,
+        the only thing that rotates a grant — rename a key here and it silently
+        reads ``None`` there.
+        """
+        return {
+            "authorization_server": self.metadata.model_dump(mode="json"),
+            "protected_resource": self.resource.model_dump(mode="json"),
+        }
 
     def scope_for(self, configured: str | None) -> str | None:
         """The scope to request on the authorization leg.
 
-        MCP's scope-selection strategy: a general-purpose client has no
-        domain knowledge to pick scopes with, so it asks for what the server
-        advertises and lets the consent screen decide. An explicitly
-        configured scope still wins — that is an operator's choice, not a
-        guess. Neither present means omitting ``scope`` entirely.
+        The 401 challenge is what the server says *this* request needs, and MCP
+        requires clients to treat it as authoritative — so it is never dropped,
+        only added to. An operator's configured scope is a request for more
+        than the minimum, so the two are unioned rather than ranked: replacing
+        the challenge with a configuration would authorize successfully and
+        still leave the token unable to touch the resource.
+
+        With no challenge, a configured scope *replaces* the advertised set
+        rather than joining it. The spec reaches for ``scopes_supported``
+        precisely because "MCP clients typically lack domain-specific knowledge
+        to make informed decisions about individual scope selection" — an
+        operator who named the scopes is that knowledge, and unioning would
+        turn a deliberate ``repo:read`` into the whole advertised set,
+        ``admin:org`` included. With neither, the advertised set is the
+        fallback; with none of the three, ``scope`` is omitted entirely.
+
+        ``offline_access`` is then added whenever the server advertises it
+        (SEP-2207). It asks for a refresh token rather than for access to
+        anything, so neither a challenge — which names resource scopes and
+        nothing else — nor an operator naming the data they want has thereby
+        opted out of silent renewal. Dropping it leaves a Connector demanding a
+        browser round-trip every time its access token ages out.
         """
-        if configured:
-            return configured
-        return " ".join(self.scopes_supported) if self.scopes_supported else None
+        if self.challenge_scope:
+            # Authoritative, so it is joined rather than chosen between.
+            requested = _split(self.challenge_scope) + _split(configured)
+        else:
+            requested = _split(configured) or list(self.scopes_supported or [])
+        return self._with_offline_access(" ".join(_deduplicate(requested)) or None)
+
+    def _with_offline_access(self, requested: str | None) -> str | None:
+        """*requested* plus ``offline_access``, when the server offers it.
+
+        Read from the **authorization server's** metadata, which is where
+        SEP-2207 puts it. The resource document is the wrong place to look:
+        ``offline_access`` is a matter between client and authorization server,
+        never a requirement of the resource, so a conformant MCP server is told
+        not to advertise it — checking there would make this dead code against
+        exactly the servers that follow the spec.
+
+        Only when advertised: asking for a scope the server never listed can
+        have the whole authorization request rejected.
+        """
+        advertised = self.metadata.scopes_supported or []
+        if _OFFLINE_ACCESS not in advertised:
+            return requested
+        scopes = requested.split() if requested else []
+        if _OFFLINE_ACCESS in scopes:
+            return requested
+        return " ".join([*scopes, _OFFLINE_ACCESS])
 
 
 async def discover_authorization(server_url: str) -> DiscoveredAuthorization:
@@ -85,37 +253,224 @@ async def discover_authorization(server_url: str) -> DiscoveredAuthorization:
     transport is the authoritative SSRF guard (and blocks redirects). So the
     metadata-derived endpoints (auth server, token, registration) are guarded
     without a separate check at each call site.
+
+    Bounded as a whole rather than per request: a server that answers slowly
+    enough never trips ``httpx``'s per-read timeout, and this runs while a
+    request and its database session are held open.
+
     """
-    await guard_public_url(server_url)
+    try:
+        async with asyncio.timeout(_DISCOVERY_TIMEOUT):
+            # Inside the deadline, not before it: the guard resolves DNS, and a
+            # blackholed name has no bound of its own to stop at.
+            await guard_public_url(server_url)
+            return await _discover(server_url)
+    except TimeoutError as exc:
+        raise ConnectorOAuthError(
+            "The MCP server's authorization metadata took too long to discover."
+        ) from exc
+
+
+async def _discover(server_url: str) -> DiscoveredAuthorization:
+    """The discovery sequence itself, run under its caller's deadline."""
     async with guarded_client(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as client:
-        resource = await _discover_protected_resource(client, server_url)
-        authorization_server = (
-            str(resource.authorization_servers[0])
-            if resource is not None and resource.authorization_servers
-            else None
+        challenge = await _read_challenge(client, server_url)
+        resource = await _discover_protected_resource(
+            client, server_url, challenge.resource_metadata_url,
         )
-        for metadata_url in build_oauth_authorization_server_metadata_discovery_urls(
-            authorization_server, server_url
-        ):
-            try:
-                response = await client.send(create_oauth_metadata_request(metadata_url))
-            except httpx.HTTPError:
-                continue
-            try:
-                ok, metadata = handle_auth_metadata_response(response)
-            except Exception:
-                continue
-            if ok and metadata is not None:
-                _require_pkce_support(metadata)
-                return DiscoveredAuthorization(
-                    metadata=metadata,
-                    scopes_supported=(
-                        resource.scopes_supported if resource is not None else None
-                    ),
-                )
+        if resource is None:
+            raise ConnectorOAuthError(
+                "This MCP server publishes no OAuth 2.0 Protected Resource "
+                "Metadata (RFC 9728), so there is no way to tell which "
+                "authorization server it trusts. Ask its operator to publish "
+                "one, or connect it with an API key instead."
+            )
+        metadata, document = await _discover_authorization_server(
+            client, server_url, resource,
+        )
+
+    _require_https_endpoints(metadata)
+    _require_pkce_support(metadata)
+    return DiscoveredAuthorization(
+        metadata=metadata,
+        resource=resource,
+        challenge_scope=challenge.scope,
+        issuer_as_published=document.get("issuer"),
+        iss_parameter_supported=bool(
+            document.get("authorization_response_iss_parameter_supported")
+        ),
+    )
+
+
+async def _discover_authorization_server(
+    client: httpx.AsyncClient,
+    server_url: str,
+    resource: ProtectedResourceMetadata,
+) -> tuple[OAuthMetadata, dict]:
+    """The authorization server's own metadata, from the first URL that has it.
+
+    Returned with the document it was parsed from: the parsed model
+    canonicalises URLs and drops fields it does not model, and both matter for
+    :func:`require_matching_issuer`.
+
+    Candidates come from the authorization server the resource document names,
+    and only from there. There is no falling back to the MCP origin when a
+    server publishes no resource document: the spec's discovery sequence ends
+    that branch at "abort or use pre-configured values", and guessing that a
+    resource server is also its own authorization server is exactly the guess
+    RFC 9728 exists to remove. The SDK keeps such a fallback for servers built
+    against an older spec, which is why the candidate builder still accepts a
+    ``None`` first argument — we never pass one, so *server_url* reaches it only
+    to satisfy that signature and no candidate is ever built from it.
+
+    Raises rather than returning ``None``: without this document there is no
+    endpoint to send anyone to.
+    """
+    authorization_server = str(resource.authorization_servers[0])
+    # Whose document we are asking for, and therefore whose ``issuer`` the
+    # answer must claim (RFC 8414 §3.3). Put through ``AnyUrl`` because the
+    # compared ``issuer`` comes back through it too and it canonicalises (a
+    # bare origin gains a trailing slash, a path does not). Matching
+    # serialisations is what lets the comparison itself stay exact.
+    expected_issuer = str(AnyUrl(authorization_server))
+    for metadata_url in build_oauth_authorization_server_metadata_discovery_urls(
+        authorization_server, server_url
+    ):
+        try:
+            response = await client.send(create_oauth_metadata_request(metadata_url))
+        except httpx.HTTPError:
+            continue
+        try:
+            keep_trying, metadata = await handle_auth_metadata_response(response)
+        except Exception:
+            continue
+        if metadata is not None and not _issued_by(metadata, expected_issuer):
+            continue
+        if metadata is not None:
+            return metadata, response.json()
+        if not keep_trying and response.status_code >= 500:
+            # The SDK reads *any* non-4XX as "the remaining candidates are no
+            # more likely to answer than this one". True of a server error;
+            # not of a redirect, which says only that this one URL moved. The
+            # SDK never has to tell them apart because its client follows
+            # redirects — ours refuses to, so that it cannot be bounced onto
+            # an internal host, and a provider whose legacy path 301s to its
+            # canonical one would otherwise take the OIDC candidate behind it
+            # down with it.
+            break
     raise ConnectorOAuthError(
         "Could not discover the MCP server's OAuth metadata."
     )
+
+
+@dataclass(frozen=True)
+class _Challenge:
+    """What the MCP server's 401 ``WWW-Authenticate`` said, if it issued one."""
+
+    resource_metadata_url: str | None = None
+    scope: str | None = None
+
+
+async def _read_challenge(client: httpx.AsyncClient, server_url: str) -> _Challenge:
+    """Ask the MCP server unauthenticated and read its 401 challenge.
+
+    MCP requires clients to support both discovery routes, and this is the one
+    only the server can answer: a conforming server may publish its resource
+    metadata at a URL no ``.well-known`` guess would reach, and its challenge
+    names the scopes *this* resource needs rather than everything the
+    authorization server might ever grant.
+
+    A bare ``GET`` is the SSE-open shape. A server that takes it as an
+    invitation rather than refusing it answers with a stream instead of a 401 —
+    and httpx bounds each *read*, not the request, so its heartbeats would reset
+    that clock indefinitely and hang the authorize endpoint on a request slot
+    and a database session. Hence a deadline over the whole call.
+
+    Best-effort by design: a server that answers anything but a 401 with a
+    usable header simply contributes nothing, and the ``.well-known`` route
+    carries the discovery on its own.
+    """
+    try:
+        async with asyncio.timeout(_HTTP_TIMEOUT):
+            response = await client.get(
+                server_url, headers={"Accept": "text/event-stream"}
+            )
+    except (httpx.HTTPError, TimeoutError):
+        return _Challenge()
+    if response.status_code != 401:
+        return _Challenge()
+    return _Challenge(
+        resource_metadata_url=extract_resource_metadata_from_www_auth(response),
+        scope=extract_scope_from_www_auth(response),
+    )
+
+
+def _issued_by(metadata: OAuthMetadata, expected: str) -> bool:
+    """Whether a metadata document claims the issuer whose URL it came from.
+
+    RFC 8414 §3.3: the ``issuer`` in the response MUST match the one the
+    well-known URL was built from, and data that fails MUST NOT be used. The
+    SDK's handler only parses, so an authorization server answering for a
+    *different* tenant than the resource document named would otherwise be
+    accepted — and the browser, the authorization code, and the exchange would
+    all go to that tenant instead.
+    """
+    # Compared exactly, not normalised: RFC 8414 §3.3 says the values must be
+    # identical, and ``/tenant`` and ``/tenant/`` are two tenants as far as an
+    # authorization server is concerned. Trimming either would merge them.
+    if str(metadata.issuer) == expected:
+        return True
+    logger.warning(
+        "Ignoring authorization server metadata from %s: it claims issuer %s",
+        expected, metadata.issuer,
+    )
+    return False
+
+
+def _describes(resource: ProtectedResourceMetadata, server_url: str) -> bool:
+    """Whether a resource document actually describes *server_url*.
+
+    The SDK's own ``_validate_resource_match``, which driving the flow by hand
+    skips. Without it a server can publish a document naming someone else's
+    resource and pointing at *their* authorization server: the browser would be
+    sent to a login page the user rightly trusts, to authorize a grant we then
+    hold against a different host entirely. RFC 9728 makes ``resource``
+    mandatory, so there is no absent case to wave through.
+    """
+    if check_resource_allowed(
+        requested_resource=resource_url_from_server_url(server_url),
+        configured_resource=str(resource.resource),
+    ):
+        return True
+    logger.warning(
+        "Ignoring an MCP server's resource metadata: it claims %s, which does "
+        "not cover %s", resource.resource, server_url,
+    )
+    return False
+
+
+def _require_https_endpoints(metadata: OAuthMetadata) -> None:
+    """Refuse an authorization server that publishes a plaintext endpoint.
+
+    ``guarded_client`` already enforces https on everything *we* fetch, but the
+    authorization endpoint is the one the **browser** is sent to — no transport
+    of ours is in that path, and a plaintext one would carry the client id,
+    state and PKCE challenge in the clear. Checked at discovery so a bad
+    document is rejected before any of it is stored.
+    """
+    endpoints = {
+        "authorization_endpoint": metadata.authorization_endpoint,
+        "token_endpoint": metadata.token_endpoint,
+        "registration_endpoint": metadata.registration_endpoint,
+    }
+    for name, endpoint in endpoints.items():
+        if endpoint is None:
+            continue
+        if urlparse(str(endpoint)).scheme != "https":
+            raise ConnectorOAuthError(
+                f"The authorization server's {name} is not https, "
+                f"which MCP requires."
+            )
 
 
 def _require_pkce_support(metadata: OAuthMetadata) -> None:
@@ -132,26 +487,36 @@ def _require_pkce_support(metadata: OAuthMetadata) -> None:
         )
 
 
-async def _discover_protected_resource(client: httpx.AsyncClient, server_url: str):
+async def _discover_protected_resource(
+    client: httpx.AsyncClient, server_url: str, challenge_url: str | None,
+):
     """The server's RFC 9728 metadata — authorization servers *and* scopes.
 
     Both come from the one document, so it is fetched once and returned whole
-    rather than pulled apart here. ``None`` when undiscoverable: authorization
-    server discovery then derives from *server_url*, and scope selection falls
-    back to whatever the caller configured.
+    rather than pulled apart here. ``None`` when undiscoverable, which the
+    caller turns into a refusal — there is nothing left to discover from.
+
+    *challenge_url* is the ``resource_metadata`` the server named in its 401,
+    which the SDK puts first among the candidates — a conforming server may
+    publish the document nowhere else.
     """
     for resource_metadata_url in build_protected_resource_metadata_discovery_urls(
-        None, server_url
+        challenge_url, server_url
     ):
         try:
             response = await client.get(resource_metadata_url)
-            metadata = handle_protected_resource_response(response)
+            metadata = await handle_protected_resource_response(response)
         except Exception:
             continue
-        if metadata is not None and metadata.authorization_servers:
-            # Attacker-controlled (it came from the remote server's metadata), but
-            # the guarded_client that fetches its metadata pins DNS and rejects
-            # non-public hosts, so no separate check is needed here.
+        if (
+            metadata is not None
+            and metadata.authorization_servers
+            and _describes(metadata, server_url)
+        ):
+            # Its authorization server is attacker-controlled input, but the
+            # guarded_client that fetches metadata from it pins DNS and rejects
+            # non-public hosts, so SSRF needs no separate check here. What
+            # ``_describes`` adds is that the document is talking about *us*.
             return metadata
     return None
 
@@ -207,9 +572,7 @@ async def ensure_client(
             client_secret=client_secret,
             redirect_uris=[redirect_uri],
             scope=scope,
-            token_endpoint_auth_method=(
-                "client_secret_post" if client_secret else "none"
-            ),
+            token_endpoint_auth_method=_manual_auth_method(metadata, client_secret),
         )
 
     if should_use_client_metadata_url(metadata, client_metadata_url):
@@ -221,30 +584,133 @@ async def ensure_client(
             )
         return cimd_client(client_metadata_url, redirect_uri=redirect_uri)
 
+    return await _register_client(metadata, redirect_uri=redirect_uri, scope=scope)
+
+
+async def _register_client(
+    metadata: OAuthMetadata, *, redirect_uri: str, scope: str | None,
+) -> OAuthClientInformationFull:
+    """Register a client with the server (RFC 7591 dynamic registration).
+
+    The last resort: no client was configured and the server does not advertise
+    CIMD, so it has to mint us one.
+    """
     client_metadata = OAuthClientMetadata(
         redirect_uris=[redirect_uri],
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
         scope=scope,
-        token_endpoint_auth_method="client_secret_post",
+        # Ask for what the server says it accepts: a registration endpoint that
+        # only does Basic rejects the request outright rather than substituting
+        # a method, so a hardcoded preference locks us out of those servers.
+        token_endpoint_auth_method=_preferred_auth_method(metadata),
         client_name=_CLIENT_NAME,
     )
-    async with guarded_client(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as client:
-        try:
+    # The deadline sits outside the ``try`` so its ``TimeoutError`` lands in the
+    # same conversion as every other failure — inside, it would escape as a raw
+    # 500 rather than the 502 a failed registration reads as.
+    try:
+        async with asyncio.timeout(_HTTP_TIMEOUT), guarded_client(
+            timeout=httpx.Timeout(_HTTP_TIMEOUT)
+        ) as client:
             request = create_client_registration_request(
                 metadata, client_metadata, str(metadata.issuer)
             )
             response = await client.send(request)
-            return handle_registration_response(response)
-        except (ConnectorOAuthError, InvalidConnectorUrlError):
-            # InvalidConnectorUrlError = guarded_client rejected the (server-
-            # controlled) registration endpoint as non-public; surface it as-is.
-            raise
-        except Exception as exc:
-            raise ConnectorOAuthError(
-                f"Dynamic client registration failed: {exc}. Provide an OAuth "
-                f"Client ID/Secret if this server does not support registration."
-            ) from exc
+            # Kept whole: the server may substitute a different
+            # ``token_endpoint_auth_method`` than the one asked for
+            # (RFC 7591 §3.2.1), and that answer is what we authenticate with.
+            return _pin_auth_method(await handle_registration_response(response))
+    except (ConnectorOAuthError, InvalidConnectorUrlError):
+        # InvalidConnectorUrlError = guarded_client rejected the (server-
+        # controlled) registration endpoint as non-public; surface it as-is.
+        raise
+    except Exception as exc:
+        raise ConnectorOAuthError(
+            f"Dynamic client registration failed: {exc}. Provide an OAuth "
+            f"Client ID/Secret if this server does not support registration."
+        ) from exc
+
+
+def _pin_auth_method(
+    client: OAuthClientInformationFull,
+) -> OAuthClientInformationFull:
+    """Resolve an omitted ``token_endpoint_auth_method`` before the row is stored.
+
+    The one place the RFC 7591 §2 default is applied, because the client is
+    read back twice — by the code exchange and, later, by every rotation the
+    token refresher makes — and an absent method reads as "send no secret at
+    all". Deciding it once, on the bytes they share, is what stops an
+    authorization that worked from becoming a refresh that doesn't.
+
+    Only a registered client can arrive unresolved; the manual and CIMD paths
+    both state a method outright.
+    """
+    if client.token_endpoint_auth_method is not None:
+        return client
+    return client.model_copy(
+        update={"token_endpoint_auth_method": "client_secret_basic"}
+    )
+
+
+def _preferred_auth_method(metadata: OAuthMetadata) -> str:
+    """The client-authentication method to use with *metadata*'s server.
+
+    The first of ours the server declares, most preferred first. ``none`` is
+    among them because a public-only authorization server rejects a
+    registration that asks to authenticate at all — and its own declaration is
+    the only evidence for that.
+
+    Declaring nothing falls back to Basic, the RFC 7591 §2 default. So does
+    declaring only methods we cannot perform (``private_key_jwt``): the request
+    is refused either way, and refused with a method we support gives the
+    clearer error.
+    """
+    supported = metadata.token_endpoint_auth_methods_supported or []
+    for method in ("client_secret_post", "client_secret_basic", "none"):
+        if method in supported:
+            return method
+    return "client_secret_basic"
+
+
+def _manual_auth_method(metadata: OAuthMetadata, client_secret: str | None) -> str:
+    """How a hand-configured client authenticates at the token endpoint.
+
+    Nothing registered this client with us, so there is no echoed method to
+    honour and the server's own declaration is the only evidence.
+    """
+    if not client_secret:
+        return "none"
+    return _preferred_auth_method(metadata)
+
+
+def _apply_client_auth(
+    client: OAuthClientInformationFull,
+    data: dict[str, str],
+    headers: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Authenticate a token request the way the client is registered to.
+
+    A port of the SDK's ``OAuthContext.prepare_token_auth`` rather than a call
+    to it: that is a method on a dataclass assembled around a ``TokenStorage``
+    nothing here has. Like the SDK's, it takes the method at face value —
+    resolving an absent one is :func:`_pin_auth_method`'s job, at the point the
+    client is minted, so the code exchange and every later rotation
+    authenticate identically.
+    """
+    method = client.token_endpoint_auth_method
+    if method == "client_secret_basic" and client.client_id and client.client_secret:
+        # Percent-encoded before base64 per RFC 6749 §2.3.1 — a secret
+        # containing ':' would otherwise split into the wrong credentials.
+        credentials = (
+            f"{quote(client.client_id, safe='')}:"
+            f"{quote(client.client_secret, safe='')}"
+        )
+        encoded = base64.b64encode(credentials.encode()).decode()
+        headers = {**headers, "Authorization": f"Basic {encoded}"}
+    elif method == "client_secret_post" and client.client_secret:
+        data = {**data, "client_secret": client.client_secret}
+    return data, headers
 
 
 def build_authorization_url(
@@ -300,21 +766,11 @@ async def exchange_code(
         "code_verifier": code_verifier,
         "resource": resource_url_from_server_url(server_url),
     }
-    if client.client_secret:
-        data["client_secret"] = client.client_secret
+    data, headers = _apply_client_auth(
+        client, data, {"Accept": "application/json"}
+    )
 
-    # guarded_client pins DNS + rejects non-public hosts, so the server-supplied
-    # token endpoint is SSRF-safe without a separate pre-check.
-    async with guarded_client(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as http_client:
-        try:
-            response = await http_client.post(
-                str(metadata.token_endpoint),
-                data=data,
-                headers={"Accept": "application/json"},
-            )
-        except httpx.HTTPError as exc:
-            raise ConnectorOAuthError(f"Token endpoint unreachable: {exc}") from exc
-
+    response = await _post_to_token_endpoint(metadata, data, headers)
     if response.status_code != 200:
         raise ConnectorOAuthError(
             f"Token exchange failed ({response.status_code})."
@@ -323,3 +779,105 @@ async def exchange_code(
         return OAuthToken.model_validate(response.json())
     except Exception as exc:
         raise ConnectorOAuthError(f"Malformed token response: {exc}") from exc
+
+
+# Token-endpoint errors that will never come right on their own. Everything
+# else means the provider is unwell and the next attempt should simply try
+# again. ``invalid_grant``: the stored grant is dead — revoked, expired, or
+# already rotated by someone else. ``invalid_client``: the registration itself
+# is no longer accepted, which a dynamically-registered client reaches on its
+# own the moment its ``client_secret_expires_at`` passes.
+_PERMANENT_TOKEN_ERRORS = ("invalid_grant", "invalid_client")
+
+
+class GrantRevoked(ConnectorOAuthError):
+    """The authorization server refused the grant, or the client behind it.
+
+    The only errors allowed to send a Connector back to the browser: retrying
+    them costs requests to be refused, and re-authorizing is what actually
+    replaces both the grant and — through a fresh registration — the client.
+    """
+
+
+async def refresh_tokens(
+    metadata: OAuthMetadata,
+    client: OAuthClientInformationFull,
+    *,
+    refresh_token: str,
+    server_url: str,
+) -> OAuthToken:
+    """Trade a refresh token for a fresh grant (RFC 6749 §6).
+
+    The sibling of :func:`exchange_code`, and deliberately its twin: the same
+    client authentication, the same ``resource`` indicator, the same guarded
+    client. An access token whose audience differs between the two legs is
+    refused by any server that enforces RFC 8707.
+
+    The response replaces the stored grant wholesale. Refresh tokens rotate, so
+    the reply may carry a new one — and per OAuth 2.1 §4.3.2 it may equally omit
+    one, meaning the old one stays valid. Reconciling that is the caller's job
+    (:func:`app.services.mcp.grant.store_tokens`); this function only reports
+    what came back.
+    """
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client.client_id,
+        "resource": resource_url_from_server_url(server_url),
+    }
+    data, headers = _apply_client_auth(
+        client, data, {"Accept": "application/json"}
+    )
+
+    response = await _post_to_token_endpoint(metadata, data, headers)
+    if response.status_code != 200:
+        if _error_code(response) in _PERMANENT_TOKEN_ERRORS:
+            raise GrantRevoked(
+                f"The authorization server rejected the refresh "
+                f"({_error_code(response)})."
+            )
+        raise ConnectorOAuthError(f"Token refresh failed ({response.status_code}).")
+    try:
+        return OAuthToken.model_validate(response.json())
+    except Exception as exc:
+        raise ConnectorOAuthError(f"Malformed token response: {exc}") from exc
+
+
+async def _post_to_token_endpoint(
+    metadata: OAuthMetadata, data: dict[str, str], headers: dict[str, str],
+) -> httpx.Response:
+    """POST to the token endpoint under a deadline over the whole call.
+
+    ``httpx.Timeout`` bounds each *read*, not the request — the same trap
+    :func:`_read_challenge` documents. A token endpoint that answers a byte
+    every nineteen seconds keeps resetting that clock, and this call is made
+    while a ``mcp_server`` row is locked: it would hold the lock, the database
+    connection, and the refresher's whole tick behind it.
+
+    ``guarded_client`` pins DNS and rejects non-public hosts, so the
+    server-supplied endpoint is SSRF-safe without a separate pre-check.
+    """
+    try:
+        async with asyncio.timeout(_HTTP_TIMEOUT):
+            async with guarded_client(
+                timeout=httpx.Timeout(_HTTP_TIMEOUT)
+            ) as http_client:
+                return await http_client.post(
+                    str(metadata.token_endpoint), data=data, headers=headers,
+                )
+    except (httpx.HTTPError, TimeoutError) as exc:
+        raise ConnectorOAuthError(f"Token endpoint unreachable: {exc}") from exc
+
+
+def _error_code(response: httpx.Response) -> str | None:
+    """The OAuth 2.0 ``error`` code in a failed token response, if it is there.
+
+    Best-effort by design: a server that answers an error with HTML, or with
+    JSON shaped some other way, has told us nothing about *why* — and the
+    caller's default for "don't know" is to retry, which is the safe one.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    return body.get("error") if isinstance(body, dict) else None

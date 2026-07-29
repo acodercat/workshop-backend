@@ -105,6 +105,18 @@ def oauth_state_key(state: str) -> str:
     return f"{OAUTH_STATE_PREFIX}:{state}"
 
 
+def oauth_current_state_key(connector_id: int) -> str:
+    """Redis key naming the one authorization a Connector is currently waiting on.
+
+    Each ``state`` is independently valid for its whole TTL, so without this a
+    user who starts a second authorization — a second tab, a different account,
+    a first attempt they thought had failed — leaves two live flows for one
+    Connector, and whichever *finishes* last wins. This records which one they
+    started last, which is the one they meant.
+    """
+    return f"{OAUTH_STATE_PREFIX}:current:{connector_id}"
+
+
 def email_verify_key(email: str) -> str:
     """Redis key holding the active registration verification state
     for ``email``. Lowercased so casing variations of the same address

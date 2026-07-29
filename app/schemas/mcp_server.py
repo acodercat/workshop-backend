@@ -24,12 +24,14 @@ def _require_auth_credentials(
         raise ValueError("HEADER auth requires header_name and credential.")
 
 
-# MCP caps tool names at 128 characters; the list is bounded too so a PATCH
-# can't push an unbounded blob into the JSONB column. Both limits sit well above
-# any real server — the largest published catalogues are a few dozen tools.
-_MAX_TOOL_NAME_LEN = 128
-_MAX_DISABLED_TOOLS = 256
-ToolName = Annotated[str, Field(min_length=1, max_length=_MAX_TOOL_NAME_LEN)]
+# What the user can switch off — MCP caps tool names at 128 characters, and the
+# list is bounded so a PATCH can't push an unbounded blob into the JSONB column.
+# Both sit well above any real server; the largest published catalogues are a
+# few dozen tools. They also bound what the probe bothers to store a preview of,
+# since a tool outside them could never be switched off (see ``probe.py``).
+MAX_TOOL_NAME_LEN = 128
+MAX_DISABLED_TOOLS = 256
+ToolName = Annotated[str, Field(min_length=1, max_length=MAX_TOOL_NAME_LEN)]
 
 
 class ConnectorResponse(BaseModel):
@@ -58,6 +60,10 @@ class ConnectorResponse(BaseModel):
     # Same name as the column on purpose — ``model_validate`` maps by attribute,
     # so a renamed field here would silently serialize as ``false``.
     oauth_reauthorization_required: bool = False
+    # Its sibling: the last turn that tried could not reach the server at all.
+    # The only health signal a non-OAuth Connector has, since the flag above is
+    # a verdict on an OAuth grant. Same naming rule applies.
+    last_connect_failed: bool = False
     # True unless this is an OAuth connector still awaiting authorization.
     # Set by the endpoint layer (the ORM has no such column).
     authorized: bool = True
@@ -170,6 +176,11 @@ class OAuthCallbackRequest(BaseModel):
 
     code: str
     state: str
+    #: RFC 9207 issuer identifier, when the authorization server sends one.
+    #: Optional on the wire because plenty do not; whether its absence is
+    #: fatal is decided by what the server advertised (see
+    #: :func:`~app.services.mcp.oauth.require_matching_issuer`).
+    iss: str | None = None
 
 
 class ConnectionTestResponse(BaseModel):
@@ -191,7 +202,7 @@ class ConnectorUpdate(BaseModel):
     # list, so a merge would only add a way for two tabs to disagree. Names the
     # server no longer exposes are accepted and simply never match.
     disabled_tools: list[ToolName] | None = Field(
-        default=None, max_length=_MAX_DISABLED_TOOLS,
+        default=None, max_length=MAX_DISABLED_TOOLS,
     )
 
     @model_validator(mode="after")

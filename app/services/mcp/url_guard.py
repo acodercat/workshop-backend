@@ -43,7 +43,7 @@ async def guard_public_url(url: str) -> None:
 
 
 def validate_public_url(url: str) -> None:
-    """Raise :class:`InvalidConnectorUrlError` unless *url* is a public https endpoint."""
+    """Raise :class:`InvalidConnectorUrlError` unless *url* is public https."""
     parsed = urlparse(url)
     if parsed.scheme != "https":
         raise InvalidConnectorUrlError("Connector URL must use https.")
@@ -52,7 +52,9 @@ def validate_public_url(url: str) -> None:
         raise InvalidConnectorUrlError("Connector URL has no host.")
 
     try:
-        addr_infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+        addr_infos = socket.getaddrinfo(
+            host, parsed.port or 443, proto=socket.IPPROTO_TCP
+        )
     except socket.gaierror as exc:
         raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.") from exc
 
@@ -65,14 +67,16 @@ def validate_public_url(url: str) -> None:
 
 
 def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
+    """Whether *ip* is globally routable — an allowlist, not a blocklist.
+
+    ``is_global`` is the IANA special-purpose registry's own answer, which is
+    the only one that stays right as that registry grows. Enumerating what to
+    reject instead leaves whatever the enumeration missed: shared CGNAT space
+    (``100.64.0.0/10``) is neither ``is_private`` nor ``is_loopback``, so a
+    blocklist of those waves through Tailscale addresses, carrier-grade NAT
+    ranges, and anything else an operator runs in there.
+    """
+    return ip.is_global
 
 
 class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
@@ -86,10 +90,19 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
     """
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        # Scheme is enforced here, not only at the pre-flight check: the
+        # endpoints a server advertises in its metadata — token, registration,
+        # authorization — never pass through that check, and a plaintext one
+        # would carry the PKCE verifier, client secret, or refresh token in the
+        # clear. MCP requires authorization-server endpoints to be HTTPS.
+        if request.url.scheme != "https":
+            raise InvalidConnectorUrlError(
+                f"Refusing a non-https request to {request.url.host!r}."
+            )
         host = request.url.host
         if not host:
             raise InvalidConnectorUrlError("Request URL has no host.")
-        port = request.url.port or (443 if request.url.scheme == "https" else 80)
+        port = request.url.port or 443
         try:
             infos = await asyncio.get_running_loop().getaddrinfo(
                 host, port, type=socket.SOCK_STREAM

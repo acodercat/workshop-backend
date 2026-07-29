@@ -1,12 +1,28 @@
 """Unit tests for the Connector OAuth service (pure / no-network parts)."""
 
+import asyncio
+import base64
+import time
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
+
+import httpx
 import pytest
-from mcp.shared.auth import OAuthClientInformationFull, OAuthMetadata
+from fastapi import HTTPException
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthMetadata,
+    ProtectedResourceMetadata,
+)
 
 from app.errors import ConnectorOAuthError, InvalidConnectorUrlError
 from app.services.mcp.oauth import (
     DiscoveredAuthorization,
+    GrantRevoked,
+    _apply_client_auth,
+    _read_challenge,
     _require_pkce_support,
+    require_matching_issuer,
     build_authorization_url,
     cimd_client,
     client_metadata_document,
@@ -15,6 +31,7 @@ from app.services.mcp.oauth import (
     exchange_code,
     new_pkce,
     new_state,
+    refresh_tokens,
 )
 
 
@@ -76,8 +93,8 @@ class TestBuildAuthorizationUrl:
 
 
 class TestSpecRequirements:
-    """The two MCP MUSTs the browser-redirect legs must satisfy themselves —
-    the SDK's ``OAuthClientProvider`` only covers the worker's leg."""
+    """The two MCP MUSTs the browser-redirect legs must satisfy themselves.
+    Driving the flow by hand means the SDK's provider is not there to."""
 
     def test_authorization_carries_the_resource_indicator(self):
         # RFC 8707: binds the token to this server so it can't be replayed.
@@ -113,22 +130,122 @@ class TestSpecRequirements:
 
 
 class TestEnsureClientManual:
-    async def test_manual_confidential_client_no_network(self):
-        client = await ensure_client(
-            _metadata(),
+    """A hand-configured client. Nothing registered it with us, so the server's
+    own declaration is the only evidence for how it should authenticate."""
+
+    async def _client(self, supported, *, client_secret="sek"):
+        return await ensure_client(
+            OAuthMetadata(
+                issuer="https://as.example.com",
+                authorization_endpoint="https://as.example.com/authorize",
+                token_endpoint="https://as.example.com/token",
+                response_types_supported=["code"],
+                token_endpoint_auth_methods_supported=supported,
+            ),
             redirect_uri="https://app/cb", scope="read",
-            client_id="cid", client_secret="sek",
+            client_id="cid", client_secret=client_secret,
         )
+
+    async def test_manual_confidential_client_no_network(self):
+        client = await self._client(["client_secret_post"])
         assert client.client_id == "cid"
         assert client.client_secret == "sek"
         assert client.token_endpoint_auth_method == "client_secret_post"
 
     async def test_manual_public_client_when_no_secret(self):
-        client = await ensure_client(
-            _metadata(),
-            redirect_uri="https://app/cb", scope=None, client_id="cid",
-        )
+        client = await self._client(["client_secret_post"], client_secret=None)
         assert client.token_endpoint_auth_method == "none"
+
+    async def test_a_public_only_server_is_not_asked_to_authenticate(self):
+        # An authorization server declaring only ``none`` rejects a client that
+        # asks to authenticate at all; its declaration is the only evidence.
+        client = await self._client(["none"])
+        assert client.token_endpoint_auth_method == "none"
+
+    async def test_uses_basic_when_that_is_all_the_server_takes(self):
+        # The exchange that could never complete before: the secret went in the
+        # body to a server that only reads the Authorization header.
+        client = await self._client(["client_secret_basic"])
+        assert client.token_endpoint_auth_method == "client_secret_basic"
+
+    async def test_defaults_to_basic_when_the_server_declares_nothing(self):
+        # RFC 8414 gives token_endpoint_auth_methods_supported that same default.
+        client = await self._client(None)
+        assert client.token_endpoint_auth_method == "client_secret_basic"
+
+
+class TestTokenEndpointClientAuth:
+    """The client authenticates as it is registered to, not as whichever method
+    happens to be convenient."""
+
+    def _apply(self, method, *, client_id="cid", client_secret="sek"):
+        client = OAuthClientInformationFull(
+            client_id=client_id, client_secret=client_secret,
+            redirect_uris=["https://app/cb"],
+            token_endpoint_auth_method=method,
+        )
+        return _apply_client_auth(client, {"grant_type": "authorization_code"}, {})
+
+    def test_basic_goes_in_the_header_and_not_the_body(self):
+        data, headers = self._apply("client_secret_basic")
+        expected = base64.b64encode(b"cid:sek").decode()
+        assert headers["Authorization"] == f"Basic {expected}"
+        assert "client_secret" not in data
+
+    def test_post_goes_in_the_body_and_not_the_header(self):
+        data, headers = self._apply("client_secret_post")
+        assert data["client_secret"] == "sek"
+        assert "Authorization" not in headers
+
+    def test_a_public_client_sends_the_secret_nowhere(self):
+        data, headers = self._apply("none")
+        assert "client_secret" not in data
+        assert "Authorization" not in headers
+
+    def test_credentials_are_percent_encoded_before_base64(self):
+        # RFC 6749 §2.3.1 — a secret containing ':' would otherwise decode into
+        # the wrong id/secret split at the server.
+        _data, headers = self._apply(
+            "client_secret_basic", client_id="a b", client_secret="p:q",
+        )
+        raw = base64.b64decode(headers["Authorization"].removeprefix("Basic "))
+        assert raw.decode() == "a%20b:p%3Aq"
+
+    async def _exchange(self, monkeypatch, method):
+        """Run a token exchange; return the token and the request it sent."""
+        sent: list[httpx.Request] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            sent.append(request)
+            return httpx.Response(
+                200, json={"access_token": "at", "token_type": "Bearer"},
+            )
+
+        _serve(monkeypatch, handle)
+        token = await exchange_code(
+            _metadata(),
+            OAuthClientInformationFull(
+                client_id="cid", client_secret="sek",
+                redirect_uris=["https://app/cb"],
+                token_endpoint_auth_method=method,
+            ),
+            code="abc", server_url="https://mcp.example.com/mcp",
+            redirect_uri="https://app/cb", code_verifier="v",
+        )
+        return token, sent[0]
+
+    async def test_the_exchange_authenticates_with_basic(self, monkeypatch):
+        # The unit tests above prove the helper; this proves the token leg is
+        # wired to it, which is where the secret was previously hard-posted.
+        token, request = await self._exchange(monkeypatch, "client_secret_basic")
+        assert token.access_token == "at"
+        assert request.headers["authorization"].startswith("Basic ")
+        assert "client_secret" not in request.content.decode()
+
+    async def test_the_exchange_authenticates_with_post(self, monkeypatch):
+        _token, request = await self._exchange(monkeypatch, "client_secret_post")
+        assert "client_secret=sek" in request.content.decode()
+        assert "authorization" not in request.headers
 
 
 class TestSsrfGuard:
@@ -157,6 +274,487 @@ class TestSsrfGuard:
             )
 
 
+def _serve(monkeypatch, handler, *, allow_any_url=False):
+    """Route the flow's outbound requests through *handler*.
+
+    Stubs ``guarded_client`` rather than the SDK helpers, so the real request
+    builders and response parsers run — the only arrangement under which a
+    coroutine left unawaited shows up as a failure rather than as a plausible
+    truthy object.
+    """
+    from app.services.mcp import oauth
+
+    if allow_any_url:
+        async def allow(_url):
+            return None
+
+        monkeypatch.setattr(oauth, "guard_public_url", allow)
+    monkeypatch.setattr(
+        oauth,
+        "guarded_client",
+        lambda **_kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+
+class TestDiscoverAuthorization:
+    """Discovery end to end against a stubbed server.
+
+    Cover for the happy path the SSRF cases never reach: it runs entirely
+    through ``async def`` SDK helpers, whose responses are meaningless until
+    awaited.
+    """
+
+    _AS_METADATA = {
+        "issuer": "https://as.example.com",
+        "authorization_endpoint": "https://as.example.com/authorize",
+        "token_endpoint": "https://as.example.com/token",
+        "response_types_supported": ["code"],
+        "code_challenge_methods_supported": ["S256"],
+    }
+
+    _RESOURCE = {
+        "resource": "https://mcp.example.com/mcp",
+        "authorization_servers": ["https://as.example.com"],
+    }
+
+    def _handler(self, *, resource=..., authorization=None):
+        """Serve a conformant pair unless a test overrides one half."""
+        resource = self._RESOURCE if resource is ... else resource
+        authorization = authorization or self._AS_METADATA
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "oauth-protected-resource" in path:
+                return (
+                    httpx.Response(404)
+                    if resource is None
+                    else httpx.Response(200, json=resource)
+                )
+            if "oauth-authorization-server" in path or "openid-configuration" in path:
+                return httpx.Response(200, json=authorization)
+            return httpx.Response(404)
+
+        return handle
+
+    async def test_returns_the_authorization_server_metadata(self, monkeypatch):
+        _serve(monkeypatch, self._handler(), allow_any_url=True)
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+        assert isinstance(discovered.metadata, OAuthMetadata)
+        assert str(discovered.metadata.token_endpoint) == "https://as.example.com/token"
+
+    async def test_takes_the_scopes_the_protected_resource_declares(self, monkeypatch):
+        # Also the proof that the RFC 9728 document was parsed rather than left
+        # as a coroutine: unparsed, it contributes no scopes at all.
+        _serve(
+            monkeypatch,
+            self._handler(resource={
+                "resource": "https://mcp.example.com/mcp",
+                "authorization_servers": ["https://as.example.com"],
+                "scopes_supported": ["files:read", "files:write"],
+            }),
+            allow_any_url=True,
+        )
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+        assert discovered.scope_for(None) == "files:read files:write"
+
+    async def test_refuses_a_server_whose_metadata_omits_pkce(self, monkeypatch):
+        # The MUST enforced against a real discovery run, not just the helper.
+        without_pkce = {
+            key: value
+            for key, value in self._AS_METADATA.items()
+            if key != "code_challenge_methods_supported"
+        }
+        _serve(
+            monkeypatch, self._handler(authorization=without_pkce), allow_any_url=True,
+        )
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+    async def test_uses_the_resource_metadata_url_the_challenge_names(
+        self, monkeypatch
+    ):
+        # MCP lets a server publish its RFC 9728 document anywhere and point at
+        # it from the 401. No ``.well-known`` guess would find this one.
+        served = "https://mcp.example.com/tenants/acme/resource-metadata"
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == "https://mcp.example.com/mcp":
+                return httpx.Response(401, headers={
+                    "WWW-Authenticate": f'Bearer resource_metadata="{served}"',
+                })
+            if url == served:
+                return httpx.Response(200, json={
+                    "resource": "https://mcp.example.com/mcp",
+                    "authorization_servers": ["https://as.example.com"],
+                    "scopes_supported": ["files:read", "files:write"],
+                })
+            if "oauth-protected-resource" in request.url.path:
+                return httpx.Response(404)
+            return httpx.Response(200, json=self._AS_METADATA)
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+        assert discovered.scopes_supported == ["files:read", "files:write"]
+
+    async def test_the_challenge_scope_outranks_the_advertised_set(
+        self, monkeypatch
+    ):
+        # The challenge names what *this* resource needs; scopes_supported is
+        # everything the authorization server might ever grant.
+        def handle(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == "https://mcp.example.com/mcp":
+                return httpx.Response(401, headers={
+                    "WWW-Authenticate": 'Bearer scope="files:read"',
+                })
+            if "oauth-protected-resource" in request.url.path:
+                return httpx.Response(200, json={
+                    "resource": "https://mcp.example.com/mcp",
+                    "authorization_servers": ["https://as.example.com"],
+                    "scopes_supported": ["files:read", "files:write", "admin"],
+                })
+            return httpx.Response(200, json=self._AS_METADATA)
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+
+        assert discovered.scope_for(None) == "files:read"
+        # An operator asking for more gets more — but never at the cost of what
+        # the server said it needs, which MCP makes authoritative.
+        assert discovered.scope_for("custom") == "files:read custom"
+
+    async def test_a_server_that_does_not_challenge_still_discovers(
+        self, monkeypatch
+    ):
+        # Both routes are required; the well-known one must stand alone.
+        _serve(monkeypatch, self._handler(), allow_any_url=True)
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+        assert discovered.challenge_scope is None
+        assert isinstance(discovered.metadata, OAuthMetadata)
+
+    async def test_a_server_that_streams_instead_of_challenging_is_dropped(
+        self, monkeypatch
+    ):
+        # The challenge read sends the SSE-open shape, and a server may answer
+        # it with a stream rather than a 401. httpx bounds each read, not the
+        # request, so its heartbeats would hold the authorize endpoint open for
+        # as long as it kept writing.
+        from app.services.mcp import oauth
+
+        monkeypatch.setattr(oauth, "_HTTP_TIMEOUT", 0.05)
+        answer = self._handler()
+
+        async def handle(request: httpx.Request) -> httpx.Response:
+            if ".well-known" not in request.url.path:
+                await asyncio.sleep(5)
+            return answer(request)
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+
+        started = time.monotonic()
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+
+        assert time.monotonic() - started < 1.0
+        assert isinstance(discovered.metadata, OAuthMetadata)
+
+    async def test_only_the_servers_own_answers_are_shrugged_off(self):
+        # Best-effort covers what the server says, not our own refusal to talk
+        # to it — the pinning transport rejects a host that resolves private
+        # only at request time. Reporting that as "this server issued no
+        # challenge" would file our error under the server's behaviour.
+        client = AsyncMock()
+        client.get.side_effect = InvalidConnectorUrlError("resolves to private")
+
+        with pytest.raises(InvalidConnectorUrlError):
+            await _read_challenge(client, "https://mcp.example.com/mcp")
+
+    async def test_a_redirect_on_one_candidate_does_not_end_discovery(
+        self, monkeypatch,
+    ):
+        # The guarded client refuses to follow redirects, so a provider whose
+        # legacy well-known path 301s to its canonical one hands us the 301
+        # itself — and taking that for "this server is broken" would bury the
+        # OIDC candidate behind it, making the Connector unaddable.
+        def handle(request: httpx.Request) -> httpx.Response:
+            if "oauth-protected-resource" in request.url.path:
+                return httpx.Response(200, json=self._RESOURCE)
+            if "oauth-authorization-server" in request.url.path:
+                return httpx.Response(301, headers={"location": "https://elsewhere"})
+            if "openid-configuration" in request.url.path:
+                return httpx.Response(200, json=self._AS_METADATA)
+            return httpx.Response(404)
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+
+        assert str(discovered.metadata.token_endpoint) == "https://as.example.com/token"
+
+    async def test_a_server_error_still_ends_it(self, monkeypatch):
+        # The other half of the same rule: a 5XX says the endpoint itself is
+        # unwell, and the candidates behind it are no more likely to answer.
+        attempts: list[str] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            if "oauth-protected-resource" in request.url.path:
+                return httpx.Response(200, json=self._RESOURCE)
+            if ".well-known" not in request.url.path:
+                return httpx.Response(404)   # the challenge read, not a candidate
+            attempts.append(request.url.path)
+            return httpx.Response(503)
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+        assert len(attempts) == 1
+
+    async def test_the_issuer_is_recorded_as_published(self, monkeypatch):
+        # Not as pydantic renders it: ``AnyUrl`` gives a bare origin a trailing
+        # slash, and RFC 9207 forbids normalising either side before
+        # comparison — so recording the parsed value would reject every
+        # provider whose issuer is a bare origin.
+        bare = dict(self._AS_METADATA, issuer="https://as.example.com")
+        _serve(
+            monkeypatch,
+            self._handler(
+                resource={
+                    "resource": "https://mcp.example.com/mcp",
+                    "authorization_servers": ["https://as.example.com"],
+                },
+                authorization=bare,
+            ),
+            allow_any_url=True,
+        )
+
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+
+        assert str(discovered.metadata.issuer) == "https://as.example.com/"
+        assert discovered.issuer_as_published == "https://as.example.com"
+
+    async def test_the_iss_support_flag_survives_parsing(self, monkeypatch):
+        # The SDK's model does not carry it, so it has to come off the document.
+        advertising = dict(
+            self._AS_METADATA, authorization_response_iss_parameter_supported=True
+        )
+        _serve(
+            monkeypatch, self._handler(authorization=advertising), allow_any_url=True,
+        )
+
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+
+        assert discovered.iss_parameter_supported is True
+
+    async def test_a_slow_server_cannot_hold_the_endpoint_open(self, monkeypatch):
+        # ``httpx.Timeout`` bounds each read, so a server answering a byte at a
+        # time never trips it — and this runs while a request and its database
+        # session are held. One discovery is six requests at worst, so the
+        # bound has to cover the sequence rather than each of its steps.
+        from app.services.mcp import oauth
+
+        monkeypatch.setattr(oauth, "_DISCOVERY_TIMEOUT", 0.05)
+
+        async def never_answers(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(5)
+            return httpx.Response(200, json=self._RESOURCE)
+
+        _serve(monkeypatch, never_answers, allow_any_url=True)
+
+        started = time.monotonic()
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+        assert time.monotonic() - started < 1.0
+
+    async def test_a_document_naming_someone_else_is_ignored(self, monkeypatch):
+        # A server may publish metadata claiming another party's resource and
+        # pointing at their authorization server. Taking it would send the
+        # user's browser to a login page they rightly trust, to authorize a
+        # grant we then hold against a different host.
+        impersonating = {
+            "resource": "https://bank.example.com",
+            "authorization_servers": ["https://bank-as.example.com"],
+        }
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            if "oauth-protected-resource" in request.url.path:
+                return httpx.Response(200, json=impersonating)
+            if request.url.host == "bank-as.example.com":
+                raise AssertionError("must not follow the impersonated server")
+            return httpx.Response(
+                200, json=dict(self._AS_METADATA, issuer="https://mcp.example.com"),
+            )
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+
+        # The impersonated document is discarded, which leaves no document at
+        # all — and nothing else names an authorization server. The handler
+        # asserts the one it tried to point at is never contacted.
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+    async def test_a_trailing_slash_is_a_different_issuer(self, monkeypatch):
+        # RFC 8414 §3.3 says identical, and ``/tenant`` is not ``/tenant/`` —
+        # an authorization server routes them to different tenants. Trimming
+        # either side to be helpful merges two identities.
+        resource = dict(
+            self._RESOURCE, authorization_servers=["https://as.example.com/tenant/"],
+        )
+        served = dict(self._AS_METADATA, issuer="https://as.example.com/tenant")
+        _serve(
+            monkeypatch,
+            self._handler(resource=resource, authorization=served),
+            allow_any_url=True,
+        )
+
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+    async def test_metadata_claiming_a_different_issuer_is_ignored(
+        self, monkeypatch
+    ):
+        # RFC 8414 §3.3. A resource document naming ``as.example.com`` whose
+        # well-known answers for a *different* tenant would otherwise send the
+        # browser, the authorization code, and the exchange to that tenant.
+        wrong_tenant = dict(self._AS_METADATA, issuer="https://as.example.com/other")
+        _serve(
+            monkeypatch, self._handler(authorization=wrong_tenant), allow_any_url=True,
+        )
+
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+    async def test_refuses_a_plaintext_authorization_endpoint(self, monkeypatch):
+        # The one endpoint no transport of ours protects: the browser is sent
+        # there carrying client_id, state and the PKCE challenge.
+        plaintext = dict(
+            self._AS_METADATA,
+            authorization_endpoint="http://login.example.com/authorize",
+        )
+        _serve(
+            monkeypatch, self._handler(authorization=plaintext), allow_any_url=True,
+        )
+        with pytest.raises(ConnectorOAuthError, match="https"):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+    async def test_reports_a_server_with_no_metadata_at_all(self, monkeypatch):
+        _serve(
+            monkeypatch, lambda _request: httpx.Response(404), allow_any_url=True,
+        )
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+    async def test_a_server_publishing_no_resource_document_is_refused(
+        self, monkeypatch
+    ):
+        # A server nominating its own origin is the guess RFC 9728 exists to
+        # remove, and the spec's discovery sequence ends this branch at "abort
+        # or use pre-configured values". Serving perfectly good authorization
+        # metadata at that origin does not make it discoverable.
+        its_own = dict(
+            self._AS_METADATA,
+            issuer="https://mcp.example.com",
+            token_endpoint="https://mcp.example.com/token",
+        )
+        _serve(
+            monkeypatch,
+            self._handler(resource=None, authorization=its_own),
+            allow_any_url=True,
+        )
+
+        with pytest.raises(ConnectorOAuthError, match="Protected Resource"):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+
+class TestDynamicClientRegistration:
+    """DCR is the fallback when the server advertises neither a manual client
+    nor CIMD — and the branch every other ``ensure_client`` test skips."""
+
+    def _registration_metadata(self) -> OAuthMetadata:
+        return OAuthMetadata(
+            issuer="https://as.example.com",
+            authorization_endpoint="https://as.example.com/authorize",
+            token_endpoint="https://as.example.com/token",
+            response_types_supported=["code"],
+            registration_endpoint="https://as.example.com/register",
+        )
+
+    async def test_returns_the_client_the_server_registered(self, monkeypatch):
+        registered = {
+            "client_id": "generated-cid",
+            "client_secret": "generated-secret",
+            "redirect_uris": ["https://app/cb"],
+            "token_endpoint_auth_method": "client_secret_basic",
+        }
+        _serve(monkeypatch, lambda _request: httpx.Response(201, json=registered))
+
+        client = await ensure_client(
+            self._registration_metadata(), redirect_uri="https://app/cb", scope=None,
+        )
+
+        assert isinstance(client, OAuthClientInformationFull)
+        assert client.client_id == "generated-cid"
+        # We asked for POST; the server substituted Basic, as RFC 7591 §3.2.1
+        # lets it. Reading the answer back is the point of the round-trip.
+        assert client.token_endpoint_auth_method == "client_secret_basic"
+
+    async def test_registration_asks_for_the_method_the_server_declares(
+        self, monkeypatch
+    ):
+        # A registration endpoint that only does Basic rejects an unsupported
+        # request outright rather than correcting it, so asking blindly for
+        # POST locks us out of those servers entirely.
+        sent: list[httpx.Request] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            sent.append(request)
+            return httpx.Response(201, json={
+                "client_id": "cid", "redirect_uris": ["https://app/cb"],
+                "token_endpoint_auth_method": "client_secret_basic",
+            })
+
+        _serve(monkeypatch, handle)
+        basic_only = self._registration_metadata().model_copy(
+            update={"token_endpoint_auth_methods_supported": ["client_secret_basic"]}
+        )
+
+        await ensure_client(basic_only, redirect_uri="https://app/cb", scope=None)
+
+        assert '"token_endpoint_auth_method":"client_secret_basic"' in (
+            sent[0].content.decode().replace(" ", "")
+        )
+
+    async def test_an_omitted_auth_method_is_pinned_before_the_row_is_stored(
+        self, monkeypatch
+    ):
+        # Left as None the two readers disagree: this exchange would take the
+        # RFC default (Basic) while a later rotation reads it as "send no
+        # secret", so an authorization that worked stops being renewable.
+        registered = {
+            "client_id": "generated-cid",
+            "client_secret": "generated-secret",
+            "redirect_uris": ["https://app/cb"],
+        }
+        _serve(monkeypatch, lambda _request: httpx.Response(201, json=registered))
+
+        client = await ensure_client(
+            self._registration_metadata(), redirect_uri="https://app/cb", scope=None,
+        )
+
+        assert client.token_endpoint_auth_method == "client_secret_basic"
+
+    async def test_a_rejected_registration_says_to_configure_a_client(
+        self, monkeypatch,
+    ):
+        _serve(monkeypatch, lambda _request: httpx.Response(400, text="nope"))
+        with pytest.raises(ConnectorOAuthError, match="Client ID"):
+            await ensure_client(
+                self._registration_metadata(),
+                redirect_uri="https://app/cb", scope=None,
+            )
+
+
 class TestBuildOAuthConnector:
     """The row a custom OAuth Connector is created as.
 
@@ -171,7 +769,9 @@ class TestBuildOAuthConnector:
         from app.schemas.mcp_server import ConnectorCreate
 
         async def fake_register(**_kwargs):
-            return "encrypted-client"
+            return "encrypted-client", {
+                "authorization_server": {"issuer": "https://as/"},
+            }
 
         monkeypatch.setattr(endpoint, "_register_oauth_client", fake_register)
 
@@ -186,6 +786,11 @@ class TestBuildOAuthConnector:
         assert connector.user_id == 42
         assert connector.auth_type == MCPServerAuthType.OAUTH
         assert connector.oauth_client_encrypted == "encrypted-client"
+        # Stored with it: a client belongs to the server that issued it, and a
+        # later authorization has to be able to notice that server changing.
+        assert connector.oauth_metadata == {
+            "authorization_server": {"issuer": "https://as/"},
+        }
         # Not handed to the agent until the user comes back from the provider.
         assert connector.connected is False
 
@@ -203,6 +808,8 @@ class TestClientIdMetadataDocument:
     """CIMD: the client_id is our published metadata URL, so there is no
     registration round-trip and nothing per-Connector to store."""
 
+    _METADATA_URL = "https://api.example.com/api/connectors/client-metadata"
+
     def _metadata_supporting_cimd(self) -> OAuthMetadata:
         return OAuthMetadata(
             issuer="https://as.example.com",
@@ -216,9 +823,9 @@ class TestClientIdMetadataDocument:
         client = await ensure_client(
             self._metadata_supporting_cimd(),
             redirect_uri="https://app/cb", scope="read",
-            client_metadata_url="https://api.example.com/api/connectors/client-metadata",
+            client_metadata_url=self._METADATA_URL,
         )
-        assert client.client_id == "https://api.example.com/api/connectors/client-metadata"
+        assert client.client_id == self._METADATA_URL
         # Public client: the id is a world-readable URL, so there is no secret.
         assert client.client_secret is None
         assert client.token_endpoint_auth_method == "none"
@@ -236,7 +843,7 @@ class TestClientIdMetadataDocument:
                     registration_endpoint="https://10.0.0.1/register",
                 ),
                 redirect_uri="https://app/cb", scope=None,
-                client_metadata_url="https://api.example.com/api/connectors/client-metadata",
+                client_metadata_url=self._METADATA_URL,
             )
 
     async def test_a_manual_client_id_still_wins_over_cimd(self):
@@ -245,13 +852,15 @@ class TestClientIdMetadataDocument:
             self._metadata_supporting_cimd(),
             redirect_uri="https://app/cb", scope=None,
             client_id="manual-cid", client_secret="sek",
-            client_metadata_url="https://api.example.com/api/connectors/client-metadata",
+            client_metadata_url=self._METADATA_URL,
         )
         assert client.client_id == "manual-cid"
 
     async def test_rejects_a_metadata_url_that_cannot_be_a_client_id(self):
         # Must be https with a non-root path, or the AS cannot resolve it.
-        for bad in ("http://api.example.com/client-metadata", "https://api.example.com/"):
+        for bad in (
+            "http://api.example.com/client-metadata", "https://api.example.com/",
+        ):
             with pytest.raises(ConnectorOAuthError):
                 await ensure_client(
                     self._metadata_supporting_cimd(),
@@ -342,23 +951,84 @@ class TestScopeSelectionStrategy:
     """MCP's scope-selection strategy: a general-purpose client has no domain
     knowledge to pick scopes with, so it asks for what the server declares."""
 
-    def _discovered(self, scopes):
-        return DiscoveredAuthorization(metadata=_metadata(), scopes_supported=scopes)
+    def _discovered(self, scopes, *, challenge=None, offline=False):
+        metadata = OAuthMetadata(
+            issuer="https://as.example.com",
+            authorization_endpoint="https://as.example.com/authorize",
+            token_endpoint="https://as.example.com/token",
+            response_types_supported=["code"],
+            # SEP-2207 puts ``offline_access`` in the *authorization server's*
+            # metadata; a conformant resource server never advertises it.
+            scopes_supported=["offline_access"] if offline else None,
+        )
+        return DiscoveredAuthorization(
+            metadata=metadata,
+            resource=ProtectedResourceMetadata(
+                resource="https://mcp.example.com/mcp",
+                authorization_servers=["https://as.example.com"],
+                scopes_supported=scopes,
+            ),
+            challenge_scope=challenge,
+        )
 
     def test_uses_the_scopes_the_server_declares(self):
         assert self._discovered(["files:read", "files:write"]).scope_for(None) == (
             "files:read files:write"
         )
 
-    def test_a_configured_scope_wins(self):
-        # An operator's explicit choice is not a guess, so it outranks discovery.
-        assert self._discovered(["files:read"]).scope_for("custom:scope") == "custom:scope"
+    def test_a_configured_scope_narrows_the_declared_set(self):
+        # The advertised set is what the spec falls back to for want of domain
+        # knowledge. An operator who named the scopes supplied that knowledge,
+        # so unioning would turn a deliberate narrowing into a widening.
+        assert self._discovered(["files:read", "admin"]).scope_for("files:read") == (
+            "files:read"
+        )
 
     def test_omits_scope_when_neither_is_available(self):
         # Omitting lets the server apply its own default rather than us
         # inventing a scope string it may reject.
         assert self._discovered(None).scope_for(None) is None
         assert self._discovered([]).scope_for(None) is None
+
+    def test_a_refresh_token_is_asked_for_when_the_server_offers_one(self):
+        # SEP-2207: without ``offline_access`` the grant carries no refresh
+        # token, so every access-token expiry becomes a browser round-trip —
+        # the gap most MCP clients still ship with.
+        discovered = self._discovered(["files:read"], offline=True)
+        assert discovered.scope_for(None) == "files:read offline_access"
+
+    def test_a_challenge_scope_does_not_cost_the_refresh_token(self):
+        # A 401 challenge names resource scopes and nothing else, so taking it
+        # verbatim silently drops the request for a refresh token.
+        discovered = self._discovered(
+            ["files:read", "files:write"], challenge="files:read", offline=True,
+        )
+        assert discovered.scope_for(None) == "files:read offline_access"
+
+    def test_a_configured_scope_cannot_widen_past_what_is_advertised(self):
+        # Narrowing is the point; the operator can only ask for less than the
+        # advertised set, or for names the server never listed at their own
+        # risk — either way the challenge, when there is one, still stands.
+        narrowed = self._discovered(["a", "b", "c"], challenge="a")
+        assert narrowed.scope_for("b") == "a b"
+
+    def test_a_configured_scope_never_displaces_the_challenge(self):
+        # The failure this prevents: authorization succeeds, and the token
+        # cannot touch the resource it was obtained for.
+        discovered = self._discovered(
+            ["files:read", "files:write"], challenge="files:read",
+        )
+        assert discovered.scope_for("custom") == "files:read custom"
+
+    def test_overlapping_scopes_are_not_repeated(self):
+        discovered = self._discovered(None, challenge="files:read files:write")
+        assert discovered.scope_for("files:read") == "files:read files:write"
+
+    def test_it_is_not_requested_when_the_server_never_offered_it(self):
+        # Asking for an unadvertised scope can have the whole request rejected.
+        discovered = self._discovered(["files:read"])
+        assert discovered.scope_for(None) == "files:read"
+        assert discovered.scope_for("custom") == "custom"
 
 
 class TestResponseMapping:
@@ -377,7 +1047,7 @@ class TestResponseMapping:
             id=1, user_id=7, name="Notion", url="https://mcp.notion.com/mcp",
             auth_type=MCPServerAuthType.OAUTH,
             oauth_tokens_encrypted="enc", connected=True,
-            oauth_reauthorization_required=True,
+            oauth_reauthorization_required=True, last_connect_failed=True,
             # NOT NULL columns: a loaded row always has these, but SQLAlchemy
             # applies its Python-side defaults at flush, not at construction.
             tool_count=0, disabled_tools=[], created_at=now, updated_at=now,
@@ -386,9 +1056,28 @@ class TestResponseMapping:
         response = _to_response(connector)
 
         assert response.oauth_reauthorization_required is True
+        assert response.last_connect_failed is True
         assert response.disabled_tools == []
         assert response.advertised_icon_url == "https://cdn.example.com/notion.png"
         assert response.authorized is True  # tokens present, but the grant is dead
+
+    def test_a_reachable_probe_clears_the_unreachable_flag(self):
+        # The user who fixes a broken URL and hits refresh must see the badge
+        # go at once, not after the next turn.
+        from app.api.endpoints.mcp_server import _apply_probe
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+        from app.services.mcp.probe import ProbeResult
+
+        connector = MCPServer(
+            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+            auth_type=MCPServerAuthType.BEARER, last_connect_failed=True,
+        )
+        _apply_probe(
+            connector, ProbeResult(server_name="c", tools=[{"name": "t"}]),
+        )
+
+        assert connector.last_connect_failed is False
+        assert connector.tool_count == 1
 
 
 class TestProbeCredential:
@@ -410,7 +1099,9 @@ class TestProbeCredential:
 
         monkeypatch.setattr(endpoint, "_decrypt_or_none", lambda ciphertext: "tok")
         auth_type, credential = endpoint._probe_credential(
-            self._connector(auth_type=MCPServerAuthType.BEARER, encrypted_credential="e")
+            self._connector(
+                auth_type=MCPServerAuthType.BEARER, encrypted_credential="e",
+            )
         )
         assert (auth_type, credential) == (MCPServerAuthType.BEARER, "tok")
 
@@ -472,3 +1163,970 @@ class TestDisabledToolsBounds:
 
         with pytest.raises(ValidationError):
             ConnectorUpdate(disabled_tools=[f"tool_{index}" for index in range(257)])
+
+
+class TestRefreshingAGrant:
+    """The twin of the code exchange: an access token whose audience differs
+    between the two legs is refused by any server that enforces RFC 8707."""
+
+    _METADATA = OAuthMetadata(
+        issuer="https://as.example.com",
+        authorization_endpoint="https://as.example.com/authorize",
+        token_endpoint="https://as.example.com/token",
+        response_types_supported=["code"],
+    )
+
+    def _sent(self, monkeypatch, response: httpx.Response) -> httpx.Request:
+        captured: dict = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return response
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+        return captured
+
+    async def test_it_carries_the_resource_indicator_and_client_auth(
+        self, monkeypatch,
+    ):
+        captured = self._sent(
+            monkeypatch,
+            httpx.Response(200, json={"access_token": "new", "token_type": "Bearer"}),
+        )
+        client = OAuthClientInformationFull(
+            client_id="cid", client_secret="sek", redirect_uris=["https://app/cb"],
+            token_endpoint_auth_method="client_secret_post",
+        )
+
+        tokens = await refresh_tokens(
+            self._METADATA, client,
+            refresh_token="R0", server_url="https://mcp.example.com/mcp",
+        )
+
+        assert tokens.access_token == "new"
+        body = captured["request"].content.decode()
+        assert "grant_type=refresh_token" in body
+        assert "refresh_token=R0" in body
+        assert "client_secret=sek" in body
+        assert "resource=" in body
+
+    async def test_a_rejected_grant_is_distinguishable_from_an_outage(
+        self, monkeypatch,
+    ):
+        # Only ``invalid_grant`` says the refresh token will never work again,
+        # and only that may send a Connector back to the browser.
+        self._sent(
+            monkeypatch, httpx.Response(400, json={"error": "invalid_grant"}),
+        )
+
+        with pytest.raises(GrantRevoked):
+            await refresh_tokens(
+                self._METADATA, _client(),
+                refresh_token="R0", server_url="https://mcp.example.com/mcp",
+            )
+
+    async def test_a_rejected_client_is_permanent_too(self, monkeypatch):
+        # A dynamically-registered client reaches this on its own when its
+        # ``client_secret_expires_at`` passes. Retried as a transient failure it
+        # would be re-sent every few minutes forever, and the card would never
+        # offer the re-authorization that mints a fresh registration.
+        self._sent(
+            monkeypatch, httpx.Response(401, json={"error": "invalid_client"}),
+        )
+
+        with pytest.raises(GrantRevoked):
+            await refresh_tokens(
+                self._METADATA, _client(),
+                refresh_token="R0", server_url="https://mcp.example.com/mcp",
+            )
+
+    async def test_any_other_failure_is_an_ordinary_oauth_error(self, monkeypatch):
+        self._sent(monkeypatch, httpx.Response(503, text="upstream down"))
+
+        with pytest.raises(ConnectorOAuthError) as caught:
+            await refresh_tokens(
+                self._METADATA, _client(),
+                refresh_token="R0", server_url="https://mcp.example.com/mcp",
+            )
+
+        assert not isinstance(caught.value, GrantRevoked)
+
+
+class TestStoringAFreshGrant:
+    """The one rule for writing a grant onto a row, shared by the authorization
+    callback and the token refresher — a difference between them would be a
+    Connector that works until its first refresh."""
+
+    def _connector(self, **over):
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+
+        base = dict(
+            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+            auth_type=MCPServerAuthType.OAUTH,
+        )
+        base.update(over)
+        return MCPServer(**base)
+
+    def test_the_deadline_is_written_with_the_grant(self, monkeypatch):
+        # ``expires_in`` counts from now, so the moment of writing is the only
+        # place the absolute deadline is knowable — and it is what the token
+        # refresher selects on. A grant stored without one is never renewed.
+        from app.services.mcp import grant
+        from mcp.shared.auth import OAuthToken
+
+        monkeypatch.setattr(grant, "encrypt_secret", lambda plaintext: "sealed")
+        connector = self._connector()
+
+        grant.store_tokens(
+            connector,
+            OAuthToken(access_token="at", token_type="Bearer", expires_in=3600),
+            rotation=False,
+        )
+
+        assert connector.oauth_tokens_encrypted == "sealed"
+        assert connector.oauth_tokens_expires_at is not None
+
+    def test_a_renewable_grant_with_no_stated_lifetime_gets_a_deadline(
+        self, monkeypatch,
+    ):
+        # NULL would read as "valid forever" and leave the refresher blind to a
+        # grant that has in fact died.
+        from app.services.mcp import grant
+        from mcp.shared.auth import OAuthToken
+
+        monkeypatch.setattr(grant, "encrypt_secret", lambda plaintext: "sealed")
+        connector = self._connector()
+
+        grant.store_tokens(
+            connector,
+            OAuthToken(access_token="at", token_type="Bearer", refresh_token="R0"),
+            rotation=False,
+        )
+
+        ahead = (
+            connector.oauth_tokens_expires_at - datetime.now(timezone.utc)
+        ).total_seconds()
+        assert grant.ASSUMED_TOKEN_LIFETIME - 5 < ahead <= grant.ASSUMED_TOKEN_LIFETIME
+
+    def test_a_grant_nothing_can_renew_is_given_no_deadline(self, monkeypatch):
+        # Some servers issue neither a lifetime nor a refresh token. Assuming a
+        # deadline there buys nothing and costs a false alarm: the refresher
+        # would pick the row up an hour later, find nothing to rotate with, and
+        # ask the user to re-authorize a token that never expired — hourly.
+        from app.services.mcp import grant
+        from mcp.shared.auth import OAuthToken
+
+        monkeypatch.setattr(grant, "encrypt_secret", lambda plaintext: "sealed")
+        connector = self._connector()
+
+        grant.store_tokens(
+            connector, OAuthToken(access_token="at", token_type="Bearer"),
+            rotation=False,
+        )
+
+        assert connector.oauth_tokens_expires_at is None
+
+    def test_a_stated_lifetime_is_taken_even_without_a_refresh_token(
+        self, monkeypatch,
+    ):
+        # Here the server did say when it dies, and nothing can renew it — so
+        # flagging it for re-authorization *ahead* of that moment is right.
+        from app.services.mcp import grant
+        from mcp.shared.auth import OAuthToken
+
+        monkeypatch.setattr(grant, "encrypt_secret", lambda plaintext: "sealed")
+        connector = self._connector()
+
+        grant.store_tokens(
+            connector,
+            OAuthToken(access_token="at", token_type="Bearer", expires_in=120),
+            rotation=False,
+        )
+
+        ahead = (
+            connector.oauth_tokens_expires_at - datetime.now(timezone.utc)
+        ).total_seconds()
+        assert 115 < ahead <= 120
+
+    def test_a_rotation_that_reissues_nothing_keeps_the_refresh_token(
+        self, monkeypatch,
+    ):
+        # OAuth 2.1 §4.3.2 makes reissue optional — the old refresh token stays
+        # valid. Writing the response verbatim would discard one the provider
+        # never revoked and turn the next expiry into a browser round-trip.
+        from app.services.mcp import grant
+        from mcp.shared.auth import OAuthToken
+
+        stored = OAuthToken(
+            access_token="old", token_type="Bearer", refresh_token="R0",
+        )
+        written: dict = {}
+        monkeypatch.setattr(
+            grant, "decrypt_secret", lambda _c: stored.model_dump_json(),
+        )
+        monkeypatch.setattr(
+            grant, "encrypt_secret",
+            lambda plaintext: written.setdefault("it", plaintext),
+        )
+        connector = self._connector(oauth_tokens_encrypted="whatever")
+
+        grant.store_tokens(
+            connector, OAuthToken(access_token="new", token_type="Bearer"),
+            rotation=True,
+        )
+
+        kept = OAuthToken.model_validate_json(written["it"])
+        assert (kept.access_token, kept.refresh_token) == ("new", "R0")
+
+    def test_a_code_exchange_never_inherits_the_old_refresh_token(
+        self, monkeypatch,
+    ):
+        # A code exchange establishes a new grant, so an old refresh token has
+        # no standing in it — and the new grant may have come from a *different*
+        # authorization server, which would then be handed the old one.
+        from app.services.mcp import grant
+        from mcp.shared.auth import OAuthToken
+
+        stored = OAuthToken(
+            access_token="old", token_type="Bearer", refresh_token="R0",
+        )
+        written: dict = {}
+        monkeypatch.setattr(
+            grant, "decrypt_secret", lambda _c: stored.model_dump_json(),
+        )
+        monkeypatch.setattr(
+            grant, "encrypt_secret",
+            lambda plaintext: written.setdefault("it", plaintext),
+        )
+        connector = self._connector(oauth_tokens_encrypted="whatever")
+
+        grant.store_tokens(
+            connector, OAuthToken(access_token="new", token_type="Bearer"),
+            rotation=False,
+        )
+
+        assert OAuthToken.model_validate_json(written["it"]).refresh_token is None
+
+    def test_a_reissued_refresh_token_replaces_the_old_one(self, monkeypatch):
+        from app.services.mcp import grant
+        from mcp.shared.auth import OAuthToken
+
+        stored = OAuthToken(
+            access_token="old", token_type="Bearer", refresh_token="R0",
+        )
+        written: dict = {}
+        monkeypatch.setattr(
+            grant, "decrypt_secret", lambda _c: stored.model_dump_json(),
+        )
+        monkeypatch.setattr(
+            grant, "encrypt_secret",
+            lambda plaintext: written.setdefault("it", plaintext),
+        )
+        connector = self._connector(oauth_tokens_encrypted="whatever")
+
+        grant.store_tokens(
+            connector,
+            OAuthToken(access_token="new", token_type="Bearer", refresh_token="R1"),
+            rotation=True,
+        )
+
+        assert OAuthToken.model_validate_json(written["it"]).refresh_token == "R1"
+
+
+class TestOAuthCallbackHealth:
+    """Authorization succeeding says nothing about whether the MCP server will
+    talk to us — a wrong token audience, or simply down."""
+
+    def _connector(self):
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+
+        return MCPServer(
+            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+            auth_type=MCPServerAuthType.OAUTH, last_connect_failed=False,
+        )
+
+    async def _probe_with(self, monkeypatch, outcome):
+        from app.api.endpoints import mcp_server as endpoint
+
+        async def fake_probe(*_args, **_kwargs):
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(endpoint, "probe", fake_probe)
+        connector = self._connector()
+        await endpoint._probe_after_authorization(connector, "at")
+        return connector
+
+    async def test_an_unreachable_server_is_marked(self, monkeypatch):
+        from app.errors import ConnectorUnreachableError
+
+        connector = await self._probe_with(
+            monkeypatch, ConnectorUnreachableError("down"),
+        )
+        assert connector.last_connect_failed is True
+
+    async def test_it_never_raises_mid_redirect(self, monkeypatch):
+        # The grant is already stored and the user is coming back from the
+        # provider; failing here would strand a Connector that *is* authorized.
+        connector = await self._probe_with(monkeypatch, RuntimeError("boom"))
+        assert connector.last_connect_failed is True
+
+    async def test_a_reachable_server_is_recorded_healthy(self, monkeypatch):
+        from app.services.mcp.probe import ProbeResult
+
+        connector = await self._probe_with(
+            monkeypatch, ProbeResult(server_name="c", tools=[{"name": "t"}]),
+        )
+        assert connector.last_connect_failed is False
+        assert connector.tool_count == 1
+
+
+_NOW = datetime(2026, 7, 29, tzinfo=timezone.utc)
+
+
+class TestIssuerIdentification:
+    """RFC 9207 on the authorization response — the mix-up defence.
+
+    Its precondition is this service's shape: one client, one redirect URI,
+    many unrelated authorization servers.
+    """
+
+    _RECORDED = "https://as.example.com"
+
+    def _check(self, returned, *, recorded=..., advertised=False):
+        require_matching_issuer(
+            returned,
+            recorded=self._RECORDED if recorded is ... else recorded,
+            advertised=advertised,
+        )
+
+    def test_a_response_from_another_issuer_is_refused(self):
+        # The whole point: without this the code — and the PKCE verifier with
+        # it — would be posted to the token endpoint of the server that did
+        # *not* issue it, which is how the attacker redeems it at the one that
+        # did. PKCE guards a code intercepted without the verifier; here we
+        # would hand the verifier over ourselves.
+        with pytest.raises(ConnectorOAuthError):
+            self._check("https://attacker.example.com")
+
+    def test_the_recorded_issuer_passes(self):
+        self._check(self._RECORDED)
+
+    def test_a_trailing_slash_is_not_normalised_away(self):
+        # The RFC forbids trailing-slash normalisation before comparison, so
+        # this must fail — and it is why the recorded value has to be the
+        # string the document published rather than the one pydantic's
+        # ``AnyUrl`` canonicalised.
+        with pytest.raises(ConnectorOAuthError):
+            self._check(self._RECORDED + "/")
+
+    def test_an_advertised_parameter_may_not_go_missing(self):
+        with pytest.raises(ConnectorOAuthError):
+            self._check(None, advertised=True)
+
+    def test_a_server_that_never_advertised_it_may_omit_it(self):
+        self._check(None)
+
+    def test_it_is_compared_even_when_unadvertised(self):
+        # The RFC's local-policy provision, which MCP takes: servers emitting
+        # ``iss`` before advertising it still get checked.
+        with pytest.raises(ConnectorOAuthError):
+            self._check("https://attacker.example.com", advertised=False)
+
+    def test_a_flow_started_before_the_check_fails_closed(self):
+        # A pending authorization from before the issuer was recorded cannot
+        # be validated; it costs one more click, not a silent exchange.
+        with pytest.raises(ConnectorOAuthError):
+            self._check(self._RECORDED, recorded=None)
+
+
+class TestCallbackRejectsAMixedUpResponse:
+    """The check has to be wired into the callback, not merely available."""
+
+    async def test_the_code_is_never_exchanged(self, monkeypatch):
+        import json as json_module
+
+        from app.api.endpoints import mcp_server as endpoint
+        from app.rate_limit import limiter
+        from app.schemas.mcp_server import OAuthCallbackRequest
+
+        monkeypatch.setattr(limiter, "enabled", False)
+        exchanged: list[object] = []
+
+        async def never(*_args, **_kwargs):
+            exchanged.append(True)
+
+        monkeypatch.setattr(endpoint.oauth, "exchange_code", never)
+
+        redis = AsyncMock()
+        redis.get.return_value = json_module.dumps({
+            "connector_id": 1,
+            "user_id": 7,
+            "code_verifier": "v",
+            "issuer": "https://as.example.com",
+            "iss_advertised": True,
+            "discovered": {"authorization_server": {}},
+        })
+
+        with pytest.raises(ConnectorOAuthError):
+            await endpoint.oauth_callback(
+                request=MagicMock(),
+                body=OAuthCallbackRequest(
+                    code="c", state="s", iss="https://attacker.example.com",
+                ),
+                db=AsyncMock(),
+                redis=redis,
+            )
+
+        assert exchanged == []
+        # One-shot regardless: a rejected response still burns its state.
+        redis.delete.assert_awaited_once()
+
+
+class TestTwoAuthorizationsInTheAir:
+    """Each ``state`` is valid for its whole TTL, so a user who restarts a
+    flow — second tab, different account — has two live ones for one Connector.
+    The winner must be the one they started last, not the one that finished
+    last."""
+
+    def _redis(self, *, current_state: str | None):
+        import json as json_module
+
+        redis = AsyncMock()
+        pending = json_module.dumps({
+            "connector_id": 1,
+            "user_id": 7,
+            "code_verifier": "v",
+            "issuer": None,
+            "iss_advertised": False,
+            "discovered": {"authorization_server": {
+                "issuer": "https://as.example.com",
+                "authorization_endpoint": "https://as.example.com/authorize",
+                "token_endpoint": "https://as.example.com/token",
+                "response_types_supported": ["code"],
+            }},
+        })
+
+        async def get(key):
+            return current_state if "current" in key else pending
+        redis.get.side_effect = get
+        return redis
+
+    def _db(self):
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+
+        db = AsyncMock()
+        db.get.return_value = MCPServer(
+            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+            auth_type=MCPServerAuthType.OAUTH,
+        )
+        return db
+
+    async def _callback(self, monkeypatch, redis, state, db=None):
+        from app.api.endpoints import mcp_server as endpoint
+        from app.rate_limit import limiter
+        from app.schemas.mcp_server import OAuthCallbackRequest
+
+        monkeypatch.setattr(limiter, "enabled", False)
+        return await endpoint.oauth_callback(
+            request=MagicMock(),
+            body=OAuthCallbackRequest(code="c", state=state, iss=None),
+            db=db or AsyncMock(),
+            redis=redis,
+        )
+
+    async def test_the_older_flow_cannot_land_on_top_of_the_newer(
+        self, monkeypatch,
+    ):
+        from app.api.endpoints import mcp_server as endpoint
+
+        exchanged: list[object] = []
+
+        async def never(*_args, **_kwargs):
+            exchanged.append(True)
+        monkeypatch.setattr(endpoint.oauth, "exchange_code", never)
+
+        with pytest.raises(HTTPException) as caught:
+            await self._callback(
+                monkeypatch, self._redis(current_state="newer"), "older",
+            )
+
+        assert caught.value.status_code == 400
+        # Refused before the exchange: burning the newer flow's authorization
+        # code would take the Connector down with it.
+        assert exchanged == []
+
+    async def test_a_flow_superseded_during_the_exchange_does_not_land(
+        self, monkeypatch,
+    ):
+        # The dangerous interleaving: this flow was current on the way in, and
+        # the user started another while its token endpoint kept it waiting.
+        # A single pre-flight check passes and the stale grant is stored on top
+        # of the newer one.
+        from app.api.endpoints import mcp_server as endpoint
+
+        redis = self._redis(current_state="mine")
+        stored: list[object] = []
+        monkeypatch.setattr(
+            endpoint.grant, "store_tokens",
+            lambda *args, **kwargs: stored.append(args),
+        )
+
+        async def slow_exchange(*_args, **_kwargs):
+            redis.get.side_effect = self._redis(current_state="newer").get.side_effect
+            return MagicMock(access_token="stale")
+        monkeypatch.setattr(endpoint.oauth, "exchange_code", slow_exchange)
+        monkeypatch.setattr(endpoint, "_load_oauth_client", lambda _c: MagicMock())
+        monkeypatch.setattr(
+            endpoint.settings, "mcp_oauth_redirect_uri", "https://app/cb",
+        )
+
+        db = self._db()
+        with pytest.raises(HTTPException) as caught:
+            await self._callback(monkeypatch, redis, "mine", db)
+
+        assert caught.value.status_code == 400
+        assert stored == []
+        db.commit.assert_not_awaited()
+
+    async def test_a_state_predating_the_pointer_still_completes(
+        self, monkeypatch,
+    ):
+        # In flight when this shipped, or simply expired ahead of its state.
+        # Refusing those would strand every authorization already open.
+        from app.api.endpoints import mcp_server as endpoint
+
+        assert (
+            await endpoint._reject_a_superseded_authorization(
+                self._redis(current_state=None), "whatever", {"connector_id": 1},
+            )
+            is None
+        )
+
+
+def _sealed(client: OAuthClientInformationFull) -> str:
+    from app.services.crypto import encrypt_secret
+
+    return encrypt_secret(client.model_dump_json())
+
+
+def _dcr_client(client_id: str, *, secret: str = "s") -> OAuthClientInformationFull:
+    """A client an authorization server minted — ``client_id_issued_at`` says so."""
+    return OAuthClientInformationFull(
+        client_id=client_id, client_secret=secret,
+        redirect_uris=["https://app/cb"], client_id_issued_at=1,
+    )
+
+
+def _manual_client() -> OAuthClientInformationFull:
+    """The operator's own OAuth app: a secret, and nothing saying who issued it."""
+    return OAuthClientInformationFull(
+        client_id="theirs", client_secret="theirs",
+        redirect_uris=["https://app/cb"],
+    )
+
+
+def _cimd_client() -> OAuthClientInformationFull:
+    """Client-id-metadata-document: the id is a public URL, there is no secret."""
+    return OAuthClientInformationFull(
+        client_id="https://app.example.com/oauth/client",
+        redirect_uris=["https://app/cb"], token_endpoint_auth_method="none",
+    )
+
+
+class TestAnAuthorizationServerThatChanged:
+    """The MCP server names its own authorization server, and can name a
+    different one tomorrow. The client on the row belongs to the first."""
+
+    @pytest.fixture(autouse=True)
+    def _encryption_key(self, monkeypatch):
+        # These tests seal and open real client blobs rather than mocking the
+        # store, so the resolver's own decrypt runs.
+        from cryptography.fernet import Fernet
+
+        from app.services import crypto
+
+        monkeypatch.setattr(
+            crypto.settings,
+            "mcp_credential_encryption_key",
+            Fernet.generate_key().decode(),
+        )
+        crypto._cipher.cache_clear()
+        yield
+        crypto._cipher.cache_clear()
+
+    def _connector(self, issuer: str | None):
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+
+        return MCPServer(
+            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+            auth_type=MCPServerAuthType.OAUTH,
+            oauth_client_encrypted="sealed",
+            oauth_metadata=(
+                {"authorization_server": {"issuer": issuer}} if issuer else None
+            ),
+        )
+
+    def _discovered(self, issuer: str):
+        return DiscoveredAuthorization(
+            resource=ProtectedResourceMetadata(
+                resource="https://mcp.example.com/mcp",
+                authorization_servers=[issuer],
+            ),
+            metadata=OAuthMetadata(
+                issuer=issuer,
+                authorization_endpoint=f"{issuer}/authorize",
+                token_endpoint=f"{issuer}/token",
+                response_types_supported=["code"],
+            ),
+        )
+
+    async def _client_for(self, connector, discovered, db=None):
+        from app.api.endpoints import mcp_server as endpoint
+
+        return await endpoint._client_for_authorization(
+            connector, discovered, db or AsyncMock(),
+        )
+
+    async def test_a_migrated_issuer_re_registers_instead_of_reusing(self, monkeypatch):
+        # The DCR secret the *first* server issued must not be posted to
+        # whichever one the MCP server points at now — but a client a server
+        # minted can be minted again, so the user is not sent away.
+        from app.api.endpoints import mcp_server as endpoint
+
+        minted = _dcr_client("fresh")
+        monkeypatch.setattr(
+            endpoint.oauth, "ensure_client", AsyncMock(return_value=minted),
+        )
+        monkeypatch.setattr(
+            endpoint.settings, "mcp_oauth_redirect_uri", "https://app/cb",
+        )
+        connector = self._connector("https://as-a.example.com/")
+        connector.oauth_client_encrypted = _sealed(_dcr_client("old", secret="old"))
+
+        client = await self._client_for(
+            connector, self._discovered("https://as-evil.example.com"),
+        )
+
+        assert client.client_id == "fresh"
+        # Recorded, so the next authorization compares against it rather than
+        # registering all over again.
+        discovered = self._discovered("https://as-evil.example.com")
+        assert connector.oauth_metadata["authorization_server"]["issuer"] == str(
+            discovered.metadata.issuer
+        )
+        assert (
+            endpoint._why_the_stored_client_is_unusable(
+                connector, _dcr_client("fresh"), discovered,
+            )
+            is None
+        )
+
+    async def test_a_manual_client_is_refused_rather_than_replaced(self, monkeypatch):
+        # It is the operator's own OAuth app; there is no second one to make.
+        from app.api.endpoints import mcp_server as endpoint
+
+        monkeypatch.setattr(endpoint.oauth, "ensure_client", AsyncMock())
+        connector = self._connector("https://as-a.example.com/")
+        connector.oauth_client_encrypted = _sealed(_manual_client())
+
+        with pytest.raises(HTTPException) as caught:
+            await self._client_for(
+                connector, self._discovered("https://as-evil.example.com"),
+            )
+
+        assert caught.value.status_code == 400
+        endpoint.oauth.ensure_client.assert_not_awaited()
+
+    async def test_the_same_issuer_reuses_the_stored_client(self):
+        connector = self._connector("https://as-a.example.com/")
+        connector.oauth_client_encrypted = _sealed(_dcr_client("stored"))
+
+        client = await self._client_for(
+            connector, self._discovered("https://as-a.example.com"),
+        )
+
+        assert client.client_id == "stored"
+
+    async def test_the_authorize_endpoint_actually_checks(self, monkeypatch):
+        # Testing the rule in isolation says nothing about whether the endpoint
+        # asks it. Drive the real one.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.rate_limit import limiter
+
+        monkeypatch.setattr(limiter, "enabled", False)
+        connector = self._connector("https://as-a.example.com/")
+        connector.oauth_client_encrypted = _sealed(_manual_client())
+
+        async def owned(*_args, **_kwargs):
+            return connector
+        monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
+        monkeypatch.setattr(
+            endpoint.settings, "mcp_oauth_redirect_uri", "https://app/cb",
+        )
+        monkeypatch.setattr(
+            endpoint.oauth, "discover_authorization",
+            AsyncMock(return_value=self._discovered("https://as-evil.example.com")),
+        )
+
+        with pytest.raises(HTTPException) as caught:
+            await endpoint.create_connector_authorization(
+                request=MagicMock(), connector_id=1,
+                db=AsyncMock(), redis=AsyncMock(), current_user=MagicMock(id=7),
+            )
+
+        assert caught.value.status_code == 400
+
+    async def test_a_first_authorization_has_nothing_to_compare(self):
+        # Nothing registered yet: this really is the first time round.
+        connector = self._connector(None)
+        connector.oauth_client_encrypted = None
+
+        with pytest.raises(ConnectorOAuthError):
+            await self._client_for(connector, self._discovered("https://as-a.example.com"))
+
+    async def test_a_public_client_with_no_recorded_issuer_is_kept(self):
+        # Every OAuth connector alive when the issuer column ships has none, so
+        # refusing them all would break reconnect for the whole population on
+        # deploy day. This one holds no secret — a bare client id offered to the
+        # wrong server is rejected there, and nothing of ours travels.
+        connector = self._connector(None)
+        connector.oauth_client_encrypted = _sealed(_cimd_client())
+
+        client = await self._client_for(
+            connector, self._discovered("https://as-a.example.com"),
+        )
+
+        assert client.client_id == "https://app.example.com/oauth/client"
+
+    async def test_a_confidential_client_with_no_recorded_issuer_is_re_minted(
+        self, monkeypatch,
+    ):
+        # It holds a secret whose origin the row cannot prove, so it is not
+        # reused — but it says a server issued it, so a new one is registered
+        # and the reconnect goes through with the issuer finally recorded.
+        from app.api.endpoints import mcp_server as endpoint
+
+        monkeypatch.setattr(
+            endpoint.oauth, "ensure_client",
+            AsyncMock(return_value=_dcr_client("fresh")),
+        )
+        monkeypatch.setattr(
+            endpoint.settings, "mcp_oauth_redirect_uri", "https://app/cb",
+        )
+        connector = self._connector(None)
+        connector.oauth_client_encrypted = _sealed(_dcr_client("old", secret="old"))
+
+        client = await self._client_for(
+            connector, self._discovered("https://as-a.example.com"),
+        )
+
+        assert client.client_id == "fresh"
+        # Recorded, so the next authorization compares against it rather than
+        # registering all over again.
+        discovered = self._discovered("https://as-a.example.com")
+        assert connector.oauth_metadata["authorization_server"]["issuer"] == str(
+            discovered.metadata.issuer
+        )
+        assert (
+            endpoint._why_the_stored_client_is_unusable(
+                connector, _dcr_client("fresh"), discovered,
+            )
+            is None
+        )
+
+    async def test_an_unprovable_confidential_client_is_refused(self, monkeypatch):
+        # No issuer recorded, a secret, and nothing saying a server minted it:
+        # it may be the operator's own app, so it is neither used nor replaced.
+        from app.api.endpoints import mcp_server as endpoint
+
+        monkeypatch.setattr(endpoint.oauth, "ensure_client", AsyncMock())
+        connector = self._connector(None)
+        connector.oauth_client_encrypted = _sealed(_manual_client())
+
+        with pytest.raises(HTTPException) as caught:
+            await self._client_for(
+                connector, self._discovered("https://as-a.example.com"),
+            )
+
+        assert caught.value.status_code == 400
+        endpoint.oauth.ensure_client.assert_not_awaited()
+
+
+class TestAnExpiredClientRegistration:
+    """A DCR client can be given an expiry of its own. Past it the server says
+    ``invalid_client``, which sends the user to Reconnect — and Reconnect must
+    not hand them the same dead registration."""
+
+    def test_a_stated_expiry_in_the_past_counts(self):
+        from app.api.endpoints.mcp_server import _secret_expired
+
+        assert _secret_expired(
+            OAuthClientInformationFull(
+                client_id="cid", redirect_uris=["https://app/cb"],
+                client_secret="s", client_secret_expires_at=1,
+            )
+        )
+
+    def test_zero_means_never(self):
+        # RFC 7591 §3.2.1. Reading it as a 1970 deadline would re-register a
+        # perfectly good client on every authorization.
+        from app.api.endpoints.mcp_server import _secret_expired
+
+        assert not _secret_expired(
+            OAuthClientInformationFull(
+                client_id="cid", redirect_uris=["https://app/cb"],
+                client_secret="s", client_secret_expires_at=0,
+            )
+        )
+
+    def test_a_manual_client_is_never_re_registered(self):
+        # It belongs to the operator's own OAuth app and carries no expiry, so
+        # it must not be replaced behind their back.
+        from app.api.endpoints.mcp_server import _secret_expired
+
+        assert not _secret_expired(
+            OAuthClientInformationFull(
+                client_id="theirs", redirect_uris=["https://app/cb"],
+                client_secret="theirs",
+            )
+        )
+
+
+class TestRepointingAnOAuthConnector:
+    """An OAuth grant is issued for one resource; the URL cannot move under it."""
+
+    async def _patch(self, monkeypatch, connector, body):
+        """PATCH the connector, with only the database and the network stubbed."""
+        from app.api.endpoints import mcp_server as endpoint
+        from app.rate_limit import limiter
+        from app.services.mcp.probe import ProbeResult
+
+        # The endpoint is rate-limit decorated, which insists on a real request.
+        monkeypatch.setattr(limiter, "enabled", False)
+
+        async def owned(*_args, **_kwargs):
+            return connector
+
+        async def probed(*_args, **_kwargs):
+            return ProbeResult(server_name="s", tools=[])
+
+        monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
+        monkeypatch.setattr(endpoint, "probe", probed)
+        monkeypatch.setattr(endpoint, "_commit_or_conflict", AsyncMock())
+        db = AsyncMock()
+        return await endpoint.update_connector(
+            request=MagicMock(), connector_id=1, body=body,
+            db=db, current_user=MagicMock(id=7),
+        )
+
+    def _oauth_connector(self):
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+
+        return MCPServer(
+            id=1, user_id=7, name="c", url="https://old.example.com/mcp",
+            auth_type=MCPServerAuthType.OAUTH,
+            oauth_client_encrypted="client", oauth_tokens_encrypted="tokens",
+            oauth_scope="files:read",
+            # Server defaults, which a transient object never materialises —
+            # the response model rejects them as NULL.
+            disabled_tools=[], tool_count=0, connected=True,
+            oauth_reauthorization_required=False, last_connect_failed=False,
+            created_at=_NOW, updated_at=_NOW,
+        )
+
+    async def test_the_url_cannot_be_changed(self, monkeypatch):
+        # Dropping the grant is mandatory — it is bound to the old resource —
+        # and the client registration has to go with it, since the old
+        # authorization server issued it and may have given it a secret. That
+        # leaves a row nothing can re-provision: the authorize endpoint needs a
+        # client registration and a PATCH cannot make one. So the change is
+        # refused rather than performed into a dead end.
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        connector = self._oauth_connector()
+
+        with pytest.raises(HTTPException) as caught:
+            await self._patch(
+                monkeypatch, connector,
+                ConnectorUpdate(url="https://new.example.com/mcp"),
+            )
+
+        assert caught.value.status_code == 400
+        assert connector.url == "https://old.example.com/mcp"
+        assert connector.oauth_client_encrypted == "client"
+        assert connector.oauth_tokens_encrypted == "tokens"
+
+    async def test_everything_else_about_it_still_changes(self, monkeypatch):
+        # The refusal is about the URL alone; renaming or switching tools off
+        # must keep working on an authorized Connector.
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        connector = self._oauth_connector()
+
+        await self._patch(
+            monkeypatch, connector,
+            ConnectorUpdate(name="renamed", disabled_tools=["delete_page"]),
+        )
+
+        assert (connector.name, connector.disabled_tools) == (
+            "renamed", ["delete_page"],
+        )
+        assert connector.oauth_tokens_encrypted == "tokens"
+
+    async def test_a_static_credential_connector_still_moves(self, monkeypatch):
+        # The rule is about the grant, not about the column.
+        from app.models.mcp_server import MCPServerAuthType
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        connector = self._oauth_connector()
+        connector.auth_type = MCPServerAuthType.NONE
+        connector.oauth_client_encrypted = None
+
+        await self._patch(
+            monkeypatch, connector,
+            ConnectorUpdate(url="https://new.example.com/mcp"),
+        )
+
+        assert connector.url == "https://new.example.com/mcp"
+
+
+class TestSwitchingAwayFromOAuth:
+    """Converting a Connector to a static credential must leave nothing an
+    OAuth code path can still act on."""
+
+    def test_every_oauth_column_is_cleared(self):
+        # The stored metadata is the one that bites: left behind, the token
+        # refresher still knows where to aim a rotation and would write an
+        # OAuth token back onto a row the user just converted to a static
+        # credential.
+        from app.api.endpoints.mcp_server import _clear_oauth_state
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+
+        # Every ``oauth_*`` column gets a truthy value first. A fixture that
+        # leaves one unset cannot catch a clear that misses it — on a transient
+        # ORM object the server default has not materialised, so the column
+        # reads as ``None`` and looks cleared either way.
+        oauth_columns = [
+            column for column in MCPServer.__table__.columns.keys()
+            if column.startswith("oauth_")
+        ]
+        connector = MCPServer(
+            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+            auth_type=MCPServerAuthType.OAUTH,
+        )
+        marks = {
+            "oauth_tokens_expires_at": datetime(2026, 7, 29, tzinfo=timezone.utc),
+            "oauth_metadata": {"authorization_server": {}},
+            "oauth_reauthorization_required": True,
+        }
+        for column in oauth_columns:
+            setattr(connector, column, marks.get(column, "set"))
+
+        _clear_oauth_state(connector)
+
+        left_over = [
+            column for column in oauth_columns if getattr(connector, column)
+        ]
+        assert left_over == []

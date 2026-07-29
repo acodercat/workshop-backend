@@ -11,10 +11,11 @@ multi-node deploys run this on every host and rely on Postgres
 advisory locks (``app.workers.settle_sweeper._LOCK_KEY``) to ensure
 exactly one host actually polls per tick.
 
-This process owns up to **four** concurrent background tasks. Two are
+This process owns up to **five** concurrent background tasks. Two are
 the push and pull halves of the same settle responsibility; the third
-is the pull backstop for payment notifications; the fourth (flag-gated)
-enforces mid-turn spend:
+is the pull backstop for payment notifications; the fourth keeps
+Connector OAuth grants alive; the fifth (flag-gated) enforces mid-turn
+spend:
 
 - :mod:`app.workers.settle_sweeper` — periodic 60s poll, the
   correctness backstop. Catches missed pub/sub messages, expired
@@ -27,6 +28,12 @@ enforces mid-turn spend:
   PENDING payment orders against the provider, settling ones whose async
   notification was lost and reaping expired ones. Its own advisory lock,
   independent of the settle sweeper's.
+- :mod:`app.workers.connector_token_refresher` — periodic poll that
+  rotates OAuth Connector grants before they expire. The *only* thing
+  allowed to spend a refresh token: it claims each row with
+  ``FOR UPDATE SKIP LOCKED`` for the length of one token round-trip,
+  which is what lets the agent worker read an access token without ever
+  having to serialize a rotation across its replicas.
 - :mod:`app.workers.budget_enforcer` — only when
   ``budget_enforcer_enabled``: prices each running turn's
   heartbeat-reported interim usage and cancels turns outrunning their
@@ -52,6 +59,7 @@ import redis.asyncio as aioredis
 from app.logging_config import setup_logging
 from app.workers import (
     budget_enforcer,
+    connector_token_refresher,
     payment_reconciler,
     settle_sweeper,
     settle_subscriber,
@@ -82,6 +90,7 @@ async def _run() -> None:
             tg.create_task(settle_sweeper.run_forever())
             tg.create_task(settle_subscriber.run_forever(redis))
             tg.create_task(payment_reconciler.run_forever())
+            tg.create_task(connector_token_refresher.run_forever())
             # Flag-gated (default off). Log the resolved state either way so a
             # restart makes it unambiguous whether enforcement is live — the
             # enforcer is otherwise silent until it actually stops a turn.
