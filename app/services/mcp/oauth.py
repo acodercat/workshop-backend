@@ -176,11 +176,10 @@ class DiscoveredAuthorization:
     def as_stored(self) -> dict:
         """Both documents, in the shape ``mcp_server.oauth_metadata`` holds.
 
-        Kept so a refresh knows where to send itself without rediscovering
-        anything: the token endpoint to post to, and the resource its indicator
-        must name. Read back by
-        :func:`app.workers.connector_token_refresher._stored_authorization`,
-        the only thing that rotates a grant — rename a key here and it silently
+        Kept so that neither a refresh nor a revocation has to rediscover
+        anything: the endpoint to post to, and the resource an indicator must
+        name. Read back by :func:`app.services.mcp.grant.stored_authorization`,
+        which every caller goes through — rename a key here and it silently
         reads ``None`` there.
         """
         return {

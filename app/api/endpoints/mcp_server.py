@@ -326,7 +326,9 @@ async def update_connector(
     if body.name is not None:
         connector.name = body.name
     if body.connected is not None:
-        if not body.connected:
+        if body.connected:
+            _reject_connecting_without_a_credential(connector)
+        else:
             # Disconnecting gives the grant up rather than shelving it: what the
             # provider delegated to us goes back, and reconnecting asks for it
             # again. Both calls are inert on a Connector that has no grant —
@@ -358,6 +360,38 @@ async def update_connector(
     await _commit_or_conflict(db, connector.name)
     await db.refresh(connector)
     return _to_response(connector)
+
+
+def _reject_connecting_without_a_credential(connector: MCPServer) -> None:
+    """Refuse to connect an OAuth Connector that holds no grant.
+
+    Connecting is a promise that the next turn can use it, and an OAuth row with
+    no tokens cannot serve one call: the worker sends no bearer, the server
+    answers 401, and the turn records the Connector as unreachable — a diagnosis
+    that points at the server rather than at the missing authorization. The
+    remedy is the browser, so say so instead of accepting the flag.
+
+    This state only became reachable when disconnecting began giving the grant
+    up. Before that, ``connected`` was set true in one place — the authorization
+    callback, after it had stored a grant — so the flag implied one; now the two
+    are independent and the endpoint has to say which combinations mean
+    something. Rows disconnected before that change still carry their grant and
+    still reconnect with a single flag, which is the case this must not refuse.
+
+    Only reachable through the API: the UI routes such a click to the authorize
+    flow. That is exactly why it is here — the invariant should not depend on a
+    client choosing to honour it.
+    """
+    if connector.auth_type != MCPServerAuthType.OAUTH:
+        return
+    if connector.oauth_tokens_encrypted is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "this connector isn't authorized; authorize it rather than "
+                "connecting it"
+            ),
+        )
 
 
 def _reject_unprovisionable(
