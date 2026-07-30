@@ -2784,3 +2784,39 @@ class TestEndingAnAuthorization:
         )
 
         redis.delete.assert_awaited_once_with(oauth_current_state_key(1))
+
+    async def test_redis_being_down_leaves_the_ending_untaken(self, monkeypatch):
+        # Not "it fails" but *how* it fails: nothing must be half-done. Wrapping
+        # the Redis call in a swallow — the tempting defensive edit — would commit
+        # a disconnect while leaving the flow in the air live, which is the one
+        # outcome this whole path exists to prevent. So the property is pinned
+        # rather than left to whoever reads the docstring.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.rate_limit import limiter
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        monkeypatch.setattr(limiter, "enabled", False)
+        self._stub_grant(monkeypatch)
+        connector = _stored_connector()
+
+        async def owned(*_args, **_kwargs):
+            return connector
+
+        monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
+        monkeypatch.setattr(endpoint, "decrypt_secret", lambda sealed: sealed)
+        commit = AsyncMock()
+        monkeypatch.setattr(endpoint, "_commit_or_conflict", commit)
+        redis = AsyncMock()
+        redis.delete.side_effect = ConnectionError("redis is down")
+
+        with pytest.raises(ConnectionError):
+            await endpoint.update_connector(
+                request=MagicMock(), connector_id=1,
+                body=ConnectorUpdate(connected=False),
+                background_tasks=BackgroundTasks(),
+                db=AsyncMock(), redis=redis, current_user=MagicMock(id=7),
+            )
+
+        # Nothing committed, so the row still holds its grant and is still
+        # connected; the queued revocation never reaches a response to run from.
+        commit.assert_not_awaited()

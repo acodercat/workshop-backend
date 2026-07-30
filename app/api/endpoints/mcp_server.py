@@ -618,6 +618,16 @@ async def _release_authorization(
     A Connector with no grant has none to revoke and none to clear; one with no
     flow in the air has no key to delete; and every non-OAuth auth type is both.
 
+    The Redis call is *not* guarded, unlike the grant read one line above, and
+    the difference is the kind of failure. An unreadable grant is permanent and
+    belongs to one row — swallowing it is what keeps that Connector deletable at
+    all. Redis being unreachable is transient and global: it fails the request,
+    nothing commits, and the queued revocation never reaches a response to be
+    run from, so the ending is all-or-nothing and the user's retry is the whole
+    remedy. Swallowing it would instead commit a disconnect while leaving the
+    flow live — the one outcome this function exists to prevent. It also cannot
+    matter while it lasts, because the callback reads Redis before anything else.
+
     What it deliberately does not touch is how to obtain the *next* one — see
     :func:`_forget_how_to_authorize`, which only the conversion wants.
     """
