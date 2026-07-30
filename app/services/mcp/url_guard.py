@@ -110,24 +110,45 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
         except socket.gaierror as exc:
             raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.") from exc
 
-        pinned: str | None = None
+        # Every address is checked, and any private one refuses the whole
+        # request: a name that answers with a mix is the rebinding case, and
+        # picking a public one out of it would be doing the attacker's sorting.
+        candidates: list[str] = []
         for *_, sockaddr in infos:
             ip = ipaddress.ip_address(sockaddr[0])
             if not _is_public(ip):
                 raise InvalidConnectorUrlError(
                     f"Connector URL resolves to a non-public address ({ip})."
                 )
-            if pinned is None:
-                pinned = sockaddr[0]
-        if pinned is None:
+            candidates.append(sockaddr[0])
+        if not candidates:
             raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.")
 
-        # Connect to the validated IP, but keep TLS SNI + cert verification on the
+        # Connect to a validated IP, but keep TLS SNI + cert verification on the
         # real hostname (httpcore reads ``sni_hostname``). The ``Host`` header is
         # already the original authority — httpx set it before the transport ran.
         request.extensions["sni_hostname"] = host
-        request.url = request.url.copy_with(host=pinned)
-        return await super().handle_async_request(request)
+
+        # Tried in turn. An ordinary client does that, and replacing the host
+        # with one literal address took it away: a name behind a CDN answers with
+        # several, ``getaddrinfo`` rotates their order per call, and stopping at
+        # the first meant a single unreachable edge — or an IPv6 record on a host
+        # with no IPv6 route — failed requests at random while the next one
+        # succeeded. Pinning must not cost failover.
+        #
+        # Only connection failures move on. They happen before any byte of the
+        # request is sent, so retrying is safe even for the token exchange; a
+        # read failure could mean the server already acted on it, and is raised.
+        last: httpx.TransportError | None = None
+        for address in candidates:
+            request.url = request.url.copy_with(host=address)
+            try:
+                return await super().handle_async_request(request)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                last = exc
+        # Never with an empty ``last``: the candidate list is non-empty by the
+        # check above, so the loop either returned or recorded a failure.
+        raise last
 
 
 def guarded_client(
