@@ -244,7 +244,7 @@ async def oauth_callback(
         recorded=pending.get("issuer"),
         advertised=bool(pending.get("iss_advertised")),
     )
-    await _reject_a_superseded_authorization(redis, body.state, pending)
+    await _reject_an_unawaited_authorization(redis, body.state, pending)
 
     connector = await db.get(MCPServer, pending["connector_id"])
     if connector is None or connector.user_id != pending["user_id"]:
@@ -315,6 +315,7 @@ async def update_connector(
     body: ConnectorUpdate,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ConnectorResponse:
     """Update a Connector; re-probe when a non-OAuth URL or auth changes."""
@@ -331,11 +332,12 @@ async def update_connector(
         else:
             # Disconnecting gives the grant up rather than shelving it: what the
             # provider delegated to us goes back, and reconnecting asks for it
-            # again. Both calls are inert on a Connector that has no grant —
-            # every non-OAuth auth type, and an OAuth one that never finished —
-            # so neither needs an ``auth_type`` guard.
+            # again. All three calls are inert on a Connector that has no grant
+            # — every non-OAuth auth type, and an OAuth one that never finished
+            # — so none of them needs an ``auth_type`` guard.
             _revoke_grant_afterwards(background_tasks, connector)
             grant.discard(connector)
+            await _stop_awaiting_authorization(redis, connector)
         connector.connected = body.connected
     if body.disabled_tools is not None:
         # Not validated against the live tool list: that would cost a network
@@ -668,6 +670,31 @@ def _revoke_grant_afterwards(
     )
 
 
+async def _stop_awaiting_authorization(
+    redis: aioredis.Redis, connector: MCPServer,
+) -> None:
+    """Give up on any authorization still in the air for this Connector.
+
+    Clearing the grant is not enough on its own. An authorization the user
+    started before disconnecting keeps its own ``state`` in Redis for the whole
+    TTL, and every check the callback makes would still pass — the client
+    registration it compares against is deliberately kept — so the flow would
+    come back minutes later, write a grant, and set ``connected`` again. The
+    user's last action would lose to their second-to-last.
+
+    Deleting the pointer is what says "waiting for nothing", and
+    :func:`_reject_an_unawaited_authorization` reads that as a refusal. The
+    pointer rather than the pending records: it is the only one of them this
+    request can name, and it covers *every* flow in the air at once rather than
+    the newest — two tabs open means two live ``state`` values and only one is
+    pointed at.
+
+    Idempotent, and unconditional for the same reason the calls beside it are:
+    a Connector with nothing in flight has no key here to delete.
+    """
+    await redis.delete(oauth_current_state_key(connector.id))
+
+
 async def _revoke_quietly(
     connector_id: int,
     metadata: OAuthMetadata,
@@ -788,14 +815,19 @@ async def _locked_connector_for_grant(
     row it does not describe: the user starts another authorization and picks a
     different account, or they change the Connector's credentials — to a bearer
     token, which clears the OAuth columns, or to a different OAuth client of
-    their own. The second is the worse one: it would put a refresh token back
-    on a row the user had just converted away from OAuth, and flip ``connected``
-    on behind their disconnect.
+    their own. The second is the worse one: it would put a refresh token back on
+    a row the user had just converted away from OAuth.
 
     One comparison covers both credential cases, because both move
     ``oauth_client_encrypted``: a changed auth type clears it, a re-registration
     replaces it, and Fernet ciphertext differs even for identical plaintext. It
     is the client this flow's code was issued to; a grant belongs with it.
+
+    What it does *not* cover is a disconnect, which keeps that column on purpose
+    so reconnecting stays cheap. That one is caught by
+    :func:`_reject_an_unawaited_authorization`, called just below — disconnecting
+    deletes the pointer naming the flow, and a flow nobody is waiting for is
+    refused.
 
     ``with_for_update`` holds the row until this transaction commits, so unlike
     a bare check nothing can land between asking and writing.
@@ -824,7 +856,7 @@ async def _locked_connector_for_grant(
                 "authorizing; start again"
             ),
         )
-    await _reject_a_superseded_authorization(redis, state, pending)
+    await _reject_an_unawaited_authorization(redis, state, pending)
     return connector
 
 
@@ -851,28 +883,50 @@ async def _consume_pending_authorization(
     return raw
 
 
-async def _reject_a_superseded_authorization(
+async def _reject_an_unawaited_authorization(
     redis: aioredis.Redis, state: str, pending: dict,
 ) -> None:
-    """Refuse a flow the user has since restarted for the same Connector.
+    """Refuse a flow the Connector is no longer waiting for.
 
-    Two authorizations in the air at once is not exotic — a second tab, or a
-    first attempt that looked stuck — and each ``state`` stays independently
-    valid, so the winner would otherwise be whichever *finished* last. Choosing
-    an account in the newer tab and then having the older one quietly overwrite
-    it leaves the Connector signed in as someone the user did not last pick,
-    with nothing on screen saying so.
+    Two ways it can stop waiting, and the Redis key says which. Holding another
+    ``state`` means the user restarted the flow — a second tab, or a first
+    attempt that looked stuck — and each ``state`` stays independently valid, so
+    the winner would otherwise be whichever *finished* last. Choosing an account
+    in the newer tab and having the older one quietly overwrite it leaves the
+    Connector signed in as someone the user did not last pick, with nothing on
+    screen saying so.
 
-    Not fatal, and phrased so: the flow that is still current will go through.
+    Holding nothing means the Connector was disconnected while this flow was in
+    the air. Fail closed, and that is a deliberate change from reading an absent
+    key as consent: disconnecting deletes it, so the flow that would otherwise
+    come back and write a grant — and set ``connected`` — arrives to find nobody
+    waiting. Nothing else produces an absent key beside a live pending record:
+    both are written in the same handler with the same TTL, the pending one
+    first, so it is always the first to expire.
 
-    Asked twice: once on the way in, to spend nothing on a flow already known
-    to be stale, and again from inside
-    :func:`_locked_connector_for_grant`, where the answer keeps until
-    the write.
+    The other endings already refuse on their own. Deleting the Connector makes
+    the callback 404, and converting it to a static credential moves
+    ``oauth_client_encrypted``, which
+    :func:`_locked_connector_for_grant` compares. Disconnecting is the one that
+    slipped through, precisely because it *keeps* the client registration — the
+    thing that makes reconnecting cheap is the thing that left the flow looking
+    legitimate.
+
+    Asked twice: once on the way in, to spend nothing on a flow already known to
+    be stale, and again from inside :func:`_locked_connector_for_grant`, where
+    the answer keeps until the write.
     """
     current = await redis.get(oauth_current_state_key(pending["connector_id"]))
-    if current is None or current == state:
+    if current == state:
         return
+    if current is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "this connector is no longer waiting to be authorized; "
+                "connect it again to start over"
+            ),
+        )
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=(

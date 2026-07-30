@@ -1905,19 +1905,52 @@ class TestTwoAuthorizationsInTheAir:
         assert db.get.await_args.kwargs["with_for_update"] is True
         assert db.get.await_args.kwargs["populate_existing"] is True
 
-    async def test_a_state_predating_the_pointer_still_completes(
-        self, monkeypatch,
-    ):
-        # In flight when this shipped, or simply expired ahead of its state.
-        # Refusing those would strand every authorization already open.
+    async def test_a_flow_nothing_is_waiting_for_is_refused(self):
+        # An absent pointer used to read as consent, on the theory that it might
+        # have expired ahead of its own pending record. It cannot: both are
+        # written in one handler with one TTL, the pending record first, so the
+        # pending record is always the first to go. What an absent pointer means
+        # in practice is that the Connector was disconnected while this flow was
+        # in the air — and letting that through undoes the disconnect.
         from app.api.endpoints import mcp_server as endpoint
 
-        assert (
-            await endpoint._reject_a_superseded_authorization(
+        with pytest.raises(HTTPException) as caught:
+            await endpoint._reject_an_unawaited_authorization(
                 self._redis(current_state=None), "whatever", {"connector_id": 1},
             )
-            is None
-        )
+
+        assert caught.value.status_code == 400
+        # Told apart from the superseded case, because the remedies differ: there
+        # the user finishes the other tab, here they start over.
+        assert "no longer waiting" in caught.value.detail
+
+    async def test_a_disconnect_mid_flow_is_not_undone_by_the_callback(
+        self, monkeypatch,
+    ):
+        # The whole scenario: the popup is open, the user disconnects in another
+        # tab, then approves in the popup. Without the pointer being deleted
+        # every check passes — the client registration the write is fenced on is
+        # deliberately *kept* by a disconnect — and the callback stores a grant
+        # and turns ``connected`` back on, so the user's last action loses to
+        # their second-to-last.
+        from app.api.endpoints import mcp_server as endpoint
+
+        exchanged: list[object] = []
+
+        async def never(*_args, **_kwargs):
+            exchanged.append(True)
+        monkeypatch.setattr(endpoint.oauth, "exchange_code", never)
+
+        # What a disconnect leaves behind: this flow's pending record is still
+        # live for the rest of its TTL, and nothing is pointed at it.
+        redis = self._redis(current_state=None)
+
+        with pytest.raises(HTTPException) as caught:
+            await self._callback(monkeypatch, redis, "the-open-popup")
+
+        assert caught.value.status_code == 400
+        # Refused before the code is spent, so there is no grant to discard.
+        assert exchanged == []
 
 
 def _stub_state_consumption(redis: AsyncMock, pending: str) -> None:
@@ -2268,12 +2301,15 @@ def _stored_connector(**over):
     return MCPServer(**base)
 
 
-async def _patch_connector(monkeypatch, connector, body) -> BackgroundTasks:
+async def _patch_connector(
+    monkeypatch, connector, body, *, redis=None,
+) -> BackgroundTasks:
     """Run ``update_connector`` against *connector*, with only I/O stubbed.
 
     Returns the background tasks it queued. Not the response body: every caller
     asserts on the row it handed in, which is the thing under test — the
-    serialized copy would only be a second spelling of it.
+    serialized copy would only be a second spelling of it. Pass *redis* when the
+    assertion is about what the request did to the pending-authorization keys.
     """
     from app.api.endpoints import mcp_server as endpoint
     from app.rate_limit import limiter
@@ -2299,7 +2335,8 @@ async def _patch_connector(monkeypatch, connector, body) -> BackgroundTasks:
     await endpoint.update_connector(
         request=MagicMock(), connector_id=1, body=body,
         background_tasks=background_tasks,
-        db=AsyncMock(), current_user=MagicMock(id=7),
+        db=AsyncMock(), redis=redis or AsyncMock(),
+        current_user=MagicMock(id=7),
     )
     return background_tasks
 
@@ -2676,3 +2713,23 @@ class TestEndingAnAuthorization:
         )
 
         db.delete.assert_awaited_once()
+
+    async def test_an_authorization_in_the_air_is_given_up_too(self, monkeypatch):
+        # The other half of the scenario above, from this side. A ``state`` the
+        # user started before disconnecting stays valid for its whole TTL, so the
+        # pointer naming it has to go — that is what makes the callback refuse.
+        # The pointer and not the pending records: it is the only key this
+        # request can name, and deleting it retires every flow at once rather
+        # than the newest of them.
+        from app.schemas.mcp_server import ConnectorUpdate
+        from app.services.redis import oauth_current_state_key
+
+        self._stub_grant(monkeypatch)
+        redis = AsyncMock()
+
+        await _patch_connector(
+            monkeypatch, _stored_connector(), ConnectorUpdate(connected=False),
+            redis=redis,
+        )
+
+        redis.delete.assert_awaited_once_with(oauth_current_state_key(1))
