@@ -1,6 +1,6 @@
 """Tests for ``app.services.mcp.grant`` — writing a grant onto a Connector row."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from cryptography.fernet import Fernet
@@ -83,6 +83,27 @@ class TestALifetimeAlreadySpent:
         )
 
         assert connector.oauth_tokens_expires_at is None
+
+
+class TestAStaleSchedule:
+    """``oauth_refresh_after`` was reasoned from the grant being replaced."""
+
+    def test_a_new_grant_does_not_inherit_the_old_one_s_backoff(self):
+        # The authorization callback has no schedule of its own to write. A
+        # user who re-authorizes during a five-minute backoff would otherwise
+        # hand their brand-new grant the dead one's wait.
+        connector = _connector()
+        connector.oauth_refresh_after = datetime.now(timezone.utc) + timedelta(
+            seconds=300
+        )
+
+        grant.store_tokens(
+            connector,
+            OAuthToken(access_token="a", token_type="Bearer", refresh_token="r"),
+            rotation=False,
+        )
+
+        assert connector.oauth_refresh_after is None
 
 
 class TestWhichCallerIsWriting:

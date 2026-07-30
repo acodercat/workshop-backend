@@ -110,6 +110,15 @@ class MCPServer(Base):
     oauth_tokens_expires_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
     )
+    # The earliest the token refresher may try this row again — written from
+    # the new token's own lifetime after a rotation, from a flat backoff after
+    # a failure. Separate from the expiry above because "when does this die"
+    # and "when should we act" stop agreeing the moment a provider issues a
+    # token shorter-lived than the look-ahead window, which MCP asks them to
+    # prefer. NULL means no opinion: judge by expiry alone.
+    oauth_refresh_after: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True,
+    )
     # Cached at create / re-probe so the UI can show "connected · N tools"
     # without a live round-trip. The worker re-lists tools live each turn —
     # this is display-only and may lag the server.

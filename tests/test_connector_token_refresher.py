@@ -5,9 +5,11 @@ once, rotate nothing that a peer already rotated, and ask the user for a browser
 only on proof that no retry will help.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from app.models.mcp_server import MCPServer, MCPServerAuthType
@@ -135,7 +137,9 @@ class TestARotationThatFailsToLand:
     def _pending(self, **over) -> refresher._Rotation:
         base = dict(
             connector_id=1, ciphertext="the-rotation",
-            expires_at=datetime.now(timezone.utc), spent="the-spent-one",
+            expires_at=datetime.now(timezone.utc),
+            refresh_after=datetime.now(timezone.utc) + timedelta(seconds=150),
+            spent="the-spent-one",
         )
         base.update(over)
         return refresher._Rotation(**base)
@@ -185,12 +189,11 @@ class TestARotationThatFailsToLand:
 
     async def test_a_failed_commit_is_written_again(self, monkeypatch):
         _stub_credentials(monkeypatch)
-        monkeypatch.setattr(
-            refresher.grant, "store_tokens",
-            lambda row, _t, **_kw: setattr(
-                row, "oauth_tokens_encrypted", "the-rotation",
-            ),
-        )
+
+        def store(row, _tokens, **_kw):
+            row.oauth_tokens_encrypted = "the-rotation"
+            row.oauth_refresh_after = None
+        monkeypatch.setattr(refresher.grant, "store_tokens", store)
         connector = _connector(oauth_tokens_encrypted="the-spent-one")
         # The retry re-reads in its own transaction, so it sees the row as the
         # database still has it — not the object whose commit just failed.
@@ -211,6 +214,11 @@ class TestARotationThatFailsToLand:
 
         assert reread.oauth_tokens_encrypted == "the-rotation"
         second_db.commit.assert_awaited_once()
+        assert reread.oauth_tokens_encrypted == "the-rotation"
+        # The schedule travels with it. Landing the grant alone leaves the row
+        # due on the very next tick — the rotation happening twice, the second
+        # one spending a refresh token seconds old.
+        assert reread.oauth_refresh_after is not None
 
     async def test_a_first_commit_that_landed_is_not_written_over(self, monkeypatch):
         # It reached the database and lost the connection before saying so.
@@ -291,99 +299,220 @@ class TestOneBadConnectorDoesNotStarveTheRest:
     about the row, so without a backoff the same unwell rows are selected every
     tick — forever — and everything behind them is never refreshed at all."""
 
-    def setup_method(self):
-        refresher._deferred.clear()
-
-    def teardown_method(self):
-        refresher._deferred.clear()
-
-    async def test_a_failure_puts_the_row_out_of_the_next_tick(self, monkeypatch):
+    async def test_a_failure_records_its_backoff_before_releasing_the_row(
+        self, monkeypatch,
+    ):
+        # Under the lock, not from a transaction afterwards. A backoff written
+        # later cannot tell whether a peer has since rotated this row and
+        # scheduled it properly, and would overwrite that with a flat 5-minute
+        # wait — long enough for a short-lived token to die twice over.
         _stub_credentials(monkeypatch)
-        session, _db = _session_yielding(_connector())
+        connector = _connector(oauth_refresh_after=None)
+        session, db = _session_yielding(connector)
         monkeypatch.setattr(refresher, "AsyncSessionLocal", session)
-        # The first Connector's token endpoint is down; the second is fine.
         monkeypatch.setattr(
             refresher.oauth, "refresh_tokens",
-            AsyncMock(side_effect=[
-                oauth.ConnectorOAuthError("endpoint down"),
-                OAuthToken(access_token="new", token_type="Bearer"),
-                OAuthToken(access_token="new", token_type="Bearer"),
-            ]),
+            AsyncMock(side_effect=oauth.ConnectorOAuthError("endpoint down")),
         )
-        attempted: list[int] = []
-        real_refresh_one = refresher._refresh_one
+        before = datetime.now(timezone.utc)
 
-        async def recording(connector_id):
-            attempted.append(connector_id)
-            return await real_refresh_one(connector_id)
-        monkeypatch.setattr(refresher, "_refresh_one", recording)
+        assert await refresher._refresh_one(1) is False
 
-        # The real query, so the *ordering* is under test: a deferred row that
-        # is only filtered after the LIMIT still occupies a slot, and the rows
-        # behind it are never selected.
-        rows = MagicMock()
-        rows.all.return_value = [(1,), (2,)]
-        query_db = AsyncMock()
-        query_db.execute.return_value = rows
-        query_db.__aenter__.return_value = query_db
-        query_db.__aexit__.return_value = False
+        assert connector.oauth_refresh_after is not None
+        waited = connector.oauth_refresh_after - before
+        assert abs(waited.total_seconds() - refresher._RETRY_AFTER_SECONDS) < 2
+        db.commit.assert_awaited()
 
-        def sessions():
-            yield query_db
-            while True:
-                yield _session_yielding(_connector())[1]
-        stream = sessions()
-        monkeypatch.setattr(
-            refresher, "AsyncSessionLocal", MagicMock(side_effect=lambda: next(stream)),
-        )
-
-        await refresher._tick()
-
-        assert attempted == [1, 2]
-        assert refresher._currently_deferred() == [1]
-
-    async def test_the_deferral_lapses(self, monkeypatch):
-        refresher._defer(1)
-        assert refresher._currently_deferred() == [1]
-
-        monkeypatch.setattr(refresher, "_RETRY_AFTER_SECONDS", -1.0)
-        refresher._defer(1)
-
-        assert refresher._currently_deferred() == []
-        assert refresher._deferred == {}  # pruned as it was read
-
-    async def test_the_query_excludes_them_rather_than_the_batch(self, monkeypatch):
-        # After the LIMIT is too late: the deferred rows are the oldest-expiry
-        # ones, so they would fill every slot and nothing behind them would be
+    async def test_the_query_excludes_them_rather_than_the_batch(self):
+        # After the LIMIT is too late: those rows are the oldest-expiry ones,
+        # so they would fill every slot and nothing behind them would be
         # selected at all.
-        refresher._defer(1)
         db = AsyncMock()
         db.execute.return_value = MagicMock(all=MagicMock(return_value=[]))
 
         await refresher._list_due(db)
 
-        assert "NOT IN" in str(db.execute.call_args[0][0]).upper()
+        compiled = str(db.execute.call_args[0][0])
+        assert "oauth_refresh_after" in compiled
+        assert compiled.index("oauth_refresh_after") < compiled.index("LIMIT")
 
-    async def test_a_short_lived_grant_is_not_held_out_past_its_own_expiry(
-        self, monkeypatch,
-    ):
-        # The window is a failure backoff, and only that. Applying it to a
-        # success would hold a 300-second token out for 300 seconds — the MCP
-        # spec asks servers to prefer short-lived access tokens, so this is the
-        # ordinary case, not a hostile one, and it would expire every time.
+
+class TestTheUnderLockRecheck:
+    """The lock decides whether a row selected by an earlier query still wants
+    what that query thought it wanted."""
+
+    async def test_a_schedule_a_peer_just_wrote_is_honoured(self, monkeypatch):
+        # Both replicas take the same id from the same batch; A rotates and
+        # schedules the next attempt; B then gets the lock. On expiry alone B
+        # finds it "still due" — a 300-second token is inside the 600-second
+        # look-ahead the moment it is written — and rotates it straight again,
+        # spending a refresh token a second old.
         _stub_credentials(monkeypatch)
-        session, _db = _session_yielding(_connector())
+        connector = _connector(
+            oauth_tokens_expires_at=(
+                datetime.now(timezone.utc) + timedelta(seconds=300)
+            ),
+            oauth_refresh_after=(
+                datetime.now(timezone.utc) + timedelta(seconds=150)
+            ),
+        )
+        session, _db = _session_yielding(connector)
+        monkeypatch.setattr(refresher, "AsyncSessionLocal", session)
+        rotate = AsyncMock()
+        monkeypatch.setattr(refresher.oauth, "refresh_tokens", rotate)
+
+        assert await refresher._refresh_one(1) is False
+
+        rotate.assert_not_awaited()
+
+    async def test_a_lapsed_schedule_does_not_hold_it_back(self, monkeypatch):
+        _stub_credentials(monkeypatch)
+        connector = _connector(
+            oauth_refresh_after=(
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ),
+        )
+        session, _db = _session_yielding(connector)
         monkeypatch.setattr(refresher, "AsyncSessionLocal", session)
         monkeypatch.setattr(
             refresher.oauth, "refresh_tokens",
             AsyncMock(return_value=OAuthToken(
-                access_token="new", token_type="Bearer", expires_in=300,
+                access_token="new", token_type="Bearer", expires_in=3600,
+            )),
+        )
+
+        assert await refresher._refresh_one(1) is True
+
+
+class TestCancellationMidRotation:
+    """``asyncio.run`` installs its own SIGINT handler and cancels the main
+    task, and a fatal sibling in the ``TaskGroup`` cancels this one — so a
+    cancellation arriving between the provider's answer and the write is a live
+    path, and ``CancelledError`` being a ``BaseException`` means it would sail
+    past every ordinary handler on the way out."""
+
+    def _rotating(self, monkeypatch, *, commit):
+        _stub_credentials(monkeypatch)
+        connector = _connector()
+        session, db = _session_yielding(connector)
+        db.commit.side_effect = commit
+        monkeypatch.setattr(refresher, "AsyncSessionLocal", session)
+        monkeypatch.setattr(
+            refresher.oauth, "refresh_tokens",
+            AsyncMock(return_value=OAuthToken(
+                access_token="new", token_type="Bearer",
+                refresh_token="R2", expires_in=3600,
+            )),
+        )
+        return db
+
+    async def test_the_rotated_grant_is_landed_before_the_cancel_continues(
+        self, monkeypatch,
+    ):
+        # By now the provider has spent R1, so R2 is the only copy in
+        # existence. Dropping it costs the user a trip through the browser for
+        # a grant that was renewed perfectly well.
+        self._rotating(monkeypatch, commit=asyncio.CancelledError())
+        landed: list[object] = []
+
+        async def second_attempt(pending):
+            landed.append(pending)
+        monkeypatch.setattr(refresher, "_commit_again", second_attempt)
+
+        with pytest.raises(asyncio.CancelledError):
+            await refresher._refresh_one(1)
+
+        assert len(landed) == 1
+        assert landed[0].ciphertext is not None
+
+    async def test_the_cancellation_still_wins(self, monkeypatch):
+        # Recovered from, not swallowed: the task must still stop.
+        self._rotating(monkeypatch, commit=asyncio.CancelledError())
+
+        async def never_returns(_pending):
+            await asyncio.sleep(3600)
+        monkeypatch.setattr(refresher, "_commit_again", never_returns)
+        monkeypatch.setattr(refresher, "_SECOND_ATTEMPT_TIMEOUT", 0.01)
+
+        with pytest.raises(asyncio.CancelledError):
+            await refresher._refresh_one(1)
+
+
+class TestARotationRecordsWhenToComeBack:
+    """Computing the answer is worth nothing if the rotation does not store
+    it — and a test that calls the helper directly cannot tell the two apart."""
+
+    async def test_the_rotation_writes_it_onto_the_row(self, monkeypatch):
+        _stub_credentials(monkeypatch)
+        # The expiry a 300-second token leaves behind. ``store_tokens`` is a
+        # stub here — what is under test is that the rotation asks when to come
+        # back and writes the answer down, not how the grant is sealed.
+        connector = _connector(
+            oauth_tokens_expires_at=(
+                datetime.now(timezone.utc) + timedelta(seconds=300)
+            ),
+            oauth_refresh_after=None,
+        )
+        session, _db = _session_yielding(connector)
+        monkeypatch.setattr(refresher, "AsyncSessionLocal", session)
+        monkeypatch.setattr(
+            refresher.oauth, "refresh_tokens",
+            AsyncMock(return_value=OAuthToken(
+                access_token="new", token_type="Bearer",
+                refresh_token="r2", expires_in=300,
             )),
         )
 
         assert await refresher._refresh_one(1)
 
-        assert refresher._currently_deferred() == []
+        # Written, and to the half-life rather than the look-ahead: on expiry
+        # alone a 300-second token is due again on the very next tick.
+        assert connector.oauth_refresh_after is not None
+        margin = connector.oauth_tokens_expires_at - connector.oauth_refresh_after
+        assert timedelta(seconds=140) < margin < timedelta(seconds=160)
+
+
+class TestWhenToComeBack:
+    """``oauth_refresh_after`` is written from what the last attempt learned."""
+
+    def _expiry_in(self, seconds: int) -> datetime:
+        return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+    def test_a_short_lived_token_comes_back_at_half_its_life(self, monkeypatch):
+        # Its new expiry is already inside the 600s look-ahead, so on expiry
+        # alone it would be due again on the very next tick — a provider
+        # refreshed once a minute for a token it reissues happily at half the
+        # age, sitting ahead of every healthy row in the ordering.
+        monkeypatch.setattr(
+            refresher.settings, "connector_refresh_ahead_seconds", 600,
+        )
+        before = datetime.now(timezone.utc)
+
+        when = refresher._next_attempt_after(self._expiry_in(300))
+
+        assert timedelta(seconds=140) < when - before < timedelta(seconds=160)
+
+    def test_it_never_comes_back_after_the_token_dies(self, monkeypatch):
+        monkeypatch.setattr(
+            refresher.settings, "connector_refresh_ahead_seconds", 600,
+        )
+        expires_at = self._expiry_in(300)
+
+        assert refresher._next_attempt_after(expires_at) < expires_at
+
+    def test_a_long_lived_token_keeps_the_configured_look_ahead(
+        self, monkeypatch,
+    ):
+        # Unchanged behaviour where expiry alone was already the right answer:
+        # an hour-long token is picked up 600s before it dies, not at 30 min.
+        monkeypatch.setattr(
+            refresher.settings, "connector_refresh_ahead_seconds", 600,
+        )
+        expires_at = self._expiry_in(3600)
+
+        when = refresher._next_attempt_after(expires_at)
+
+        assert abs((expires_at - when).total_seconds() - 600) < 2
 
 
 class TestSelectingWhatIsDue:

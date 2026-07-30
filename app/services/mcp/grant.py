@@ -41,6 +41,13 @@ def store_tokens(
     stored = _carrying_refresh_token(connector, tokens) if rotation else tokens
     connector.oauth_tokens_encrypted = encrypt_secret(stored.model_dump_json())
     connector.oauth_tokens_expires_at = _deadline_for(stored)
+    # Any schedule on the row was reasoned from the grant this one replaces —
+    # a backoff from its last failure, or a next-attempt time from its
+    # lifetime — and none of it says anything about the grant now here. Cleared
+    # rather than left: the refresher writes its own answer immediately after
+    # this, and the authorization callback, which has none to write, must not
+    # hand a brand-new grant an old grant's backoff.
+    connector.oauth_refresh_after = None
 
 
 def _deadline_for(tokens: OAuthToken) -> datetime | None:

@@ -119,7 +119,7 @@ async def create_connector(
     if body.catalog_id is not None:
         connector = await _build_catalog_connector(db, body.catalog_id, current_user.id)
     elif body.auth_type == MCPServerAuthType.OAUTH:
-        connector = await _build_oauth_connector(body, current_user.id)
+        connector = await _build_oauth_connector(db, body, current_user.id)
     else:
         credential = _credential_plaintext(
             body.auth_type, body.credential, body.header_name
@@ -220,14 +220,12 @@ async def oauth_callback(
     one-shot). The frontend proxy forwards ``code``+``state`` here, then redirects
     the browser back to the Connectors page.
     """
-    key = oauth_state_key(body.state)
-    raw = await redis.get(key)
+    raw = await _consume_pending_authorization(redis, body.state)
     if raw is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="invalid or expired authorization state",
         )
-    await redis.delete(key)  # one-shot
     pending = json.loads(raw)
     # First thing the record is used for: a response from an authorization
     # server other than the one this flow was started with must not be acted
@@ -254,17 +252,20 @@ async def oauth_callback(
         await oauth.discover_authorization(connector.url)
     ).as_stored()
     metadata = OAuthMetadata.model_validate(stored["authorization_server"])
+    # The same column in both forms: the client to exchange with, and the
+    # ciphertext to prove afterwards that it is still the row's client.
     client = _load_oauth_client(connector)
+    authorizing_client = connector.oauth_client_encrypted
     tokens = await oauth.exchange_code(
         metadata, client,
         code=body.code, server_url=connector.url, redirect_uri=redirect_uri,
         code_verifier=pending["code_verifier"],
     )
-    # Asked again, now that the exchange is behind us. The first ask was before
-    # a round-trip to someone else's token endpoint, which can take as long as
-    # they like — long enough for the user to start the flow this one is being
-    # measured against, and finish it.
-    await _reject_a_superseded_authorization(redis, body.state, pending)
+    # Rebound deliberately: everything read before the exchange is stale by
+    # now, and the row this write belongs on is the one held under the lock.
+    connector = await _locked_connector_for_grant(
+        db, redis, pending, body.state, authorizing_client,
+    )
     grant.store_tokens(connector, tokens, rotation=False)
     # Where the token refresher will aim its rotations. Without it there is
     # nothing safe to guess from, so it would leave the Connector alone.
@@ -448,10 +449,6 @@ async def _build_catalog_connector(
     """
     entry = await catalog.get_published_entry(db, catalog_id)
     connector = catalog.build_connector(entry, user_id)
-    # Reject a re-add *before* the OAuth registration below: DCR mints a client
-    # at the provider, and a client created for a row that then 409s on the name
-    # index is orphaned — never stored, never revoked. The unique index is still
-    # the authority; this check just keeps the common retry off the network.
     await _reject_duplicate_name(db, user_id, connector.name)
     if connector.auth_type == MCPServerAuthType.OAUTH:
         connector.oauth_client_encrypted, connector.oauth_metadata = (
@@ -465,8 +462,11 @@ async def _build_catalog_connector(
     return connector
 
 
-async def _build_oauth_connector(body: ConnectorCreate, user_id: int) -> MCPServer:
+async def _build_oauth_connector(
+    db: AsyncSession, body: ConnectorCreate, user_id: int,
+) -> MCPServer:
     """Discover metadata + register/prepare the OAuth client (no tokens yet)."""
+    await _reject_duplicate_name(db, user_id, body.name)
     client, authorization = await _register_oauth_client(
         url=body.url,
         scope=body.oauth_scope,
@@ -548,6 +548,7 @@ def _clear_oauth_state(connector: MCPServer) -> None:
     connector.oauth_client_encrypted = None
     connector.oauth_tokens_encrypted = None
     connector.oauth_tokens_expires_at = None
+    connector.oauth_refresh_after = None
     connector.oauth_scope = None
     connector.oauth_metadata = None
     # A verdict about a grant that no longer exists. Left standing, the card
@@ -637,6 +638,84 @@ def _decrypt_or_none(ciphertext: str | None) -> str | None:
     return decrypt_secret(ciphertext) if ciphertext else None
 
 
+async def _locked_connector_for_grant(
+    db: AsyncSession,
+    redis: aioredis.Redis,
+    pending: dict,
+    state: str,
+    authorizing_client: str | None,
+) -> MCPServer:
+    """Re-read the Connector under a row lock, and refuse if it has moved on.
+
+    Everything read before the code exchange was read across a round-trip to
+    someone else's token endpoint, which can take as long as they like. Two
+    things can happen in that time, and both end with this grant written onto a
+    row it does not describe: the user starts another authorization and picks a
+    different account, or they change the Connector's credentials — to a bearer
+    token, which clears the OAuth columns, or to a different OAuth client of
+    their own. The second is the worse one: it would put a refresh token back
+    on a row the user had just converted away from OAuth, and flip ``connected``
+    on behind their disconnect.
+
+    One comparison covers both credential cases, because both move
+    ``oauth_client_encrypted``: a changed auth type clears it, a re-registration
+    replaces it, and Fernet ciphertext differs even for identical plaintext. It
+    is the client this flow's code was issued to; a grant belongs with it.
+
+    ``with_for_update`` holds the row until this transaction commits, so unlike
+    a bare check nothing can land between asking and writing.
+    ``populate_existing`` is what makes the answer true in the first place: on
+    its own the lock only bypasses the identity-map *shortcut*, and the row it
+    then reads is loaded onto the instance this session already holds —
+    without overwriting the attributes loaded before the exchange. The query
+    locks, the object still says what it said an hour ago, and every check
+    below passes on stale values. Both, or neither is worth having.
+    """
+    connector = await db.get(
+        MCPServer,
+        pending["connector_id"],
+        with_for_update=True,
+        populate_existing=True,
+    )
+    if connector is None or connector.user_id != pending["user_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="connector not found",
+        )
+    if connector.oauth_client_encrypted != authorizing_client:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "this connector's credentials changed while you were "
+                "authorizing; start again"
+            ),
+        )
+    await _reject_a_superseded_authorization(redis, state, pending)
+    return connector
+
+
+async def _consume_pending_authorization(
+    redis: aioredis.Redis, state: str,
+) -> str | None:
+    """Read the pending authorization for *state* and burn it, in one step.
+
+    One-shot has to mean one *winner*. Read-then-delete let both halves of a
+    doubled callback — a browser retrying the redirect, a proxy replaying it —
+    pass validation; one would exchange the code and the other would fail on a
+    code the provider had already consumed, showing the user an error for a
+    Connector that then quietly works.
+
+    A transaction rather than ``GETDEL``, which wants Redis 6.2 and would be
+    the only command here to ask for a floor this deployment has never had to
+    meet.
+    """
+    key = oauth_state_key(state)
+    async with redis.pipeline(transaction=True) as pipe:
+        pipe.get(key)
+        pipe.delete(key)
+        raw, _deleted = await pipe.execute()
+    return raw
+
+
 async def _reject_a_superseded_authorization(
     redis: aioredis.Redis, state: str, pending: dict,
 ) -> None:
@@ -651,14 +730,10 @@ async def _reject_a_superseded_authorization(
 
     Not fatal, and phrased so: the flow that is still current will go through.
 
-    Asked twice — before the code exchange and again after it — because each
-    ask is a read, and what it guards is a write several awaits later. Twice
-    leaves only the commit itself inside the window instead of a third party's
-    network round-trip, which is the difference between a race that needs two
-    tabs interleaved to the millisecond and one that needs only a slow token
-    endpoint. Closing it outright means deciding it where the write happens: a
-    generation on the row, CAS-ed in the same statement that stores the grant.
-    That is a column, and this is not worth one.
+    Asked twice: once on the way in, to spend nothing on a flow already known
+    to be stale, and again from inside
+    :func:`_locked_connector_for_grant`, where the answer keeps until
+    the write.
     """
     current = await redis.get(oauth_current_state_key(pending["connector_id"]))
     if current is None or current == state:
@@ -694,6 +769,15 @@ async def _client_for_authorization(
     would otherwise have to build by hand. Only a manually configured client
     cannot be replaced — it is the operator's own OAuth app, and there is no
     way to make another.
+
+    One case is deliberately outside all of this: an authorization server that
+    revokes a registered client *early*, having stated no expiry. Nothing here
+    can see that, so Reconnect hands the dead registration back and only
+    deleting the Connector helps. Acting on it would mean re-minting whenever
+    the row is flagged for re-authorization, and that flag does not record which
+    of the two permanent errors set it — for ``invalid_grant``, the ordinary
+    "your grant expired, sign in again", the client is in perfect health and
+    replacing it on every routine re-authorization would be the bug.
     """
     client = _load_oauth_client(connector)
     unusable = _why_the_stored_client_is_unusable(connector, client, discovered)
@@ -768,16 +852,6 @@ def _issued_by_an_authorization_server(client: OAuthClientInformationFull) -> bo
     kept rather than replaced. That is the safe way to be wrong: the user is
     asked to make a new Connector, instead of an operator's OAuth app being
     swapped out behind their back.
-
-    What this does not catch: an authorization server that revokes a registered
-    client *early*, having stated no expiry. The refresher sees ``invalid_client``
-    and flags the row, the user presses Reconnect, and the dead registration is
-    handed back to them — deleting and re-creating the Connector is the only way
-    out. Acting on that would mean re-minting whenever the row is flagged, and
-    the flag does not say which of the two permanent errors set it: for
-    ``invalid_grant`` — the ordinary "your grant expired, sign in again" — the
-    client is in perfect health. Left alone rather than guessed at, for a case
-    that needs a server to both omit the expiry and cancel the client anyway.
     """
     return (
         client.client_id_issued_at is not None
@@ -829,6 +903,12 @@ async def _get_owned_connector(
 
 async def _reject_duplicate_name(db: AsyncSession, user_id: int, name: str) -> None:
     """Raise the same 409 the unique index would, without hitting the network.
+
+    "Without hitting the network" is the whole point on the OAuth paths, and
+    why both of them ask before they register: dynamic registration mints a
+    client *at the provider*, and a client minted for a row that then collides
+    on the name index is orphaned — never stored, so never revocable, and a
+    user re-adding the same server a few times leaves one behind each time.
 
     Advisory only — a concurrent insert still lands on
     ``uq_mcp_server_user_id_name`` in :func:`_commit_or_conflict`.

@@ -671,6 +671,27 @@ class TestDynamicClientRegistration:
     """DCR is the fallback when the server advertises neither a manual client
     nor CIMD — and the branch every other ``ensure_client`` test skips."""
 
+    async def test_a_server_that_does_not_advertise_dcr_is_not_posted_to(self):
+        # The SDK's request builder does not check: handed metadata with no
+        # ``registration_endpoint`` it guesses ``{issuer}/register``, which for a
+        # provider that simply does not do DCR is an ordinary web route on their
+        # site. GitHub's remote MCP server is the case in point — it wants a
+        # pre-registered OAuth app, so the guess POSTs a registration document
+        # at https://github.com/register and collects a 422.
+        from app.services.mcp.oauth import ensure_client
+
+        no_dcr = OAuthMetadata(
+            issuer="https://github.com",
+            authorization_endpoint="https://github.com/login/oauth/authorize",
+            token_endpoint="https://github.com/login/oauth/access_token",
+            response_types_supported=["code"],
+        )
+
+        with pytest.raises(ConnectorOAuthError, match="dynamic client registration"):
+            await ensure_client(
+                no_dcr, redirect_uri="https://app/cb", scope=None,
+            )
+
     def _registration_metadata(self) -> OAuthMetadata:
         return OAuthMetadata(
             issuer="https://as.example.com",
@@ -763,6 +784,39 @@ class TestBuildOAuthConnector:
     ``TypeError`` at request time while every other test still passes.
     """
 
+    async def test_a_duplicate_name_is_refused_before_registering(
+        self, monkeypatch,
+    ):
+        # Dynamic registration mints a client at the provider. One minted for a
+        # row that then 409s on the name index is orphaned — never stored, so
+        # never revocable — and a user re-adding the same server a few times
+        # would leave one behind each time.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.errors import ConnectorNameConflictError
+        from app.models.mcp_server import MCPServerAuthType
+        from app.schemas.mcp_server import ConnectorCreate
+
+        registered: list[object] = []
+
+        async def never(**kwargs):
+            registered.append(kwargs)
+        monkeypatch.setattr(endpoint, "_register_oauth_client", never)
+
+        db = AsyncMock()
+        db.execute.return_value = MagicMock(first=MagicMock(return_value=(1,)))
+
+        with pytest.raises(ConnectorNameConflictError):
+            await endpoint._build_oauth_connector(
+                db,
+                ConnectorCreate(
+                    name="Notion", url="https://mcp.notion.com/mcp",
+                    auth_type=MCPServerAuthType.OAUTH,
+                ),
+                user_id=42,
+            )
+
+        assert registered == []
+
     async def test_builds_a_disconnected_row(self, monkeypatch):
         from app.api.endpoints import mcp_server as endpoint
         from app.models.mcp_server import MCPServerAuthType
@@ -776,6 +830,7 @@ class TestBuildOAuthConnector:
         monkeypatch.setattr(endpoint, "_register_oauth_client", fake_register)
 
         connector = await endpoint._build_oauth_connector(
+            _db_with_no_connector_named_that(),
             ConnectorCreate(
                 name="Notion", url="https://mcp.notion.com/mcp",
                 auth_type=MCPServerAuthType.OAUTH, oauth_scope="read",
@@ -1560,14 +1615,14 @@ class TestCallbackRejectsAMixedUpResponse:
         monkeypatch.setattr(endpoint.oauth, "exchange_code", never)
 
         redis = AsyncMock()
-        redis.get.return_value = json_module.dumps({
+        _stub_state_consumption(redis, json_module.dumps({
             "connector_id": 1,
             "user_id": 7,
             "code_verifier": "v",
             "issuer": "https://as.example.com",
             "iss_advertised": True,
             "discovered": {"authorization_server": {}},
-        })
+        }))
 
         with pytest.raises(ConnectorOAuthError):
             await endpoint.oauth_callback(
@@ -1580,8 +1635,10 @@ class TestCallbackRejectsAMixedUpResponse:
             )
 
         assert exchanged == []
-        # One-shot regardless: a rejected response still burns its state.
-        redis.delete.assert_awaited_once()
+        # One-shot regardless: a rejected response still burns its state, and
+        # burning it is part of the same transaction that read it.
+        redis.pipeline.assert_called_once_with(transaction=True)
+        redis.pipeline.return_value.delete.assert_called_once()
 
 
 class TestTwoAuthorizationsInTheAir:
@@ -1608,19 +1665,39 @@ class TestTwoAuthorizationsInTheAir:
             }},
         })
 
-        async def get(key):
-            return current_state if "current" in key else pending
+        _stub_state_consumption(redis, pending)
+
+        async def get(_key):
+            return current_state
         redis.get.side_effect = get
         return redis
 
-    def _db(self):
+    def _db(self, *, client: str | None = "sealed-client"):
+        """A session that refreshes a loaded object only when asked to.
+
+        Faithful to SQLAlchemy, and the point of the class: ``with_for_update``
+        alone bypasses the identity-map *shortcut* and emits the locking query,
+        but the row it reads does not overwrite attributes already loaded onto
+        the instance the session holds. Only ``populate_existing=True`` does
+        that. A double that hands back a fresh object for every ``get`` cannot
+        tell a working fence from one that locks the row and then reads its own
+        hour-old copy.
+        """
         from app.models.mcp_server import MCPServer, MCPServerAuthType
 
-        db = AsyncMock()
-        db.get.return_value = MCPServer(
+        loaded = MCPServer(
             id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
-            auth_type=MCPServerAuthType.OAUTH,
+            auth_type=MCPServerAuthType.OAUTH, oauth_client_encrypted=client,
         )
+        db = AsyncMock()
+        db.identity_map = loaded          # what the session already holds
+        db.in_database = loaded           # what the row actually says now
+
+        async def get(_model, _ident, **kwargs):
+            if kwargs.get("populate_existing"):
+                db.identity_map = db.in_database
+            return db.identity_map
+        db.get.side_effect = get
         return db
 
     async def _callback(self, monkeypatch, redis, state, db=None):
@@ -1690,6 +1767,49 @@ class TestTwoAuthorizationsInTheAir:
         assert stored == []
         db.commit.assert_not_awaited()
 
+    async def test_a_grant_is_not_written_onto_a_connector_that_changed_auth(
+        self, monkeypatch,
+    ):
+        # The worse of the two: while this flow waited at the token endpoint the
+        # user converted the Connector to a bearer token, which clears the OAuth
+        # columns. Writing anyway puts a refresh token back on a BEARER row and
+        # flips ``connected`` on behind their disconnect.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+
+        db = self._db()
+        stored: list[object] = []
+        monkeypatch.setattr(
+            endpoint.grant, "store_tokens",
+            lambda *args, **kwargs: stored.append(args),
+        )
+        monkeypatch.setattr(endpoint, "_load_oauth_client", lambda _c: MagicMock())
+        monkeypatch.setattr(
+            endpoint.settings, "mcp_oauth_redirect_uri", "https://app/cb",
+        )
+
+        async def patched_away(*_args, **_kwargs):
+            # The row in the database changes; the session's copy does not.
+            db.in_database = MCPServer(
+                id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+                auth_type=MCPServerAuthType.BEARER, oauth_client_encrypted=None,
+            )
+            return MagicMock(access_token="orphan")
+        monkeypatch.setattr(endpoint.oauth, "exchange_code", patched_away)
+
+        with pytest.raises(HTTPException) as caught:
+            await self._callback(
+                monkeypatch, self._redis(current_state="mine"), "mine", db,
+            )
+
+        assert caught.value.status_code == 400
+        assert stored == []
+        db.commit.assert_not_awaited()
+        # Locked *and* repopulated — the lock alone leaves the check asking the
+        # very object the exchange was holding all along.
+        assert db.get.await_args.kwargs["with_for_update"] is True
+        assert db.get.await_args.kwargs["populate_existing"] is True
+
     async def test_a_state_predating_the_pointer_still_completes(
         self, monkeypatch,
     ):
@@ -1703,6 +1823,28 @@ class TestTwoAuthorizationsInTheAir:
             )
             is None
         )
+
+
+def _stub_state_consumption(redis: AsyncMock, pending: str) -> None:
+    """Make ``redis.pipeline(transaction=True)`` hand back *pending*, once.
+
+    The callback reads and burns the pending authorization in a single
+    transaction, so a double that only answers ``get`` would not be exercising
+    the code under test at all.
+    """
+    pipe = AsyncMock()
+    pipe.__aenter__.return_value = pipe
+    pipe.get = MagicMock()
+    pipe.delete = MagicMock()
+    pipe.execute = AsyncMock(return_value=[pending, 1])
+    redis.pipeline = MagicMock(return_value=pipe)
+
+
+def _db_with_no_connector_named_that() -> AsyncMock:
+    """A session whose duplicate-name lookup comes back empty."""
+    db = AsyncMock()
+    db.execute.return_value = MagicMock(first=MagicMock(return_value=None))
+    return db
 
 
 def _sealed(client: OAuthClientInformationFull) -> str:

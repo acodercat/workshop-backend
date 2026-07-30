@@ -23,13 +23,13 @@ a static one.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from mcp.shared.auth import OAuthClientInformationFull, OAuthMetadata
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.database import AsyncSessionLocal
 from app.models.mcp_server import MCPServer, MCPServerAuthType
@@ -46,41 +46,26 @@ logger = logging.getLogger(__name__)
 # is never refreshed at all. It only takes a provider that disappears (which
 # answers "unreachable", not ``invalid_grant``, so it is never flagged) for that
 # set to accumulate on its own.
-#
-# Failures only. A *successful* rotation needs no cool-off, and giving it one is
-# actively wrong: whether a row is due is already decided by :func:`_list_due`
-# against the expiry that rotation just wrote, and a fixed window layered on top
-# can only disagree with it. Where it disagrees, it loses — a provider issuing
-# tokens shorter-lived than this window (which the MCP spec asks them to prefer)
-# would have every grant expire in the gap it holds them out for.
-_RETRY_AFTER_SECONDS = 300.0
+_RETRY_AFTER_SECONDS = 300
 
 # Ceiling on the second attempt at writing a rotated grant. It runs after
 # something already went wrong, so it gets a bound of its own rather than
 # inheriting the confidence of the first.
 _SECOND_ATTEMPT_TIMEOUT = 20.0
 
-# Connector id → the monotonic time before which not to try again. Per process
-# rather than a column: what it buys is the *ordering* within a tick, which
-# each replica works out for itself, and a restart costs one extra attempt.
-_deferred: dict[int, float] = {}
 
+class _CancelledMidRotation(Exception):
+    """A cancellation that arrived while a rotated grant was being written.
 
-def _defer(connector_id: int) -> None:
-    """Leave this Connector out of the next few ticks."""
-    _deferred[connector_id] = time.monotonic() + _RETRY_AFTER_SECONDS
-
-
-def _currently_deferred() -> list[int]:
-    """The ids a recent failure said to leave alone, pruned of lapsed ones.
-
-    Pruning here keeps the map the size of the currently-unwell set rather than
-    growing with every failure ever seen.
+    Carries the rotation so the caller can land it before letting the
+    cancellation continue. An ordinary ``Exception`` on purpose: a
+    ``BaseException`` would pass straight through the handler that has to do
+    the landing, which is the whole reason this exists.
     """
-    now = time.monotonic()
-    for connector_id in [i for i, until in _deferred.items() if until <= now]:
-        del _deferred[connector_id]
-    return list(_deferred)
+
+    def __init__(self, rotation: _Rotation) -> None:
+        super().__init__("cancelled while writing a rotated grant")
+        self.rotation = rotation
 
 
 @dataclass(frozen=True)
@@ -95,6 +80,7 @@ class _Rotation:
     connector_id: int
     ciphertext: str
     expires_at: datetime | None
+    refresh_after: datetime | None
     spent: str | None
 
 
@@ -156,41 +142,68 @@ async def _list_due(db) -> list[int]:
     is known dead, so retrying it every tick would only spend requests to be
     refused, and the flag is cleared by the authorize flow that fixes it.
 
-    So are the ones a recent failure deferred — and in the query rather than
-    after it. Filtering a batch that has already been ``LIMIT``-ed just leaves
-    the batch short: the deferred rows are the oldest-expiry ones, so they
-    would occupy every slot and nothing behind them would be selected at all.
+    So are the ones whose ``oauth_refresh_after`` has not come round — and in
+    the query rather than after it. Filtering a batch that has already been
+    ``LIMIT``-ed just leaves the batch short: those rows are the oldest-expiry
+    ones, so they would occupy every slot and nothing behind them would be
+    selected at all.
 
-    What this ordering cannot do is share the batch out. A Connector whose
-    provider issues tokens shorter-lived than
-    ``connector_refresh_ahead_seconds`` is due again the moment it is rotated,
-    and sorts ahead of every healthy row precisely because it expires soonest;
-    enough of them fill every batch and nothing else is ever selected. Nor can
-    two replicas see each other's work — :data:`_deferred` is per process, and
-    the under-lock re-check asks only "is this due", which such a row still is
-    a second after someone rotated it, so both replicas rotate it in turn.
-    Both want the same missing thing: a *next attempt* time on the row rather
-    than an expiry inferred to be one. That is a column, and until there is one
-    the ceiling here is what ``connector_refresh_batch`` buys.
+    Two conditions rather than one because expiry alone answers the wrong
+    question for a short-lived token. A grant that lives less than
+    ``connector_refresh_ahead_seconds`` is inside the look-ahead the instant it
+    is written, so on expiry alone it is due again on the very next tick and
+    sorts ahead of every healthy row precisely because it expires soonest.
+    ``oauth_refresh_after`` is the answer to "when should we act", written from
+    what the last attempt actually learned, and it is on the row so every
+    replica sees it.
     """
-    horizon = datetime.now(timezone.utc) + timedelta(
-        seconds=settings.connector_refresh_ahead_seconds
-    )
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(seconds=settings.connector_refresh_ahead_seconds)
     query = select(MCPServer.id).where(
         MCPServer.auth_type == MCPServerAuthType.OAUTH,
         MCPServer.oauth_tokens_encrypted.is_not(None),
         MCPServer.oauth_tokens_expires_at.is_not(None),
         MCPServer.oauth_tokens_expires_at < horizon,
         MCPServer.oauth_reauthorization_required.is_(False),
+        or_(
+            MCPServer.oauth_refresh_after.is_(None),
+            MCPServer.oauth_refresh_after <= now,
+        ),
     )
-    standing_aside = _currently_deferred()
-    if standing_aside:
-        query = query.where(MCPServer.id.not_in(standing_aside))
     rows = await db.execute(
         query.order_by(MCPServer.oauth_tokens_expires_at.asc())
         .limit(settings.connector_refresh_batch)
     )
     return [row[0] for row in rows.all()]
+
+
+def _next_attempt_after(expires_at: datetime | None) -> datetime:
+    """When to come back to a grant that expires at *expires_at*.
+
+    Two answers, and the later one wins.
+
+    The first is when :func:`_list_due` would pick the row up again on expiry
+    alone — ``expires_at`` less the look-ahead. For a token that outlives the
+    window that is the whole answer, and this changes nothing about today's
+    behaviour.
+
+    The second is what makes a *short-lived* token work. Its new expiry is
+    already inside the look-ahead, so the first answer is in the past and would
+    mean "next tick, and every tick after" — a provider refreshed once a minute
+    for a token it will happily reissue at half the age, while the row sits
+    ahead of every healthy one in the ordering. Half of the token's own life is
+    the answer that scales with what the server actually gave us: it leaves the
+    same proportion of margin whatever the lifetime, and for a 300-second token
+    means one refresh every 150 seconds rather than five.
+    """
+    now = datetime.now(timezone.utc)
+    if expires_at is None:
+        return now
+    due_on_expiry = expires_at - timedelta(
+        seconds=settings.connector_refresh_ahead_seconds
+    )
+    half_life = now + (expires_at - now) / 2
+    return max(due_on_expiry, half_life)
 
 
 async def _refresh_one(connector_id: int) -> bool:
@@ -204,10 +217,23 @@ async def _refresh_one(connector_id: int) -> bool:
     """
     try:
         rotated, pending = await _rotate(connector_id)
+    except _CancelledMidRotation as interrupted:
+        # The session that held the row is closed by now — the exception
+        # unwound its ``async with`` — so this second attempt cannot deadlock
+        # against it, the same seam the ordinary retry below relies on.
+        # Shielded so the cancellation that got us here does not also take the
+        # write, and bounded so a database going down with the process cannot
+        # hold up the exit.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                asyncio.shield(_commit_again(interrupted.rotation)),
+                _SECOND_ATTEMPT_TIMEOUT,
+            )
+        raise asyncio.CancelledError from None
     except Exception:
-        # One unwell Connector must not end the tick for the rest of the batch,
-        # nor be tried again on the very next one — see :data:`_deferred`.
-        _defer(connector_id)
+        # One unwell Connector must not end the tick for the rest of the batch.
+        # When to try it again was already decided under the lock, by whichever
+        # step failed; nothing out here knows enough to overrule that.
         logger.warning(
             "Could not refresh Connector %s; leaving it for a later tick",
             connector_id, exc_info=True,
@@ -262,16 +288,40 @@ async def _rotate(connector_id: int) -> tuple[bool, _Rotation | None]:
             _refuse(connector, "the authorization server rejected the grant")
             await db.commit()
             return False, None
+        except Exception:
+            # Recorded here, still holding the lock, rather than from a second
+            # transaction afterwards. A backoff written later has no way to
+            # tell whether a peer has since rotated this row and scheduled it
+            # properly; under the lock the question cannot arise, because no
+            # peer could have touched it. Whatever went wrong is the caller's
+            # to log — this only decides when to come back.
+            connector.oauth_refresh_after = datetime.now(timezone.utc) + timedelta(
+                seconds=_RETRY_AFTER_SECONDS
+            )
+            await db.commit()
+            raise
         spent = connector.oauth_tokens_encrypted
         grant.store_tokens(connector, rotated, rotation=True)
+        connector.oauth_refresh_after = _next_attempt_after(
+            connector.oauth_tokens_expires_at
+        )
         pending = _Rotation(
             connector_id=connector.id,
             ciphertext=connector.oauth_tokens_encrypted,
             expires_at=connector.oauth_tokens_expires_at,
+            refresh_after=connector.oauth_refresh_after,
             spent=spent,
         )
         try:
             await db.commit()
+        except asyncio.CancelledError:
+            # Converted, not propagated — for the length of one write. By now
+            # the provider has spent the old refresh token, so the replacement
+            # in *pending* is the only copy in existence and dying with it
+            # costs the user a trip through the browser. The caller lands it
+            # and then re-raises, so the cancellation still wins; see
+            # :func:`_refresh_one`.
+            raise _CancelledMidRotation(pending) from None
         except Exception:
             # Release the row before anyone tries to take it again, and hand
             # the caller plain values — this session is no longer safe to read
@@ -290,13 +340,13 @@ async def _commit_again(pending: _Rotation) -> None:
     tick asks with the spent token, is told ``invalid_grant``, and the user is
     sent to the browser — out of a pool blip.
 
-    Not proof against cancellation, deliberately. ``CancelledError`` is a
-    ``BaseException``, so a graceful shutdown landing between the provider's
-    answer and this write drops the rotated grant, and the next process is told
-    ``invalid_grant``. Shielding the write does not fix it — a shielded task
-    still dies when the loop closes — so the real fix is draining pending
-    writes during shutdown, which is process-lifecycle machinery for a window
-    of about a second per rotation against a cost of one re-authorization.
+    Reached from two directions, and cancellation is one of them.
+    ``asyncio.run`` installs its own SIGINT handler and cancels the main task,
+    and a sibling in the ``TaskGroup`` failing fatally cancels this one too — so
+    "the process is going away" is a live path, not a hypothetical, and
+    ``CancelledError`` being a ``BaseException`` means it would otherwise sail
+    past every handler between here and the top. :class:`_CancelledMidRotation`
+    is how it is caught for exactly as long as this write takes.
 
     Fenced on the grant it replaces, and idempotent against the ambiguous case:
     a first commit that reached the database but lost the connection before
@@ -326,6 +376,7 @@ async def _commit_again(pending: _Rotation) -> None:
                     return
                 current.oauth_tokens_encrypted = pending.ciphertext
                 current.oauth_tokens_expires_at = pending.expires_at
+                current.oauth_refresh_after = pending.refresh_after
                 await db.commit()
                 logger.info(
                     "Connector %s: rotation landed on the second attempt",
@@ -344,12 +395,22 @@ def _still_due(connector: MCPServer) -> bool:
     A batch is processed serially, so by the time a late row is reached another
     replica may have rotated it — refreshing again would spend a perfectly good
     refresh token for nothing.
+
+    Both halves of :func:`_list_due`'s question, not just the expiry one. The
+    expiry alone cannot see a peer's work on exactly the rows where seeing it
+    matters: a short-lived token is inside the look-ahead the moment it is
+    written, so a replica that took the lock a second after someone rotated it
+    would find it "still due" and rotate it straight again.
     """
     if connector.oauth_tokens_expires_at is None:
         return False
-    horizon = datetime.now(timezone.utc) + timedelta(
-        seconds=settings.connector_refresh_ahead_seconds
-    )
+    now = datetime.now(timezone.utc)
+    if (
+        connector.oauth_refresh_after is not None
+        and connector.oauth_refresh_after > now
+    ):
+        return False
+    horizon = now + timedelta(seconds=settings.connector_refresh_ahead_seconds)
     return connector.oauth_tokens_expires_at < horizon
 
 

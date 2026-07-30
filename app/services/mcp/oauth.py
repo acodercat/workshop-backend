@@ -594,7 +594,24 @@ async def _register_client(
 
     The last resort: no client was configured and the server does not advertise
     CIMD, so it has to mint us one.
+
+    Only if it says it can. MCP ranks DCR third *and* conditions it on
+    ``registration_endpoint`` being advertised, and the SDK's request builder
+    does not check — handed metadata without one it falls back to guessing
+    ``{issuer}/register``, which for a provider that simply does not do DCR is
+    an ordinary web route on their site. GitHub's remote MCP server is the case
+    in point: it requires a pre-registered OAuth app, so the guess POSTs a
+    registration document at ``https://github.com/register``, collects a 422,
+    and the user is told their Connector could not be added rather than what to
+    do about it.
     """
+    if metadata.registration_endpoint is None:
+        raise ConnectorOAuthError(
+            "This server's authorization server does not support dynamic "
+            "client registration, so it cannot issue us a client. Register an "
+            "OAuth app with the provider and add this Connector with its "
+            "Client ID and Secret."
+        )
     client_metadata = OAuthClientMetadata(
         redirect_uris=[redirect_uri],
         grant_types=["authorization_code", "refresh_token"],
