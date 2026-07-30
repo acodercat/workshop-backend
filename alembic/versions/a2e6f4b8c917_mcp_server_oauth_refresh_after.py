@@ -13,11 +13,13 @@ query orders by soonest expiry it sits ahead of every healthy row. Enough such
 Connectors and nothing else is ever selected: the normal tokens behind them
 expire while their provider is refreshed once a minute for nothing.
 
-The in-process map this replaces could not fix that. It was per process, so two
-replicas each rotated the same grant in turn, and it did not survive a restart.
-Worst of all it was a fixed window applied to successes as well as failures, so
-it held a 300-second token out for 300 seconds and guaranteed the expiry it was
-meant to prevent.
+The in-process map this replaces could not fix that. It only ever recorded
+failures, so it had nothing to say about the case above; it was per process, so
+two replicas each rotated the same grant in turn; and it did not survive a
+restart. Widening it to cover successes as well is the thing that does not work:
+a fixed window is either shorter than the tick interval, in which case it changes
+nothing, or longer than the shortest legitimate token lifetime, in which case it
+holds a 300-second grant out past its own expiry. There is no value between.
 
 A column is what both halves wanted. It is written from the *new* token's own
 lifetime after a success and from a flat backoff after a failure, it is visible

@@ -12,11 +12,14 @@ prefix of its siblings because only the OAuth path can ever set it.
 Existing rows default to ``false`` — the flag only ever becomes true after the
 refresher is told ``invalid_grant``, so backfilling is meaningless.
 
-**Deploy note: apply this BEFORE deploying either service.** The backend's
-token refresher writes it and its query filters on it; the worker reads it in
-its per-turn Connector resolve, so a worker on the old schema resolves *zero*
-Connectors — every user loses every MCP tool on every turn until the migration
-lands, not the per-Connector degradation its other failure paths give you.
+**Deploy note: apply this BEFORE deploying the backend.** Its token refresher
+writes the column and its due query filters on it, so on an old schema every
+tick raises and no Connector's grant is renewed at all.
+
+The worker does not read it, deliberately: a flagged Connector is one the *user*
+has to fix, not one a turn should decline to try, so the worker presents whatever
+access token the row carries either way. That also means the worker is
+indifferent to this migration's timing.
 
 Revision ID: f1a6d3c8b507
 Revises: e2c7a3f5b184

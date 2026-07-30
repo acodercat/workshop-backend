@@ -12,11 +12,17 @@ server, which every auth type can fail.
 
 The two are orthogonal and both are kept: one says the grant is dead and only a
 trip through the browser fixes it, the other says the server could not be
-reached. Written by the worker on a transition and cleared by the next
-successful connect, so a transient misread heals itself and a healthy Connector
-costs no write per turn. The reason is left to the worker log rather than a
-free-text column, which would leak an upstream server's internals into a
-client-facing response.
+reached. The reason is left to the worker log rather than a free-text column,
+which would leak an upstream server's internals into a client-facing response.
+
+Written by the worker on every attempt, not only on a change against the row it
+read — that snapshot is not evidence about the column, since a concurrent turn
+may have marked the Connector broken since, and skipping the write because *our*
+snapshot said "healthy" would leave a stale verdict standing over a Connector we
+just proved works. So budget one indexed single-row UPDATE per connected
+Connector per turn: ten concurrent healthy turns for one user cost ten writes,
+not zero. Each is fenced on the value that turn read (``AND last_connect_failed
+= …``), which makes a stolen race a rowcount-0 no-op rather than an inversion.
 
 Skipping a Connector is not a verdict: an exhausted connect budget leaves the
 flag untouched, because nothing was learned about the server.
