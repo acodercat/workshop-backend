@@ -787,7 +787,7 @@ async def exchange_code(
         client, data, {"Accept": "application/json"}
     )
 
-    response = await _post_to_token_endpoint(metadata, data, headers)
+    response = await _post(str(metadata.token_endpoint), data, headers)
     if response.status_code != 200:
         raise ConnectorOAuthError(
             f"Token exchange failed ({response.status_code})."
@@ -846,7 +846,7 @@ async def refresh_tokens(
         client, data, {"Accept": "application/json"}
     )
 
-    response = await _post_to_token_endpoint(metadata, data, headers)
+    response = await _post(str(metadata.token_endpoint), data, headers)
     if response.status_code != 200:
         if _error_code(response) in _PERMANENT_TOKEN_ERRORS:
             raise GrantRevoked(
@@ -860,14 +860,68 @@ async def refresh_tokens(
         raise ConnectorOAuthError(f"Malformed token response: {exc}") from exc
 
 
-async def _post_to_token_endpoint(
-    metadata: OAuthMetadata, data: dict[str, str], headers: dict[str, str],
+async def revoke_grant(
+    metadata: OAuthMetadata,
+    client: OAuthClientInformationFull,
+    *,
+    tokens: OAuthToken,
+) -> None:
+    """Tell the authorization server we are finished with a grant (RFC 7009).
+
+    Sent when the user disconnects or deletes a Connector. Dropping our copy of
+    the tokens is enough to stop *us* using them, but it is not what the user
+    was promised: without this the authorization stays live at the provider, and
+    they find an application they disconnected still listed on their account
+    page, still holding a refresh token that outlives every trace of it here.
+
+    The refresh token is what gets sent when there is one. RFC 7009 §2.1 asks a
+    server that revokes one to invalidate the whole grant family behind it, so
+    that single request ends the access tokens too; revoking an access token
+    only ends that token, and the refresh token would mint another. Falling back
+    to the access token covers the providers that issue no refresh token at all.
+
+    Authenticated exactly as a token request is. A separate
+    ``revocation_endpoint_auth_methods_supported`` exists, but RFC 7009 §2.1
+    says the client authenticates as it does at the token endpoint, and a client
+    registered for one method is registered for both.
+
+    Only called when *metadata* advertises the endpoint — a server that does not
+    is a server with nothing to tell. Failure raises like every sibling here;
+    the caller decides what a failure is worth, and for the one caller today the
+    answer is a log line.
+    """
+    if metadata.revocation_endpoint is None:
+        raise ConnectorOAuthError(
+            "This authorization server advertises no revocation endpoint."
+        )
+    data = {
+        "token": tokens.refresh_token or tokens.access_token,
+        "token_type_hint": (
+            "refresh_token" if tokens.refresh_token else "access_token"
+        ),
+        "client_id": client.client_id,
+    }
+    data, headers = _apply_client_auth(
+        client, data, {"Accept": "application/json"}
+    )
+
+    response = await _post(str(metadata.revocation_endpoint), data, headers)
+    # 200 is the whole of success, and it is also what a server answers for a
+    # token it does not recognise (RFC 7009 §2.2) — already revoked, already
+    # expired, never valid. Nothing here can tell those apart, and nothing here
+    # needs to: they are all "the provider is not holding this".
+    if response.status_code != 200:
+        raise ConnectorOAuthError(f"Revocation failed ({response.status_code}).")
+
+
+async def _post(
+    url: str, data: dict[str, str], headers: dict[str, str],
 ) -> httpx.Response:
-    """POST to the token endpoint under a deadline over the whole call.
+    """POST to one of the provider's endpoints, under a deadline over the call.
 
     ``httpx.Timeout`` bounds each *read*, not the request — the same trap
-    :func:`_read_challenge` documents. A token endpoint that answers a byte
-    every nineteen seconds keeps resetting that clock, and this call is made
+    :func:`_read_challenge` documents. An endpoint that answers a byte every
+    nineteen seconds keeps resetting that clock, and one of these calls is made
     while a ``mcp_server`` row is locked: it would hold the lock, the database
     connection, and the refresher's whole tick behind it.
 
@@ -879,11 +933,9 @@ async def _post_to_token_endpoint(
             async with guarded_client(
                 timeout=httpx.Timeout(_HTTP_TIMEOUT)
             ) as http_client:
-                return await http_client.post(
-                    str(metadata.token_endpoint), data=data, headers=headers,
-                )
+                return await http_client.post(url, data=data, headers=headers)
     except (httpx.HTTPError, TimeoutError) as exc:
-        raise ConnectorOAuthError(f"Token endpoint unreachable: {exc}") from exc
+        raise ConnectorOAuthError(f"OAuth endpoint unreachable: {exc}") from exc
 
 
 def _error_code(response: httpx.Response) -> str | None:

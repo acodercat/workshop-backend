@@ -56,8 +56,10 @@ def _stub_credentials(monkeypatch, *, refresh_token: str | None = "R0"):
         client_id="cid", redirect_uris=["https://app/cb"],
         token_endpoint_auth_method="none",
     )
+    # The client blob only. ``stored_authorization`` is left to do its real
+    # work, so a row carrying no metadata still reads as one that carries none.
     monkeypatch.setattr(
-        refresher, "decrypt_secret", lambda _c: client.model_dump_json(),
+        refresher.grant, "decrypt_secret", lambda _c: client.model_dump_json(),
     )
     monkeypatch.setattr(refresher.grant, "stored_tokens", lambda _row: stored)
     monkeypatch.setattr(refresher.grant, "store_tokens", MagicMock())
@@ -516,18 +518,30 @@ class TestWhenToComeBack:
 
 
 class TestSelectingWhatIsDue:
-    async def test_the_query_skips_rows_already_asking_for_a_browser(self):
-        # Their refresh token is known dead; retrying it every tick would only
-        # spend requests to be refused.
+    async def _compiled_query(self) -> str:
         db = AsyncMock()
         db.execute.return_value = MagicMock(all=MagicMock(return_value=[]))
 
         await refresher._list_due(db)
 
-        compiled = str(db.execute.call_args[0][0])
+        return str(db.execute.call_args[0][0])
+
+    async def test_the_query_skips_rows_already_asking_for_a_browser(self):
+        # Their refresh token is known dead; retrying it every tick would only
+        # spend requests to be refused.
+        compiled = await self._compiled_query()
+
         assert "oauth_reauthorization_required" in compiled
         assert "oauth_tokens_expires_at" in compiled
         assert "auth_type" in compiled
+
+    async def test_the_query_skips_disconnected_rows(self):
+        # Rotating a refresh token is what *keeps* an authorization alive, so
+        # doing it for a Connector the user disconnected maintains access they
+        # believe they ended. Not merely wasted work — a consent mismatch.
+        compiled = await self._compiled_query()
+
+        assert "mcp_server.connected" in compiled
 
 
 class TestTheLoop:

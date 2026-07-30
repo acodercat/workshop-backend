@@ -1,16 +1,24 @@
-"""How an OAuth grant is written onto a Connector row.
+"""How an OAuth grant is written onto — and read back off — a Connector row.
 
 Two callers persist one: the authorization callback, which has just exchanged a
 code, and the token refresher, which has just rotated. Anything they disagreed
 about would be a Connector that works right up until its first refresh, so the
 rule lives here once rather than at each of them.
+
+The reads live here too, for the same reason: more than one caller wants the
+same pair of columns unsealed the same way, and a private helper in whichever
+module needed them first is a copy waiting to be made.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from mcp.shared.auth import OAuthToken
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthMetadata,
+    OAuthToken,
+)
 
 from app.models.mcp_server import MCPServer
 from app.services.crypto import decrypt_secret, encrypt_secret
@@ -48,6 +56,27 @@ def store_tokens(
     # this, and the authorization callback, which has none to write, must not
     # hand a brand-new grant an old grant's backoff.
     connector.oauth_refresh_after = None
+
+
+def discard(connector: MCPServer) -> None:
+    """Forget the grant, keeping what the row needs to obtain another.
+
+    The inverse of :func:`store_tokens`, and it clears exactly the columns that
+    one writes plus the verdict passed on them. What it deliberately leaves is
+    the client registration, the scope and the discovery metadata: those belong
+    to the *Connector*, not to any one grant, and dropping them would turn every
+    reconnect into a fresh dynamic registration against a provider that already
+    knows us.
+
+    ``oauth_reauthorization_required`` goes because it is an opinion about a
+    grant that no longer exists. Left standing it would render as "needs
+    reconnecting" on a Connector the user themselves disconnected — the
+    provider's verdict shown where the user's own choice belongs.
+    """
+    connector.oauth_tokens_encrypted = None
+    connector.oauth_tokens_expires_at = None
+    connector.oauth_refresh_after = None
+    connector.oauth_reauthorization_required = False
 
 
 def _deadline_for(tokens: OAuthToken) -> datetime | None:
@@ -91,6 +120,29 @@ def stored_tokens(connector: MCPServer) -> OAuthToken | None:
         return None
     return OAuthToken.model_validate_json(
         decrypt_secret(connector.oauth_tokens_encrypted)
+    )
+
+
+def stored_authorization(
+    connector: MCPServer,
+) -> tuple[OAuthMetadata, OAuthClientInformationFull] | None:
+    """Which authorization server to talk to about this grant, and as whom.
+
+    Both were captured when the user authorized. ``None`` when either is
+    missing — a row from before this was recorded, or one whose OAuth state has
+    been cleared — and every caller's answer to that is to do nothing: guessing
+    an endpoint would post a refresh token, and the client secret under it, to
+    whatever host the Connector happens to point at.
+    """
+    stored = connector.oauth_metadata or {}
+    authorization_server = stored.get("authorization_server")
+    if not authorization_server or not connector.oauth_client_encrypted:
+        return None
+    return (
+        OAuthMetadata.model_validate(authorization_server),
+        OAuthClientInformationFull.model_validate_json(
+            decrypt_secret(connector.oauth_client_encrypted)
+        ),
     )
 
 

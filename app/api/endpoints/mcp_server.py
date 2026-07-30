@@ -14,7 +14,14 @@ import logging
 import time
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -306,6 +313,7 @@ async def update_connector(
     request: Request,
     connector_id: int,
     body: ConnectorUpdate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ConnectorResponse:
@@ -318,6 +326,14 @@ async def update_connector(
     if body.name is not None:
         connector.name = body.name
     if body.connected is not None:
+        if not body.connected:
+            # Disconnecting gives the grant up rather than shelving it: what the
+            # provider delegated to us goes back, and reconnecting asks for it
+            # again. Both calls are inert on a Connector that has no grant —
+            # every non-OAuth auth type, and an OAuth one that never finished —
+            # so neither needs an ``auth_type`` guard.
+            _revoke_grant_afterwards(background_tasks, connector)
+            grant.discard(connector)
         connector.connected = body.connected
     if body.disabled_tools is not None:
         # Not validated against the live tool list: that would cost a network
@@ -328,7 +344,7 @@ async def update_connector(
         # OAuth rows are refused above, and no other auth type skips the probe.
         connector.url = body.url
     credential = (
-        _apply_auth_change(connector, body) if auth_changed
+        _apply_auth_change(connector, background_tasks, body) if auth_changed
         else _decrypt_or_none(connector.encrypted_credential)
     )
 
@@ -381,12 +397,17 @@ def _reject_unprovisionable(
         )
 
 
-def _apply_auth_change(connector: MCPServer, body: ConnectorUpdate) -> str | None:
+def _apply_auth_change(
+    connector: MCPServer,
+    background_tasks: BackgroundTasks,
+    body: ConnectorUpdate,
+) -> str | None:
     """Swap the Connector's credential, returning the plaintext for the probe.
 
     The new auth type is never OAuth (:func:`_reject_unprovisionable` refused
     that), so whatever OAuth state the row still carries is now unreachable and
-    goes with it.
+    goes with it — the grant included, which makes this the third way a user
+    ends an authorization and so the third place the provider has to be told.
     """
     credential = _credential_plaintext(
         body.auth_type, body.credential, body.header_name
@@ -395,6 +416,7 @@ def _apply_auth_change(connector: MCPServer, body: ConnectorUpdate) -> str | Non
     connector.encrypted_credential = (
         encrypt_secret(credential) if credential is not None else None
     )
+    _revoke_grant_afterwards(background_tasks, connector)
     _clear_oauth_state(connector)
     return credential
 
@@ -429,11 +451,16 @@ async def create_connector_tool_listing(
 @router.delete("/connectors/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_connector(
     connector_id: int,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> None:
-    """Delete a Connector (its encrypted credential/tokens go with the row)."""
+    """Delete a Connector — its encrypted credential and grant go with the row."""
     connector = await _get_owned_connector(db, connector_id, current_user.id)
+    # No ``grant.discard`` here — the row is going, which clears the columns
+    # more thoroughly than any assignment would. The provider still has to be
+    # told, and this is the last moment anything knows what to tell it.
+    _revoke_grant_afterwards(background_tasks, connector)
     await db.delete(connector)
     await db.commit()
 
@@ -536,24 +563,98 @@ def _to_response(connector: MCPServer) -> ConnectorResponse:
 def _clear_oauth_state(connector: MCPServer) -> None:
     """Strip everything that makes a row an OAuth Connector.
 
-    Every ``oauth_*`` column, not just the secrets. The stored authorization
-    metadata matters as much: it is what the token refresher aims a rotation
-    at, and a row that keeps it is a row the refresher would keep working on
-    after the user replaced its credential.
+    Every ``oauth_*`` column, not just the secrets — :func:`grant.discard`'s
+    four, and then the three it deliberately keeps. Those matter as much here:
+    the stored metadata is what the token refresher aims a rotation at, and a
+    row keeping it is a row the refresher would keep working on after the user
+    replaced its credential with a static one.
 
     One function rather than a run of assignments so "did we clear all of it?"
     has somewhere to be answered, and a column added later has somewhere
     obvious to be added.
     """
+    grant.discard(connector)
     connector.oauth_client_encrypted = None
-    connector.oauth_tokens_encrypted = None
-    connector.oauth_tokens_expires_at = None
-    connector.oauth_refresh_after = None
     connector.oauth_scope = None
     connector.oauth_metadata = None
-    # A verdict about a grant that no longer exists. Left standing, the card
-    # offers "Reconnect" on a Connector whose authorize endpoint now 400s.
-    connector.oauth_reauthorization_required = False
+
+
+def _revoke_grant_afterwards(
+    background_tasks: BackgroundTasks, connector: MCPServer,
+) -> None:
+    """Arrange for the provider to be told that a grant is finished with.
+
+    After the response, not before it, and that ordering is the point. Dropping
+    our copy of the tokens is a local write the user is entitled to see happen
+    at once; telling the provider is a request to a third party that may be
+    slow or down, and making the user wait on it would turn "disconnect" into a
+    spinner over someone else's outage. Nothing here depends on the outcome —
+    our copy is gone either way — so a failure is a log line and no more.
+
+    Reads what the request needs *now*, while the row is still loaded and its
+    columns still populated, and hands the background task plain values. All
+    three callers are about to make the row unreadable: disconnecting and
+    converting to a static credential clear the columns, deleting takes the row.
+
+    Re-authorizing is deliberately *not* a fourth. It also replaces a grant, but
+    the replacement is already in hand, and RFC 7009 §2.1 lets a server revoke
+    every token issued to this client for this user rather than just the one
+    named — which on such a provider would revoke the grant we had just
+    obtained. Ending the old authorization is worth less than that risk; a user
+    switching accounts can revoke the old one at the provider.
+
+    Does nothing when there is nothing to say — no grant, no stored
+    authorization, a provider advertising no revocation endpoint, or a grant
+    that cannot be read. The last is why the reads are guarded rather than left
+    to raise: they are the first thing on these paths to need the encryption
+    key, so a Connector sealed under a key that has since been rotated would
+    become one the user can no longer disconnect *or* delete — the two things
+    they most need to do with a Connector that is broken.
+    """
+    try:
+        tokens = grant.stored_tokens(connector)
+        authorization = grant.stored_authorization(connector)
+    except Exception:
+        logger.warning(
+            "Connector %s: its stored grant could not be read, so the provider "
+            "cannot be told it is finished with", connector.id, exc_info=True,
+        )
+        return
+    if tokens is None or authorization is None:
+        return
+    metadata, client = authorization
+    if metadata.revocation_endpoint is None:
+        logger.info(
+            "Connector %s: its authorization server offers no revocation "
+            "endpoint; dropping our copy of the grant only", connector.id,
+        )
+        return
+    background_tasks.add_task(
+        _revoke_quietly, connector.id, metadata, client, tokens,
+    )
+
+
+async def _revoke_quietly(
+    connector_id: int,
+    metadata: OAuthMetadata,
+    client: OAuthClientInformationFull,
+    tokens: OAuthToken,
+) -> None:
+    """Revoke a grant, treating every failure as nothing more than news.
+
+    Total on purpose. It runs after the response has been sent, so there is
+    nobody left to tell — and Starlette re-raises what a background task
+    raises, which would log a request-shaped traceback for a request that
+    already succeeded.
+    """
+    try:
+        await oauth.revoke_grant(metadata, client, tokens=tokens)
+    except Exception:
+        logger.warning(
+            "Connector %s: could not revoke its grant at the provider; the "
+            "authorization may still be listed on the user's account",
+            connector_id, exc_info=True,
+        )
 
 
 async def _probe_after_authorization(

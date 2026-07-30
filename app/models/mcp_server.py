@@ -146,10 +146,19 @@ class MCPServer(Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
     # Whether the user currently has this Connector connected — i.e. whether its
-    # tools are handed to the agent each turn. Distinct from ``authorized``
-    # (OAuth tokens present): a Connector can hold valid tokens and still be
-    # disconnected, which is the point — disconnecting keeps the credentials so
-    # reconnecting costs nothing, whereas deleting throws them away.
+    # tools are handed to the agent each turn. For OAuth it moves with the grant
+    # rather than beside it: disconnecting gives the tokens up (and revokes them
+    # at the provider), so reconnecting means authorizing again. That is what a
+    # user takes "disconnect" to mean, and it is what Claude and Manus both do;
+    # the alternative kept a live refresh token for something the user believed
+    # they had ended. What survives is the row itself — the name, the URL, the
+    # per-tool switches, and the client registration — which is the whole
+    # difference from deleting it.
+    #
+    # Still its own column rather than derived from ``oauth_tokens_encrypted``:
+    # the other three auth types have a credential the *user* typed, which is
+    # theirs and not ours to throw away, so for those this is exactly the plain
+    # switch it always was.
     connected: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"),
     )

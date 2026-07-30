@@ -28,12 +28,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from mcp.shared.auth import OAuthClientInformationFull, OAuthMetadata
 from sqlalchemy import or_, select
 
 from app.database import AsyncSessionLocal
 from app.models.mcp_server import MCPServer, MCPServerAuthType
-from app.services.crypto import decrypt_secret
 from app.services.mcp import grant, oauth
 from config import settings
 
@@ -138,6 +136,13 @@ async def _list_due(db) -> list[int]:
     transaction that rotates, so anything else read here would be stale by the
     time it is used — :func:`_refresh_one` re-reads under its own lock.
 
+    Disconnected rows are left out, and for a reason that is not efficiency:
+    keeping a refresh token alive is what *maintains* an authorization, and a
+    user who disconnected a Connector meant us to stop holding one. Today the
+    disconnect endpoint drops the grant outright, so this filter mostly matches
+    nothing — it stands for rows disconnected before it did, and states in the
+    query the rule the endpoint enforces by hand.
+
     Rows already asking for re-authorization are left out. Their refresh token
     is known dead, so retrying it every tick would only spend requests to be
     refused, and the flag is cleared by the authorize flow that fixes it.
@@ -161,6 +166,7 @@ async def _list_due(db) -> list[int]:
     horizon = now + timedelta(seconds=settings.connector_refresh_ahead_seconds)
     query = select(MCPServer.id).where(
         MCPServer.auth_type == MCPServerAuthType.OAUTH,
+        MCPServer.connected.is_(True),
         MCPServer.oauth_tokens_encrypted.is_not(None),
         MCPServer.oauth_tokens_expires_at.is_not(None),
         MCPServer.oauth_tokens_expires_at < horizon,
@@ -269,8 +275,12 @@ async def _rotate(connector_id: int) -> tuple[bool, _Rotation | None]:
             return False, None  # deleted, or another replica has it
         if not _still_due(connector):
             return False, None  # a peer rotated it while this batch queued
-        authorization = _stored_authorization(connector)
+        authorization = grant.stored_authorization(connector)
         if authorization is None:
+            logger.warning(
+                "Connector %s has no stored authorization metadata; not "
+                "refreshing", connector_id,
+            )
             return False, None
         metadata, client = authorization
         tokens = grant.stored_tokens(connector)
@@ -412,32 +422,6 @@ def _still_due(connector: MCPServer) -> bool:
         return False
     horizon = now + timedelta(seconds=settings.connector_refresh_ahead_seconds)
     return connector.oauth_tokens_expires_at < horizon
-
-
-def _stored_authorization(
-    connector: MCPServer,
-) -> tuple[OAuthMetadata, OAuthClientInformationFull] | None:
-    """Where to send the refresh, and who to send it as.
-
-    Both were captured when the user authorized. ``None`` when either is
-    missing, which leaves the row alone: guessing a token endpoint would post
-    the refresh token — and the client secret under it — to whatever host the
-    Connector points at.
-    """
-    stored = connector.oauth_metadata or {}
-    authorization_server = stored.get("authorization_server")
-    if not authorization_server or not connector.oauth_client_encrypted:
-        logger.warning(
-            "Connector %s has no stored authorization metadata; not refreshing",
-            connector.id,
-        )
-        return None
-    return (
-        OAuthMetadata.model_validate(authorization_server),
-        OAuthClientInformationFull.model_validate_json(
-            decrypt_secret(connector.oauth_client_encrypted)
-        ),
-    )
 
 
 def _refuse(connector: MCPServer, why: str) -> None:

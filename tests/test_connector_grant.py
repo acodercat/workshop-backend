@@ -144,3 +144,48 @@ class TestWhichCallerIsWriting:
         )
 
         assert grant.stored_tokens(connector).refresh_token is None
+
+
+class TestGivingAGrantUp:
+    """Disconnecting hands the grant back rather than shelving it, so what
+    ``discard`` leaves behind decides what reconnecting costs."""
+
+    def test_nothing_store_tokens_wrote_survives_it(self):
+        # Asserted against ``store_tokens``'s own writes rather than a hand-kept
+        # list: the two are inverses, and a column added to one and not the
+        # other is exactly the bug worth catching.
+        connector = _connector()
+        grant.store_tokens(
+            connector,
+            OAuthToken(
+                access_token="a", token_type="Bearer",
+                refresh_token="r", expires_in=3600,
+            ),
+            rotation=False,
+        )
+        connector.oauth_refresh_after = datetime.now(timezone.utc)
+        connector.oauth_reauthorization_required = True
+
+        grant.discard(connector)
+
+        assert connector.oauth_tokens_encrypted is None
+        assert connector.oauth_tokens_expires_at is None
+        assert connector.oauth_refresh_after is None
+        assert connector.oauth_reauthorization_required is False
+
+    def test_what_the_connector_needs_to_authorize_again_is_kept(self):
+        # These belong to the Connector, not to any one grant. Dropping them
+        # would make every reconnect a fresh dynamic registration against a
+        # provider that already knows us.
+        connector = _connector()
+        connector.oauth_client_encrypted = "sealed-client"
+        connector.oauth_scope = "files:read"
+        connector.oauth_metadata = {"authorization_server": {"issuer": "https://as"}}
+
+        grant.discard(connector)
+
+        assert connector.oauth_client_encrypted == "sealed-client"
+        assert connector.oauth_scope == "files:read"
+        assert connector.oauth_metadata == {
+            "authorization_server": {"issuer": "https://as"}
+        }

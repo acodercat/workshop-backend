@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from cryptography.fernet import InvalidToken
+from fastapi import BackgroundTasks, HTTPException
 from mcp.shared.auth import (
     OAuthClientInformationFull,
     OAuthMetadata,
@@ -32,6 +33,7 @@ from app.services.mcp.oauth import (
     new_pkce,
     new_state,
     refresh_tokens,
+    revoke_grant,
 )
 
 
@@ -1309,6 +1311,97 @@ class TestRefreshingAGrant:
         assert not isinstance(caught.value, GrantRevoked)
 
 
+class TestRevokingAGrant:
+    """Dropping our copy stops us using a grant; only this ends it. Without it
+    the user finds an application they disconnected still authorized on their
+    account, holding a refresh token that outlives every trace of it here."""
+
+    _METADATA = OAuthMetadata(
+        issuer="https://as.example.com",
+        authorization_endpoint="https://as.example.com/authorize",
+        token_endpoint="https://as.example.com/token",
+        revocation_endpoint="https://as.example.com/revoke",
+        response_types_supported=["code"],
+    )
+
+    def _sent(self, monkeypatch, response: httpx.Response) -> dict:
+        captured: dict = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return response
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+        return captured
+
+    def _tokens(self, refresh_token: str | None):
+        from mcp.shared.auth import OAuthToken
+
+        return OAuthToken(
+            access_token="AT", token_type="Bearer", refresh_token=refresh_token,
+        )
+
+    async def test_it_sends_the_refresh_token_to_the_revocation_endpoint(
+        self, monkeypatch,
+    ):
+        # The refresh token rather than the access token: RFC 7009 §2.1 asks a
+        # server revoking one to invalidate the whole grant family behind it,
+        # so this single request ends the access tokens too. Revoking an access
+        # token would end that token and leave the refresh token minting more.
+        captured = self._sent(monkeypatch, httpx.Response(200))
+        client = OAuthClientInformationFull(
+            client_id="cid", client_secret="sek", redirect_uris=["https://app/cb"],
+            token_endpoint_auth_method="client_secret_post",
+        )
+
+        await revoke_grant(self._METADATA, client, tokens=self._tokens("R0"))
+
+        request = captured["request"]
+        assert str(request.url) == "https://as.example.com/revoke"
+        body = request.content.decode()
+        assert "token=R0" in body
+        assert "token_type_hint=refresh_token" in body
+        # Authenticated as at the token endpoint (RFC 7009 §2.1), so a
+        # confidential client is not silently refused.
+        assert "client_secret=sek" in body
+
+    async def test_a_grant_with_no_refresh_token_revokes_its_access_token(
+        self, monkeypatch,
+    ):
+        # Some providers issue no refresh token at all; revoking the only token
+        # they gave us is the most that can be said.
+        captured = self._sent(monkeypatch, httpx.Response(200))
+
+        await revoke_grant(self._METADATA, _client(), tokens=self._tokens(None))
+
+        body = captured["request"].content.decode()
+        assert "token=AT" in body
+        assert "token_type_hint=access_token" in body
+
+    async def test_an_unrecognised_token_is_success(self, monkeypatch):
+        # RFC 7009 §2.2 — already revoked, already expired and never valid all
+        # answer 200, and all mean the same thing to us: the provider is not
+        # holding it.
+        self._sent(monkeypatch, httpx.Response(200))
+
+        await revoke_grant(self._METADATA, _client(), tokens=self._tokens("R0"))
+
+    async def test_a_refusal_is_reported_rather_than_swallowed(self, monkeypatch):
+        # The caller decides what a failure is worth; this must not decide for
+        # it by returning as though the grant were gone.
+        self._sent(monkeypatch, httpx.Response(503, text="down"))
+
+        with pytest.raises(ConnectorOAuthError):
+            await revoke_grant(self._METADATA, _client(), tokens=self._tokens("R0"))
+
+    async def test_a_server_offering_no_endpoint_is_not_guessed_at(self):
+        # No fallback to the token endpoint or anywhere else: posting a refresh
+        # token to a URL that was never advertised for it is how a credential
+        # ends up somewhere it was not meant to go.
+        with pytest.raises(ConnectorOAuthError):
+            await revoke_grant(_metadata(), _client(), tokens=self._tokens("R0"))
+
+
 class TestStoringAFreshGrant:
     """The one rule for writing a grant onto a row, shared by the authorization
     callback and the token refresher — a difference between them would be a
@@ -2162,6 +2255,7 @@ class TestRepointingAnOAuthConnector:
         db = AsyncMock()
         return await endpoint.update_connector(
             request=MagicMock(), connector_id=1, body=body,
+            background_tasks=BackgroundTasks(),
             db=db, current_user=MagicMock(id=7),
         )
 
@@ -2274,3 +2368,285 @@ class TestSwitchingAwayFromOAuth:
             column for column in oauth_columns if getattr(connector, column)
         ]
         assert left_over == []
+
+
+class TestEndingAnAuthorization:
+    """Three things end one — disconnecting, converting to a static credential,
+    and deleting — and all three mean what the user takes them to mean: we stop
+    holding an authorization, and the provider stops holding one for us. Keeping
+    the tokens and merely hiding the tools would leave a live refresh token
+    behind something the user believes they have already ended."""
+
+    _AUTHORIZATION_SERVER = {
+        "issuer": "https://as.example.com",
+        "authorization_endpoint": "https://as.example.com/authorize",
+        "token_endpoint": "https://as.example.com/token",
+        "revocation_endpoint": "https://as.example.com/revoke",
+        "response_types_supported": ["code"],
+    }
+
+    def _connector(self, **over):
+        from app.models.mcp_server import MCPServer, MCPServerAuthType
+
+        base = dict(
+            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+            auth_type=MCPServerAuthType.OAUTH,
+            oauth_client_encrypted="sealed-client",
+            oauth_tokens_encrypted="sealed-tokens",
+            oauth_scope="files:read",
+            oauth_metadata={"authorization_server": self._AUTHORIZATION_SERVER},
+            oauth_tokens_expires_at=_NOW,
+            # Server defaults, which a transient object never materialises —
+            # the response model rejects them as NULL.
+            disabled_tools=[], advertised_icons=[], tool_count=0, connected=True,
+            oauth_reauthorization_required=False, last_connect_failed=False,
+            created_at=_NOW, updated_at=_NOW,
+        )
+        base.update(over)
+        return MCPServer(**base)
+
+    async def _patch(self, monkeypatch, connector, body):
+        """PATCH it, returning the background tasks the endpoint queued."""
+        from app.api.endpoints import mcp_server as endpoint
+        from app.rate_limit import limiter
+
+        monkeypatch.setattr(limiter, "enabled", False)
+
+        async def owned(*_args, **_kwargs):
+            return connector
+
+        monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
+        monkeypatch.setattr(endpoint, "_commit_or_conflict", AsyncMock())
+        # Every PATCH reads the static credential back, whether or not it is
+        # changing one. Nothing here is about crypto, so the seal is a no-op.
+        monkeypatch.setattr(endpoint, "decrypt_secret", lambda sealed: sealed)
+        background_tasks = BackgroundTasks()
+        await endpoint.update_connector(
+            request=MagicMock(), connector_id=1, body=body,
+            background_tasks=background_tasks,
+            db=AsyncMock(), current_user=MagicMock(id=7),
+        )
+        return background_tasks
+
+    def _stub_grant(self, monkeypatch, *, refresh_token="R0"):
+        """The row's sealed blobs, as their decrypted selves."""
+        from app.api.endpoints import mcp_server as endpoint
+        from mcp.shared.auth import OAuthToken
+
+        tokens = OAuthToken(
+            access_token="AT", token_type="Bearer", refresh_token=refresh_token,
+        )
+        monkeypatch.setattr(
+            endpoint.grant, "stored_tokens", lambda _row: tokens,
+        )
+        monkeypatch.setattr(
+            endpoint.grant, "decrypt_secret",
+            lambda _c: _client().model_dump_json(),
+        )
+        return tokens
+
+    async def test_the_grant_goes_and_the_registration_stays(self, monkeypatch):
+        # The split that makes reconnecting one browser round-trip rather than
+        # a fresh dynamic registration against a provider that already knows us.
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        self._stub_grant(monkeypatch)
+        connector = self._connector()
+
+        await self._patch(monkeypatch, connector, ConnectorUpdate(connected=False))
+
+        assert connector.connected is False
+        assert connector.oauth_tokens_encrypted is None
+        assert connector.oauth_tokens_expires_at is None
+        assert connector.oauth_client_encrypted == "sealed-client"
+        assert connector.oauth_metadata is not None
+
+    async def test_the_provider_is_told_after_the_response(self, monkeypatch):
+        # Queued rather than awaited: our copy is gone either way, so making
+        # the user wait would turn "disconnect" into a spinner over someone
+        # else's outage.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        tokens = self._stub_grant(monkeypatch)
+
+        queued = await self._patch(
+            monkeypatch, self._connector(), ConnectorUpdate(connected=False),
+        )
+
+        assert [task.func for task in queued.tasks] == [endpoint._revoke_quietly]
+        assert queued.tasks[0].args[-1] is tokens
+
+    async def test_reconnecting_is_left_to_the_authorize_flow(self, monkeypatch):
+        # ``connected=True`` restores nothing — there is nothing to restore.
+        # The client sees ``authorized`` go false and sends the user to the
+        # provider, which is the only thing that can mint a new grant.
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        self._stub_grant(monkeypatch)
+        connector = self._connector(
+            connected=False, oauth_tokens_encrypted=None,
+            oauth_tokens_expires_at=None,
+        )
+
+        queued = await self._patch(
+            monkeypatch, connector, ConnectorUpdate(connected=True),
+        )
+
+        assert connector.connected is True
+        assert connector.oauth_tokens_encrypted is None
+        assert queued.tasks == []
+
+    async def test_a_credential_the_user_typed_is_not_thrown_away(
+        self, monkeypatch,
+    ):
+        # The rule is "give back what the provider delegated to us", not "clear
+        # the row". A bearer token is the user's own secret, and discarding it
+        # would make disconnecting cost them a trip to find it again.
+        from app.models.mcp_server import MCPServerAuthType
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        connector = self._connector(
+            auth_type=MCPServerAuthType.BEARER,
+            encrypted_credential="sealed-bearer",
+            oauth_client_encrypted=None, oauth_tokens_encrypted=None,
+            oauth_scope=None, oauth_metadata=None, oauth_tokens_expires_at=None,
+        )
+
+        queued = await self._patch(
+            monkeypatch, connector, ConnectorUpdate(connected=False),
+        )
+
+        assert connector.encrypted_credential == "sealed-bearer"
+        assert queued.tasks == []
+
+    async def test_a_provider_offering_no_revocation_is_not_guessed_at(
+        self, monkeypatch,
+    ):
+        # Nothing is sent anywhere: an endpoint that was never advertised for a
+        # refresh token is not a place to post one. Our copy still goes.
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        self._stub_grant(monkeypatch)
+        without_revocation = {
+            key: value for key, value in self._AUTHORIZATION_SERVER.items()
+            if key != "revocation_endpoint"
+        }
+        connector = self._connector(
+            oauth_metadata={"authorization_server": without_revocation},
+        )
+
+        queued = await self._patch(
+            monkeypatch, connector, ConnectorUpdate(connected=False),
+        )
+
+        assert connector.oauth_tokens_encrypted is None
+        assert queued.tasks == []
+
+    async def test_deleting_tells_the_provider_too(self, monkeypatch):
+        # The same orphan, reached the other way: the row goes but the
+        # authorization would stay listed on the user's account.
+        from app.api.endpoints import mcp_server as endpoint
+
+        self._stub_grant(monkeypatch)
+
+        async def owned(*_args, **_kwargs):
+            return self._connector()
+
+        monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
+        background_tasks = BackgroundTasks()
+
+        await endpoint.delete_connector(
+            connector_id=1, background_tasks=background_tasks,
+            db=AsyncMock(), current_user=MagicMock(id=7),
+        )
+
+        assert [task.func for task in background_tasks.tasks] == [
+            endpoint._revoke_quietly
+        ]
+
+    async def test_a_provider_that_refuses_the_revocation_is_only_logged(
+        self, monkeypatch,
+    ):
+        # It runs after the response, so there is nobody left to tell — and
+        # Starlette re-raises what a background task raises, which would log a
+        # request-shaped traceback for a request that already succeeded.
+        from app.api.endpoints import mcp_server as endpoint
+
+        monkeypatch.setattr(
+            endpoint.oauth, "revoke_grant",
+            AsyncMock(side_effect=ConnectorOAuthError("nope")),
+        )
+
+        await endpoint._revoke_quietly(1, MagicMock(), MagicMock(), MagicMock())
+
+    async def test_converting_to_a_static_credential_tells_the_provider_too(
+        self, monkeypatch,
+    ):
+        # The third way a user ends an authorization. The grant is dropped here
+        # whatever happens — it is unreachable once the row is no longer OAuth —
+        # so the provider has to hear about it on this path as well.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.models.mcp_server import MCPServerAuthType
+        from app.schemas.mcp_server import ConnectorUpdate
+        from app.services.mcp.probe import ProbeResult
+
+        self._stub_grant(monkeypatch)
+        monkeypatch.setattr(endpoint, "encrypt_secret", lambda plain: plain)
+        monkeypatch.setattr(
+            endpoint, "probe",
+            AsyncMock(return_value=ProbeResult(server_name="s", tools=[])),
+        )
+        connector = self._connector()
+
+        queued = await self._patch(
+            monkeypatch, connector,
+            ConnectorUpdate(auth_type=MCPServerAuthType.BEARER, credential="tok"),
+        )
+
+        assert connector.oauth_tokens_encrypted is None
+        assert connector.oauth_client_encrypted is None
+        assert [task.func for task in queued.tasks] == [endpoint._revoke_quietly]
+
+    async def test_a_grant_that_cannot_be_read_still_lets_go(self, monkeypatch):
+        # Sealed under an encryption key that has since been rotated. Reading it
+        # is the first thing on this path to need that key, and failing here
+        # would leave the user unable to disconnect *or* delete the one kind of
+        # Connector they most need to be rid of.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.schemas.mcp_server import ConnectorUpdate
+
+        def unreadable(_ciphertext):
+            raise InvalidToken
+
+        monkeypatch.setattr(endpoint.grant, "decrypt_secret", unreadable)
+        connector = self._connector()
+
+        queued = await self._patch(
+            monkeypatch, connector, ConnectorUpdate(connected=False),
+        )
+
+        assert connector.connected is False
+        assert connector.oauth_tokens_encrypted is None
+        assert queued.tasks == []
+
+    async def test_deleting_one_that_cannot_be_read_still_works(self, monkeypatch):
+        from app.api.endpoints import mcp_server as endpoint
+
+        def unreadable(_ciphertext):
+            raise InvalidToken
+
+        monkeypatch.setattr(endpoint.grant, "decrypt_secret", unreadable)
+
+        async def owned(*_args, **_kwargs):
+            return self._connector()
+
+        monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
+        db = AsyncMock()
+
+        await endpoint.delete_connector(
+            connector_id=1, background_tasks=BackgroundTasks(),
+            db=db, current_user=MagicMock(id=7),
+        )
+
+        db.delete.assert_awaited_once()
