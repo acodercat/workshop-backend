@@ -328,16 +328,13 @@ async def update_connector(
         connector.name = body.name
     if body.connected is not None:
         if body.connected:
-            _reject_connecting_without_a_credential(connector)
+            _reject_connecting_without_a_grant(connector)
         else:
-            # Disconnecting gives the grant up rather than shelving it: what the
-            # provider delegated to us goes back, and reconnecting asks for it
-            # again. All three calls are inert on a Connector that has no grant
-            # — every non-OAuth auth type, and an OAuth one that never finished
-            # — so none of them needs an ``auth_type`` guard.
-            _revoke_grant_afterwards(background_tasks, connector)
-            grant.discard(connector)
-            await _stop_awaiting_authorization(redis, connector)
+            # Disconnecting gives the authorization up rather than shelving it:
+            # what the provider delegated to us goes back, and reconnecting asks
+            # for it again. How to *ask* is kept, which is the whole difference
+            # from deleting the Connector.
+            await _release_authorization(redis, background_tasks, connector)
         connector.connected = body.connected
     if body.disabled_tools is not None:
         # Not validated against the live tool list: that would cost a network
@@ -347,10 +344,12 @@ async def update_connector(
         # Guarded by ``probe`` below, which every surviving URL change reaches:
         # OAuth rows are refused above, and no other auth type skips the probe.
         connector.url = body.url
-    credential = (
-        _apply_auth_change(connector, background_tasks, body) if auth_changed
-        else _decrypt_or_none(connector.encrypted_credential)
-    )
+    if auth_changed:
+        credential = await _apply_auth_change(
+            redis, background_tasks, connector, body,
+        )
+    else:
+        credential = _decrypt_or_none(connector.encrypted_credential)
 
     # OAuth re-probe needs a live token (re-authorize instead); only non-OAuth
     # connectors are probed here.
@@ -364,7 +363,7 @@ async def update_connector(
     return _to_response(connector)
 
 
-def _reject_connecting_without_a_credential(connector: MCPServer) -> None:
+def _reject_connecting_without_a_grant(connector: MCPServer) -> None:
     """Refuse to connect an OAuth Connector that holds no grant.
 
     Connecting is a promise that the next turn can use it, and an OAuth row with
@@ -433,17 +432,18 @@ def _reject_unprovisionable(
         )
 
 
-def _apply_auth_change(
-    connector: MCPServer,
+async def _apply_auth_change(
+    redis: aioredis.Redis,
     background_tasks: BackgroundTasks,
+    connector: MCPServer,
     body: ConnectorUpdate,
 ) -> str | None:
     """Swap the Connector's credential, returning the plaintext for the probe.
 
     The new auth type is never OAuth (:func:`_reject_unprovisionable` refused
-    that), so whatever OAuth state the row still carries is now unreachable and
-    goes with it — the grant included, which makes this the third way a user
-    ends an authorization and so the third place the provider has to be told.
+    that), so every trace of the old one is now unreachable and goes: the
+    authorization, and then the standing to ask for another. Both halves, because
+    this is one of the three ways a user ends an authorization.
     """
     credential = _credential_plaintext(
         body.auth_type, body.credential, body.header_name
@@ -452,8 +452,8 @@ def _apply_auth_change(
     connector.encrypted_credential = (
         encrypt_secret(credential) if credential is not None else None
     )
-    _revoke_grant_afterwards(background_tasks, connector)
-    _clear_oauth_state(connector)
+    await _release_authorization(redis, background_tasks, connector)
+    _forget_how_to_authorize(connector)
     return credential
 
 
@@ -489,14 +489,16 @@ async def delete_connector(
     connector_id: int,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> None:
     """Delete a Connector — its encrypted credential and grant go with the row."""
     connector = await _get_owned_connector(db, connector_id, current_user.id)
-    # No ``grant.discard`` here — the row is going, which clears the columns
-    # more thoroughly than any assignment would. The provider still has to be
-    # told, and this is the last moment anything knows what to tell it.
-    _revoke_grant_afterwards(background_tasks, connector)
+    # Before the row goes, because this is the last moment anything can read what
+    # the provider has to be told. Clearing columns on a row about to be deleted
+    # is redundant, and left in anyway: one call at all three endings is worth
+    # more than saving three assignments at one of them.
+    await _release_authorization(redis, background_tasks, connector)
     await db.delete(connector)
     await db.commit()
 
@@ -596,20 +598,52 @@ def _to_response(connector: MCPServer) -> ConnectorResponse:
     return response
 
 
-def _clear_oauth_state(connector: MCPServer) -> None:
-    """Strip everything that makes a row an OAuth Connector.
+async def _release_authorization(
+    redis: aioredis.Redis,
+    background_tasks: BackgroundTasks,
+    connector: MCPServer,
+) -> None:
+    """Give up the authorization this Connector holds — all of it, at once.
 
-    Every ``oauth_*`` column, not just the secrets — :func:`grant.discard`'s
-    four, and then the three it deliberately keeps. Those matter as much here:
-    the stored metadata is what the token refresher aims a rotation at, and a
-    row keeping it is a row the refresher would keep working on after the user
-    replaced its credential with a static one.
+    One is held in three places and they have to be let go together: the grant on
+    the row, the provider's record of it, and any flow still in the air that
+    would produce a new one. Three things end an authorization — disconnecting,
+    converting to a static credential, deleting — and each used to name its own
+    subset, so each arrived at a different one and the gaps were covered only by
+    accident: the callback's client-ciphertext fence happened to catch the
+    conversion, a missing row happened to catch the delete. Either of those
+    changing would have regressed a path with nothing to notice it.
 
-    One function rather than a run of assignments so "did we clear all of it?"
-    has somewhere to be answered, and a column added later has somewhere
-    obvious to be added.
+    Every step is inert when there is nothing to do, so no caller needs a guard.
+    A Connector with no grant has none to revoke and none to clear; one with no
+    flow in the air has no key to delete; and every non-OAuth auth type is both.
+
+    What it deliberately does not touch is how to obtain the *next* one — see
+    :func:`_forget_how_to_authorize`, which only the conversion wants.
     """
+    _revoke_grant_afterwards(background_tasks, connector)
     grant.discard(connector)
+    await _stop_awaiting_authorization(redis, connector)
+
+
+def _forget_how_to_authorize(connector: MCPServer) -> None:
+    """Drop what the row needs to obtain an authorization at all.
+
+    The client registration, the scope and the discovery metadata: not the
+    authorization but the standing to ask for one. Kept across a disconnect,
+    which is what makes reconnecting a single browser round-trip; dropped when
+    the Connector stops being an OAuth Connector, because then nothing can reach
+    them again.
+
+    The metadata is the one that bites. It is what the token refresher aims a
+    rotation at, so a row that keeps it is a row the refresher would go on
+    working after the user replaced its credential with a static one.
+
+    Together with :func:`_release_authorization` this is every ``oauth_*``
+    column, which is the pair a conversion calls — and the reason each has a
+    docstring saying which half it owns, so a column added later has one obvious
+    home rather than two plausible ones.
+    """
     connector.oauth_client_encrypted = None
     connector.oauth_scope = None
     connector.oauth_metadata = None
@@ -628,11 +662,11 @@ def _revoke_grant_afterwards(
     our copy is gone either way — so a failure is a log line and no more.
 
     Reads what the request needs *now*, while the row is still loaded and its
-    columns still populated, and hands the background task plain values. All
-    three callers are about to make the row unreadable: disconnecting and
-    converting to a static credential clear the columns, deleting takes the row.
+    columns still populated, and hands the background task plain values. Its one
+    caller clears those columns on the next line, which is why the ordering
+    inside :func:`_release_authorization` is not incidental.
 
-    Re-authorizing is deliberately *not* a fourth. It also replaces a grant, but
+    Re-authorizing is deliberately not an ending. It also replaces a grant, but
     the replacement is already in hand, and RFC 7009 §2.1 lets a server revoke
     every token issued to this client for this user rather than just the one
     named — which on such a provider would revoke the grant we had just
@@ -675,12 +709,12 @@ async def _stop_awaiting_authorization(
 ) -> None:
     """Give up on any authorization still in the air for this Connector.
 
-    Clearing the grant is not enough on its own. An authorization the user
-    started before disconnecting keeps its own ``state`` in Redis for the whole
-    TTL, and every check the callback makes would still pass — the client
-    registration it compares against is deliberately kept — so the flow would
-    come back minutes later, write a grant, and set ``connected`` again. The
-    user's last action would lose to their second-to-last.
+    Clearing the grant is not enough on its own. A flow the user started earlier
+    keeps its own ``state`` in Redis for the whole TTL, so it would come back
+    minutes later, write a grant, and set ``connected`` again — their last action
+    losing to their second-to-last. Disconnecting is where that bites hardest,
+    because the client registration the callback fences on is deliberately kept,
+    so nothing further along would have refused it.
 
     Deleting the pointer is what says "waiting for nothing", and
     :func:`_reject_an_unawaited_authorization` reads that as a refusal. The
@@ -904,13 +938,13 @@ async def _reject_an_unawaited_authorization(
     both are written in the same handler with the same TTL, the pending one
     first, so it is always the first to expire.
 
-    The other endings already refuse on their own. Deleting the Connector makes
-    the callback 404, and converting it to a static credential moves
-    ``oauth_client_encrypted``, which
-    :func:`_locked_connector_for_grant` compares. Disconnecting is the one that
-    slipped through, precisely because it *keeps* the client registration — the
-    thing that makes reconnecting cheap is the thing that left the flow looking
-    legitimate.
+    Every ending reaches this, because every ending goes through
+    :func:`_release_authorization`. Two of them would also be caught further on —
+    a deleted Connector 404s, a converted one moves the ciphertext
+    :func:`_locked_connector_for_grant` compares — but those are consequences
+    rather than intentions, and the third, disconnecting, has neither: it keeps
+    the client registration on purpose. One rule that fires for all three beats
+    three accidents, two of which happen to work.
 
     Asked twice: once on the way in, to spend nothing on a flow already known to
     be stale, and again from inside :func:`_locked_connector_for_grant`, where

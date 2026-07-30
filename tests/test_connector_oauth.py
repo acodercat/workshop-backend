@@ -2404,13 +2404,18 @@ class TestSwitchingAwayFromOAuth:
     """Converting a Connector to a static credential must leave nothing an
     OAuth code path can still act on."""
 
-    def test_every_oauth_column_is_cleared(self):
+    async def test_every_oauth_column_is_cleared(self, monkeypatch):
         # The stored metadata is the one that bites: left behind, the token
-        # refresher still knows where to aim a rotation and would write an
-        # OAuth token back onto a row the user just converted to a static
-        # credential.
-        from app.api.endpoints.mcp_server import _clear_oauth_state
+        # refresher still knows where to aim a rotation and would write an OAuth
+        # token back onto a row the user just converted to a static credential.
+        #
+        # Driven through the endpoint rather than the helper that does the
+        # clearing. Two helpers share the job — one owns the authorization, the
+        # other the standing to ask for one — so a test naming either of them
+        # would pass while the conversion path called only that one.
+        from app.api.endpoints import mcp_server as endpoint
         from app.models.mcp_server import MCPServer, MCPServerAuthType
+        from app.schemas.mcp_server import ConnectorUpdate
 
         # Every ``oauth_*`` column gets a truthy value first. A fixture that
         # leaves one unset cannot catch a clear that misses it — on a transient
@@ -2420,19 +2425,20 @@ class TestSwitchingAwayFromOAuth:
             column for column in MCPServer.__table__.columns.keys()
             if column.startswith("oauth_")
         ]
-        connector = MCPServer(
-            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
-            auth_type=MCPServerAuthType.OAUTH,
-        )
+        connector = _stored_connector()
         marks = {
-            "oauth_tokens_expires_at": datetime(2026, 7, 29, tzinfo=timezone.utc),
-            "oauth_metadata": {"authorization_server": {}},
+            "oauth_tokens_expires_at": _NOW,
+            "oauth_metadata": {"authorization_server": _AUTHORIZATION_SERVER},
             "oauth_reauthorization_required": True,
         }
         for column in oauth_columns:
             setattr(connector, column, marks.get(column, "set"))
+        monkeypatch.setattr(endpoint, "encrypt_secret", lambda plain: plain)
 
-        _clear_oauth_state(connector)
+        await _patch_connector(
+            monkeypatch, connector,
+            ConnectorUpdate(auth_type=MCPServerAuthType.BEARER, credential="tok"),
+        )
 
         left_over = [
             column for column in oauth_columns if getattr(connector, column)
@@ -2621,7 +2627,7 @@ class TestEndingAnAuthorization:
 
         await endpoint.delete_connector(
             connector_id=1, background_tasks=background_tasks,
-            db=AsyncMock(), current_user=MagicMock(id=7),
+            db=AsyncMock(), redis=AsyncMock(), current_user=MagicMock(id=7),
         )
 
         assert [task.func for task in background_tasks.tasks] == [
@@ -2709,7 +2715,7 @@ class TestEndingAnAuthorization:
 
         await endpoint.delete_connector(
             connector_id=1, background_tasks=BackgroundTasks(),
-            db=db, current_user=MagicMock(id=7),
+            db=db, redis=AsyncMock(), current_user=MagicMock(id=7),
         )
 
         db.delete.assert_awaited_once()
@@ -2730,6 +2736,51 @@ class TestEndingAnAuthorization:
         await _patch_connector(
             monkeypatch, _stored_connector(), ConnectorUpdate(connected=False),
             redis=redis,
+        )
+
+        redis.delete.assert_awaited_once_with(oauth_current_state_key(1))
+
+    async def test_converting_also_retires_a_flow_in_the_air(self, monkeypatch):
+        # What the split calls used to miss. A conversion was covered only by
+        # accident — the callback fences the write on ``oauth_client_encrypted``,
+        # which a conversion clears — so the flow was refused for a reason that
+        # had nothing to do with the user's intent, and would stop being refused
+        # the day that column stopped being cleared.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.models.mcp_server import MCPServerAuthType
+        from app.schemas.mcp_server import ConnectorUpdate
+        from app.services.redis import oauth_current_state_key
+
+        self._stub_grant(monkeypatch)
+        monkeypatch.setattr(endpoint, "encrypt_secret", lambda plain: plain)
+        redis = AsyncMock()
+
+        await _patch_connector(
+            monkeypatch, _stored_connector(),
+            ConnectorUpdate(auth_type=MCPServerAuthType.BEARER, credential="tok"),
+            redis=redis,
+        )
+
+        redis.delete.assert_awaited_once_with(oauth_current_state_key(1))
+
+    async def test_deleting_also_retires_a_flow_in_the_air(self, monkeypatch):
+        # Likewise: covered only by the callback failing to find the row. Leaving
+        # the pointer behind also leaves a Redis key naming a Connector that no
+        # longer exists, for the rest of its TTL.
+        from app.api.endpoints import mcp_server as endpoint
+        from app.services.redis import oauth_current_state_key
+
+        self._stub_grant(monkeypatch)
+
+        async def owned(*_args, **_kwargs):
+            return _stored_connector()
+
+        monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
+        redis = AsyncMock()
+
+        await endpoint.delete_connector(
+            connector_id=1, background_tasks=BackgroundTasks(),
+            db=AsyncMock(), redis=redis, current_user=MagicMock(id=7),
         )
 
         redis.delete.assert_awaited_once_with(oauth_current_state_key(1))
