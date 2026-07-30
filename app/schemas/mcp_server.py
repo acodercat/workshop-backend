@@ -34,6 +34,25 @@ MAX_DISABLED_TOOLS = 256
 ToolName = Annotated[str, Field(min_length=1, max_length=MAX_TOOL_NAME_LEN)]
 
 
+class ConnectorIcon(BaseModel):
+    """One icon a server advertises for itself (SEP-973).
+
+    Sanitized at probe time (``probe._usable_icons``) rather than validated here:
+    by the time it reaches this model the scheme has already been checked and the
+    fields copied by name, so this is a shape declaration and nothing more.
+
+    ``sizes`` is the spec's own form — a list of ``"48x48"`` strings, or
+    ``["any"]`` for something scalable — and ``theme`` says which colour scheme
+    the icon's background suits. Both are what let the client hand the choice to
+    the browser instead of making it.
+    """
+
+    src: str
+    mime_type: str | None = None
+    sizes: list[str] | None = None
+    theme: str | None = None
+
+
 class ConnectorResponse(BaseModel):
     """A Connector as returned to the client. Never exposes the credential."""
 
@@ -45,9 +64,12 @@ class ConnectorResponse(BaseModel):
     auth_type: str
     tool_count: int
     tools_preview: list[dict[str, str]] | None
-    # The server's own icon, when it advertises one (SEP-973). Distinct from
-    # the catalog entry's curated ``icon_url``, which the client prefers.
-    advertised_icon_url: str | None = None
+    # The icons the server advertises for itself (SEP-973), all of them, in the
+    # order offered. Distinct from the catalog entry's curated ``icon_url``,
+    # which the client prefers when there is one; these are what the server says
+    # about itself, and the client chooses among them by pixel density and
+    # colour scheme.
+    advertised_icons: list[ConnectorIcon] = Field(default_factory=list)
     # Bare server-side names the user switched off. Same name as the column on
     # purpose, like ``oauth_reauthorization_required`` below.
     disabled_tools: list[ToolName] = Field(default_factory=list)

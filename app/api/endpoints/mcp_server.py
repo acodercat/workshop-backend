@@ -590,7 +590,7 @@ def _apply_probe(connector: MCPServer, result: ProbeResult) -> None:
     """
     connector.tool_count = len(result.tools)
     connector.tools_preview = result.tools
-    connector.advertised_icon_url = result.icon_url
+    connector.advertised_icons = result.icons
     # Reaching here means the handshake completed, which is what the worker's
     # per-turn connect proves too — so a user who fixes a broken URL sees the
     # badge go at once rather than after the next turn. Never set here: a

@@ -95,62 +95,114 @@ class TestProbe:
             await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
 
 
-class TestServerIcon:
-    """``serverInfo.icons`` (SEP-973) gives a connector its own artwork; only
-    sources the browser can load directly are kept."""
+class TestServerIcons:
+    """``serverInfo.icons`` (SEP-973) gives a connector its own artwork. Every
+    source the browser can load directly is kept, because which one is best
+    depends on the device and the colour scheme — and only the browser knows
+    those."""
 
-    def _server_info(self, *srcs):
-        from types import SimpleNamespace
+    def _server_info(self, *icons):
+        """A ``serverInfo`` whose icons are the given dicts, SDK-shaped."""
+        from mcp.types import Icon, Implementation
 
-        return SimpleNamespace(
-            icons=[SimpleNamespace(src=src) for src in srcs]
+        return Implementation(
+            name="s",
+            version="1",
+            icons=[Icon.model_validate(icon) for icon in icons],
         )
 
-    def test_takes_an_https_icon(self):
-        from app.services.mcp.probe import _usable_icon
+    def _srcs(self, server_info):
+        from app.services.mcp.probe import _usable_icons
 
-        assert _usable_icon(self._server_info("https://cdn.example.com/i.png")) == (
-            "https://cdn.example.com/i.png"
+        return [icon["src"] for icon in _usable_icons(server_info)]
+
+    def test_keeps_every_usable_candidate_in_order(self):
+        # The point of the change: the browser needs the whole set to choose
+        # from, so a first-usable scan threw away what the choice depends on.
+        assert self._srcs(
+            self._server_info(
+                {"src": "https://cdn.example.com/48.png", "sizes": ["48x48"]},
+                {"src": "https://cdn.example.com/96.png", "sizes": ["96x96"]},
+            )
+        ) == ["https://cdn.example.com/48.png", "https://cdn.example.com/96.png"]
+
+    def test_carries_the_fields_the_browser_chooses_by(self):
+        from app.services.mcp.probe import _usable_icons
+
+        [icon] = _usable_icons(
+            self._server_info({
+                "src": "https://cdn.example.com/i.png",
+                "mimeType": "image/png",
+                "sizes": ["48x48"],
+                # Not modelled by the SDK, so it arrives as an extra field —
+                # dropping it would take dark-mode support with it.
+                "theme": "dark",
+            })
         )
+
+        assert icon == {
+            "src": "https://cdn.example.com/i.png",
+            "mime_type": "image/png",
+            "sizes": ["48x48"],
+            "theme": "dark",
+        }
+
+    def test_copies_by_name_rather_than_forwarding(self):
+        # Otherwise a server parks arbitrary JSON in our column.
+        from app.services.mcp.probe import _usable_icons
+
+        [icon] = _usable_icons(
+            self._server_info(
+                {"src": "https://cdn.example.com/i.png", "nonsense": {"deep": [1]}}
+            )
+        )
+
+        assert set(icon) == {"src", "mime_type", "sizes", "theme"}
 
     def test_takes_an_inline_image_data_uri(self):
-        from app.services.mcp.probe import _usable_icon
-
         src = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="
-        assert _usable_icon(self._server_info(src)) == src
+        assert self._srcs(self._server_info({"src": src})) == [src]
 
     def test_skips_sources_the_browser_should_not_load(self):
-        from app.services.mcp.probe import _usable_icon
-
         for bad in (
             "http://cdn.example.com/i.png",       # plaintext
             "javascript:alert(1)",                 # not an image at all
             "data:text/html,<script>x</script>",   # data URI, wrong type
             "file:///etc/passwd",
         ):
-            assert _usable_icon(self._server_info(bad)) is None
+            assert self._srcs(self._server_info({"src": bad})) == []
 
-    def test_skips_an_oversize_payload(self):
-        from app.services.mcp.probe import _MAX_ICON_SRC_LEN, _usable_icon
+    def test_skips_an_oversize_payload_but_keeps_its_neighbours(self):
+        from app.services.mcp.probe import _MAX_ICON_SRC_LEN
 
-        assert _usable_icon(
-            self._server_info("data:image/png;base64," + "A" * _MAX_ICON_SRC_LEN)
-        ) is None
+        assert self._srcs(
+            self._server_info(
+                {"src": "data:image/png;base64," + "A" * _MAX_ICON_SRC_LEN},
+                {"src": "https://ok.example.com/i.png"},
+            )
+        ) == ["https://ok.example.com/i.png"]
 
-    def test_falls_through_to_the_first_usable_one(self):
-        from app.services.mcp.probe import _usable_icon
+    def test_the_count_is_bounded(self):
+        # Stored and re-serialized into every connector response, so a server
+        # cannot make that list as long as it likes.
+        from app.services.mcp.probe import _MAX_ICONS
 
-        assert _usable_icon(
-            self._server_info("file:///x", "https://ok.example.com/i.png")
-        ) == "https://ok.example.com/i.png"
+        assert len(
+            self._srcs(
+                self._server_info(
+                    *[
+                        {"src": f"https://cdn.example.com/{n}.png"}
+                        for n in range(_MAX_ICONS + 5)
+                    ]
+                )
+            )
+        ) == _MAX_ICONS
 
     def test_no_icons_is_not_an_error(self):
-        from types import SimpleNamespace
+        from app.services.mcp.probe import _usable_icons
 
-        from app.services.mcp.probe import _usable_icon
-
-        assert _usable_icon(SimpleNamespace(icons=None)) is None
-        assert _usable_icon(None) is None
+        assert _usable_icons(self._server_info()) == []
+        assert _usable_icons(None) == []
 
 
 class TestProbePagination:

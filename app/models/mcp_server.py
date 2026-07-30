@@ -131,7 +131,12 @@ class MCPServer(Base):
     # What the server advertises for itself in ``serverInfo.icons`` (SEP-973),
     # captured at probe time. The UI prefers a curated catalog icon over this,
     # and falls back to the built-in glyph when neither exists.
-    advertised_icon_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Every usable icon the server advertised at the last probe (SEP-973), in
+    # the order it offered them. A list because the client picks by pixel
+    # density and colour scheme, which is a decision only the browser can make.
+    advertised_icons: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+    )
     # Bare server-side names of the tools the user switched off; everything else
     # the server exposes stays available. Exceptions rather than a selection, so
     # a tool the server adds later is available at once and one it drops leaves

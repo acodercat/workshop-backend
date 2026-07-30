@@ -1106,14 +1106,16 @@ class TestResponseMapping:
             # NOT NULL columns: a loaded row always has these, but SQLAlchemy
             # applies its Python-side defaults at flush, not at construction.
             tool_count=0, disabled_tools=[], created_at=now, updated_at=now,
-            advertised_icon_url="https://cdn.example.com/notion.png",
+            advertised_icons=[{"src": "https://cdn.example.com/notion.png"}],
         )
         response = _to_response(connector)
 
         assert response.oauth_reauthorization_required is True
         assert response.last_connect_failed is True
         assert response.disabled_tools == []
-        assert response.advertised_icon_url == "https://cdn.example.com/notion.png"
+        assert [icon.src for icon in response.advertised_icons] == [
+            "https://cdn.example.com/notion.png"
+        ]
         assert response.authorized is True  # tokens present, but the grant is dead
 
     def test_a_reachable_probe_clears_the_unreachable_flag(self):
@@ -2173,7 +2175,7 @@ class TestRepointingAnOAuthConnector:
             oauth_scope="files:read",
             # Server defaults, which a transient object never materialises —
             # the response model rejects them as NULL.
-            disabled_tools=[], tool_count=0, connected=True,
+            disabled_tools=[], advertised_icons=[], tool_count=0, connected=True,
             oauth_reauthorization_required=False, last_connect_failed=False,
             created_at=_NOW, updated_at=_NOW,
         )

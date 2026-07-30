@@ -9,7 +9,7 @@ SDK directly — the backend does not depend on axon. All failures collapse to
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mcp import ClientSession
 from mcp.types import Implementation, Tool
@@ -44,12 +44,22 @@ _MAX_DESCRIPTION_CHARS = 500
 # every connector-list response for no visual gain. Comfortably fits a real SVG.
 _MAX_ICON_SRC_LEN = 4096
 
+# How many of a server's icons to keep. Keeping more than one exists so the
+# browser can choose by pixel density and colour scheme, which needs a handful —
+# two themes times a few resolutions. Past that it is a server handing us a list
+# to store and re-serialize on every request.
+_MAX_ICONS = 8
+
 
 @dataclass(frozen=True)
 class ProbeResult:
     server_name: str
     tools: list[dict[str, str]]  # ``[{"name": ..., "description": ...}]``
-    icon_url: str | None = None  # from ``serverInfo.icons`` (SEP-973), if usable
+    # Every usable icon the server advertises (SEP-973), not the best of them:
+    # which is best depends on the viewer's pixel density and colour scheme, and
+    # neither is knowable here. The browser chooses — see ``ConnectorIcon`` on
+    # the client — so this side sanitizes and passes on.
+    icons: list[dict] = field(default_factory=list)
 
 
 def build_auth_headers(
@@ -196,25 +206,48 @@ async def _probe(
     return ProbeResult(
         server_name=server_name,
         tools=tools,
-        icon_url=_usable_icon(server_info),
+        icons=_usable_icons(server_info),
     )
 
 
-def _usable_icon(server_info: Implementation | None) -> str | None:
-    """The server's own icon (SEP-973), if it offers one we can safely render.
+def _usable_icons(server_info: Implementation | None) -> list[dict]:
+    """The server's icons (SEP-973), reduced to the ones we can safely render.
 
-    Takes the first icon whose ``src`` the browser can load directly: an https
-    URL or an inline ``data:image/`` URI. Anything else — other schemes, or a
-    payload past :data:`_MAX_ICON_SRC_LEN` — is skipped, and the caller falls
-    back to the built-in glyph. No SSRF concern: the browser fetches this, our
-    server never does.
+    All of them, not the first that looks usable. Choosing is the browser's job:
+    it knows the device's pixel density and the user's colour scheme, and has
+    ``srcset`` and ``prefers-color-scheme`` to act on them. Nothing on this side
+    knows either, so picking here can only be a guess that overrides a decision
+    the browser would have made correctly.
+
+    Filtered rather than forwarded. ``src`` must be an https URL or an inline
+    ``data:image/`` URI — rejecting other schemes is a MUST in the spec, and
+    ``javascript:`` is why. Length and count are bounded because this list is
+    stored and re-serialized into every connector response. Fields are copied by
+    name, so a server cannot park arbitrary JSON in our column.
+
+    No SSRF concern: the browser fetches these, this server never does. It does
+    mean a cross-origin ``src`` lets that host see the viewer's IP. The spec
+    would rather clients required same-origin, but hosting icons on a CDN is
+    both common and encouraged for reachability, so the cost is taken instead
+    and the fetch carries no credentials or referrer (see ``ConnectorIcon``).
     """
     if server_info is None:
-        return None
+        return []
+    usable: list[dict] = []
     for icon in server_info.icons or []:
+        if len(usable) == _MAX_ICONS:
+            break
         src = icon.src.strip()
         if len(src) > _MAX_ICON_SRC_LEN:
             continue
-        if src.startswith("https://") or src.startswith("data:image/"):
-            return src
-    return None
+        if not (src.startswith("https://") or src.startswith("data:image/")):
+            continue
+        usable.append({
+            "src": src,
+            "mime_type": icon.mimeType,
+            "sizes": icon.sizes,
+            # Not modelled by the SDK yet, so it arrives as an extra field.
+            # Worth carrying: it is what lets the client offer a dark variant.
+            "theme": (icon.model_extra or {}).get("theme"),
+        })
+    return usable
