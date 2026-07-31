@@ -1,6 +1,13 @@
 """mcp_server.oauth_refresh_after
 
-The earliest moment the token refresher may try this Connector again.
+The earliest moment this Connector's grant may be renewed again.
+
+It carries that one meaning for two callers. For the backend's token refresher it
+is a backoff: how long to leave a Connector alone after a failure. For the
+worker it is also a **claim** — a renewal writes ``now + 30s`` here before
+spending the refresh token, so a peer that locks the row mid-request sees the
+window and adopts the result instead of presenting the same single-use token. A
+successful renewal clears it to NULL.
 
 Until now that answer was inferred from ``oauth_tokens_expires_at``: a row was
 due whenever its access token expired within ``connector_refresh_ahead_seconds``
@@ -29,9 +36,10 @@ rather than something two different pieces of code infer separately.
 NULL means "no opinion, judge by expiry alone" — which is every existing row, so
 there is nothing to backfill.
 
-**Deploy note: apply before deploying the backend.** The refresher's due query
-filters on this column; on an old schema every tick raises and no Connector's
-grant is renewed at all.
+**Deploy note: apply before deploying either service.** The refresher's due
+query filters on this column and the worker's renewal claims with it; on an old
+schema every tick raises, and so does every OAuth Connector a turn tries to
+renew.
 
 Revision ID: a2e6f4b8c917
 Revises: f7c3b9e1a204

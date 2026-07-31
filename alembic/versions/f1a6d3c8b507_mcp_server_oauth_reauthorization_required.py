@@ -12,14 +12,22 @@ prefix of its siblings because only the OAuth path can ever set it.
 Existing rows default to ``false`` — the flag only ever becomes true after the
 refresher is told ``invalid_grant``, so backfilling is meaningless.
 
-**Deploy note: apply this BEFORE deploying the backend.** Its token refresher
-writes the column and its due query filters on it, so on an old schema every
-tick raises and no Connector's grant is renewed at all.
+Both services read it and both write it. The backend's refresher sets it when
+told ``invalid_grant``; the worker sets it when a mid-turn renewal is refused the
+same way, and reads it to skip spending a request on a grant already judged dead.
+Neither ever clears it — only a fresh interactive authorization does, which is
+the backend's authorize flow.
 
-The worker does not read it, deliberately: a flagged Connector is one the *user*
-has to fix, not one a turn should decline to try, so the worker presents whatever
-access token the row carries either way. That also means the worker is
-indifferent to this migration's timing.
+The worker also tells the user about it, which is the point of writing it there:
+a flagged Connector gets a system reminder naming it, so the model can send them
+to the Connectors page rather than retrying a tool that cannot work. Its tools
+are dropped from that turn's catalog only if its access token has *also* expired;
+a flag says the refresh token is dead, and the access token under it can still
+have an hour left.
+
+**Deploy note: apply this BEFORE deploying either service.** Both read and write
+the column, so on an old schema the refresher's every tick raises and so does
+every OAuth Connector the worker tries to connect.
 
 Revision ID: f1a6d3c8b507
 Revises: e2c7a3f5b184

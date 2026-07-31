@@ -6,10 +6,12 @@ When the stored OAuth access token stops being valid.
 recorded — so nothing in ``oauth_tokens_encrypted`` can answer "is this token
 still good?" after the process that fetched it is gone.
 
-This is what the background token refresher selects on
-(``app/workers/connector_token_refresher.py``): a grant with no deadline is one
-nothing ever renews, so its access token simply dies and the user is sent back
-to the browser.
+This is the column that says whether a token still needs renewing. Both
+services read it: the backend's token refresher selects on it, and the worker
+reads it per turn to decide whether to renew a Connector's grant before the
+handshake — and writes it after one. A grant with no deadline is one nothing
+ever renews, so its access token simply dies and the user is sent back to the
+browser.
 
 Absolute, not a duration, so it survives being read by a different process at a
 different time — which is the whole point.
@@ -22,8 +24,10 @@ an hour later, find nothing to rotate with, and ask the user to re-authorize a
 token that had not expired. A grant that *can* be renewed and states no
 lifetime gets the assumption, since acting early costs one request.
 
-**Deploy note: apply before deploying the backend**, whose token refresher
-selects on this column — an old schema means nothing is ever renewed.
+**Deploy note: apply before deploying either service.** The backend's token
+refresher selects on this column and the worker reads and writes it on every
+OAuth Connector it connects; on an old schema the refresher renews nothing and
+every such connect attempt raises.
 
 Revision ID: c8f4a1d6e207
 Revises: b5c9e2f7a184
