@@ -189,8 +189,8 @@ async def create_connector_authorization(
             "issuer": discovered.issuer_as_published,
             "iss_advertised": discovered.iss_parameter_supported,
             # Carried so the callback exchanges the code without repeating the
-            # multi-request discovery, and then stores it on the row for the
-            # token refresher to aim rotations at.
+            # multi-request discovery, and then stores it on the row for a later
+            # renewal to aim its rotation at.
             "discovered": discovered.as_stored(),
         }),
         ex=settings.mcp_oauth_state_ttl_seconds,
@@ -273,9 +273,9 @@ async def oauth_callback(
     connector = await _locked_connector_for_grant(
         db, redis, pending, body.state, authorizing_client,
     )
-    grant.store_tokens(connector, tokens, rotation=False)
-    # Where the token refresher will aim its rotations. Without it there is
-    # nothing safe to guess from, so it would leave the Connector alone.
+    grant.store_tokens(connector, tokens)
+    # Where a later renewal aims its rotation. Without it there is nothing safe
+    # to guess from, so renewal would leave the Connector alone.
     connector.oauth_metadata = stored
     connector.connected = True
     # A fresh grant is exactly what the flag was asking for.
@@ -645,9 +645,9 @@ def _forget_how_to_authorize(connector: MCPServer) -> None:
     the Connector stops being an OAuth Connector, because then nothing can reach
     them again.
 
-    The metadata is the one that bites. It is what the token refresher aims a
-    rotation at, so a row that keeps it is a row the refresher would go on
-    working after the user replaced its credential with a static one.
+    The metadata is the one that bites. It is what a renewal aims its rotation
+    at, so a row that keeps it is a row renewal would go on working after the
+    user replaced its credential with a static one.
 
     Together with :func:`_release_authorization` this is every ``oauth_*``
     column, which is the pair a conversion calls — and the reason each has a

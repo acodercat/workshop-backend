@@ -82,17 +82,19 @@ class MCPServer(Base):
     # ``oauth_client_encrypted``: Fernet JSON of the SDK ``OAuthClientInformationFull``
     # (client_id/secret, from DCR or manual). ``oauth_tokens_encrypted``: Fernet
     # JSON of the SDK ``OAuthToken`` (access/refresh/expiry); NULL until the user
-    # authorizes, then rotated in place by the background token refresher — the
-    # only thing allowed to spend a refresh token. ``oauth_scope``: the
-    # requested scope string. Credentials are never returned to the client.
+    # authorizes, then renewed in place by the agent worker, on demand during a
+    # turn. A refresh token is single-use, so exactly one party may spend it, and
+    # what guarantees that is a claim on ``oauth_refresh_after`` below.
+    # ``oauth_scope``: the requested scope string. Credentials are never returned
+    # to the client.
     oauth_client_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     oauth_tokens_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     oauth_scope: Mapped[str | None] = mapped_column(String, nullable=True)
     # The authorization server's metadata and the RFC 9728 resource document,
-    # captured when the user authorized. The token refresher reads this to know
-    # where to send a rotation and what its RFC 8707 ``resource`` must name;
-    # without it there is nothing safe to guess from, so such a row is left
-    # alone. Cached rather than rediscovered per rotation: these were just
+    # captured when the user authorized. Whoever renews the grant reads this to
+    # know where to send the rotation and what its RFC 8707 ``resource`` must
+    # name; without it there is nothing safe to guess from, so such a row is
+    # left alone. Cached rather than rediscovered per rotation: these were just
     # fetched during authorization and barely ever change, and a provider that
     # does move an endpoint makes the rotation fail, which asks the user to
     # reauthorize and rewrites this. Not encrypted — public discovery documents.
@@ -101,8 +103,8 @@ class MCPServer(Base):
     )
     # When the stored access token stops being valid. Absolute, because
     # ``OAuthToken.expires_in`` is relative to an issuance moment the token
-    # itself doesn't carry. This is what the token refresher selects on, so a
-    # NULL means a grant it never looks at — which is right for the two cases
+    # itself doesn't carry. This is what decides whether a grant needs renewing,
+    # so a NULL means one nothing ever renews — which is right for the two cases
     # that produce one: rows authorized before this column existed, and grants
     # nothing can renew (no ``expires_in`` *and* no refresh token). A renewable
     # grant that states no lifetime gets an assumed one instead; see
@@ -110,12 +112,14 @@ class MCPServer(Base):
     oauth_tokens_expires_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
     )
-    # The earliest the token refresher may try this row again — written from
-    # the new token's own lifetime after a rotation, from a flat backoff after
-    # a failure. Separate from the expiry above because "when does this die"
-    # and "when should we act" stop agreeing the moment a provider issues a
-    # token shorter-lived than the look-ahead window, which MCP asks them to
-    # prefer. NULL means no opinion: judge by expiry alone.
+    # The earliest this grant may be renewed again, and the thing that makes a
+    # single-use refresh token safe to spend: a renewal writes a near-future
+    # timestamp here *before* presenting it, so a peer that locks the row
+    # mid-request sees the claim and adopts the result rather than presenting the
+    # same token. After that it is a backoff — a flat one on failure, NULL on
+    # success. Separate from the expiry above because "when does this die" and
+    # "when may we act" are different questions. NULL means no opinion: judge by
+    # expiry alone.
     oauth_refresh_after: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True,
     )
@@ -162,10 +166,11 @@ class MCPServer(Base):
     connected: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"),
     )
-    # Set by the token refresher when the authorization server refuses the
-    # refresh token itself — revoked at the provider, expired, or a rotated one
-    # rejected. Never by the worker: a turn can see that its access token was
-    # refused, not that the grant behind it is dead. Kept apart
+    # Set when the authorization server refuses the refresh token itself —
+    # revoked at the provider, expired, or a rotated one rejected. Only a
+    # renewal is in a position to see that; a 401 on a tool call is not, since it
+    # says an access token was refused and not that the grant behind it is
+    # dead. Kept apart
     # from ``connected`` on purpose: that is the user's switch, this is the
     # provider's verdict, and only the pair distinguishes "I turned it off" from
     # "it needs reconnecting". Cleared on the next successful connect, so a

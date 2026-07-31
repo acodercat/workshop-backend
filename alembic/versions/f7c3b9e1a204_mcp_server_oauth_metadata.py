@@ -3,9 +3,9 @@
 The authorization server's own metadata and the RFC 9728 resource document,
 captured when the user authorized.
 
-Whoever renews a grant reads this to know where to send the rotation and what
-its ``resource`` indicator must name — the backend's token refresher, and the
-worker, which renews on demand during a turn. Without it there is nothing to guess
+Renewing a grant reads this to know where to send the rotation and what its
+``resource`` indicator must name. That is the worker's, on demand during a
+turn. Without it there is nothing to guess
 from safely: posting the refresh token to ``urljoin(<MCP origin>, "/token")``
 is right only for a server that hosts its own token endpoint, and would
 otherwise hand the grant — and the client secret under it — to the resource
@@ -23,14 +23,13 @@ reauthorized, and that flow rewrites this column — so it heals itself.
 Not encrypted, unlike its ``oauth_*`` siblings: these are public discovery
 documents, and sealing them would imply a sensitivity they do not have.
 
-NULL for rows authorized before this column existed. Both readers treat that as
-"cannot rotate safely" rather than guessing: the backend leaves the Connector
-alone, and the worker asks the user to authorize again, since a turn that cannot
-renew has nothing to fall back on. Either way such a row recovers on its next
-authorization.
+NULL for rows authorized before this column existed. Treated as "cannot rotate
+safely" rather than guessed at: the worker asks the user to authorize again,
+since a turn that cannot renew has nothing to fall back on. Such a row recovers
+on its next authorization, which is what writes this.
 
-**Deploy note: apply before deploying either service** — both address a rotation
-from this column.
+**Deploy note: apply before deploying either service** — the worker addresses a
+rotation from this column, and the backend's callback writes it.
 
 Revision ID: f7c3b9e1a204
 Revises: e4a9c2b7d503

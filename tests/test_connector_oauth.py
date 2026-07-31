@@ -19,7 +19,6 @@ from mcp.shared.auth import (
 from app.errors import ConnectorOAuthError, InvalidConnectorUrlError
 from app.services.mcp.oauth import (
     DiscoveredAuthorization,
-    GrantRevoked,
     _apply_client_auth,
     _read_challenge,
     _require_pkce_support,
@@ -32,7 +31,6 @@ from app.services.mcp.oauth import (
     exchange_code,
     new_pkce,
     new_state,
-    refresh_tokens,
     revoke_grant,
 )
 
@@ -1224,93 +1222,6 @@ class TestDisabledToolsBounds:
             ConnectorUpdate(disabled_tools=[f"tool_{index}" for index in range(257)])
 
 
-class TestRefreshingAGrant:
-    """The twin of the code exchange: an access token whose audience differs
-    between the two legs is refused by any server that enforces RFC 8707."""
-
-    _METADATA = OAuthMetadata(
-        issuer="https://as.example.com",
-        authorization_endpoint="https://as.example.com/authorize",
-        token_endpoint="https://as.example.com/token",
-        response_types_supported=["code"],
-    )
-
-    def _sent(self, monkeypatch, response: httpx.Response) -> httpx.Request:
-        captured: dict = {}
-
-        def handle(request: httpx.Request) -> httpx.Response:
-            captured["request"] = request
-            return response
-
-        _serve(monkeypatch, handle, allow_any_url=True)
-        return captured
-
-    async def test_it_carries_the_resource_indicator_and_client_auth(
-        self, monkeypatch,
-    ):
-        captured = self._sent(
-            monkeypatch,
-            httpx.Response(200, json={"access_token": "new", "token_type": "Bearer"}),
-        )
-        client = OAuthClientInformationFull(
-            client_id="cid", client_secret="sek", redirect_uris=["https://app/cb"],
-            token_endpoint_auth_method="client_secret_post",
-        )
-
-        tokens = await refresh_tokens(
-            self._METADATA, client,
-            refresh_token="R0", server_url="https://mcp.example.com/mcp",
-        )
-
-        assert tokens.access_token == "new"
-        body = captured["request"].content.decode()
-        assert "grant_type=refresh_token" in body
-        assert "refresh_token=R0" in body
-        assert "client_secret=sek" in body
-        assert "resource=" in body
-
-    async def test_a_rejected_grant_is_distinguishable_from_an_outage(
-        self, monkeypatch,
-    ):
-        # Only ``invalid_grant`` says the refresh token will never work again,
-        # and only that may send a Connector back to the browser.
-        self._sent(
-            monkeypatch, httpx.Response(400, json={"error": "invalid_grant"}),
-        )
-
-        with pytest.raises(GrantRevoked):
-            await refresh_tokens(
-                self._METADATA, _client(),
-                refresh_token="R0", server_url="https://mcp.example.com/mcp",
-            )
-
-    async def test_a_rejected_client_is_permanent_too(self, monkeypatch):
-        # A dynamically-registered client reaches this on its own when its
-        # ``client_secret_expires_at`` passes. Retried as a transient failure it
-        # would be re-sent every few minutes forever, and the card would never
-        # offer the re-authorization that mints a fresh registration.
-        self._sent(
-            monkeypatch, httpx.Response(401, json={"error": "invalid_client"}),
-        )
-
-        with pytest.raises(GrantRevoked):
-            await refresh_tokens(
-                self._METADATA, _client(),
-                refresh_token="R0", server_url="https://mcp.example.com/mcp",
-            )
-
-    async def test_any_other_failure_is_an_ordinary_oauth_error(self, monkeypatch):
-        self._sent(monkeypatch, httpx.Response(503, text="upstream down"))
-
-        with pytest.raises(ConnectorOAuthError) as caught:
-            await refresh_tokens(
-                self._METADATA, _client(),
-                refresh_token="R0", server_url="https://mcp.example.com/mcp",
-            )
-
-        assert not isinstance(caught.value, GrantRevoked)
-
-
 class TestRevokingAGrant:
     """Dropping our copy stops us using a grant; only this ends it. Without it
     the user finds an application they disconnected still authorized on their
@@ -1403,24 +1314,13 @@ class TestRevokingAGrant:
 
 
 class TestStoringAFreshGrant:
-    """The one rule for writing a grant onto a row, shared by the authorization
-    callback and the token refresher — a difference between them would be a
-    Connector that works until its first refresh."""
-
-    def _connector(self, **over):
-        from app.models.mcp_server import MCPServer, MCPServerAuthType
-
-        base = dict(
-            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
-            auth_type=MCPServerAuthType.OAUTH,
-        )
-        base.update(over)
-        return MCPServer(**base)
+    """Writing a newly authorized grant onto a row. Verbatim, always: renewal
+    and its refresh-token carry-forward belong to the worker."""
 
     def test_the_deadline_is_written_with_the_grant(self, monkeypatch):
         # ``expires_in`` counts from now, so the moment of writing is the only
-        # place the absolute deadline is knowable — and it is what the token
-        # refresher selects on. A grant stored without one is never renewed.
+        # place the absolute deadline is knowable — and it is what renewal reads
+        # to decide. A grant stored without one is never renewed.
         from app.services.mcp import grant
         from mcp.shared.auth import OAuthToken
 
@@ -1430,7 +1330,6 @@ class TestStoringAFreshGrant:
         grant.store_tokens(
             connector,
             OAuthToken(access_token="at", token_type="Bearer", expires_in=3600),
-            rotation=False,
         )
 
         assert connector.oauth_tokens_encrypted == "sealed"
@@ -1439,8 +1338,8 @@ class TestStoringAFreshGrant:
     def test_a_renewable_grant_with_no_stated_lifetime_gets_a_deadline(
         self, monkeypatch,
     ):
-        # NULL would read as "valid forever" and leave the refresher blind to a
-        # grant that has in fact died.
+        # NULL would read as "valid forever" and leave renewal blind to a grant
+        # that has in fact died.
         from app.services.mcp import grant
         from mcp.shared.auth import OAuthToken
 
@@ -1450,7 +1349,6 @@ class TestStoringAFreshGrant:
         grant.store_tokens(
             connector,
             OAuthToken(access_token="at", token_type="Bearer", refresh_token="R0"),
-            rotation=False,
         )
 
         ahead = (
@@ -1460,9 +1358,9 @@ class TestStoringAFreshGrant:
 
     def test_a_grant_nothing_can_renew_is_given_no_deadline(self, monkeypatch):
         # Some servers issue neither a lifetime nor a refresh token. Assuming a
-        # deadline there buys nothing and costs a false alarm: the refresher
-        # would pick the row up an hour later, find nothing to rotate with, and
-        # ask the user to re-authorize a token that never expired — hourly.
+        # deadline there buys nothing and costs a false alarm: renewal would pick
+        # the row up an hour later, find nothing to rotate with, and ask the user
+        # to re-authorize a token that never expired.
         from app.services.mcp import grant
         from mcp.shared.auth import OAuthToken
 
@@ -1471,7 +1369,6 @@ class TestStoringAFreshGrant:
 
         grant.store_tokens(
             connector, OAuthToken(access_token="at", token_type="Bearer"),
-            rotation=False,
         )
 
         assert connector.oauth_tokens_expires_at is None
@@ -1490,43 +1387,12 @@ class TestStoringAFreshGrant:
         grant.store_tokens(
             connector,
             OAuthToken(access_token="at", token_type="Bearer", expires_in=120),
-            rotation=False,
         )
 
         ahead = (
             connector.oauth_tokens_expires_at - datetime.now(timezone.utc)
         ).total_seconds()
         assert 115 < ahead <= 120
-
-    def test_a_rotation_that_reissues_nothing_keeps_the_refresh_token(
-        self, monkeypatch,
-    ):
-        # OAuth 2.1 §4.3.2 makes reissue optional — the old refresh token stays
-        # valid. Writing the response verbatim would discard one the provider
-        # never revoked and turn the next expiry into a browser round-trip.
-        from app.services.mcp import grant
-        from mcp.shared.auth import OAuthToken
-
-        stored = OAuthToken(
-            access_token="old", token_type="Bearer", refresh_token="R0",
-        )
-        written: dict = {}
-        monkeypatch.setattr(
-            grant, "decrypt_secret", lambda _c: stored.model_dump_json(),
-        )
-        monkeypatch.setattr(
-            grant, "encrypt_secret",
-            lambda plaintext: written.setdefault("it", plaintext),
-        )
-        connector = _stored_connector(oauth_tokens_encrypted="whatever")
-
-        grant.store_tokens(
-            connector, OAuthToken(access_token="new", token_type="Bearer"),
-            rotation=True,
-        )
-
-        kept = OAuthToken.model_validate_json(written["it"])
-        assert (kept.access_token, kept.refresh_token) == ("new", "R0")
 
     def test_a_code_exchange_never_inherits_the_old_refresh_token(
         self, monkeypatch,
@@ -1552,35 +1418,9 @@ class TestStoringAFreshGrant:
 
         grant.store_tokens(
             connector, OAuthToken(access_token="new", token_type="Bearer"),
-            rotation=False,
         )
 
         assert OAuthToken.model_validate_json(written["it"]).refresh_token is None
-
-    def test_a_reissued_refresh_token_replaces_the_old_one(self, monkeypatch):
-        from app.services.mcp import grant
-        from mcp.shared.auth import OAuthToken
-
-        stored = OAuthToken(
-            access_token="old", token_type="Bearer", refresh_token="R0",
-        )
-        written: dict = {}
-        monkeypatch.setattr(
-            grant, "decrypt_secret", lambda _c: stored.model_dump_json(),
-        )
-        monkeypatch.setattr(
-            grant, "encrypt_secret",
-            lambda plaintext: written.setdefault("it", plaintext),
-        )
-        connector = _stored_connector(oauth_tokens_encrypted="whatever")
-
-        grant.store_tokens(
-            connector,
-            OAuthToken(access_token="new", token_type="Bearer", refresh_token="R1"),
-            rotation=True,
-        )
-
-        assert OAuthToken.model_validate_json(written["it"]).refresh_token == "R1"
 
 
 class TestOAuthCallbackHealth:

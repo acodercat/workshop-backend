@@ -49,13 +49,11 @@ class TestALifetimeAlreadySpent:
                 access_token="a", token_type="Bearer",
                 refresh_token="r", expires_in=expires_in,
             ),
-            rotation=False,
         )
 
         assert connector.oauth_tokens_expires_at <= datetime.now(timezone.utc)
-        # Clamped, not applied: a deadline decades back is unrecoverable, since
-        # the refresher orders by this column and such a row would be the most
-        # overdue thing in the queue forever.
+        # Clamped, not applied: a nonsense lifetime should read as "expired now",
+        # not as a date far enough out of range to be mistaken for meaningful.
         assert connector.oauth_tokens_expires_at >= before
 
     def test_silence_is_not_the_same_as_zero(self):
@@ -66,20 +64,18 @@ class TestALifetimeAlreadySpent:
         grant.store_tokens(
             connector,
             OAuthToken(access_token="a", token_type="Bearer", refresh_token="r"),
-            rotation=False,
         )
 
         assert connector.oauth_tokens_expires_at > datetime.now(timezone.utc)
 
     def test_with_no_refresh_token_silence_leaves_it_unscheduled(self):
-        # Nothing could act on it: the refresher would find nothing to rotate
-        # with and ask for a browser every hour, forever.
+        # Nothing could act on it: renewal would find nothing to rotate with and
+        # send the user to the browser for a token that had not expired.
         connector = _connector()
 
         grant.store_tokens(
             connector,
             OAuthToken(access_token="a", token_type="Bearer"),
-            rotation=False,
         )
 
         assert connector.oauth_tokens_expires_at is None
@@ -100,31 +96,15 @@ class TestAStaleSchedule:
         grant.store_tokens(
             connector,
             OAuthToken(access_token="a", token_type="Bearer", refresh_token="r"),
-            rotation=False,
         )
 
         assert connector.oauth_refresh_after is None
 
 
-class TestWhichCallerIsWriting:
-    """A refresh response may mean "keep using yours"; a code exchange never
-    does — it establishes a whole new grant."""
-
-    def test_a_rotation_keeps_a_refresh_token_the_response_omitted(self):
-        connector = _connector()
-        grant.store_tokens(
-            connector,
-            OAuthToken(access_token="a", token_type="Bearer", refresh_token="r1"),
-            rotation=False,
-        )
-
-        grant.store_tokens(
-            connector,
-            OAuthToken(access_token="b", token_type="Bearer"),
-            rotation=True,
-        )
-
-        assert grant.stored_tokens(connector).refresh_token == "r1"
+class TestWhatAnAuthorizationWrites:
+    """Verbatim, always. A refresh response may mean "keep using yours" and has
+    to be reconciled, but that is renewal's job and renewal is the worker's; a
+    code exchange establishes a whole new grant."""
 
     def test_an_authorization_does_not_inherit_the_old_one(self):
         # It may be a re-authorization against a different authorization
@@ -134,13 +114,11 @@ class TestWhichCallerIsWriting:
         grant.store_tokens(
             connector,
             OAuthToken(access_token="a", token_type="Bearer", refresh_token="r1"),
-            rotation=False,
         )
 
         grant.store_tokens(
             connector,
             OAuthToken(access_token="b", token_type="Bearer"),
-            rotation=False,
         )
 
         assert grant.stored_tokens(connector).refresh_token is None
@@ -161,7 +139,6 @@ class TestGivingAGrantUp:
                 access_token="a", token_type="Bearer",
                 refresh_token="r", expires_in=3600,
             ),
-            rotation=False,
         )
         connector.oauth_refresh_after = datetime.now(timezone.utc)
         connector.oauth_reauthorization_required = True

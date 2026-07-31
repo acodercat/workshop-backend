@@ -59,27 +59,6 @@ class Settings(BaseSettings):
     mcp_client_metadata_url: str = Field(
         default="", description="Public URL of our OAuth client metadata document (CIMD)",
     )
-    # Connector OAuth grants are rotated only by the background process
-    # (``app.workers.connector_token_refresher``) — never by the agent worker,
-    # which runs N replicas with no session affinity and so cannot serialize a
-    # single-use refresh token.
-    connector_refresh_interval_seconds: int = Field(
-        default=60, gt=0,
-        description="Seconds between Connector token-refresher ticks.",
-    )
-    connector_refresh_ahead_seconds: int = Field(
-        default=600, gt=0,
-        description="How far ahead of expiry a Connector's access token is refreshed. Must exceed the tick interval by enough that a few missed ticks still leave the token live.",
-    )
-    # Bounded against the look-ahead above: a tick rotates serially, and one
-    # rotation is capped by the OAuth service's 20s deadline, so a batch of N
-    # can take 20N seconds in the worst case. Past the look-ahead window, a
-    # queue of unwell Connectors at the front would let healthy tokens behind
-    # them expire before their turn came. 20 x 20s = 400s, inside 600s.
-    connector_refresh_batch: int = Field(
-        default=20, gt=0,
-        description="Max Connectors rotated per tick; the rest wait for the next one. Keep batch x 20s under connector_refresh_ahead_seconds.",
-    )
     algorithm: str = Field(default="HS256", description="Algorithm for JWT")
     access_token_expire_minutes: int = Field(
         default=MINUTES_PER_WEEK,

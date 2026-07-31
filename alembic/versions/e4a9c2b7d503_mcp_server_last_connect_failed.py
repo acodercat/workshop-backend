@@ -27,15 +27,13 @@ not zero. Each is fenced on the value that turn read (``AND last_connect_failed
 Skipping a Connector is not a verdict: an exhausted connect budget leaves the
 flag untouched, because nothing was learned about the server.
 
-Its sibling ``oauth_reauthorization_required`` is deliberately *not* written by
-the worker. A turn can see that a server refused its access token, not that the
-grant behind it is dead — that is answered where a refresh is attempted, in the
-backend's token refresher.
+Its sibling ``oauth_reauthorization_required`` is deliberately *not* written from
+a connect attempt. A turn can see that a server refused its access token, not that
+the grant behind it is dead — that is answered where a refresh is attempted.
 
-**Deploy note: apply before deploying either the backend or the worker.** The
-API and the background refresher both read these columns, and the worker SELECTs
-this one in its per-turn Connector resolve — an old schema makes it resolve
-*zero* Connectors.
+**Deploy note: apply before deploying either the backend or the worker.** The API
+reads these columns and the worker SELECTs this one in its per-turn Connector
+resolve — an old schema makes it resolve *zero* Connectors.
 
 Revision ID: e4a9c2b7d503
 Revises: c8f4a1d6e207

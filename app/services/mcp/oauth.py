@@ -4,10 +4,13 @@ We drive the two-legged web redirect (authorize → browser → callback) oursel
 — the SDK's ``OAuthClientProvider`` is built for a blocking local-browser client
 — but reuse the SDK's low-level ``mcp.client.auth.oauth2`` helpers for metadata
 discovery, client identity (CIMD or dynamic registration), and PKCE, so no
-OAuth crypto is hand-written. Rotating a stored grant afterwards is
-:mod:`app.workers.connector_token_refresher`'s job, through
-:func:`refresh_tokens` here — never the agent worker's, which only presents
-whatever access token it finds.
+OAuth crypto is hand-written.
+
+**Obtaining a grant only.** Renewing one afterwards belongs to the agent worker,
+which does it on demand during a turn (``infra/connector_grant_rotation``) —
+because a turn can outlive its access token, and nothing on a schedule here can
+close that gap. What stays is the browser flow this module exists for: authorize,
+exchange, and the RFC 7009 revocation that ends a grant.
 
 All failures collapse to :class:`ConnectorOAuthError` so the endpoint layer needs
 no translation.
@@ -653,11 +656,11 @@ def _pin_auth_method(
 ) -> OAuthClientInformationFull:
     """Resolve an omitted ``token_endpoint_auth_method`` before the row is stored.
 
-    The one place the RFC 7591 §2 default is applied, because the client is
-    read back twice — by the code exchange and, later, by every rotation the
-    token refresher makes — and an absent method reads as "send no secret at
-    all". Deciding it once, on the bytes they share, is what stops an
-    authorization that worked from becoming a refresh that doesn't.
+    The one place the RFC 7591 §2 default is applied, because the client is read
+    back twice — by the code exchange here and, later, by every renewal the
+    worker makes — and an absent method reads as "send no secret at all".
+    Deciding it once, on the bytes they share, is what stops an authorization
+    that worked from becoming a renewal that doesn't.
 
     Only a registered client can arrive unresolved; the manual and CIMD paths
     both state a method outright.
@@ -797,68 +800,6 @@ async def exchange_code(
         raise ConnectorOAuthError(f"Malformed token response: {exc}") from exc
 
 
-# Token-endpoint errors that will never come right on their own. Everything
-# else means the provider is unwell and the next attempt should simply try
-# again. ``invalid_grant``: the stored grant is dead — revoked, expired, or
-# already rotated by someone else. ``invalid_client``: the registration itself
-# is no longer accepted, which a dynamically-registered client reaches on its
-# own the moment its ``client_secret_expires_at`` passes.
-_PERMANENT_TOKEN_ERRORS = ("invalid_grant", "invalid_client")
-
-
-class GrantRevoked(ConnectorOAuthError):
-    """The authorization server refused the grant, or the client behind it.
-
-    The only errors allowed to send a Connector back to the browser: retrying
-    them costs requests to be refused, and re-authorizing is what actually
-    replaces both the grant and — through a fresh registration — the client.
-    """
-
-
-async def refresh_tokens(
-    metadata: OAuthMetadata,
-    client: OAuthClientInformationFull,
-    *,
-    refresh_token: str,
-    server_url: str,
-) -> OAuthToken:
-    """Trade a refresh token for a fresh grant (RFC 6749 §6).
-
-    The sibling of :func:`exchange_code`, and deliberately its twin: the same
-    client authentication, the same ``resource`` indicator, the same guarded
-    client. An access token whose audience differs between the two legs is
-    refused by any server that enforces RFC 8707.
-
-    The response replaces the stored grant wholesale. Refresh tokens rotate, so
-    the reply may carry a new one — and per OAuth 2.1 §4.3.2 it may equally omit
-    one, meaning the old one stays valid. Reconciling that is the caller's job
-    (:func:`app.services.mcp.grant.store_tokens`); this function only reports
-    what came back.
-    """
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": client.client_id,
-        "resource": resource_url_from_server_url(server_url),
-    }
-    data, headers = _apply_client_auth(
-        client, data, {"Accept": "application/json"}
-    )
-
-    response = await _post(str(metadata.token_endpoint), data, headers)
-    if response.status_code != 200:
-        if _error_code(response) in _PERMANENT_TOKEN_ERRORS:
-            raise GrantRevoked(
-                f"The authorization server rejected the refresh "
-                f"({_error_code(response)})."
-            )
-        raise ConnectorOAuthError(f"Token refresh failed ({response.status_code}).")
-    try:
-        return OAuthToken.model_validate(response.json())
-    except Exception as exc:
-        raise ConnectorOAuthError(f"Malformed token response: {exc}") from exc
-
-
 async def revoke_grant(
     metadata: OAuthMetadata,
     client: OAuthClientInformationFull,
@@ -920,9 +861,8 @@ async def _post(
 
     ``httpx.Timeout`` bounds each *read*, not the request — the same trap
     :func:`_read_challenge` documents. An endpoint that answers a byte every
-    nineteen seconds keeps resetting that clock, and one of these calls is made
-    while a ``mcp_server`` row is locked: it would hold the lock, the database
-    connection, and the refresher's whole tick behind it.
+    nineteen seconds keeps resetting that clock, and these calls are made inside
+    a request the user is waiting on.
 
     ``guarded_client`` pins DNS and rejects non-public hosts, so the
     server-supplied endpoint is SSRF-safe without a separate pre-check.
@@ -935,17 +875,3 @@ async def _post(
                 return await http_client.post(url, data=data, headers=headers)
     except (httpx.HTTPError, TimeoutError) as exc:
         raise ConnectorOAuthError(f"OAuth endpoint unreachable: {exc}") from exc
-
-
-def _error_code(response: httpx.Response) -> str | None:
-    """The OAuth 2.0 ``error`` code in a failed token response, if it is there.
-
-    Best-effort by design: a server that answers an error with HTML, or with
-    JSON shaped some other way, has told us nothing about *why* — and the
-    caller's default for "don't know" is to retry, which is the safe one.
-    """
-    try:
-        body = response.json()
-    except Exception:
-        return None
-    return body.get("error") if isinstance(body, dict) else None
