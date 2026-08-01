@@ -54,6 +54,8 @@ RUN_E2E_TESTS=1 uv run pytest tests/e2e/ -v
 
 `alembic/env.py` imports `app.models.*` and `config.settings` — migrations rely on `db_uri` from `.env` at repo root.
 
+**The migration history is not squashed, and that is a decision.** Ninety-plus files is slow to replay on a fresh database and holds plenty of steps a later one undid, but collapsing the early ones into a single initial revision is only correct if **every** live database is already at or past the collapse point. One that is not — an unattended staging box, a colleague's local, a restored backup — meets a `down_revision` it has never heard of and stops, or worse, runs `CREATE TABLE` against tables that exist. Squashing is therefore gated on reading `SELECT version_num FROM alembic_version` on every live database and choosing a point at or before the oldest, and it is worth doing only when there are no pending migrations to complicate the answer. The gain is developer-setup time; nothing about it reaches production behaviour.
+
 ## E2E tests (`tests/e2e/`)
 
 Opt-in via `RUN_E2E_TESTS=1` (mirrors axon's `RUN_INTEGRATION_TESTS`).
