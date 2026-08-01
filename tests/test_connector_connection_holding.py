@@ -36,8 +36,8 @@ def _session() -> AsyncMock:
 class TestTheReleaseIsRefusedOverPendingWork:
     async def test_a_pending_change_is_refused_rather_than_committed(self):
         # The failure this exists to prevent is silent: a mutation committed by
-        # the release, then stranded by a probe that raises, leaving a row half
-        # updated where the handler used to roll back whole.
+        # the release, then stranded by a probe that raises. Without the commit
+        # the same exception leaves the row untouched.
         db = _session()
         db.dirty = {MagicMock()}
 

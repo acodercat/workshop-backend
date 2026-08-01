@@ -344,19 +344,11 @@ async def update_connector(
     auth_changed = body.auth_type is not None
     _reject_unprovisionable(connector, body, url_changed=url_changed)
 
-    # The probe happens **before** the row is changed, and everything it needs is
-    # named here first. Two reasons, and the second is why the values are hoisted
-    # rather than the probe simply moved:
-    #
-    # Committing to release the connection cannot come after a mutation — a probe
-    # that then fails would strand it, where today the PATCH is one transaction
-    # that succeeds or rolls back whole. So nothing may be written yet.
-    #
-    # And what to probe is decided by the row *as it will be*, not as it is: an
-    # OAuth Connector switching to BEARER is probed (its new auth type is not
-    # OAuth), and reading ``connector.auth_type`` before the switch would say the
-    # opposite. Naming the values once and using them for both the decision and
-    # the write is what keeps the two from disagreeing.
+    # What to probe is decided by the row *as it will be*, not as it is: an OAuth
+    # Connector switching to BEARER is probed (its new auth type is not OAuth),
+    # and reading ``connector.auth_type`` before the switch would say the
+    # opposite. Hoisting the values names them once, so the decision below and
+    # the write further down cannot disagree about what this PATCH produces.
     next_url = body.url if url_changed else connector.url
     next_auth_type = body.auth_type if auth_changed else connector.auth_type
     credential = (
