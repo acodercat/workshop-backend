@@ -7,7 +7,8 @@ router — not re-deriving these rules.
 Instantiating **copies** the template onto a new user-owned ``mcp_server`` row
 rather than referencing it live. That is what keeps a Connector working after
 its catalog entry is edited or retired, and what lets every existing per-user
-path (authorize, token refresh, the ``connected`` toggle, delete) stay untouched.
+path (authorize, the worker's grant renewal, the ``connected`` toggle, delete)
+stay untouched.
 """
 
 from sqlalchemy import select

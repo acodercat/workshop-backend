@@ -132,12 +132,11 @@ class MCPServer(Base):
     tools_preview: Mapped[list[dict[str, str]] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True,
     )
-    # What the server advertises for itself in ``serverInfo.icons`` (SEP-973),
-    # captured at probe time. The UI prefers a curated catalog icon over this,
-    # and falls back to the built-in glyph when neither exists.
-    # Every usable icon the server advertised at the last probe (SEP-973), in
-    # the order it offered them. A list because the client picks by pixel
-    # density and colour scheme, which is a decision only the browser can make.
+    # Every usable icon the server advertised in ``serverInfo.icons`` (SEP-973)
+    # at the last probe, in the order it offered them. A list because the client
+    # picks by pixel density and colour scheme — a decision only the browser can
+    # make. The UI prefers a curated catalog icon over these, and falls back to
+    # the built-in glyph when neither exists.
     advertised_icons: Mapped[list[dict]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
@@ -167,15 +166,15 @@ class MCPServer(Base):
         Boolean, nullable=False, server_default=text("true"),
     )
     # Set when the authorization server refuses the refresh token itself —
-    # revoked at the provider, expired, or a rotated one rejected. Only a
-    # renewal is in a position to see that; a 401 on a tool call is not, since it
-    # says an access token was refused and not that the grant behind it is
-    # dead. Kept apart
-    # from ``connected`` on purpose: that is the user's switch, this is the
+    # revoked at the provider, expired, or a rotated one rejected. Only a renewal
+    # is in a position to see that; a 401 on a tool call is not, since it says an
+    # access token was refused and not that the grant behind it is dead. Kept
+    # apart from ``connected`` on purpose: that is the user's switch, this is the
     # provider's verdict, and only the pair distinguishes "I turned it off" from
-    # "it needs reconnecting". Cleared on the next successful connect, so a
-    # transient misread heals itself. ``oauth_``-prefixed like its siblings —
-    # only the OAuth path can set it.
+    # "it needs reconnecting". Cleared only where the grant is actually replaced
+    # or given up — the OAuth callback and disconnect — never by a probe or a
+    # connect: those prove the *server* answers, not that this grant revived.
+    # ``oauth_``-prefixed like its siblings — only the OAuth path can set it.
     oauth_reauthorization_required: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false"),
     )
@@ -183,9 +182,10 @@ class MCPServer(Base):
     # this Connector at all — DNS gone, TLS refused, 502, handshake timeout.
     # The sibling of the flag above, and the only health signal a non-OAuth
     # Connector can have: that one is a verdict on an OAuth *grant*, so it can
-    # never fire for BEARER / HEADER / NONE. Both cleared on the next
-    # successful connect; the reason stays in the worker log rather than a
-    # free-text column that would leak an upstream server's internals.
+    # never fire for BEARER / HEADER / NONE. Unlike it, this one clears on any
+    # successful connect or probe — reachability is exactly what those prove.
+    # The reason stays in the worker log rather than a free-text column that
+    # would leak an upstream server's internals.
     last_connect_failed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false"),
     )
