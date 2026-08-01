@@ -863,7 +863,7 @@ class TestBuildOAuthConnector:
             registered.append(kwargs)
         monkeypatch.setattr(endpoint, "_register_oauth_client", never)
 
-        db = AsyncMock()
+        db = _session()
         db.execute.return_value = MagicMock(first=MagicMock(return_value=(1,)))
 
         with pytest.raises(ConnectorNameConflictError):
@@ -1718,7 +1718,7 @@ class TestCallbackRejectsAMixedUpResponse:
                 body=OAuthCallbackRequest(
                     code="c", state="s", iss="https://attacker.example.com",
                 ),
-                db=AsyncMock(),
+                db=_session(),
                 redis=redis,
             )
 
@@ -1777,7 +1777,7 @@ class TestTwoAuthorizationsInTheAir:
             id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
             auth_type=MCPServerAuthType.OAUTH, oauth_client_encrypted=client,
         )
-        db = AsyncMock()
+        db = _session()
         db.identity_map = loaded          # what the session already holds
         db.in_database = loaded           # what the row actually says now
 
@@ -1853,7 +1853,10 @@ class TestTwoAuthorizationsInTheAir:
 
         assert caught.value.status_code == 400
         assert stored == []
-        db.commit.assert_not_awaited()
+        # One commit, and it is the read release before the exchange — the grant
+        # itself never reached a write. (Asserting *no* commit would pin the
+        # connection-holding this endpoint deliberately gave up.)
+        assert db.commit.await_count == 1
 
     async def test_a_grant_is_not_written_onto_a_connector_that_changed_auth(
         self, monkeypatch,
@@ -1892,7 +1895,10 @@ class TestTwoAuthorizationsInTheAir:
 
         assert caught.value.status_code == 400
         assert stored == []
-        db.commit.assert_not_awaited()
+        # One commit, and it is the read release before the exchange — the grant
+        # itself never reached a write. (Asserting *no* commit would pin the
+        # connection-holding this endpoint deliberately gave up.)
+        assert db.commit.await_count == 1
         # Locked *and* repopulated — the lock alone leaves the check asking the
         # very object the exchange was holding all along.
         assert db.get.await_args.kwargs["with_for_update"] is True
@@ -1961,9 +1967,23 @@ def _stub_state_consumption(redis: AsyncMock, pending: str) -> None:
     redis.pipeline = MagicMock(return_value=pipe)
 
 
+def _session(**kwargs) -> AsyncMock:
+    """An ``AsyncSession`` double whose pending-change sets are empty.
+
+    ``AsyncMock`` invents a truthy attribute on demand, so a bare one claims to
+    be holding pending inserts, updates *and* deletes — which is what a session
+    that has only read looks nothing like, and what ``_release_connection``
+    refuses to commit over. Stating them makes the double honest about being
+    fresh.
+    """
+    db = AsyncMock(**kwargs)
+    db.new, db.dirty, db.deleted = set(), set(), set()
+    return db
+
+
 def _db_with_no_connector_named_that() -> AsyncMock:
     """A session whose duplicate-name lookup comes back empty."""
-    db = AsyncMock()
+    db = _session()
     db.execute.return_value = MagicMock(first=MagicMock(return_value=None))
     return db
 
@@ -2136,7 +2156,7 @@ class TestAnAuthorizationServerThatChanged:
         with pytest.raises(HTTPException) as caught:
             await endpoint.create_connector_authorization(
                 request=MagicMock(), connector_id=1,
-                db=AsyncMock(), redis=AsyncMock(), current_user=MagicMock(id=7),
+                db=_session(), redis=AsyncMock(), current_user=MagicMock(id=7),
             )
 
         assert caught.value.status_code == 400
@@ -2328,7 +2348,7 @@ async def _patch_connector(
     await endpoint.update_connector(
         request=MagicMock(), connector_id=1, body=body,
         background_tasks=background_tasks,
-        db=AsyncMock(), redis=redis or AsyncMock(),
+        db=_session(), redis=redis or AsyncMock(),
         current_user=MagicMock(id=7),
     )
     return background_tasks
@@ -2620,7 +2640,7 @@ class TestEndingAnAuthorization:
 
         await endpoint.delete_connector(
             connector_id=1, background_tasks=background_tasks,
-            db=AsyncMock(), redis=AsyncMock(), current_user=MagicMock(id=7),
+            db=_session(), redis=AsyncMock(), current_user=MagicMock(id=7),
         )
 
         assert [task.func for task in background_tasks.tasks] == [
@@ -2704,7 +2724,7 @@ class TestEndingAnAuthorization:
             return _stored_connector()
 
         monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
-        db = AsyncMock()
+        db = _session()
 
         await endpoint.delete_connector(
             connector_id=1, background_tasks=BackgroundTasks(),
@@ -2773,7 +2793,7 @@ class TestEndingAnAuthorization:
 
         await endpoint.delete_connector(
             connector_id=1, background_tasks=BackgroundTasks(),
-            db=AsyncMock(), redis=redis, current_user=MagicMock(id=7),
+            db=_session(), redis=redis, current_user=MagicMock(id=7),
         )
 
         redis.delete.assert_awaited_once_with(oauth_current_state_key(1))
@@ -2807,7 +2827,7 @@ class TestEndingAnAuthorization:
                 request=MagicMock(), connector_id=1,
                 body=ConnectorUpdate(connected=False),
                 background_tasks=BackgroundTasks(),
-                db=AsyncMock(), redis=redis, current_user=MagicMock(id=7),
+                db=_session(), redis=redis, current_user=MagicMock(id=7),
             )
 
         # Nothing committed, so the row still holds its grant and is still

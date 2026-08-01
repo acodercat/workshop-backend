@@ -131,6 +131,7 @@ async def create_connector(
         credential = _credential_plaintext(
             body.auth_type, body.credential, body.header_name
         )
+        await _release_connection(db)
         result = await probe(body.url, body.auth_type, credential)
         connector = MCPServer(
             user_id=current_user.id,
@@ -172,6 +173,7 @@ async def create_connector_authorization(
             detail="connector is not an OAuth connector",
         )
     redirect_uri = _require_redirect_uri()
+    await _release_connection(db)
     discovered = await oauth.discover_authorization(connector.url)
     metadata = discovered.metadata
     client = await _client_for_authorization(connector, discovered, db)
@@ -253,6 +255,10 @@ async def oauth_callback(
         )
 
     redirect_uri = _require_redirect_uri()
+    # Everything below until ``_locked_connector_for_grant`` is somebody else's
+    # server answering, and the row read above is re-read under a lock there
+    # anyway — so the connection goes back rather than idling through it.
+    await _release_connection(db)
     # Reuse what /authorize discovered (carried in the state) rather than
     # repeating it; rediscover only if the state predates this field.
     stored = pending.get("discovered") or (
@@ -324,6 +330,35 @@ async def update_connector(
     auth_changed = body.auth_type is not None
     _reject_unprovisionable(connector, body, url_changed=url_changed)
 
+    # The probe happens **before** the row is changed, and everything it needs is
+    # named here first. Two reasons, and the second is why the values are hoisted
+    # rather than the probe simply moved:
+    #
+    # Committing to release the connection cannot come after a mutation — a probe
+    # that then fails would strand it, where today the PATCH is one transaction
+    # that succeeds or rolls back whole. So nothing may be written yet.
+    #
+    # And what to probe is decided by the row *as it will be*, not as it is: an
+    # OAuth Connector switching to BEARER is probed (its new auth type is not
+    # OAuth), and reading ``connector.auth_type`` before the switch would say the
+    # opposite. Naming the values once and using them for both the decision and
+    # the write is what keeps the two from disagreeing.
+    next_url = body.url if url_changed else connector.url
+    next_auth_type = body.auth_type if auth_changed else connector.auth_type
+    credential = (
+        _credential_plaintext(body.auth_type, body.credential, body.header_name)
+        if auth_changed
+        else _decrypt_or_none(connector.encrypted_credential)
+    )
+    # OAuth re-probe needs a live token (re-authorize instead); only non-OAuth
+    # connectors are probed here.
+    probed = None
+    if (url_changed or auth_changed) and next_auth_type != MCPServerAuthType.OAUTH:
+        await _release_connection(db)
+        probed = await probe(next_url, next_auth_type, credential)
+
+    # Nothing above this line has touched the row — that is what makes the
+    # release safe, and what keeps a failed probe from stranding half a PATCH.
     if body.name is not None:
         connector.name = body.name
     if body.connected is not None:
@@ -341,22 +376,16 @@ async def update_connector(
         # round-trip on every PATCH, and an unmatched name is inert anyway.
         connector.disabled_tools = body.disabled_tools
     if url_changed:
-        # Guarded by ``probe`` below, which every surviving URL change reaches:
-        # OAuth rows are refused above, and no other auth type skips the probe.
+        # Guarded by the probe above, which every surviving URL change reaches:
+        # OAuth rows are refused by ``_reject_unprovisionable``, and no other
+        # auth type skips it.
         connector.url = body.url
     if auth_changed:
-        credential = await _apply_auth_change(
-            redis, background_tasks, connector, body,
+        await _apply_auth_change(
+            redis, background_tasks, connector, next_auth_type, credential,
         )
-    else:
-        credential = _decrypt_or_none(connector.encrypted_credential)
-
-    # OAuth re-probe needs a live token (re-authorize instead); only non-OAuth
-    # connectors are probed here.
-    if (url_changed or auth_changed) and connector.auth_type != MCPServerAuthType.OAUTH:
-        _apply_probe(
-            connector, await probe(connector.url, connector.auth_type, credential),
-        )
+    if probed is not None:
+        _apply_probe(connector, probed)
 
     await _commit_or_conflict(db, connector.name)
     await db.refresh(connector)
@@ -436,25 +465,27 @@ async def _apply_auth_change(
     redis: aioredis.Redis,
     background_tasks: BackgroundTasks,
     connector: MCPServer,
-    body: ConnectorUpdate,
-) -> str | None:
-    """Swap the Connector's credential, returning the plaintext for the probe.
+    auth_type: MCPServerAuthType,
+    credential: str | None,
+) -> None:
+    """Swap the Connector to *auth_type* and *credential*.
+
+    Handed both rather than deriving them from the body, because the caller
+    needs the same pair earlier — to probe with, before this writes anything.
+    One derivation, one meaning, so the row that gets written and the row that
+    was probed cannot disagree.
 
     The new auth type is never OAuth (:func:`_reject_unprovisionable` refused
     that), so every trace of the old one is now unreachable and goes: the
     authorization, and then the standing to ask for another. Both halves, because
     this is one of the three ways a user ends an authorization.
     """
-    credential = _credential_plaintext(
-        body.auth_type, body.credential, body.header_name
-    )
-    connector.auth_type = body.auth_type
+    connector.auth_type = auth_type
     connector.encrypted_credential = (
         encrypt_secret(credential) if credential is not None else None
     )
     await _release_authorization(redis, background_tasks, connector)
     _forget_how_to_authorize(connector)
-    return credential
 
 
 @router.post("/connectors/{connector_id}/tool-listings")
@@ -477,6 +508,7 @@ async def create_connector_tool_listing(
     """
     connector = await _get_owned_connector(db, connector_id, current_user.id)
     auth_type, credential = _probe_credential(connector)
+    await _release_connection(db)
     result = await probe(connector.url, auth_type, credential)
     _apply_probe(connector, result)
     await db.commit()
@@ -503,6 +535,37 @@ async def delete_connector(
     await db.commit()
 
 
+async def _release_connection(db: AsyncSession) -> None:
+    """End the read-only prelude's transaction before a third-party round-trip.
+
+    A pooled connection is held from the first query of the request — which is
+    the *auth* dependency's, before any handler body runs — until something
+    commits. A probe or an OAuth discovery in between leaves it
+    ``idle in transaction``: checked out, holding its snapshot, and doing
+    nothing, for as long as somebody else's server takes to answer. Forty of
+    those and the pool is empty, at which point requests that never touch a
+    Connector start failing too.
+
+    So the read is committed and the connection goes back; SQLAlchemy checks
+    another one out when the work resumes. ``expire_on_commit=False`` is what
+    makes that free here: rows already read keep their values, so the code after
+    reads them without a round-trip. (``rollback`` would not do — it expires
+    every instance, and the next attribute access would open a transaction again,
+    right before the call this exists to make outside one.)
+
+    **Nothing may be pending.** This commits, so a mutation made above it would
+    be persisted and then stranded by a probe that fails — where today the whole
+    handler is one transaction that rolls back together. The assertion is not
+    decoration: that partial write is silent, and this is the only place that can
+    see it coming.
+    """
+    assert not db.new and not db.dirty and not db.deleted, (
+        "_release_connection would commit a pending change; move it above the "
+        "read it belongs to, or move this call above the change"
+    )
+    await db.commit()
+
+
 async def _build_catalog_connector(
     db: AsyncSession, catalog_id: int, user_id: int,
 ) -> MCPServer:
@@ -515,6 +578,9 @@ async def _build_catalog_connector(
     entry = await catalog.get_published_entry(db, catalog_id)
     connector = catalog.build_connector(entry, user_id)
     await _reject_duplicate_name(db, user_id, connector.name)
+    # ``connector`` is unsaved and not in the session, so this commits the two
+    # reads above and nothing else.
+    await _release_connection(db)
     if connector.auth_type == MCPServerAuthType.OAUTH:
         connector.oauth_client_encrypted, connector.oauth_metadata = (
             await _register_oauth_client(
@@ -532,6 +598,7 @@ async def _build_oauth_connector(
 ) -> MCPServer:
     """Discover metadata + register/prepare the OAuth client (no tokens yet)."""
     await _reject_duplicate_name(db, user_id, body.name)
+    await _release_connection(db)
     client, authorization = await _register_oauth_client(
         url=body.url,
         scope=body.oauth_scope,
