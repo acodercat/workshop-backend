@@ -339,7 +339,9 @@ async def _discover_authorization_server(
         authorization_server, server_url
     ):
         try:
-            response = await client.send(create_oauth_metadata_request(metadata_url))
+            response = await _send_bounded(
+                client, create_oauth_metadata_request(metadata_url),
+            )
         except httpx.HTTPError:
             continue
         try:
@@ -394,8 +396,11 @@ async def _read_challenge(client: httpx.AsyncClient, server_url: str) -> _Challe
     """
     try:
         async with asyncio.timeout(_HTTP_TIMEOUT):
-            response = await client.get(
-                server_url, headers={"Accept": "text/event-stream"}
+            response = await _send_bounded(
+                client,
+                client.build_request(
+                    "GET", server_url, headers={"Accept": "text/event-stream"},
+                ),
             )
     except (httpx.HTTPError, TimeoutError):
         return _Challenge()
@@ -506,7 +511,9 @@ async def _discover_protected_resource(
         challenge_url, server_url
     ):
         try:
-            response = await client.get(resource_metadata_url)
+            response = await _send_bounded(
+                client, client.build_request("GET", resource_metadata_url),
+            )
             metadata = await handle_protected_resource_response(response)
         except Exception:
             continue
@@ -635,7 +642,7 @@ async def _register_client(
             request = create_client_registration_request(
                 metadata, client_metadata, str(metadata.issuer)
             )
-            response = await client.send(request)
+            response = await _send_bounded(client, request)
             # Kept whole: the server may substitute a different
             # ``token_endpoint_auth_method`` than the one asked for
             # (RFC 7591 §3.2.1), and that answer is what we authenticate with.
@@ -854,6 +861,71 @@ async def revoke_grant(
         raise ConnectorOAuthError(f"Revocation failed ({response.status_code}).")
 
 
+# The most of a discovery or token document worth reading. These are metadata
+# and grants — a few kilobytes at most — so this is two orders of magnitude of
+# slack and still refuses the case a time bound cannot: an endpoint answering
+# 200 with gigabytes as fast as the socket allows arrives well inside
+# ``_HTTP_TIMEOUT``, and ``httpx`` buffers the body whole before there is a
+# response object to measure. Every URL here is user- or server-supplied, so
+# "a real provider would not do that" is not an argument available.
+#
+# Counted **on the wire**, which is the only place counting means anything: a
+# limit applied after decoding is not a limit, since 40 KiB of gzip expands to
+# 40 MiB in a single chunk and the allocation has happened before there is a
+# length to check.
+_MAX_RESPONSE_BYTES = 256 * 1024
+
+
+async def _send_bounded(
+    client: httpx.AsyncClient, request: httpx.Request,
+) -> httpx.Response:
+    """Send *request* and return its answer, reading at most
+    :data:`_MAX_RESPONSE_BYTES` of body.
+
+    A real :class:`httpx.Response` comes back rather than some reduced shape,
+    because most callers hand it straight to an MCP SDK handler that expects
+    one. The only difference from ``client.send`` is that the body cannot be
+    larger than the cap — so every call site keeps its own reading of status,
+    headers and JSON unchanged.
+
+    **Not** folded into ``guarded_client``: that same factory is handed to the
+    SDK as its ``httpx_client_factory`` for the Streamable HTTP transport, whose
+    SSE stream is a legitimately long-lived, legitimately unbounded read. A cap
+    at the transport would close working MCP sessions. The bound belongs where a
+    *document* is fetched, which is here.
+
+    Asks for ``identity`` and refuses an encoded reply rather than decoding it,
+    for the reason the cap is counted on the wire at all.
+    """
+    request.headers["Accept-Encoding"] = "identity"
+    response = await client.send(request, stream=True)
+    try:
+        encoding = response.headers.get("content-encoding", "identity").strip()
+        if encoding.lower() not in ("", "identity"):
+            raise ConnectorOAuthError(
+                f"{request.url.host} answered with Content-Encoding "
+                f"{encoding!r} after being asked for none; refusing to decode it."
+            )
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in response.aiter_raw():
+            size += len(chunk)
+            if size > _MAX_RESPONSE_BYTES:
+                raise ConnectorOAuthError(
+                    f"{request.url.host} sent more than {_MAX_RESPONSE_BYTES} "
+                    f"bytes; refusing to read it."
+                )
+            chunks.append(chunk)
+    finally:
+        await response.aclose()
+    return httpx.Response(
+        response.status_code,
+        headers=response.headers,
+        content=b"".join(chunks),
+        request=request,
+    )
+
+
 async def _post(
     url: str, data: dict[str, str], headers: dict[str, str],
 ) -> httpx.Response:
@@ -872,6 +944,11 @@ async def _post(
             async with guarded_client(
                 timeout=httpx.Timeout(_HTTP_TIMEOUT)
             ) as http_client:
-                return await http_client.post(url, data=data, headers=headers)
+                return await _send_bounded(
+                    http_client,
+                    http_client.build_request(
+                        "POST", url, data=data, headers=headers,
+                    ),
+                )
     except (httpx.HTTPError, TimeoutError) as exc:
         raise ConnectorOAuthError(f"OAuth endpoint unreachable: {exc}") from exc

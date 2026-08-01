@@ -22,6 +22,11 @@ class TestValidatePublicUrl:
         "https://192.0.0.1/x",         # IETF protocol assignments
         "https://198.18.0.1/x",        # benchmarking range
         "https://[fc00::1]/x",         # IPv6 unique-local
+        # An IPv4 address wrapped in a globally-assigned IPv6 prefix. ``is_global``
+        # judges the outer address and says yes; on a NAT64/DNS64 network the
+        # translator then dials the inner one, which here is 127.0.0.1.
+        "https://[64:ff9b::7f00:1]/x",  # NAT64 well-known (RFC 6052)
+        "https://[::7f00:1]/x",         # IPv4-compatible, deprecated (RFC 4291)
     ])
     def test_rejects_unsafe(self, url):
         with pytest.raises(InvalidConnectorUrlError):
@@ -43,6 +48,44 @@ class TestValidatePublicUrl:
         monkeypatch.setattr(url_guard.socket, "getaddrinfo", boom)
         with pytest.raises(InvalidConnectorUrlError):
             url_guard.validate_public_url("https://no.such.host.invalid/x")
+
+
+class TestEmbeddedIPv4Prefixes:
+    """The two wrappers ``is_global`` waves through, and the boundary of that.
+
+    Refusing them is a different kind of refusal from the rest: the address the
+    registry judges is global, and the one that gets dialled is inside it.
+    """
+
+    @pytest.mark.parametrize("address,dialled", [
+        ("64:ff9b::7f00:1", "127.0.0.1"),
+        ("64:ff9b::a00:5", "10.0.0.5"),
+        ("64:ff9b::a9fe:a9fe", "169.254.169.254"),   # cloud metadata
+        ("::7f00:1", "127.0.0.1"),
+    ])
+    def test_a_wrapped_internal_address_is_refused(self, address, dialled):
+        import ipaddress
+
+        # The premise, asserted rather than asserted-about: without the extra
+        # check these pass, and what they reach is an internal host.
+        assert ipaddress.ip_address(address).is_global
+        assert str(ipaddress.ip_address(
+            int(ipaddress.ip_address(address)) & 0xFFFFFFFF
+        )) == dialled
+
+        with pytest.raises(InvalidConnectorUrlError):
+            url_guard.validate_public_url(f"https://[{address}]/x")
+
+    def test_an_ordinary_global_ipv6_address_still_passes(self, monkeypatch):
+        # The boundary. Refusing whole swathes of IPv6 to close this would cost
+        # every legitimate v6-only MCP server.
+        monkeypatch.setattr(
+            url_guard.socket, "getaddrinfo",
+            lambda *args, **kwargs: [
+                (None, None, None, None, ("2606:4700::6810:85e5", 443, 0, 0)),
+            ],
+        )
+        url_guard.validate_public_url("https://mcp.example.com/x")
 
 
 class TestPinnedResolveTransport:

@@ -66,6 +66,22 @@ def validate_public_url(url: str) -> None:
             )
 
 
+# IPv6 prefixes that carry an IPv4 address inside them and that ``is_global``
+# answers ``True`` for — it judges the *outer* address, and these two are
+# globally assigned, so the private address embedded in the low 32 bits is never
+# looked at. On a network running NAT64/DNS64 the translator then forwards to
+# that address: ``64:ff9b::7f00:1`` is ``127.0.0.1`` and would pass.
+#
+# Only the two that ``is_global`` lets through are listed. IPv4-mapped
+# (``::ffff:0:0/96``), NAT64 local-use (``64:ff9b:1::/48``), 6to4 and Teredo all
+# already answer ``False`` — listing them would suggest this is the general
+# defence against embedded addresses rather than the two exceptions to one.
+_EMBEDDED_IPV4_PREFIXES = (
+    ipaddress.ip_network("64:ff9b::/96"),   # NAT64 well-known (RFC 6052 §2.1)
+    ipaddress.ip_network("::/96"),          # IPv4-compatible, deprecated (RFC 4291)
+)
+
+
 def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Whether *ip* is globally routable — an allowlist, not a blocklist.
 
@@ -75,8 +91,15 @@ def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     (``100.64.0.0/10``) is neither ``is_private`` nor ``is_loopback``, so a
     blocklist of those waves through Tailscale addresses, carrier-grade NAT
     ranges, and anything else an operator runs in there.
+
+    Two prefixes are refused on top of it, and they are refusals of a different
+    kind: not addresses the registry calls special, but wrappers whose *own*
+    address is global while the one that gets dialled is inside them. See
+    :data:`_EMBEDDED_IPV4_PREFIXES`.
     """
-    return ip.is_global
+    if not ip.is_global:
+        return False
+    return not any(ip in prefix for prefix in _EMBEDDED_IPV4_PREFIXES)
 
 
 class _PinnedResolveTransport(httpx.AsyncHTTPTransport):

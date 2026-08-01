@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import inspect
 import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -17,6 +18,7 @@ from mcp.shared.auth import (
 )
 
 from app.errors import ConnectorOAuthError, InvalidConnectorUrlError
+from app.services.mcp import oauth as oauth_service
 from app.services.mcp.oauth import (
     DiscoveredAuthorization,
     _apply_client_auth,
@@ -42,6 +44,55 @@ def _metadata() -> OAuthMetadata:
         token_endpoint="https://as.example.com/token",
         response_types_supported=["code"],
     )
+
+
+class _Unread(httpx.SyncByteStream, httpx.AsyncByteStream):
+    """*data*, as a stream nobody has consumed yet.
+
+    ``httpx.Response(content=...)`` hands its bytes over eagerly and marks the
+    stream **consumed**, so reading such a response with ``aiter_raw`` — which
+    the bounded read does, to count wire bytes before anything decodes them —
+    raises. A response off a real socket arrives unconsumed, and reading one
+    without buffering it whole is the property under test.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def __iter__(self):
+        yield self._data
+
+    async def __aiter__(self):
+        yield self._data
+
+
+def _streaming(handler):
+    """*handler*, with each answer rebuilt around an unconsumed stream.
+
+    Wraps the one handler rather than the thirty-odd ``httpx.Response(...)``
+    calls behind it, so a test writes the response it means and this is where
+    the double is made faithful.
+
+    Always async, and awaits the wrapped handler when it is: ``MockTransport``
+    accepts either, and the tests use both — the ones that stall a reply need a
+    coroutine to sleep in.
+    """
+
+    async def rebuilt(request: httpx.Request) -> httpx.Response:
+        response = handler(request)
+        if inspect.isawaitable(response):
+            response = await response
+        headers = {
+            name: value for name, value in response.headers.items()
+            if name.lower() != "content-length"
+        }
+        return httpx.Response(
+            response.status_code,
+            headers=headers,
+            stream=_Unread(response.content),
+        )
+
+    return rebuilt
 
 
 def _client() -> OAuthClientInformationFull:
@@ -274,6 +325,11 @@ class TestSsrfGuard:
             )
 
 
+async def _allow(_url):
+    """``guard_public_url`` stand-in for tests that drive the client directly."""
+    return None
+
+
 def _serve(monkeypatch, handler, *, allow_any_url=False):
     """Route the flow's outbound requests through *handler*.
 
@@ -292,7 +348,9 @@ def _serve(monkeypatch, handler, *, allow_any_url=False):
     monkeypatch.setattr(
         oauth,
         "guarded_client",
-        lambda **_kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        lambda **_kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(_streaming(handler)),
+        ),
     )
 
 
@@ -463,7 +521,10 @@ class TestDiscoverAuthorization:
         # only at request time. Reporting that as "this server issued no
         # challenge" would file our error under the server's behaviour.
         client = AsyncMock()
-        client.get.side_effect = InvalidConnectorUrlError("resolves to private")
+        # The refusal comes from the pinning transport, so it surfaces on the
+        # send — where the bounded read now issues it.
+        client.send.side_effect = InvalidConnectorUrlError("resolves to private")
+        client.build_request = httpx.Client().build_request
 
         with pytest.raises(InvalidConnectorUrlError):
             await _read_challenge(client, "https://mcp.example.com/mcp")
@@ -1311,6 +1372,98 @@ class TestRevokingAGrant:
         # ends up somewhere it was not meant to go.
         with pytest.raises(ConnectorOAuthError):
             await revoke_grant(_metadata(), _client(), tokens=self._tokens("R0"))
+
+
+class TestOutboundReadsAreBounded:
+    """Every URL fetched here is user- or server-supplied, and the process doing
+    the fetching is the API serving other users' requests.
+
+    A time bound cannot express this one: an endpoint answering 200 with
+    gigabytes as fast as the socket allows arrives well inside the deadline, and
+    ``httpx`` buffers the body whole before there is a response object to
+    measure — so the buffer lands in the uvicorn heap either way.
+    """
+
+    async def _revoke(self):
+        # Revocation is the shortest path to one outbound read; the bound it
+        # exercises is shared by every fetch in this module.
+        await revoke_grant(
+            TestRevokingAGrant._METADATA, _client(),
+            tokens=TestRevokingAGrant()._tokens(None),
+        )
+
+    async def test_an_oversize_body_is_refused_rather_than_buffered(
+        self, monkeypatch,
+    ):
+        read = 0
+
+        class _Endless(httpx.AsyncByteStream, httpx.SyncByteStream):
+            def __iter__(self):
+                raise NotImplementedError
+
+            async def __aiter__(self):
+                nonlocal read
+                while True:
+                    read += 64 * 1024
+                    yield b"x" * (64 * 1024)
+
+        # Past ``_serve``, which rebuilds every answer around a bounded stream —
+        # the point here is a server that never stops sending.
+        monkeypatch.setattr(oauth_service, "guard_public_url", _allow)
+        monkeypatch.setattr(
+            oauth_service, "guarded_client",
+            lambda **_kwargs: httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, stream=_Endless()),
+                ),
+            ),
+        )
+
+        with pytest.raises(ConnectorOAuthError):
+            await self._revoke()
+
+        assert read <= oauth_service._MAX_RESPONSE_BYTES + 64 * 1024
+
+    async def test_an_encoded_body_is_refused_before_it_is_decoded(
+        self, monkeypatch,
+    ):
+        # Refusing eventually is not the property: a decoded read also ends in an
+        # error, but only after the allocation, and the expansion ratio is the
+        # server's to pick. What is asserted is *why* it was refused — the
+        # encoding, which can only be seen before a byte is decoded.
+        import gzip
+
+        bomb = gzip.compress(b'{"a":"' + b"x" * (40 * 1024 * 1024) + b'"}')
+        # Small enough on the wire that a size cap alone would wave it through.
+        assert len(bomb) < oauth_service._MAX_RESPONSE_BYTES
+
+        monkeypatch.setattr(oauth_service, "guard_public_url", _allow)
+        monkeypatch.setattr(
+            oauth_service, "guarded_client",
+            lambda **_kwargs: httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200, headers={"content-encoding": "gzip"},
+                        stream=_Unread(bomb),
+                    ),
+                ),
+            ),
+        )
+
+        with pytest.raises(ConnectorOAuthError, match="Content-Encoding"):
+            await self._revoke()
+
+    async def test_it_asks_for_no_encoding_at_all(self, monkeypatch):
+        seen: dict = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen["accept_encoding"] = request.headers.get("accept-encoding")
+            return httpx.Response(200)
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+        await self._revoke()
+
+        assert seen["accept_encoding"] == "identity"
 
 
 class TestStoringAFreshGrant:
