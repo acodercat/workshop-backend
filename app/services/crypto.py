@@ -46,7 +46,10 @@ def open_secret(ciphertext: str, *, what: str) -> str:
     """
     try:
         return decrypt_secret(ciphertext)
-    except Exception as exc:
+    except Exception:
+        # ``from None``: what is safe to chain depends on what sits inside the
+        # ``try``, and Fernet saying nothing today is not a property of this
+        # function. A parse added beside it would carry the plaintext.
         raise ConnectorCredentialUnreadableError(
             f"This Connector's {what} could not be read. Set it again."
-        ) from exc
+        ) from None
