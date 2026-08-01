@@ -1,11 +1,15 @@
 """Official Connector catalog: instantiation rules (no DB required)."""
 
+import contextlib
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.errors import ConnectorCatalogEntryNotFoundError
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.schemas.mcp_server import ConnectorCatalogEntryResponse
+from app.services.mcp import catalog
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES, build_connector
 
 
@@ -57,6 +61,40 @@ class TestBuildConnector:
         assert connector.encrypted_credential is None
         assert connector.oauth_client_encrypted is None
         assert connector.oauth_tokens_encrypted is None
+
+
+class TestUnpublishedEntriesAreUnreachable:
+    """Unpublishing is the operator's off switch, and it has to hold on both
+    reads. They are not the same promise: the listing merely stops advertising,
+    while the fetch-by-id is the one an attacker reaches with an id kept from an
+    earlier listing."""
+
+    async def _statement(self, call) -> str:
+        db = AsyncMock()
+        # ``Result``'s own accessors are sync; an AsyncMock would hand back
+        # coroutines and the caller would fail on the double, not the query.
+        db.execute.return_value = MagicMock(
+            scalars=MagicMock(return_value=iter(())),
+            scalar_one_or_none=MagicMock(return_value=None),
+        )
+        with contextlib.suppress(ConnectorCatalogEntryNotFoundError):
+            await call(db)
+        return " ".join(str(db.execute.await_args.args[0].compile()).split())
+
+    async def test_the_listing_offers_only_published_entries(self):
+        sql = await self._statement(catalog.list_published)
+
+        assert "mcp_server_catalog.published IS true" in sql
+
+    async def test_an_id_kept_from_an_earlier_listing_stops_working(self):
+        # Without this predicate an unpublished entry stays addable by anyone
+        # who wrote its id down, which is the whole thing unpublishing prevents.
+        sql = await self._statement(
+            lambda db: catalog.get_published_entry(db, 7)
+        )
+
+        assert "mcp_server_catalog.published IS true" in sql
+        assert "mcp_server_catalog.id = " in sql
 
 
 class TestInstantiableAuthTypes:

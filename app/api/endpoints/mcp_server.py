@@ -44,6 +44,7 @@ from app.errors import (
     ConnectorOAuthClientUnusableError,
     ConnectorOAuthError,
     ConnectorQuotaExceededError,
+    OAuthNotConfiguredError,
 )
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.user import User
@@ -665,8 +666,18 @@ async def _register_oauth_client(
 
 
 def _require_redirect_uri() -> str:
+    """The redirect URI every OAuth step needs, or a loud refusal.
+
+    Logged here rather than left to the handler, which serializes an
+    :class:`AppError` without a line of its own: this is the deployment's own
+    omission, nobody downstream can act on it, and a 500 with nothing in the
+    log is how it stays unnoticed.
+    """
     if not settings.mcp_oauth_redirect_uri:
-        raise ConnectorOAuthError("OAuth is not configured (mcp_oauth_redirect_uri).")
+        logger.error(
+            "mcp_oauth_redirect_uri is not set; no Connector can use OAuth"
+        )
+        raise OAuthNotConfiguredError("OAuth is not configured on this server.")
     return settings.mcp_oauth_redirect_uri
 
 

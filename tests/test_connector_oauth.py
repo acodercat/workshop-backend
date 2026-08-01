@@ -26,6 +26,7 @@ from app.errors import (
     ConnectorOAuthClientUnusableError,
     ConnectorOAuthError,
     InvalidConnectorUrlError,
+    OAuthNotConfiguredError,
 )
 from app.services.mcp import oauth as oauth_service
 from app.services.mcp.oauth import (
@@ -1061,13 +1062,21 @@ class TestClientMetadataEndpoint:
         assert caught.value.status_code == 404
 
     async def test_fails_loudly_when_the_redirect_uri_is_missing(self, monkeypatch):
-        # A document advertising no redirect URI would strand every flow.
-        with pytest.raises(ConnectorOAuthError):
+        # A document advertising no redirect URI would strand every flow. 500,
+        # not the 502 its neighbours carry: this is the deployment's own
+        # omission, so "the provider is having trouble, try again" is both
+        # untrue and unactionable.
+        with pytest.raises(OAuthNotConfiguredError) as caught:
             await self._get(
                 monkeypatch,
                 metadata_url="https://api.example.com/api/connectors/client-metadata",
                 redirect_uri="",
             )
+
+        assert caught.value.status_code == 500
+        # The operator needs the setting's name; the caller must not be handed
+        # the shape of a config they have no business knowing.
+        assert "mcp_oauth_redirect_uri" not in caught.value.message
 
 
 class TestScopeSelectionStrategy:

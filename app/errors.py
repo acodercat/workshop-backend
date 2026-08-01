@@ -325,6 +325,16 @@ class ConnectorOAuthChangeUnsupportedError(AppError):
     error_type = "connector_oauth_change_unsupported"
 
 
+class OAuthNotConfiguredError(AppError):
+    """This deployment has no OAuth redirect URI, so it cannot run the flow at
+    all. 500 rather than the 502 its neighbours use: those name a third party
+    having a bad day, and a caller reads them as "retry, or go fix your OAuth
+    app". Nothing here is the caller's, and no amount of retrying helps."""
+
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    error_type = "oauth_not_configured"
+
+
 class ConnectorCatalogEntryNotFoundError(AppError):
     """No such entry in the official Connector directory — the id is unknown or
     the entry has been unpublished. 404 rather than 403 for an unpublished one:
