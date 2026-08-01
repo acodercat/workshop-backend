@@ -17,7 +17,13 @@ from mcp.shared.auth import (
 )
 
 from app.errors import (
+    ConnectorAuthorizationExpiredError,
+    ConnectorAuthorizationSupersededError,
+    ConnectorChangedDuringAuthorizationError,
     ConnectorCredentialUnreadableError,
+    ConnectorNotAuthorizedError,
+    ConnectorOAuthChangeUnsupportedError,
+    ConnectorOAuthClientUnusableError,
     ConnectorOAuthError,
     InvalidConnectorUrlError,
 )
@@ -1050,8 +1056,6 @@ class TestClientMetadataEndpoint:
     async def test_404s_when_cimd_is_not_configured(self, monkeypatch):
         # Publishing an identity that names a redirect URI we may not serve is
         # worse than publishing nothing.
-        from fastapi import HTTPException
-
         with pytest.raises(HTTPException) as caught:
             await self._get(monkeypatch, metadata_url="", redirect_uri="https://app/cb")
         assert caught.value.status_code == 404
@@ -1815,7 +1819,7 @@ class TestTwoAuthorizationsInTheAir:
             exchanged.append(True)
         monkeypatch.setattr(endpoint.oauth, "exchange_code", never)
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorAuthorizationSupersededError) as caught:
             await self._callback(
                 monkeypatch, self._redis(current_state="newer"), "older",
             )
@@ -1851,7 +1855,7 @@ class TestTwoAuthorizationsInTheAir:
         )
 
         db = self._db()
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorAuthorizationSupersededError) as caught:
             await self._callback(monkeypatch, redis, "mine", db)
 
         assert caught.value.status_code == 400
@@ -1891,7 +1895,7 @@ class TestTwoAuthorizationsInTheAir:
             return MagicMock(access_token="orphan")
         monkeypatch.setattr(endpoint.oauth, "exchange_code", patched_away)
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorChangedDuringAuthorizationError) as caught:
             await self._callback(
                 monkeypatch, self._redis(current_state="mine"), "mine", db,
             )
@@ -1916,7 +1920,7 @@ class TestTwoAuthorizationsInTheAir:
         # in the air — and letting that through undoes the disconnect.
         from app.api.endpoints import mcp_server as endpoint
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorAuthorizationExpiredError) as caught:
             await endpoint._reject_an_unawaited_authorization(
                 self._redis(current_state=None), "whatever", {"connector_id": 1},
             )
@@ -1924,7 +1928,7 @@ class TestTwoAuthorizationsInTheAir:
         assert caught.value.status_code == 400
         # Told apart from the superseded case, because the remedies differ: there
         # the user finishes the other tab, here they start over.
-        assert "no longer waiting" in caught.value.detail
+        assert "no longer waiting" in caught.value.message
 
     async def test_a_disconnect_mid_flow_is_not_undone_by_the_callback(
         self, monkeypatch,
@@ -1947,7 +1951,7 @@ class TestTwoAuthorizationsInTheAir:
         # live for the rest of its TTL, and nothing is pointed at it.
         redis = self._redis(current_state=None)
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorAuthorizationExpiredError) as caught:
             await self._callback(monkeypatch, redis, "the-open-popup")
 
         assert caught.value.status_code == 400
@@ -2117,7 +2121,7 @@ class TestAnAuthorizationServerThatChanged:
         connector = self._connector("https://as-a.example.com/")
         connector.oauth_client_encrypted = _sealed(_manual_client())
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorOAuthClientUnusableError) as caught:
             await self._client_for(
                 connector, self._discovered("https://as-evil.example.com"),
             )
@@ -2156,7 +2160,7 @@ class TestAnAuthorizationServerThatChanged:
             AsyncMock(return_value=self._discovered("https://as-evil.example.com")),
         )
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorOAuthClientUnusableError) as caught:
             await endpoint.create_connector_authorization(
                 request=MagicMock(), connector_id=1,
                 db=_session(), redis=AsyncMock(), current_user=MagicMock(id=7),
@@ -2231,7 +2235,7 @@ class TestAnAuthorizationServerThatChanged:
         connector = self._connector(None)
         connector.oauth_client_encrypted = _sealed(_manual_client())
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorOAuthClientUnusableError) as caught:
             await self._client_for(
                 connector, self._discovered("https://as-a.example.com"),
             )
@@ -2371,7 +2375,7 @@ class TestRepointingAnOAuthConnector:
 
         connector = _stored_connector(url="https://old.example.com/mcp")
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorOAuthChangeUnsupportedError) as caught:
             await _patch_connector(
                 monkeypatch, connector,
                 ConnectorUpdate(url="https://new.example.com/mcp"),
@@ -2535,7 +2539,7 @@ class TestEndingAnAuthorization:
             oauth_tokens_expires_at=None,
         )
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorNotAuthorizedError) as caught:
             await _patch_connector(
                 monkeypatch, connector, ConnectorUpdate(connected=True),
             )

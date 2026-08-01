@@ -263,6 +263,68 @@ class ConnectorCredentialUnreadableError(AppError):
     error_type = "connector_credential_unreadable"
 
 
+class ConnectorNotOAuthError(AppError):
+    """An OAuth step was asked of a Connector that authenticates some other way.
+    400: the request describes something the row is not."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_not_oauth"
+
+
+class ConnectorNotAuthorizedError(AppError):
+    """Asked to connect an OAuth Connector that holds no grant. 400: connecting
+    is the wrong verb for it — authorizing is what it still needs."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_not_authorized"
+
+
+class ConnectorAuthorizationExpiredError(AppError):
+    """The authorization attempt this request belongs to is no longer live —
+    its state has lapsed, or the Connector has stopped waiting. 400: starting a
+    new one is the whole remedy, and always available."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_authorization_expired"
+
+
+class ConnectorAuthorizationSupersededError(AppError):
+    """A newer authorization was started for this Connector, so this callback
+    belongs to an attempt the user has already abandoned. Distinct from
+    :class:`ConnectorAuthorizationExpiredError` because the remedy is the
+    opposite: finish the *other* one rather than start another."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_authorization_superseded"
+
+
+class ConnectorChangedDuringAuthorizationError(AppError):
+    """The Connector's OAuth client was replaced while the user was away at the
+    provider, so this grant would land on a row it does not describe. 400: the
+    attempt is void and a fresh one will succeed."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_changed_during_authorization"
+
+
+class ConnectorOAuthClientUnusableError(AppError):
+    """The stored OAuth client cannot be used against the authorization server
+    and cannot be replaced either — the user registered it themselves, so
+    nothing here may re-mint it. 400: only a new Connector helps."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_oauth_client_unusable"
+
+
+class ConnectorOAuthChangeUnsupportedError(AppError):
+    """A PATCH would move a Connector into, or an OAuth Connector's URL out of,
+    the shape its grant was issued against. 400: an authorization is bound to
+    the server it was granted for, so this is a new Connector, not an edit."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_oauth_change_unsupported"
+
+
 class ConnectorCatalogEntryNotFoundError(AppError):
     """No such entry in the official Connector directory — the id is unknown or
     the entry has been unpublished. 404 rather than 403 for an unpublished one:

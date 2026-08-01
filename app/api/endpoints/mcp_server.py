@@ -34,7 +34,14 @@ from mcp.shared.auth import (
 from app.api.dependencies import get_db, get_redis
 from app.auth import authenticate_and_get_user
 from app.errors import (
+    ConnectorAuthorizationExpiredError,
+    ConnectorAuthorizationSupersededError,
+    ConnectorChangedDuringAuthorizationError,
     ConnectorNameConflictError,
+    ConnectorNotAuthorizedError,
+    ConnectorNotOAuthError,
+    ConnectorOAuthChangeUnsupportedError,
+    ConnectorOAuthClientUnusableError,
     ConnectorOAuthError,
     ConnectorQuotaExceededError,
 )
@@ -182,10 +189,7 @@ async def create_connector_authorization(
     """
     connector = await _get_owned_connector(db, connector_id, current_user.id)
     if connector.auth_type != MCPServerAuthType.OAUTH:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="connector is not an OAuth connector",
-        )
+        raise ConnectorNotOAuthError("connector is not an OAuth connector")
     redirect_uri = _require_redirect_uri()
     await _release_connection(db)
     discovered = await oauth.discover_authorization(connector.url)
@@ -245,9 +249,8 @@ async def oauth_callback(
     """
     raw = await _consume_pending_authorization(redis, body.state)
     if raw is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="invalid or expired authorization state",
+        raise ConnectorAuthorizationExpiredError(
+            "invalid or expired authorization state"
         )
     pending = json.loads(raw)
     # First thing the record is used for: a response from an authorization
@@ -421,12 +424,9 @@ def _reject_connecting_without_a_grant(connector: MCPServer) -> None:
     if connector.auth_type != MCPServerAuthType.OAUTH:
         return
     if connector.oauth_tokens_encrypted is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "this connector isn't authorized; authorize it rather than "
-                "connecting it"
-            ),
+        raise ConnectorNotAuthorizedError(
+            "this connector isn't authorized; authorize it rather than "
+            "connecting it"
         )
 
 
@@ -450,20 +450,14 @@ def _reject_unprovisionable(
     the user to discover that Reconnect now fails.
     """
     if body.auth_type == MCPServerAuthType.OAUTH:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "changing a connector to OAuth isn't supported; "
-                "create a new OAuth connector"
-            ),
+        raise ConnectorOAuthChangeUnsupportedError(
+            "changing a connector to OAuth isn't supported; "
+            "create a new OAuth connector"
         )
     if url_changed and connector.auth_type == MCPServerAuthType.OAUTH:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "changing an OAuth connector's URL isn't supported; "
-                "create a new OAuth connector"
-            ),
+        raise ConnectorOAuthChangeUnsupportedError(
+            "changing an OAuth connector's URL isn't supported; "
+            "create a new OAuth connector"
         )
 
 
@@ -980,12 +974,9 @@ async def _locked_connector_for_grant(
             status_code=status.HTTP_404_NOT_FOUND, detail="connector not found",
         )
     if connector.oauth_client_encrypted != authorizing_client:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "this connector's credentials changed while you were "
-                "authorizing; start again"
-            ),
+        raise ConnectorChangedDuringAuthorizationError(
+            "this connector's credentials changed while you were "
+            "authorizing; start again"
         )
     await _reject_an_unawaited_authorization(redis, state, pending)
     return connector
@@ -1051,19 +1042,13 @@ async def _reject_an_unawaited_authorization(
     if current == state:
         return
     if current is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "this connector is no longer waiting to be authorized; "
-                "connect it again to start over"
-            ),
+        raise ConnectorAuthorizationExpiredError(
+            "this connector is no longer waiting to be authorized; "
+            "connect it again to start over"
         )
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=(
-            "a newer authorization was started for this connector; "
-            "finish that one instead"
-        ),
+    raise ConnectorAuthorizationSupersededError(
+        "a newer authorization was started for this connector; "
+        "finish that one instead"
     )
 
 
@@ -1104,9 +1089,8 @@ async def _client_for_authorization(
     if unusable is None:
         return client
     if not _issued_by_an_authorization_server(client):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{unusable}; create a new OAuth connector",
+        raise ConnectorOAuthClientUnusableError(
+            f"{unusable}; create a new OAuth connector"
         )
     logger.info("Connector %s: %s; registering again", connector.id, unusable)
     connector.oauth_client_encrypted = encrypt_secret(
