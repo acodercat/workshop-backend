@@ -76,6 +76,22 @@ class TestEmbeddedIPv4Prefixes:
         with pytest.raises(InvalidConnectorUrlError):
             url_guard.validate_public_url(f"https://[{address}]/x")
 
+    @pytest.mark.parametrize("address,dialled", [
+        ("64:ff9b::8.8.8.8", "8.8.8.8"),
+        ("64:ff9b::1.1.1.1", "1.1.1.1"),
+    ])
+    def test_a_wrapped_public_address_is_allowed(self, address, dialled):
+        import ipaddress
+
+        # The prefix is not the answer, the address inside it is. DNS64 answers
+        # for every IPv4-only host out of this prefix, so refusing the prefix
+        # would leave an IPv6-only deployment with no reachable Connector at all.
+        assert str(ipaddress.ip_address(
+            int(ipaddress.ip_address(address)) & 0xFFFFFFFF
+        )) == dialled
+
+        url_guard.validate_public_url(f"https://[{address}]/x")
+
     def test_an_ordinary_global_ipv6_address_still_passes(self, monkeypatch):
         # The boundary. Refusing whole swathes of IPv6 to close this would cost
         # every legitimate v6-only MCP server.

@@ -76,6 +76,11 @@ def validate_public_url(url: str) -> None:
 # (``::ffff:0:0/96``), NAT64 local-use (``64:ff9b:1::/48``), 6to4 and Teredo all
 # already answer ``False`` — listing them would suggest this is the general
 # defence against embedded addresses rather than the two exceptions to one.
+#
+# The address inside is judged, not the prefix refused. On an IPv6-only network
+# DNS64 answers for *every* IPv4-only host out of ``64:ff9b::/96``, so refusing
+# the prefix outright would leave no reachable Connector at all — and it is the
+# inner address that gets dialled, so it is the one the question is about.
 _EMBEDDED_IPV4_PREFIXES = (
     ipaddress.ip_network("64:ff9b::/96"),   # NAT64 well-known (RFC 6052 §2.1)
     ipaddress.ip_network("::/96"),          # IPv4-compatible, deprecated (RFC 4291)
@@ -92,14 +97,27 @@ def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     blocklist of those waves through Tailscale addresses, carrier-grade NAT
     ranges, and anything else an operator runs in there.
 
-    Two prefixes are refused on top of it, and they are refusals of a different
-    kind: not addresses the registry calls special, but wrappers whose *own*
-    address is global while the one that gets dialled is inside them. See
+    One case it cannot answer alone: a wrapper whose *own* address is global
+    while the address that actually gets dialled sits inside it. There the
+    question is about the inner one, so that is what gets asked. See
     :data:`_EMBEDDED_IPV4_PREFIXES`.
     """
     if not ip.is_global:
         return False
-    return not any(ip in prefix for prefix in _EMBEDDED_IPV4_PREFIXES)
+    embedded = _embedded_ipv4(ip)
+    return embedded is None or embedded.is_global
+
+
+def _embedded_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | None:
+    """The IPv4 address *ip* carries in its low 32 bits, if it is one of the
+    wrappers ``is_global`` judges from the outside. ``None`` for anything else."""
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return None
+    if not any(ip in prefix for prefix in _EMBEDDED_IPV4_PREFIXES):
+        return None
+    return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
 
 
 class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
@@ -162,13 +180,22 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
         # Only connection failures move on. They happen before any byte of the
         # request is sent, so retrying is safe even for the token exchange; a
         # read failure could mean the server already acted on it, and is raised.
+        # Restored afterwards, always. The request object outlives this call: an
+        # ``httpx.Auth`` flow re-yields *the same* one to retry a 401, and a
+        # second pass over a URL left holding the pinned literal would read its
+        # host as the address — pinning the SNI to an IP no certificate names,
+        # and collapsing the candidate list to the one address already tried.
+        original = request.url
         last: httpx.TransportError | None = None
-        for address in candidates:
-            request.url = request.url.copy_with(host=address)
-            try:
-                return await super().handle_async_request(request)
-            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-                last = exc
+        try:
+            for address in candidates:
+                request.url = original.copy_with(host=address)
+                try:
+                    return await super().handle_async_request(request)
+                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                    last = exc
+        finally:
+            request.url = original
         # Never with an empty ``last``: the candidate list is non-empty by the
         # check above, so the loop either returned or recorded a failure.
         raise last
