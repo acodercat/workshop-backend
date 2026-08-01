@@ -52,7 +52,7 @@ from app.schemas.mcp_server import (
     ConnectorUpdate,
     OAuthCallbackRequest,
 )
-from app.services.crypto import decrypt_secret, encrypt_secret
+from app.services.crypto import encrypt_secret, open_secret
 from app.services.mcp import catalog, grant, oauth
 from app.services.mcp.probe import ProbeResult, probe
 from app.services.redis import oauth_current_state_key, oauth_state_key
@@ -908,7 +908,7 @@ def _probe_credential(
             "This Connector is not authorized yet; authorize it first."
         )
     tokens = OAuthToken.model_validate_json(
-        decrypt_secret(connector.oauth_tokens_encrypted)
+        open_secret(connector.oauth_tokens_encrypted, what="authorization")
     )
     return MCPServerAuthType.BEARER, tokens.access_token
 
@@ -928,7 +928,7 @@ def _credential_plaintext(
 
 
 def _decrypt_or_none(ciphertext: str | None) -> str | None:
-    return decrypt_secret(ciphertext) if ciphertext else None
+    return open_secret(ciphertext, what="credential") if ciphertext else None
 
 
 async def _locked_connector_for_grant(
@@ -1193,16 +1193,16 @@ def _load_oauth_client(connector: MCPServer) -> OAuthClientInformationFull:
     """Decrypt the connector's stored OAuth client, or fail cleanly if absent.
 
     A well-formed OAuth connector always has one (create registers it and PATCH
-    can't switch a connector to OAuth). A NULL column means a malformed row —
-    surface a typed :class:`ConnectorOAuthError` instead of letting
-    ``decrypt_secret("")`` raise a raw Fernet ``InvalidToken`` (an unhandled 500).
+    can't switch a connector to OAuth), so a NULL column means a malformed row.
+    A column that is present but will not open is a different failure with a
+    different remedy, and :func:`open_secret` names that one.
     """
     if not connector.oauth_client_encrypted:
         raise ConnectorOAuthError(
             "connector has no OAuth client registration; re-create it."
         )
     return OAuthClientInformationFull.model_validate_json(
-        decrypt_secret(connector.oauth_client_encrypted)
+        open_secret(connector.oauth_client_encrypted, what="OAuth client")
     )
 
 

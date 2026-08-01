@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from cryptography.fernet import InvalidToken
 from fastapi import BackgroundTasks, HTTPException
 from mcp.shared.auth import (
     OAuthClientInformationFull,
@@ -17,7 +16,11 @@ from mcp.shared.auth import (
     ProtectedResourceMetadata,
 )
 
-from app.errors import ConnectorOAuthError, InvalidConnectorUrlError
+from app.errors import (
+    ConnectorCredentialUnreadableError,
+    ConnectorOAuthError,
+    InvalidConnectorUrlError,
+)
 from app.services.mcp import oauth as oauth_service
 from app.services.mcp.oauth import (
     DiscoveredAuthorization,
@@ -1233,7 +1236,7 @@ class TestProbeCredential:
 
         tokens = OAuthToken(access_token="at", token_type="Bearer")
         monkeypatch.setattr(
-            endpoint, "decrypt_secret", lambda ciphertext: tokens.model_dump_json()
+            endpoint, "open_secret", lambda ciphertext, **_: tokens.model_dump_json()
         )
         auth_type, credential = endpoint._probe_credential(
             self._connector(
@@ -1561,7 +1564,7 @@ class TestStoringAFreshGrant:
         )
         written: dict = {}
         monkeypatch.setattr(
-            grant, "decrypt_secret", lambda _c: stored.model_dump_json(),
+            grant, "open_secret", lambda _c, **_: stored.model_dump_json(),
         )
         monkeypatch.setattr(
             grant, "encrypt_secret",
@@ -2342,7 +2345,7 @@ async def _patch_connector(
     )
     # Every PATCH reads the static credential back, whether or not it is
     # changing one. Nothing here is about crypto, so the seal is a no-op.
-    monkeypatch.setattr(endpoint, "decrypt_secret", lambda sealed: sealed)
+    monkeypatch.setattr(endpoint, "open_secret", lambda sealed, **_: sealed)
 
     background_tasks = BackgroundTasks()
     await endpoint.update_connector(
@@ -2478,8 +2481,8 @@ class TestEndingAnAuthorization:
             endpoint.grant, "stored_tokens", lambda _row: tokens,
         )
         monkeypatch.setattr(
-            endpoint.grant, "decrypt_secret",
-            lambda _c: _client().model_dump_json(),
+            endpoint.grant, "open_secret",
+            lambda _c, **_: _client().model_dump_json(),
         )
         return tokens
 
@@ -2698,10 +2701,10 @@ class TestEndingAnAuthorization:
         from app.api.endpoints import mcp_server as endpoint
         from app.schemas.mcp_server import ConnectorUpdate
 
-        def unreadable(_ciphertext):
-            raise InvalidToken
+        def unreadable(_ciphertext, **_):
+            raise ConnectorCredentialUnreadableError("sealed under a rotated key")
 
-        monkeypatch.setattr(endpoint.grant, "decrypt_secret", unreadable)
+        monkeypatch.setattr(endpoint.grant, "open_secret", unreadable)
         connector = _stored_connector()
 
         queued = await _patch_connector(
@@ -2715,10 +2718,10 @@ class TestEndingAnAuthorization:
     async def test_deleting_one_that_cannot_be_read_still_works(self, monkeypatch):
         from app.api.endpoints import mcp_server as endpoint
 
-        def unreadable(_ciphertext):
-            raise InvalidToken
+        def unreadable(_ciphertext, **_):
+            raise ConnectorCredentialUnreadableError("sealed under a rotated key")
 
-        monkeypatch.setattr(endpoint.grant, "decrypt_secret", unreadable)
+        monkeypatch.setattr(endpoint.grant, "open_secret", unreadable)
 
         async def owned(*_args, **_kwargs):
             return _stored_connector()
@@ -2816,7 +2819,7 @@ class TestEndingAnAuthorization:
             return connector
 
         monkeypatch.setattr(endpoint, "_get_owned_connector", owned)
-        monkeypatch.setattr(endpoint, "decrypt_secret", lambda sealed: sealed)
+        monkeypatch.setattr(endpoint, "open_secret", lambda sealed, **_: sealed)
         commit = AsyncMock()
         monkeypatch.setattr(endpoint, "_commit_or_conflict", commit)
         redis = AsyncMock()

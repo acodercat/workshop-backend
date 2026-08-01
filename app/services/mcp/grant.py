@@ -23,7 +23,7 @@ from mcp.shared.auth import (
 )
 
 from app.models.mcp_server import MCPServer
-from app.services.crypto import decrypt_secret, encrypt_secret
+from app.services.crypto import encrypt_secret, open_secret
 
 # What to assume a token lives for when its issuer would not say. An hour is
 # the common default across providers, and being wrong only means refreshing
@@ -117,7 +117,7 @@ def stored_tokens(connector: MCPServer) -> OAuthToken | None:
     if not connector.oauth_tokens_encrypted:
         return None
     return OAuthToken.model_validate_json(
-        decrypt_secret(connector.oauth_tokens_encrypted)
+        open_secret(connector.oauth_tokens_encrypted, what="authorization")
     )
 
 
@@ -139,6 +139,6 @@ def stored_authorization(
     return (
         OAuthMetadata.model_validate(authorization_server),
         OAuthClientInformationFull.model_validate_json(
-            decrypt_secret(connector.oauth_client_encrypted)
+            open_secret(connector.oauth_client_encrypted, what="OAuth client")
         ),
     )

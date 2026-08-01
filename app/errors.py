@@ -254,6 +254,15 @@ class ConnectorQuotaExceededError(AppError):
     error_type = "connector_quota_exceeded"
 
 
+class ConnectorCredentialUnreadableError(AppError):
+    """A secret stored on the Connector will not decrypt — the encryption key
+    has moved on, or the column is damaged. 409: the request is fine, the row
+    is not, and the only remedy is to supply the secret again."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "connector_credential_unreadable"
+
+
 class ConnectorCatalogEntryNotFoundError(AppError):
     """No such entry in the official Connector directory — the id is unknown or
     the entry has been unpublished. 404 rather than 403 for an unpublished one:
