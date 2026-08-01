@@ -245,6 +245,15 @@ class ConnectorNameConflictError(AppError):
     error_type = "connector_name_conflict"
 
 
+class ConnectorQuotaExceededError(AppError):
+    """The user already holds ``MAX_CONNECTORS_PER_USER`` Connectors. 409 rather
+    than 403: nothing about the caller is refused, a resource limit is met, and
+    deleting one makes the identical request succeed."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "connector_quota_exceeded"
+
+
 class ConnectorCatalogEntryNotFoundError(AppError):
     """No such entry in the official Connector directory — the id is unknown or
     the entry has been unpublished. 404 rather than 403 for an unpublished one:

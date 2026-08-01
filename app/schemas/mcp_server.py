@@ -29,6 +29,11 @@ def _require_auth_credentials(
 # Both sit well above any real server; the largest published catalogues are a
 # few dozen tools. They also bound what the probe bothers to store a preview of,
 # since a tool outside them could never be switched off (see ``probe.py``).
+# Every connected Connector's tools enter the model's catalog on *every step*
+# of every turn — the per-turn cost scales with how many a user holds, not with
+# how often they are used. A guardrail against the pathological case, not a
+# considered working limit; raising it costs nothing but tokens.
+MAX_CONNECTORS_PER_USER = 5
 MAX_TOOL_NAME_LEN = 128
 MAX_DISABLED_TOOLS = 256
 ToolName = Annotated[str, Field(min_length=1, max_length=MAX_TOOL_NAME_LEN)]
