@@ -143,7 +143,16 @@ in production as the failure mode. Three empty tables are the cheaper side of th
 
 Consequence: **never run `alembic revision --autogenerate` on hkgai.** `Base.metadata` no longer
 describes those tables, so autogenerate would emit `DROP TABLE` for them. Migrations come from
-master, always.
+master, always — and a couple of their docstrings still point at `app/services/commission/`.
+That is expected: a revision is a historical record, and editing one is the fork this whole
+trade exists to avoid.
+
+### Brand check the *new* templates, not just the conflicted ones
+
+A template hkgai already had arrives as a conflict and `--ours` keeps its branding. A template
+master **adds** merges in silently, carrying master's brand — the product name *and* the company
+footer (`水杉智算技术有限公司` / `Metasequoia Technology Co., Ltd.`). After every merge:
+`grep -c "水杉\|Metasequoia\|PPIG" app/services/email/templates.py` must be **0**.
 
 ## ⚠️ Alembic migration chain
 

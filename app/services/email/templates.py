@@ -207,7 +207,7 @@ _CREDITS_TOPPED_UP_BODY_ZH = """<div style="max-width:480px;margin:0 auto;paddin
   <div style="border-top:1px solid #e5e7eb;padding-top:32px;">
     <p style="font-size:13px;color:#6b7280;margin:0;">如有任何疑问，请直接回复管理员或联系您的对接人。</p>
   </div>
-  <div style="margin-top:48px;font-size:12px;color:#9ca3af;line-height:1.7;">水杉智算技术有限公司</div>
+  <div style="margin-top:48px;font-size:12px;color:#9ca3af;line-height:1.7;">香港生成式人工智能研发中心</div>
 </div>"""
 
 
@@ -219,7 +219,7 @@ _CREDITS_TOPPED_UP_BODY_EN = """<div style="max-width:480px;margin:0 auto;paddin
   <div style="border-top:1px solid #e5e7eb;padding-top:32px;">
     <p style="font-size:13px;color:#6b7280;margin:0;">Questions? Just reply to this email or reach out to your contact.</p>
   </div>
-  <div style="margin-top:48px;font-size:12px;color:#9ca3af;line-height:1.7;">Metasequoia Technology Co., Ltd.</div>
+  <div style="margin-top:48px;font-size:12px;color:#9ca3af;line-height:1.7;">Hong Kong Generative AI Research &amp; Development Center</div>
 </div>"""
 
 
