@@ -79,6 +79,7 @@ async def queue_user_message(
     content: str,
     files: list[FileRef],
     skills: list[str] | None = None,
+    connectors: list[int] | None = None,
     recipe_id: int | None = None,
     agent_type: AgentType | None = None,
 ) -> None:
@@ -169,9 +170,11 @@ async def queue_user_message(
         db, session.user_id, skills or [],
     )
 
-    # Snapshot the user's connected Connectors. Credentials are
-    # NOT snapshotted — the worker resolves url + decrypted credential live by id.
-    accepted_connectors = await _resolve_mcp_servers(db, session.user_id)
+    # Snapshot the Connectors this turn picked. Credentials are NOT
+    # snapshotted — the worker resolves url + decrypted credential live by id.
+    accepted_connectors = await _resolve_mcp_servers(
+        db, session.user_id, connectors or [],
+    )
 
     # Resolve the picked recipe server-side into a pinned snapshot — the
     # client only sends ``recipe_id``, never the instruction text. A bad
@@ -504,14 +507,19 @@ async def _filter_invokable_skills(
 
 
 async def _resolve_mcp_servers(
-    db: AsyncSession, user_id: int | None,
+    db: AsyncSession, user_id: int | None, requested: list[int],
 ) -> list[dict[str, str | int]]:
-    """Return per-turn snapshots ``{"id", "name"}`` for the user's CONNECTED Connectors.
+    """Return per-turn snapshots ``{"id", "name"}`` for the Connectors this turn picked.
 
-    Connectors follow a "connected = active" model (like Claude / ChatGPT
-    connectors): every connected Connector's tools are available each turn,
-    minus the ones the user switched off individually (``disabled_tools``,
-    resolved live by the worker rather than snapshotted here).
+    A Connector is attached only when the composer picked it — the same
+    per-turn authorization ``_filter_invokable_skills`` gives a skill.
+    Being connected makes one *pickable*; it does not attach it. The cost
+    of attaching is paid whether or not the turn uses it: the tools enter
+    the model's catalog on every step, and the worker stands each one up
+    serially under a single budget, so ambient attachment charges every
+    turn for Connectors most turns never call. Per-tool trimming stays
+    where it was (``disabled_tools``, resolved live by the worker rather
+    than snapshotted here).
 
     The snapshot caps the set — connecting a Connector after enqueue cannot add
     it to a queued turn — but it does not freeze it: the worker re-reads each
@@ -523,16 +531,27 @@ async def _resolve_mcp_servers(
     enqueue and claim would expose its tools under a name that no longer
     exists. (Contrast the skills snapshot, whose ``bundle_key`` *is*
     load-bearing.)
+
+    An id that is not this user's, or not connected, is dropped rather than
+    raising — same call as ``_filter_invokable_skills``: a stale chip should
+    cost the turn that one Connector, not the message.
     """
-    if user_id is None:
+    if not requested or user_id is None:
         return []
-    stmt = (
-        select(MCPServer.id, MCPServer.name)
-        .where(MCPServer.user_id == user_id, MCPServer.connected.is_(True))
-        .order_by(MCPServer.created_at)
+    # De-duplicate; a repeated pick would otherwise repeat in the snapshot.
+    # Request order is kept only so a queued row reads the way the user
+    # picked — the worker connects by its own rule (failed-last), so nothing
+    # downstream depends on it.
+    requested_unique = list(dict.fromkeys(requested))
+
+    stmt = select(MCPServer.id, MCPServer.name).where(
+        MCPServer.id.in_(requested_unique),
+        MCPServer.user_id == user_id,
+        MCPServer.connected.is_(True),
     )
     result = await db.execute(stmt)
-    return [{"id": row_id, "name": name} for row_id, name in result.all()]
+    by_id = {row_id: {"id": row_id, "name": name} for row_id, name in result.all()}
+    return [by_id[picked] for picked in requested_unique if picked in by_id]
 
 
 async def _resolve_recipe_snapshot(

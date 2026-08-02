@@ -69,6 +69,13 @@ class MessageCreate(BaseModel):
         default_factory=list, max_length=settings.max_message_files,
     )
     skills: list[str] = Field(default_factory=list, max_length=20)
+    # Connectors picked for this turn, by id. Empty = none attached:
+    # being connected makes a Connector *pickable*, not attached, the same
+    # per-turn authorization ``skills`` uses. Bounded here rather than on how
+    # many a user may hold, because the cost is per attached Connector per
+    # turn — its tools enter the model's catalog on every step, and the
+    # worker stands them up serially under one budget.
+    connectors: list[int] = Field(default_factory=list, max_length=20)
     # Optional recipe picked from the composer. The backend resolves it
     # to a pinned snapshot on ``session_turn.recipe``; its instructions
     # ride to the worker as a system-reminder. ``None`` = no recipe.

@@ -585,7 +585,8 @@ async def create_message(
     try:
         await queue_user_message(
             db, redis, session, content=body.content, files=body.files,
-            skills=body.skills, recipe_id=body.recipe_id,
+            skills=body.skills, connectors=body.connectors,
+            recipe_id=body.recipe_id,
             agent_type=body.agent_type,
         )
     except GenerationInProgressError as exc:
