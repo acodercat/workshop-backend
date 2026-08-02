@@ -23,7 +23,7 @@ import base64
 import logging
 import secrets
 from dataclasses import dataclass
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse, urlsplit
 
 import httpx
 from pydantic import AnyUrl
@@ -345,6 +345,12 @@ async def _discover_authorization_server(
     # bare origin gains a trailing slash, a path does not). Matching
     # serialisations is what lets the comparison itself stay exact.
     expected_issuer = str(AnyUrl(authorization_server))
+    # A scoped alias, if one turns up, is held back rather than taken: the
+    # candidates are tried in the SDK's order, and a later one may still claim
+    # the issuer exactly. Preferring the exact match means a provider that
+    # starts publishing a per-tenant issuer — or a conforming provider behind
+    # the same shape — needs no change here.
+    scoped_alias: tuple[OAuthMetadata, dict] | None = None
     for metadata_url in build_oauth_authorization_server_metadata_discovery_urls(
         authorization_server, server_url
     ):
@@ -359,6 +365,15 @@ async def _discover_authorization_server(
         except Exception:
             continue
         if metadata is not None and not _issued_by(metadata, expected_issuer):
+            if scoped_alias is None and _uses_scoped_registration_alias(
+                metadata, expected_issuer,
+            ):
+                scoped_alias = (metadata, response.json())
+            else:
+                logger.warning(
+                    "Ignoring authorization server metadata from %s: it claims issuer %s",
+                    expected_issuer, metadata.issuer,
+                )
             continue
         if metadata is not None:
             return metadata, response.json()
@@ -372,6 +387,15 @@ async def _discover_authorization_server(
             # canonical one would otherwise take the OIDC candidate behind it
             # down with it.
             break
+    if scoped_alias is not None:
+        # Logged where it is used, not where it was found: a candidate held
+        # back and then beaten by an exact match never happened, as far as
+        # anyone reading the log is concerned.
+        logger.info(
+            "Accepting OAuth issuer %s with scoped DCR registration %s",
+            scoped_alias[0].issuer, scoped_alias[0].registration_endpoint,
+        )
+        return scoped_alias
     raise ConnectorOAuthError(
         "Could not discover the MCP server's OAuth metadata."
     )
@@ -431,17 +455,57 @@ def _issued_by(metadata: OAuthMetadata, expected: str) -> bool:
     *different* tenant than the resource document named would otherwise be
     accepted — and the browser, the authorization code, and the exchange would
     all go to that tenant instead.
+
+    One deliberate exception, and only as a last resort once every candidate
+    has been tried: :func:`_uses_scoped_registration_alias`.
+
+    Compared exactly, not normalised: the RFC says the values must be
+    identical, and ``/tenant`` and ``/tenant/`` are two tenants as far as an
+    authorization server is concerned. Trimming either would merge them.
     """
-    # Compared exactly, not normalised: RFC 8414 §3.3 says the values must be
-    # identical, and ``/tenant`` and ``/tenant/`` are two tenants as far as an
-    # authorization server is concerned. Trimming either would merge them.
-    if str(metadata.issuer) == expected:
-        return True
-    logger.warning(
-        "Ignoring authorization server metadata from %s: it claims issuer %s",
-        expected, metadata.issuer,
+    return str(metadata.issuer) == expected
+
+
+def _uses_scoped_registration_alias(
+    metadata: OAuthMetadata, authorization_server: str,
+) -> bool:
+    """Whether a DCR namespace is a scoped alias for a root issuer.
+
+    Some providers name a tenant-specific DCR namespace in a protected
+    resource document while publishing one shared OAuth issuer. Accept that
+    only when the registration endpoint remains inside the exact namespace
+    the resource named. This preserves the issuer check for ordinary
+    mismatches and prevents a tenant alias from registering a client elsewhere.
+    """
+    if metadata.registration_endpoint is None:
+        return False
+
+    scoped_server = urlsplit(authorization_server)
+    origin = (scoped_server.scheme, scoped_server.netloc)
+    # Every URL this document would send anyone to, not just the registration
+    # one the rule is named for: the browser goes to ``authorization_endpoint``
+    # and the code is spent at ``token_endpoint``, so an alias that moved
+    # either off the origin the resource named is not the alias it claims.
+    endpoints = (
+        metadata.issuer,
+        metadata.registration_endpoint,
+        metadata.authorization_endpoint,
+        metadata.token_endpoint,
     )
-    return False
+    if any(urlsplit(str(url))[:2] != origin for url in endpoints):
+        return False
+
+    issuer = urlsplit(str(metadata.issuer))
+    registration = urlsplit(str(metadata.registration_endpoint))
+
+    issuer_path = issuer.path.rstrip("/")
+    scoped_path = scoped_server.path.rstrip("/")
+    if not scoped_path or scoped_path == issuer_path:
+        return False
+    if issuer_path and not scoped_path.startswith(f"{issuer_path}/"):
+        return False
+
+    return registration.path.startswith(f"{scoped_path}/")
 
 
 def _describes(resource: ProtectedResourceMetadata, server_url: str) -> bool:
