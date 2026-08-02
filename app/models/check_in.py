@@ -15,8 +15,7 @@ default would put an early-morning check-in on the wrong day.
 
 The reward amount is **not** stored here: it lives in the paired
 ``CHECKIN`` ``credit_ledger`` row (the source of truth for credit
-movement), reached via ``ledger_id`` — a forward back-link mirroring
-``withdrawal_request.ledger_id`` / ``payment_order.ledger_id``, and the
+movement), reached via ``ledger_id`` — a forward back-link, and the
 same "money lives in the ledger" posture as ``invite_redemption`` (which
 likewise stores no amount).
 

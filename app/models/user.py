@@ -114,16 +114,6 @@ class User(Base):
     credit_balance: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default=text("0"),
     )
-    # Referral-commission wallet balance, in **RMB cents (整数分)** — real,
-    # withdrawable cash (a distinct liability class from ``credit_balance``,
-    # which is prepaid service credit). Cached materialization of
-    # ``SUM(commission_ledger.amount_fen WHERE user_id = self.id)``; the
-    # ledger is the source of truth. ``bigint`` keeps all arithmetic
-    # integer. All writes go through
-    # :mod:`app.services.commission._internal` so the invariant holds.
-    commission_balance_fen: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, default=0, server_default=text("0"),
-    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         server_default=func.now(),

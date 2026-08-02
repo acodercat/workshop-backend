@@ -24,8 +24,7 @@ Nothing else in the codebase should touch ``credit_ledger`` or
 ``user.credit_balance`` directly.
 
 See ``docs/credits-future.md`` for the deferred work (sandbox-seconds
-billing, worker-side cost cap, payment-driven top-ups, multi-org
-billing).
+billing, worker-side cost cap, multi-org billing).
 """
 
 from app.services.credits.adjust import AdjustmentAlreadyApplied, apply_adjust

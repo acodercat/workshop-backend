@@ -192,7 +192,7 @@ CREATE INDEX ix_credit_ledger_user_created
 
 | value | who writes it | sign | meaning |
 |---|---|---|---|
-| `TOPUP` | admin script / welcome grant / payment webhook | + | money in |
+| `TOPUP` | admin script / welcome grant | + | money in |
 | `RESERVE` | `queue_user_message` at turn start | − | hold pessimistic max cost |
 | `SETTLE` | settle path (lazy sweep / sweeper) | both | two rows: reverse-reserve + actual debit |
 | `REFUND` | settle path on missing usage / session delete / expired | + | full refund |
@@ -654,10 +654,10 @@ Two entry points:
 Each visits at most a handful of OPEN reservations per call
 (partial index keeps the lookup cheap).
 
-### Background process (settle sweeper + subscriber + payment reconciler)
+### Background process (settle sweeper + subscriber)
 
-One process, three concurrent async tasks (`app/workers/run.py` with
-an `asyncio.TaskGroup`). Standalone entrypoint:
+One process, two always-on concurrent async tasks (`app/workers/run.py`
+with an `asyncio.TaskGroup`; the budget enforcer is a flag-gated third). Standalone entrypoint:
 `uv run python -m app.workers.run`. Lifecycle commands:
 `bash scripts/deploy.sh background {start|stop|restart|status|logs}`.
 

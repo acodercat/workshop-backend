@@ -74,14 +74,14 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --workers 4
 uv run python -m app.workers.run          # standalone background process
 ```
 
-### Background process (settle sweeper + subscriber + payment reconciler)
+### Background process (settle sweeper + subscriber)
 
-One process, **three** concurrent tasks (see `app/workers/run.py`).
-The first two are the push/pull halves of **credit settle** — closing
-out reservations the user-facing lazy sweep didn't catch (the "user
-never came back" case: abandoned sessions, API-only clients, worker
-crashes between RESERVE and the fenced terminal write); the third is
-the pull backstop for **payments**:
+One process, **two** always-on concurrent tasks (plus the flag-gated
+budget enforcer — see `app/workers/run.py`). Both are the push/pull
+halves of **credit settle** — closing out reservations the user-facing
+lazy sweep didn't catch (the "user never came back" case: abandoned
+sessions, API-only clients, worker crashes between RESERVE and the
+fenced terminal write):
 
 - `app/workers/settle_sweeper.py` — periodic 60s poll over OPEN
   reservations. Correctness backstop, coordinated across hosts via a
@@ -90,18 +90,12 @@ the pull backstop for **payments**:
   subscriber. The worker publishes the session_id immediately after
   committing a terminal `session_turn`, so settle happens within
   sub-second instead of waiting for the next sweep tick.
-- `app/workers/payment_reconciler.py` — periodic poll reconciling
-  PENDING payment orders against the provider (汇付): settles orders
-  whose async webhook was lost and reaps expired ones. Its own
-  advisory lock, independent of the settle sweeper's.
 
-Settle's first two are push and pull halves of one responsibility —
-the subscriber is a latency optimization, the sweeper the correctness
-path — and both call the same shared helpers
-(`settle_open_for_session` / `refund_reservation`), so behaviour stays
-identical to the on-endpoint lazy sweep. The payment reconciler is the
-same pull-backstop pattern for a lost payment webhook, mirroring the
-sweeper on its own lock.
+The two are push and pull halves of one responsibility — the subscriber
+is a latency optimization, the sweeper the correctness path — and both
+call the same shared helpers (`settle_open_for_session` /
+`refund_reservation`), so behaviour stays identical to the on-endpoint
+lazy sweep.
 
 **Multi-node deployment**: every host should run a background process.
 Sweepers coordinate across the cluster via the Postgres advisory

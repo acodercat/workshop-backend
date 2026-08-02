@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # OAuth Connector redirect URI — the public callback the provider sends the
     # browser back to. Must match a route the frontend serves and be registered
     # (for manual OAuth apps). Empty default → OAuth connectors fail loudly at
-    # authorize time (the huifu_notify_url convention).
+    # authorize time rather than at startup.
     # e.g. https://app.example.com/api/connectors/oauth/callback
     mcp_oauth_redirect_uri: str = Field(
         default="", description="Public OAuth callback URL for MCP Connectors",
@@ -531,84 +531,6 @@ class Settings(BaseSettings):
     credit_price_cny: float = Field(
         default=0.1, gt=0.0,
         description="Customer-facing RMB price of 1 credit at top-up. ¥0.1 → ¥100 buys 1000 credits.",
-    )
-    credit_bonus_rate: float = Field(
-        default=0.1, ge=0.0,
-        description=(
-            "Promotional bonus credits granted on a recharge, as a fraction "
-            "of the paid base (0.1 → ¥100 buys 1000 + 100 bonus = 1100). "
-            "Frozen onto each order at create time. 0 disables the promo. "
-            "The frontend mirrors this in ``BONUS_RATE`` for the preview only."
-        ),
-    )
-
-    # ── Payments (汇付斗拱 / Huifu Dougong) ────────────────────────────
-    # Buy-side recharge: a user pays RMB and the credit ledger is topped
-    # up via ``credits.apply_topup``. Credentials default to empty strings
-    # so dev boxes without Huifu access still boot (same stance as the
-    # SMTP / OSS creds) — calls that need them fail loudly at request
-    # time, gated behind ``payment_enabled``, not at startup.
-    payment_enabled: bool = Field(
-        default=False,
-        description="Master switch for the payment/recharge endpoints. Off until Huifu creds are configured.",
-    )
-    huifu_merchant_id: str = Field(
-        default="", description="Huifu 商户号 (huifu_id); sent on every request, not part of SDK init",
-    )
-    huifu_sys_id: str = Field(default="", description="Huifu 系统号 (sys_id)")
-    huifu_product_id: str = Field(default="", description="Huifu 产品号 (product_id)")
-    huifu_rsa_private_key: str = Field(
-        default="", description="Merchant RSA private key (PKCS#8 base64 body); signs outbound requests",
-    )
-    huifu_rsa_public_key: str = Field(
-        default="", description="Huifu RSA public key; verifies responses + async notifications",
-    )
-    huifu_env: str = Field(
-        default="prod",
-        description="Huifu gateway env: 'prod' (api.huifu.com) or 'mertest' (sandbox opps-stbmertest.testpnr.com)",
-    )
-    huifu_notify_url: str = Field(
-        default="",
-        description="Public HTTPS async-notify URL, e.g. https://<host>/api/v1/payments/webhooks/huifu",
-    )
-    payment_min_cny: float = Field(
-        default=1.0, gt=0.0, description="Minimum single top-up amount in RMB",
-    )
-    payment_max_cny: float = Field(
-        default=10000.0, gt=0.0, description="Maximum single top-up amount in RMB",
-    )
-    payment_order_ttl_seconds: int = Field(
-        default=1800, description="How long a PENDING order / its QR stays payable",
-    )
-    payment_reconcile_interval_seconds: int = Field(
-        default=120, description="Background payment-reconciler poll interval (seconds)",
-    )
-
-    # ── Referral commission (返佣提现) ────────────────────────────────
-    # When an invitee recharges, the inviter earns a withdrawable cash
-    # commission (a fraction of the paid amount), held for a settlement
-    # window before it can be withdrawn. Off by default so dev boots and
-    # the feature stays dark until rollout; amounts are in RMB cents (分)
-    # except the human-facing rate / hold knobs.
-    commission_enabled: bool = Field(
-        default=False,
-        description="Master switch for referral-commission accrual + withdrawals/conversions.",
-    )
-    commission_rate: float = Field(
-        default=0.1, ge=0.0, le=1.0,
-        description="Commission as a fraction of the invitee's paid amount (0.1 → 10%).",
-    )
-    commission_hold_days: int = Field(
-        default=7, ge=0,
-        description="Settlement hold before earned commission is withdrawable (refund-clawback window).",
-    )
-    commission_min_withdraw_fen: int = Field(
-        default=1000, gt=0,
-        description="Minimum single cash withdrawal, in RMB cents (1000 = ¥10).",
-    )
-    commission_min_convert_fen: int = Field(
-        default=100, gt=0,
-        description="Minimum single commission→credits conversion, in RMB cents (100 = ¥1).",
     )
 
 

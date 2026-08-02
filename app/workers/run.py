@@ -11,10 +11,9 @@ multi-node deploys run this on every host and rely on Postgres
 advisory locks (``app.workers.settle_sweeper._LOCK_KEY``) to ensure
 exactly one host actually polls per tick.
 
-This process owns up to **four** concurrent background tasks. Two are
+This process owns up to **three** concurrent background tasks. Two are
 the push and pull halves of the same settle responsibility; the third
-is the pull backstop for payment notifications; the fourth (flag-gated)
-enforces mid-turn spend:
+(flag-gated) enforces mid-turn spend:
 
 - :mod:`app.workers.settle_sweeper` — periodic 60s poll, the
   correctness backstop. Catches missed pub/sub messages, expired
@@ -23,10 +22,6 @@ enforces mid-turn spend:
 - :mod:`app.workers.settle_subscriber` — Redis ``settle:notify``
   subscriber, the latency optimization. Worker publishes on terminal
   ``session_turn`` write, subscriber triggers settle within sub-second.
-- :mod:`app.workers.payment_reconciler` — periodic poll that reconciles
-  PENDING payment orders against the provider, settling ones whose async
-  notification was lost and reaping expired ones. Its own advisory lock,
-  independent of the settle sweeper's.
 - :mod:`app.workers.budget_enforcer` — only when
   ``budget_enforcer_enabled``: prices each running turn's
   heartbeat-reported interim usage and cancels turns outrunning their
@@ -52,7 +47,6 @@ import redis.asyncio as aioredis
 from app.logging_config import setup_logging
 from app.workers import (
     budget_enforcer,
-    payment_reconciler,
     settle_sweeper,
     settle_subscriber,
 )
@@ -81,7 +75,6 @@ async def _run() -> None:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(settle_sweeper.run_forever())
             tg.create_task(settle_subscriber.run_forever(redis))
-            tg.create_task(payment_reconciler.run_forever())
             # Flag-gated (default off). Log the resolved state either way so a
             # restart makes it unambiguous whether enforcement is live — the
             # enforcer is otherwise silent until it actually stops a turn.
@@ -101,7 +94,7 @@ async def _run() -> None:
 def main() -> None:
     setup_logging(log_dir="logs", level="INFO")
     logger.info(
-        "background process starting (settle sweeper + subscriber + reconciler"
+        "background process starting (settle sweeper + subscriber"
         "%s)",
         " + budget enforcer" if settings.budget_enforcer_enabled else "",
     )

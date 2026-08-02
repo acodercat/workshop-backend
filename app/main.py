@@ -28,11 +28,9 @@ logger = logging.getLogger(__name__)
 from app.api.endpoints import (
     auth,
     check_in,
-    commission,
     credits,
     feedback,
     mcp_server,
-    payment,
     recipe,
     session,
     share,
@@ -59,11 +57,9 @@ from slowapi.middleware import SlowAPIMiddleware
 ROUTERS = [
     auth.router,
     check_in.router,
-    commission.router,
     credits.router,
     feedback.router,
     mcp_server.router,
-    payment.router,
     recipe.router,
     session.router,
     share.router,
@@ -232,7 +228,7 @@ async def lifespan(app: FastAPI):
     app.state.user_event_hub = UserEventHub(app.state.redis)
     await app.state.user_event_hub.start()
 
-    # Background process (settle sweeper + subscriber + payment reconciler)
+    # Background process (settle sweeper + subscriber)
     # runs as a **sibling**, not inside this event loop — see
     # ``app/workers/run.py`` and ``scripts/deploy.sh background``. Web's
     # lifespan is HTTP-only again: separating background work from request

@@ -17,8 +17,8 @@ catalog. ``message`` is an English developer-facing fallback —
 terse, declarative, no "please ..." imperatives — shown only when
 the client has no localized override.
 
-Subclasses span every domain — auth, credits, payments, commission,
-skills, check-in, sessions. The module lives at ``app/errors.py`` (not
+Subclasses span every domain — auth, credits, invites, skills,
+check-in, sessions. The module lives at ``app/errors.py`` (not
 under any one domain package) precisely so any of them can add typed
 errors here without a circular dependency.
 
@@ -370,79 +370,6 @@ class FileCountQuotaExceededError(AppError):
 
     status_code = status.HTTP_403_FORBIDDEN
     error_type = "file_count_quota_exceeded"
-
-
-class PaymentDisabledError(AppError):
-    """The payment/recharge feature is off (``payment_enabled`` is False
-    or Huifu credentials are unconfigured). 403 so the frontend hides the
-    top-up surface rather than retrying."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "payment_disabled"
-
-
-class PaymentAmountRangeError(AppError):
-    """Requested top-up amount is outside ``[payment_min_cny,
-    payment_max_cny]``. A client-side validation guard duplicated in the
-    service layer so it holds regardless of caller."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "payment_amount_range"
-
-
-class OrderNotFoundError(AppError):
-    """No payment order with that id is owned by the caller (or it never
-    existed). Folds the not-owned case into not-found so an order id can't
-    be probed across users."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "order_not_found"
-
-
-class PaymentProviderError(AppError):
-    """The upstream payment provider returned an error / unparseable
-    response when creating or querying an order. 502 so it reads as an
-    upstream failure the client can retry, not a client error."""
-
-    status_code = status.HTTP_502_BAD_GATEWAY
-    error_type = "payment_provider_error"
-
-
-class CommissionDisabledError(AppError):
-    """The referral-commission wallet is off (``commission_enabled`` is
-    False). 403 so the frontend hides the withdraw/convert surface rather
-    than retrying."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "commission_disabled"
-
-
-class CommissionAmountRangeError(AppError):
-    """Requested withdrawal / conversion amount is below the configured
-    minimum (or too small to buy a whole credit). A client-side guard
-    duplicated in the service layer so it holds regardless of caller."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "commission_amount_range"
-
-
-class InsufficientCommissionError(AppError):
-    """The withdrawable commission balance can't cover the requested
-    withdrawal / conversion (frozen funds in the settlement hold don't
-    count). 400 — the client should refresh the balance and retry with a
-    smaller amount."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "insufficient_commission"
-
-
-class WithdrawalNotFoundError(AppError):
-    """No withdrawal request with that id is owned by the caller (or it
-    never existed). Folds the not-owned case into not-found so an id can't
-    be probed across users."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "withdrawal_not_found"
 
 
 class CheckInDisabledError(AppError):

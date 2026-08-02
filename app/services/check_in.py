@@ -14,8 +14,8 @@ than by the DB so an early-morning claim lands on the right day.
 ("已连续签到 N 天") but does **not** change the reward in this MVP.
 
 Every function takes an ``AsyncSession`` and **does not commit** — the
-caller (endpoint) owns the transaction, matching the ``credits`` /
-``commission`` service contract.
+caller (endpoint) owns the transaction, matching the ``credits``
+service contract.
 """
 
 import logging
