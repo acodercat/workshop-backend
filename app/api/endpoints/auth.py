@@ -10,16 +10,15 @@ from app.auth import assert_user_active, authenticate_user, create_access_token
 from app.rate_limit import limiter
 from app.schemas.auth import (
     AccessTokenResponse,
-    EmailLoginRequest,
-    EmailLoginResponse,
+    CodeLoginRequest,
+    LoggedInResponse,
     RegisterCodeRequest,
     RegisterRequest,
-    RegisterResponse,
 )
 from app.services.auth import (
     login_by_code,
     register_user,
-    request_register_code,
+    request_verification_code,
 )
 from config import settings
 
@@ -63,30 +62,21 @@ async def login_for_access_token(
 
 
 #
-# Single flow that handles both first-time signup and returning-user
-# login. The same code triple — ``POST /auth/verification-codes``
-# (dispatch) → ``POST /auth/access-tokens-by-code`` (peek-verify +
-# branch on existence) → ``POST /users`` (consume + create, only for
-# new users) — covers every case.
+# Login and registration are separate flows over a shared code
+# dispatch: ``POST /auth/verification-codes`` (send) feeds either
+# ``POST /auth/access-tokens-by-code`` (login only — peek-verify +
+# issue a JWT for an existing ACTIVE user, else ``not_registered``) or
+# ``POST /users`` (invite-gated registration — validate invite +
+# consume code + create ACTIVE user + issue a JWT).
 #
-# Why peek-verify in step 2 instead of consume-verify: the frontend
-# needs to know whether the email already maps to a user *before*
-# committing to either log them in or collect a name. Consuming the
-# code in step 2 would leave new users without a way to retry
-# step 3 if the name input got interrupted; peek + consume-on-create
-# means step 3 is the single transactional pivot, while step 2 is
-# idempotent.
+# Registration is invite-gated and a valid invite is the access grant,
+# so new users are created ``ACTIVE`` and both endpoints return the
+# same ``kind="logged_in"`` response with a token.
 #
 # All failure paths raise ``AppError`` subclasses (defined in
 # :mod:`app.errors`) that bubble up to ``app_error_handler`` —
 # ``status_code`` and ``error_type`` live on each subclass, so this
-# layer no longer carries a reason → status translation table.
-#
-# Status default for new users is ``PENDING``: email verification
-# proves the address but admin approval is the access gate. Login
-# endpoints raise ``AccountPendingError`` so the frontend can show a
-# "thanks, awaiting approval" message; ``POST /users`` returns
-# ``kind="pending_approval"`` instead of a JWT for the same reason.
+# layer carries no reason → status translation table.
 
 
 @router.post("/auth/verification-codes", status_code=status.HTTP_204_NO_CONTENT)
@@ -106,54 +96,46 @@ async def create_verification_code(
     and returning users.
 
     ``CooldownError`` / ``EmailSendFailedError`` from
-    ``request_register_code`` propagate to ``app_error_handler``.
+    ``request_verification_code`` propagate to ``app_error_handler``.
     """
-    await request_register_code(
+    await request_verification_code(
         redis,
-        email=body.email,
+        channel=body.channel,
+        identifier=body.identifier,
         locale=body.locale,
     )
 
 
 @router.post(
     "/auth/access-tokens-by-code",
-    response_model=EmailLoginResponse,
+    response_model=LoggedInResponse,
 )
 @limiter.limit(settings.rate_limit_login)
 async def access_token_by_code(
     request: Request,
-    body: EmailLoginRequest,
+    body: CodeLoginRequest,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    """Verify the code and either log the user in or signal that
-    they need to register.
+    """Log an existing user in by email + verification code.
 
-    Peek-verifies the code (does NOT consume), then branches:
+    **Login only** — peek-verifies the code, then:
 
     - Email maps to an existing ``ACTIVE`` user → consume the code
       now (we're committing to log them in), issue a JWT.
-    - Email isn't registered → leave the code untouched and tell
-      the frontend to collect a display name; the subsequent
-      ``POST /users`` is the consume-pivot that turns the verified
-      code into a row.
-    - Email maps to a ``PENDING`` user → ``AccountPendingError``
-      (403). Distinguishable from wrong credentials so the user
-      knows the gate is admin approval, not the password.
+    - Email isn't registered → ``NotRegisteredError`` (404); the
+      frontend steers the user to the invite-gated register tab.
     - Email maps to ``DISABLED`` / ``SUSPENDED`` → 401 opaque, same
       as :func:`login_for_access_token`.
-
-    Why peek for the new-user case: the user might take 30 seconds
-    typing their name. If we consumed here, an interrupt between
-    this call and ``POST /users`` would leave them with a verified
-    intent but no way to actually finish without a fresh code.
     """
-    return await login_by_code(db, redis, email=body.email, code=body.code)
+    return await login_by_code(
+        db, redis, channel=body.channel, identifier=body.identifier, code=body.code
+    )
 
 
 @router.post(
     "/users",
-    response_model=RegisterResponse,
+    response_model=LoggedInResponse,
     status_code=status.HTTP_201_CREATED,
 )
 @limiter.limit(settings.rate_limit_register)
@@ -163,30 +145,28 @@ async def create_user(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    """Create a new user via the email-OTP flow — only called when
-    :func:`access_token_by_code` told the frontend the email isn't
-    registered yet.
+    """Invite-gated registration via the email-OTP flow.
 
-    Consumes the verification code, generates the ``axon_${id}``
-    username + a random password placeholder, INSERTs the user with
-    ``status=PENDING``, and returns ``kind="pending_approval"``. No
-    JWT is issued: a PENDING account can't access anything until an
-    admin flips it to ``ACTIVE``, so the frontend pivots to a
-    "thanks, awaiting approval" screen instead of the workspace.
+    Validates the invite code, consumes the verification code,
+    generates the ``axon_${id}`` username + a random password
+    placeholder, INSERTs the user ``ACTIVE``, mints their personal
+    referral code, records the redemption, and issues a JWT — a valid
+    invite is the access grant, so the response logs the user straight
+    in (``kind="logged_in"``).
 
     ``register_user`` raises typed ``AppError`` subclasses
-    (``EmailTakenError``, ``InvalidVerificationCodeError``,
-    ``TooManyVerificationAttemptsError``) on any failure path; they
-    bubble straight up to ``app_error_handler``.
+    (``InvalidInviteCodeError``, ``InviteExpiredError``,
+    ``InviteExhaustedError``, ``EmailTakenError``,
+    ``InvalidVerificationCodeError``, ``TooManyVerificationAttemptsError``)
+    on any failure path; they bubble straight up to
+    ``app_error_handler``.
     """
-    await register_user(
+    return await register_user(
         db,
         redis,
-        email=body.email,
+        channel=body.channel,
+        identifier=body.identifier,
         code=body.code,
+        invite_code=body.invite_code,
         name=body.name,
     )
-    # No ``last_login_at`` update or token issuance — the user is
-    # ``PENDING`` and can't sign in yet. ``register_user`` already
-    # committed the row.
-    return RegisterResponse()

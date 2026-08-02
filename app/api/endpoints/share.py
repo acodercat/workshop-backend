@@ -1,6 +1,6 @@
 """Public share endpoints — anonymous read access to a shared session.
 
-Three routes, all under ``/shares/{token}``:
+Four routes, all under ``/shares/{token}``:
 
 - ``GET  /shares/{token}`` — fetch the shared session content. Returns
   401 when the share is password-protected and the request lacks a
@@ -8,8 +8,11 @@ Three routes, all under ``/shares/{token}``:
   "locked, prompt for password".
 - ``POST /shares/{token}/access-tokens`` — exchange the share password
   for a short-lived view-token (rate-limited to slow brute-force).
-- ``GET  /shares/{token}/files/{key}`` — mint a presigned OSS URL for a
-  file the share's session owns (verified via ``session_files``).
+- ``GET  /shares/{token}/files/download-url`` and
+  ``GET  /shares/{token}/files/preview-url`` — mint a presigned OSS URL
+  (save-as vs inline) for a file the share's session owns, verified via
+  ``session_files``. The ``file_key`` rides as a query param, not a path
+  segment, so a key containing slashes needs no escaping.
 
 Auth here uses **share-view tokens**, not user JWTs. The two token
 classes are physically incompatible: share-view tokens carry
@@ -279,9 +282,14 @@ async def get_share_file_preview_url(
             detail="File is not part of this shared session",
         )
 
-    url, expires_in = file_storage.generate_inline_url(
-        file_storage.SESSION_FILE_POLICY, file_key,
-    )
+    try:
+        url, expires_in = file_storage.generate_inline_url(
+            file_storage.SESSION_FILE_POLICY, file_key,
+        )
+    except file_storage.InlinePreviewNotAllowedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc),
+        )
     return PreviewUrlResponse(
         preview_url=url, file_key=file_key, expires_in=expires_in,
     )

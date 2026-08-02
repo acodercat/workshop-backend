@@ -21,47 +21,49 @@ uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
 
 ## Production
 
-Single-host manual deploy: use `scripts/deploy.sh`. Two siblings are
-managed by the same script — **web** (uvicorn on `:8005`) and
-**background-settle** (sweeper + subscriber, see below). Subcommand
-layout mirrors the frontend's `serve.sh` so muscle memory carries
-across services.
+Single-host manual deploy: use `scripts/deploy.sh`. It manages **two
+siblings** — **web** (uvicorn on `:8005`) and the **background** process
+(`python -m app.workers.run`, see below). **Top-level commands act on
+both**, so one command runs the whole backend; `background SUBCMD` is the
+escape hatch that drives the background process alone.
 
 ```bash
-# After ``git pull`` (handles deps + migrations + restart of both)
+# After ``git pull`` — stop both + deps + migrations + start both
 bash scripts/deploy.sh deploy
 
-# Web-only commands
-bash scripts/deploy.sh restart       # code-only restart (no deps/migration)
-bash scripts/deploy.sh logs          # tail uvicorn.log
-bash scripts/deploy.sh status        # show state of BOTH web + background-settle
+# Lifecycle — each acts on BOTH web + background
+bash scripts/deploy.sh start          # start both (web fail-hard, background best-effort)
+bash scripts/deploy.sh stop           # stop both
+bash scripts/deploy.sh restart        # restart both (no deps/migration)
+bash scripts/deploy.sh status         # state of both
+bash scripts/deploy.sh logs           # tail uvicorn.log (background log via `background logs`)
 
-# background-settle-only commands
-bash scripts/deploy.sh settle start
-bash scripts/deploy.sh settle stop
-bash scripts/deploy.sh settle restart
-bash scripts/deploy.sh settle status
-bash scripts/deploy.sh settle logs   # tail settle.log
+# Drive ONLY the background process
+bash scripts/deploy.sh background start
+bash scripts/deploy.sh background stop
+bash scripts/deploy.sh background restart
+bash scripts/deploy.sh background status
+bash scripts/deploy.sh background logs   # tail background.log
 ```
 
 | command | behavior |
 |---|---|
-| `start` | start uvicorn on `:8005` (no-op if already running) |
-| `stop` | SIGTERM the web, escalate to SIGKILL after a 10s grace period |
-| `restart` | `stop` + `start` — no deps / migration sync |
-| `status` | report state of **both** web (`:8005`) and background-settle |
-| `logs` | `tail -f logs/uvicorn.log` |
+| `start` | start **both** — web on `:8005` (fail-hard if the port won't bind) + background (best-effort, so its startup trouble can't hold the web tier down) |
+| `stop` | stop **both** (SIGTERM, escalate to SIGKILL after a 10s grace) |
+| `restart` | `stop` + `start` on **both** — no deps / migration sync |
+| `status` | report state of **both** web (`:8005`) and background |
+| `logs` | `tail -f logs/uvicorn.log` (background log: `background logs`) |
 | `deploy` | stop both + `uv sync` + `alembic upgrade head` + start both |
-| `settle {start\|stop\|restart\|status\|logs}` | same lifecycle commands for the background-settle process (`logs/settle.log`) |
+| `background {start\|stop\|restart\|status\|logs}` | drive **only** the background process (`logs/background.log`) |
 
 Truth source for "is it running":
 - **web**: `lsof -t -i:8005` — tolerates instances started outside the
   script (e.g., a legacy `nohup uv run uvicorn …`).
-- **background-settle**: `pgrep -f 'app.workers.run'` — no port; the
+- **background**: `pgrep -f 'app.workers.run'` — no port; the
   module path is specific enough not to collide.
 
-uvicorn stdout → `logs/uvicorn.log`; background-settle stdout →
-`logs/settle.log`; application-level loguru output lives elsewhere
+uvicorn stdout → `logs/uvicorn.log`; background-process stdout →
+`logs/background.log`; application-level loguru output lives elsewhere
 under `logs/` per `app/logging_config.py`.
 
 For ad-hoc / non-default-port runs (or when the script's defaults
@@ -69,16 +71,17 @@ don't fit, e.g. a custom SSL setup), the bare commands still work:
 
 ```bash
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --workers 4
-uv run python -m app.workers.run          # standalone background-settle
+uv run python -m app.workers.run          # standalone background process
 ```
 
-### Background-settle (sweeper + subscriber)
+### Background process (settle sweeper + subscriber + payment reconciler)
 
-Closes out **credit reservations** that the user-facing lazy sweep
-didn't catch — the "user never came back" case for abandoned
-sessions, API-only clients, and worker crashes between RESERVE and
-the fenced terminal write. One process, two concurrent tasks (see
-`app/workers/run.py`):
+One process, **three** concurrent tasks (see `app/workers/run.py`).
+The first two are the push/pull halves of **credit settle** — closing
+out reservations the user-facing lazy sweep didn't catch (the "user
+never came back" case: abandoned sessions, API-only clients, worker
+crashes between RESERVE and the fenced terminal write); the third is
+the pull backstop for **payments**:
 
 - `app/workers/settle_sweeper.py` — periodic 60s poll over OPEN
   reservations. Correctness backstop, coordinated across hosts via a
@@ -87,14 +90,20 @@ the fenced terminal write. One process, two concurrent tasks (see
   subscriber. The worker publishes the session_id immediately after
   committing a terminal `session_turn`, so settle happens within
   sub-second instead of waiting for the next sweep tick.
+- `app/workers/payment_reconciler.py` — periodic poll reconciling
+  PENDING payment orders against the provider (汇付): settles orders
+  whose async webhook was lost and reaps expired ones. Its own
+  advisory lock, independent of the settle sweeper's.
 
-The two are push and pull halves of the same settle responsibility —
-the subscriber is a latency optimization, the sweeper is the
-correctness path. Both call the same shared helpers
-(`settle_open_for_session` / `refund_reservation`); behaviour stays
-identical to the on-endpoint lazy sweep.
+Settle's first two are push and pull halves of one responsibility —
+the subscriber is a latency optimization, the sweeper the correctness
+path — and both call the same shared helpers
+(`settle_open_for_session` / `refund_reservation`), so behaviour stays
+identical to the on-endpoint lazy sweep. The payment reconciler is the
+same pull-backstop pattern for a lost payment webhook, mirroring the
+sweeper on its own lock.
 
-**Multi-node deployment**: every host should run a background-settle.
+**Multi-node deployment**: every host should run a background process.
 Sweepers coordinate across the cluster via the Postgres advisory
 lock (`pg_try_advisory_lock`); at each tick only one host actually
 scans, the others see a busy lock and skip. Connection close
@@ -104,10 +113,11 @@ settles serialize on the reservation's `FOR UPDATE` lock and the
 state-machine no-op handles the loser.
 
 ```bash
-# Operationally — same lifecycle commands as web
-bash scripts/deploy.sh settle start
-bash scripts/deploy.sh settle status
-bash scripts/deploy.sh settle logs
+# Operationally — `background SUBCMD` drives this process alone; the
+# top-level `start` / `restart` / `deploy` bring it up alongside web.
+bash scripts/deploy.sh background start
+bash scripts/deploy.sh background status
+bash scripts/deploy.sh background logs
 ```
 
 The sweeper polls every 60 s by default (see

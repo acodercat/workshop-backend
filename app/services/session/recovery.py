@@ -19,15 +19,28 @@ the stranded turn **and** its session to ``FAILED`` so the session stops
 being a zombie, composed into the sweeper's refund transaction so money
 and lifecycle reconcile atomically.
 
+:func:`cancel_unclaimed_turn` is the same mechanism turned toward a
+different hole: a user who presses stop while their turn is still
+``PENDING`` in the queue (all worker slots busy, or the fleet
+mid-deploy). The cancel endpoint's pub/sub signal only reaches a worker
+that has already *claimed* the turn, so an unclaimed turn's cancel would
+otherwise be dropped and the turn later claimed and billed. It flips the
+``PENDING`` turn + session → ``CANCELLED`` and refunds, synchronously in
+the request.
+
 **Why this is safe against a still-alive worker.** The worker's terminal
 writes are fenced on ``worker_id = ? AND status = RUNNING`` (turn) and
-``status = RUNNING`` (session). A backend ``FAILED`` write is therefore a
+``status = RUNNING`` (session). A backend terminal write is therefore a
 *poison pill*: once we flip the turn out of ``RUNNING``, the worker's
-fenced UPDATE matches no row, rolls back, and never overwrites us. And we
-only ever flip a turn whose lease is already dead (or absent), so we
-don't fight a worker that is genuinely mid-flight on a long turn — that
-row is left untouched and the next sweep re-evaluates once its lease
-finally lapses.
+fenced UPDATE matches no row, rolls back, and never overwrites us.
+:func:`fail_abandoned_turn` only ever flips a turn whose lease is already
+dead (or absent), so it doesn't fight a worker genuinely mid-flight on a
+long turn — that row is left untouched and the next sweep re-evaluates
+once its lease finally lapses. :func:`cancel_unclaimed_turn` only touches
+``PENDING`` turns, which by construction have no worker at all (the claim
+sets ``worker_id`` + the lease atomically with the ``RUNNING`` flip), so
+a concurrent claim simply wins the row-lock race and leaves the backend
+UPDATE matching zero rows.
 """
 
 import logging
@@ -38,7 +51,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from app.models.session import Session, SessionStatus
-from app.models.session_turn import SessionTurn, SessionTurnStatus
+from app.models.session_turn import (
+    SessionTurn,
+    SessionTurnStatus,
+    TerminationReason,
+)
+from app.services.credits import settle_open_for_session
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +102,7 @@ async def fail_abandoned_turn(
         )
         .values(
             status=SessionTurnStatus.FAILED,
+            termination_reason=TerminationReason.WORKER_LOST,
             lease_expires_at=None,
             terminated_at=func.now(),
         )
@@ -104,6 +123,76 @@ async def fail_abandoned_turn(
     )
     logger.warning(
         "recovery: terminalized abandoned session %s (turn + session → FAILED)",
+        session_id,
+    )
+    return True
+
+
+async def cancel_unclaimed_turn(
+    db: AsyncSession, *, session_id: uuid.UUID,
+) -> bool:
+    """Cancel a turn the user stopped before any worker claimed it.
+
+    The cancel endpoint's pub/sub signal only reaches a worker that has
+    already *claimed* the turn (and registered a live runner). A turn
+    still ``PENDING`` in the queue — all worker slots busy, or the fleet
+    mid-deploy — has nobody listening, so the signal is dropped and the
+    turn would later be claimed and run to completion, billing a user who
+    asked to stop. This closes that hole from the backend.
+
+    Flips the session's ``PENDING`` turn → ``CANCELLED`` and, iff that
+    touched a row, the parent session → ``CANCELLED``, then settles the
+    open reservation. A never-claimed turn has no measured usage in
+    ``session_turn``, so the settle helper refunds it in full. Runs in the
+    caller's transaction without committing.
+
+    Only ``PENDING`` turns are touched: such a turn is by definition
+    unclaimed (the worker sets ``worker_id`` + ``lease_expires_at``
+    atomically with the ``RUNNING`` flip), so there is no worker to race
+    for a graceful mid-turn shutdown — a claimed/``RUNNING`` turn stays on
+    the pub/sub path. The ``status = PENDING`` fence also makes this
+    race-free against a concurrent claim: the two UPDATEs serialize on the
+    turn row, and if the worker's claim commits first this UPDATE matches
+    zero rows (the turn is now ``RUNNING``) and the caller falls back to
+    pub/sub.
+
+    Returns ``True`` when an unclaimed turn was cancelled — the caller
+    should commit and **skip** the pub/sub publish. Returns ``False`` when
+    there was no ``PENDING`` turn (already claimed or terminal) — the
+    caller publishes the cancel signal for the running worker instead.
+    """
+    turn_result = await db.execute(
+        update(SessionTurn)
+        .where(
+            SessionTurn.session_id == session_id,
+            SessionTurn.status == SessionTurnStatus.PENDING,
+        )
+        .values(
+            status=SessionTurnStatus.CANCELLED,
+            termination_reason=TerminationReason.USER_CANCELLED,
+            lease_expires_at=None,
+            terminated_at=func.now(),
+        )
+    )
+    if turn_result.rowcount == 0:
+        # No unclaimed turn — either a worker claimed it (now RUNNING) or
+        # it is already terminal. Leave it to the pub/sub cancel path.
+        return False
+
+    # Mirror the worker's ``RUNNING``-guarded flip so a racing real
+    # terminal write (or operator intervention) isn't clobbered.
+    await db.execute(
+        update(Session)
+        .where(Session.id == session_id, Session.status == SessionStatus.RUNNING)
+        .values(status=SessionStatus.CANCELLED)
+    )
+    # The session is now terminal in this transaction, so the settle
+    # helper's terminal-state guard passes; a never-run turn's NULL usage
+    # routes it to a full refund of the reservation.
+    await settle_open_for_session(db, session_id)
+    logger.info(
+        "cancel: terminalized unclaimed turn for session %s "
+        "(turn + session → CANCELLED, reservation refunded)",
         session_id,
     )
     return True

@@ -90,7 +90,27 @@ def snapshot_rate(model_id: str) -> RateSnapshot:
     )
 
 
-def _normalize_rate_snapshot(raw: dict) -> RateSnapshot:
+def reserve_est_input_tokens(model_id: str) -> int:
+    """Input-token estimate for sizing ``model_id``'s reserve hold.
+
+    Reads the model's ``reserve_est_input_tokens`` rate-card key — a
+    data-driven per-model p50 of a turn's *cumulative* input tokens (an
+    agent turn re-sends its growing context every LLM call, so per-model
+    medians span 2k–425k; no single global figure fits). Falls back to
+    the global ``credit_reserve_max_input_tokens`` for entries that don't
+    carry the key.
+
+    Reserve-time-only input — deliberately NOT part of the
+    :class:`RateSnapshot`: the hold amount it produces is frozen as
+    ``reservation.reserved``, so settle never needs the estimate.
+    """
+    card = settings.credit_rates.get(model_id, {})
+    return int(
+        card.get("reserve_est_input_tokens", settings.credit_reserve_max_input_tokens)
+    )
+
+
+def normalize_rate_snapshot(raw: dict) -> RateSnapshot:
     """Coerce a (possibly legacy) JSONB snapshot into a current
     :class:`RateSnapshot`.
 
@@ -219,3 +239,16 @@ def credits_from_cny(amount_cny: float | str) -> int:
     """
     credits = Decimal(str(amount_cny)) / Decimal(str(settings.credit_price_cny))
     return int(credits)  # int(Decimal) truncates toward zero == floor for ≥0
+
+
+def recharge_bonus_credits(base_credits: int) -> int:
+    """Promotional bonus credits layered on top of the paid ``base_credits``.
+
+    A fraction of the base set by ``settings.credit_bonus_rate`` (0.1 →
+    +10%), floored so a sub-credit remainder never over-grants. Kept
+    separate from :func:`credits_from_cny` so the *paid* conversion and
+    the *promo* stay independently auditable; the order freezes the sum.
+    Returns 0 when the promo is disabled (rate 0).
+    """
+    bonus = Decimal(base_credits) * Decimal(str(settings.credit_bonus_rate))
+    return int(bonus)  # floor for ≥0, mirrors credits_from_cny

@@ -62,7 +62,15 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
 
     # Also intercept uvicorn and other libraries
     for name in ["uvicorn", "uvicorn.error", "uvicorn.access", "sqlalchemy", "httpx"]:
-        logging.getLogger(name).handlers = [InterceptHandler()]
+        named = logging.getLogger(name)
+        named.handlers = [InterceptHandler()]
+        # Or every one of their records is emitted twice: once through the
+        # handler above and once again after propagating to root, which
+        # ``basicConfig`` gave the same interceptor. Nothing is lost by stopping
+        # here — both paths end at loguru — and the duplicates are actively
+        # misleading, since two identical ``POST .../token`` lines read as two
+        # requests when investigating anything that must happen exactly once.
+        named.propagate = False
 
     # Console output (colored)
     logger.add(

@@ -1,4 +1,4 @@
-"""Entrypoint for the standalone background-settle process.
+"""Entrypoint for the standalone background process.
 
 Run as:
 
@@ -6,14 +6,15 @@ Run as:
 
 The web server (``app.main:app``) no longer starts background settle
 work in its lifespan — separation of concerns. Production deploys
-both processes side-by-side (see ``scripts/deploy.sh settle``);
+both processes side-by-side (see ``scripts/deploy.sh background``);
 multi-node deploys run this on every host and rely on Postgres
 advisory locks (``app.workers.settle_sweeper._LOCK_KEY``) to ensure
 exactly one host actually polls per tick.
 
-This process owns **two** concurrent background tasks, both calling
-into the same shared settle helpers — push and pull halves of the
-same settle responsibility:
+This process owns up to **four** concurrent background tasks. Two are
+the push and pull halves of the same settle responsibility; the third
+is the pull backstop for payment notifications; the fourth (flag-gated)
+enforces mid-turn spend:
 
 - :mod:`app.workers.settle_sweeper` — periodic 60s poll, the
   correctness backstop. Catches missed pub/sub messages, expired
@@ -22,8 +23,16 @@ same settle responsibility:
 - :mod:`app.workers.settle_subscriber` — Redis ``settle:notify``
   subscriber, the latency optimization. Worker publishes on terminal
   ``session_turn`` write, subscriber triggers settle within sub-second.
+- :mod:`app.workers.payment_reconciler` — periodic poll that reconciles
+  PENDING payment orders against the provider, settling ones whose async
+  notification was lost and reaping expired ones. Its own advisory lock,
+  independent of the settle sweeper's.
+- :mod:`app.workers.budget_enforcer` — only when
+  ``budget_enforcer_enabled``: prices each running turn's
+  heartbeat-reported interim usage and cancels turns outrunning their
+  user's balance. Its own advisory lock as well.
 
-Both are wrapped in :class:`asyncio.TaskGroup` so a fatal exception in
+All are wrapped in :class:`asyncio.TaskGroup` so a fatal exception in
 either tears the process down (systemd / scripts/deploy.sh restart
 picks it up); the sweeper's per-tick try/except and the subscriber's
 outer reconnect loop swallow recoverable errors before they reach
@@ -41,8 +50,15 @@ import logging
 import redis.asyncio as aioredis
 
 from app.logging_config import setup_logging
-from app.workers import settle_sweeper, settle_subscriber
+from app.workers import (
+    budget_enforcer,
+    payment_reconciler,
+    settle_sweeper,
+    settle_subscriber,
+)
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 async def _run() -> None:
@@ -65,18 +81,34 @@ async def _run() -> None:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(settle_sweeper.run_forever())
             tg.create_task(settle_subscriber.run_forever(redis))
+            tg.create_task(payment_reconciler.run_forever())
+            # Flag-gated (default off). Log the resolved state either way so a
+            # restart makes it unambiguous whether enforcement is live — the
+            # enforcer is otherwise silent until it actually stops a turn.
+            if settings.budget_enforcer_enabled:
+                logger.info(
+                    "budget enforcer: ENABLED (interval=%ds buffer=%d credits)",
+                    settings.budget_enforcer_interval_seconds,
+                    settings.budget_enforcer_buffer_credits,
+                )
+                tg.create_task(budget_enforcer.run_forever(redis))
+            else:
+                logger.info("budget enforcer: disabled")
     finally:
         await redis.aclose()
 
 
 def main() -> None:
     setup_logging(log_dir="logs", level="INFO")
-    logger = logging.getLogger(__name__)
-    logger.info("background-settle process starting (sweeper + subscriber)")
+    logger.info(
+        "background process starting (settle sweeper + subscriber + reconciler"
+        "%s)",
+        " + budget enforcer" if settings.budget_enforcer_enabled else "",
+    )
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
-        logger.info("background-settle process exiting (KeyboardInterrupt)")
+        logger.info("background process exiting (KeyboardInterrupt)")
 
 
 if __name__ == "__main__":

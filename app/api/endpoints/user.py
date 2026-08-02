@@ -26,12 +26,20 @@ from app.schemas.user import (
     EmailChangeCodeRequest,
     EmailChangeRequest,
     PasswordChange,
+    PhoneChangeCodeRequest,
+    PhoneChangeRequest,
     ProfileUpdate,
+    ReferralResponse,
     UserResponse,
 )
+from app.services.auth import get_or_create_referral_code
 from app.services.auth.email_change import (
     change_email,
     request_email_change_code,
+)
+from app.services.auth.phone_change import (
+    change_phone,
+    request_phone_change_code,
 )
 from app.services.user import UserEventHub, stream_user_events
 from config import settings
@@ -44,6 +52,25 @@ async def get_current_user(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> UserResponse:
     return UserResponse.model_validate(current_user)
+
+
+@router.get("/me/referral")
+async def get_referral(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> ReferralResponse:
+    """The caller's personal referral code + the per-referral reward.
+
+    New users get a code at registration; this lazily mints one (and
+    commits) for accounts that predate the feature.
+    """
+    code = await get_or_create_referral_code(db, user_id=current_user.id)
+    await db.commit()
+    return ReferralResponse(
+        code=code.code,
+        reward_credits=settings.invite_referral_reward_credits,
+        invited_count=code.used_count,
+    )
 
 
 @router.patch("/me")
@@ -166,5 +193,56 @@ async def update_email(
         redis,
         user=current_user,
         new_email=body.new_email,
+        code=body.code,
+    )
+
+
+#
+# Change phone — the SMS-channel mirror of the email-change flow above:
+#
+#   POST /me/phone/verification-codes  { new_phone, current_password }
+#       → sudo + uniqueness pre-check + send 6-digit SMS code to new_phone. 204.
+#   PUT /me/phone                      { new_phone, code }
+#       → verify code, atomically swap user.phone, bump token_version.
+#
+
+
+@router.post(
+    "/me/phone/verification-codes",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit(settings.rate_limit_register_code)
+async def request_phone_change_verification_code(
+    request: Request,
+    body: PhoneChangeCodeRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Step 1: dispatch a verification code to the new phone."""
+    await request_phone_change_code(
+        db,
+        redis,
+        user=current_user,
+        new_phone=body.new_phone,
+        current_password=body.current_password,
+    )
+
+
+@router.put("/me/phone")
+@limiter.limit("5/minute")
+async def update_phone(
+    request: Request,
+    body: PhoneChangeRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> UserResponse:
+    """Step 2: verify the code and apply the new phone."""
+    return await change_phone(
+        db,
+        redis,
+        user=current_user,
+        new_phone=body.new_phone,
         code=body.code,
     )

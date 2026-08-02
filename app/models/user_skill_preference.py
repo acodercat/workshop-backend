@@ -1,14 +1,15 @@
 """Per-user override of a skill's default ``enabled`` flag.
 
 CUSTOM skills' ``enabled`` lives on the ``skill`` row itself — the
-owner can flip it directly. BUILTIN skills are platform-wide rows
-(``user_id IS NULL``) that no end user can mutate without affecting
-everyone, so per-user toggles need a separate place to live.
+owner can flip it directly. Platform skills (SYSTEM/OFFICIAL) are
+platform-wide rows (``user_id IS NULL``) that no end user can mutate
+without affecting everyone, so per-user toggles need a separate place
+to live.
 
 This table fills that gap. One row per ``(user_id, skill_id)`` —
 ``enabled`` overrides ``skill.enabled`` when present; absent rows fall
-back to the skill's default. Mechanically the override works for both
-origins, but the only path that writes to it today is the BUILTIN
+back to the skill's default. Mechanically the override works for any
+origin, but the only path that writes to it today is the platform-skill
 toggle in :func:`app.api.endpoints.skill.update_skill`.
 """
 
@@ -17,6 +18,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     ForeignKey,
+    Index,
     Integer,
     TIMESTAMP,
 )
@@ -46,6 +48,14 @@ class UserSkillPreference(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False,
         server_default=func.now(), onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        # The composite PK leads with ``user_id``, so it can't serve the
+        # ``ON DELETE CASCADE`` from ``skill`` (deleting a CUSTOM skill is
+        # a real API path). Postgres doesn't auto-index FK columns —
+        # without this the cascade seq-scans the table.
+        Index("ix_user_skill_preference_skill_id", "skill_id"),
     )
 
     def __repr__(self) -> str:

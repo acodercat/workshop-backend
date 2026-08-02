@@ -1,4 +1,4 @@
-from app.schemas.auth import EmailLoginRequest, RegisterCodeRequest, RegisterRequest
+from app.schemas.auth import CodeLoginRequest, RegisterCodeRequest, RegisterRequest
 from app.schemas.user import EmailChangeCodeRequest, EmailChangeRequest
 
 
@@ -6,8 +6,9 @@ def test_auth_email_inputs_are_lowercased() -> None:
     assert RegisterCodeRequest(email="Alice@EXAMPLE.COM").email == "alice@example.com"
     assert RegisterRequest(
         email="Alice@EXAMPLE.COM", code="123456", name="Alice",
+        invite_code="abc123",
     ).email == "alice@example.com"
-    assert EmailLoginRequest(
+    assert CodeLoginRequest(
         email="Alice@EXAMPLE.COM", code="123456",
     ).email == "alice@example.com"
 

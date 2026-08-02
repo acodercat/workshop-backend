@@ -10,6 +10,12 @@ transaction:
   fields tell us the net balance impact for that turn without
   joining all the ledger rows. We only join ledger when we need the
   actual cost (the negative ``SETTLE`` row for ``SETTLED`` state).
+- **Refunded turns are omitted.** A ``CANCELLED`` reservation is a
+  full reserve→refund round-trip that nets to zero — the customer was
+  never charged (a voided authorization hold, not a refund), so a
+  zero-amount row only reads as "money vanished". These are filtered
+  out; the ``RESERVE`` / ``REFUND`` ledger pair stays on the audit
+  trail, just off the user-facing list.
 - Non-reservation ledger rows (``TOPUP`` / ``ADJUST``) pass through
   directly. ``TOPUP`` rows whose idempotency key starts with
   ``welcome-`` are re-tagged as ``WELCOME_GRANT`` so the UI can
@@ -40,29 +46,33 @@ class TransactionKind(StrEnum):
     Two families:
 
     - **Turn-related** (derived from ``credit_reservation.state``):
-      ``TURN_USED`` (settled with non-zero actual cost),
-      ``TURN_REFUND`` (cancelled, full refund),
-      ``TURN_PENDING`` (still open — the agent is mid-flight).
+      ``TURN_USED`` (settled with the actual cost debited),
+      ``TURN_PENDING`` (still open — the agent is mid-flight). A
+      refunded (``CANCELLED``) reservation produces **no** row — it
+      netted to zero and is filtered out (see the module docstring).
     - **Direct** (pass-through from ``credit_ledger``):
       ``WELCOME_GRANT`` (auto-grant at registration),
       ``TOPUP`` (admin-initiated or future payment-driven),
-      ``ADJUST`` (manual correction).
+      ``ADJUST`` (manual correction),
+      ``REFERRAL`` (reward for a successful referral),
+      ``CHECKIN`` (daily check-in reward).
     """
 
     TURN_USED = "TURN_USED"
-    TURN_REFUND = "TURN_REFUND"
     TURN_PENDING = "TURN_PENDING"
     WELCOME_GRANT = "WELCOME_GRANT"
     TOPUP = "TOPUP"
     ADJUST = "ADJUST"
+    REFERRAL = "REFERRAL"
+    CHECKIN = "CHECKIN"
 
 
 class TransactionRow(NamedTuple):
     """One row of the user-facing transaction view.
 
     ``amount`` is signed µ-credits: positive for credit-in, negative
-    for credit-out, zero for ``TURN_REFUND`` (the round trip nets
-    out). Callers convert to whole credits at the wire boundary.
+    for credit-out. Callers convert to whole credits at the wire
+    boundary.
     """
 
     kind: TransactionKind
@@ -86,18 +96,16 @@ _ROWS_CTE = """
         SELECT
             cr.created_at AS at,
             CASE cr.state
-                WHEN 'SETTLED'   THEN 'TURN_USED'
-                WHEN 'CANCELLED' THEN 'TURN_REFUND'
-                ELSE                  'TURN_PENDING'
+                WHEN 'SETTLED' THEN 'TURN_USED'
+                ELSE                'TURN_PENDING'
             END AS kind,
             CASE cr.state
                 WHEN 'SETTLED' THEN COALESCE((
                     SELECT amount FROM credit_ledger
-                    WHERE (reference->>'reservation_id')::bigint = cr.id
+                    WHERE reservation_id = cr.id
                       AND kind = 'SETTLE' AND amount < 0
                     LIMIT 1
                 ), 0)
-                WHEN 'CANCELLED' THEN 0
                 ELSE -cr.reserved
             END AS amount,
             jsonb_build_object(
@@ -107,6 +115,8 @@ _ROWS_CTE = """
             ) AS ref
         FROM credit_reservation cr
         WHERE cr.user_id = :user_id
+          -- Refunded turns net to zero → omit (see module docstring).
+          AND cr.state <> 'CANCELLED'
     ),
     direct_rows AS (
         SELECT
@@ -120,7 +130,7 @@ _ROWS_CTE = """
             cl.reference AS ref
         FROM credit_ledger cl
         WHERE cl.user_id = :user_id
-          AND cl.kind IN ('TOPUP', 'ADJUST')
+          AND cl.kind IN ('TOPUP', 'ADJUST', 'REFERRAL', 'CHECKIN')
     ),
     all_rows AS (
         SELECT * FROM reservation_rows

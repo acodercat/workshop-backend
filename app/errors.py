@@ -17,10 +17,10 @@ catalog. ``message`` is an English developer-facing fallback —
 terse, declarative, no "please ..." imperatives — shown only when
 the client has no localized override.
 
-All subclasses today are auth-flow errors; the module is at
-``app/errors.py`` (not ``app/services/auth/errors.py``) so future
-non-auth domains (sessions, shares, files) can add typed errors here
-without a circular dependency.
+Subclasses span every domain — auth, credits, payments, commission,
+skills, check-in, sessions. The module lives at ``app/errors.py`` (not
+under any one domain package) precisely so any of them can add typed
+errors here without a circular dependency.
 
 To add a new error kind:
 
@@ -59,9 +59,49 @@ class EmailTakenError(AppError):
     error_type = "email_taken"
 
 
-class AccountPendingError(AppError):
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "account_pending"
+class PhoneTakenError(AppError):
+    """The phone number is already registered. Mirror of
+    :class:`EmailTakenError` for the SMS-OTP registration path."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "phone_taken"
+
+
+class SmsSendFailedError(AppError):
+    """Aliyun SMS dispatch failed. Mirror of
+    :class:`EmailSendFailedError` for the phone verification path."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "sms_send_failed"
+
+
+class NotRegisteredError(AppError):
+    """Login attempt for an email with no account. The frontend steers
+    the user to the (invite-gated) register tab rather than auto-creating."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "not_registered"
+
+
+class InvalidInviteCodeError(AppError):
+    """Invite code doesn't exist or is disabled."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invalid_invite_code"
+
+
+class InviteExpiredError(AppError):
+    """Invite code's ``expires_at`` has passed."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invite_expired"
+
+
+class InviteExhaustedError(AppError):
+    """Invite code has reached its ``max_uses`` cap."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invite_exhausted"
 
 
 class CooldownError(AppError):
@@ -96,6 +136,11 @@ class IncorrectPasswordError(AppError):
 class SameEmailError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "same_email"
+
+
+class SamePhoneError(AppError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "same_phone"
 
 
 class SamePasswordError(AppError):
@@ -145,7 +190,7 @@ class SkillNameConflictError(AppError):
 
 
 class SkillBundleTooLargeError(AppError):
-    status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
     error_type = "skill_bundle_too_large"
 
 
@@ -161,16 +206,268 @@ class SkillQuotaExceededError(AppError):
     error_type = "skill_quota_exceeded"
 
 
-class SessionFileQuotaExceededError(AppError):
-    """User has hit a per-user session-file upload quota — either the
-    total-size cap or the file-count backstop.
+class SkillEnableQuotaExceededError(AppError):
+    """User already has the maximum allowed number of skills *enabled*.
 
-    Matches the ``SessionFile`` DB model name. Distinct from
-    :class:`FileTooLargeError`: the individual file would have been
-    accepted on its own, but it would push the user's account over the
-    quota. The per-file size cap is enforced separately in
-    ``file_storage``.
+    Distinct from :class:`SkillQuotaExceededError` (upload/storage cap):
+    enabled skills cost LLM context every turn, so simultaneously
+    enabled CUSTOM + OFFICIAL skills are capped separately. Disabling
+    one (or just picking the skill per-turn in the composer, which is
+    uncapped) frees a slot.
     """
 
     status_code = status.HTTP_403_FORBIDDEN
-    error_type = "session_file_quota_exceeded"
+    error_type = "skill_enable_quota_exceeded"
+
+
+class InvalidConnectorUrlError(AppError):
+    """The Connector URL isn't a usable public https endpoint — wrong scheme,
+    unresolvable host, or it resolves to a private / loopback / link-local
+    address (the SSRF guard). 400: the client must supply a different URL."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invalid_connector_url"
+
+
+class ConnectorUnreachableError(AppError):
+    """Couldn't complete the MCP handshake with the remote server (connect /
+    initialize / list-tools failed or timed out, or auth was rejected). 502 —
+    reads as an upstream failure the user can retry after fixing the server."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "connector_unreachable"
+
+
+class ConnectorNameConflictError(AppError):
+    """The user already has a Connector with this name (``uq_mcp_server_user_id_name``)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "connector_name_conflict"
+
+
+class ConnectorQuotaExceededError(AppError):
+    """The user already holds ``MAX_CONNECTORS_PER_USER`` Connectors. 409 rather
+    than 403: nothing about the caller is refused, a resource limit is met, and
+    deleting one makes the identical request succeed."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "connector_quota_exceeded"
+
+
+class ConnectorCredentialUnreadableError(AppError):
+    """A secret stored on the Connector will not decrypt — the encryption key
+    has moved on, or the column is damaged. 409: the request is fine, the row
+    is not, and the only remedy is to supply the secret again."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "connector_credential_unreadable"
+
+
+class ConnectorNotOAuthError(AppError):
+    """An OAuth step was asked of a Connector that authenticates some other way.
+    400: the request describes something the row is not."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_not_oauth"
+
+
+class ConnectorNotAuthorizedError(AppError):
+    """Asked to connect an OAuth Connector that holds no grant. 400: connecting
+    is the wrong verb for it — authorizing is what it still needs."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_not_authorized"
+
+
+class ConnectorAuthorizationExpiredError(AppError):
+    """The authorization attempt this request belongs to is no longer live —
+    its state has lapsed, or the Connector has stopped waiting. 400: starting a
+    new one is the whole remedy, and always available."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_authorization_expired"
+
+
+class ConnectorAuthorizationSupersededError(AppError):
+    """A newer authorization was started for this Connector, so this callback
+    belongs to an attempt the user has already abandoned. Distinct from
+    :class:`ConnectorAuthorizationExpiredError` because the remedy is the
+    opposite: finish the *other* one rather than start another."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_authorization_superseded"
+
+
+class ConnectorChangedDuringAuthorizationError(AppError):
+    """The Connector's OAuth client was replaced while the user was away at the
+    provider, so this grant would land on a row it does not describe. 400: the
+    attempt is void and a fresh one will succeed."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_changed_during_authorization"
+
+
+class ConnectorOAuthClientUnusableError(AppError):
+    """The stored OAuth client cannot be used against the authorization server
+    and cannot be replaced either — the user registered it themselves, so
+    nothing here may re-mint it. 400: only a new Connector helps."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_oauth_client_unusable"
+
+
+class ConnectorOAuthChangeUnsupportedError(AppError):
+    """A PATCH would move a Connector into, or an OAuth Connector's URL out of,
+    the shape its grant was issued against. 400: an authorization is bound to
+    the server it was granted for, so this is a new Connector, not an edit."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_oauth_change_unsupported"
+
+
+class OAuthNotConfiguredError(AppError):
+    """This deployment has no OAuth redirect URI, so it cannot run the flow at
+    all. 500 rather than the 502 its neighbours use: those name a third party
+    having a bad day, and a caller reads them as "retry, or go fix your OAuth
+    app". Nothing here is the caller's, and no amount of retrying helps."""
+
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    error_type = "oauth_not_configured"
+
+
+class ConnectorCatalogEntryNotFoundError(AppError):
+    """No such entry in the official Connector directory — the id is unknown or
+    the entry has been unpublished. 404 rather than 403 for an unpublished one:
+    an unlisted entry should read as absent, not as "exists but withheld"."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "connector_catalog_entry_not_found"
+
+
+class ConnectorOAuthError(AppError):
+    """An OAuth step failed — metadata discovery, dynamic client registration,
+    or the authorization-code exchange. 502: reads as an upstream/provider
+    failure the user can retry after fixing the server or their OAuth app."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "connector_oauth_failed"
+
+
+class FileSizeQuotaExceededError(AppError):
+    """The upload would push the user past their per-user total-size quota
+    (``max_session_files_bytes_per_user``). The individual file is fine on
+    its own; it just doesn't fit the account's remaining storage headroom.
+    The per-file size cap is enforced separately at the schema layer.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_size_quota_exceeded"
+
+
+class FileCountQuotaExceededError(AppError):
+    """The user has hit the per-user file-count backstop
+    (``max_session_files_per_user``)."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_count_quota_exceeded"
+
+
+class PaymentDisabledError(AppError):
+    """The payment/recharge feature is off (``payment_enabled`` is False
+    or Huifu credentials are unconfigured). 403 so the frontend hides the
+    top-up surface rather than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "payment_disabled"
+
+
+class PaymentAmountRangeError(AppError):
+    """Requested top-up amount is outside ``[payment_min_cny,
+    payment_max_cny]``. A client-side validation guard duplicated in the
+    service layer so it holds regardless of caller."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "payment_amount_range"
+
+
+class OrderNotFoundError(AppError):
+    """No payment order with that id is owned by the caller (or it never
+    existed). Folds the not-owned case into not-found so an order id can't
+    be probed across users."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "order_not_found"
+
+
+class PaymentProviderError(AppError):
+    """The upstream payment provider returned an error / unparseable
+    response when creating or querying an order. 502 so it reads as an
+    upstream failure the client can retry, not a client error."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "payment_provider_error"
+
+
+class CommissionDisabledError(AppError):
+    """The referral-commission wallet is off (``commission_enabled`` is
+    False). 403 so the frontend hides the withdraw/convert surface rather
+    than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "commission_disabled"
+
+
+class CommissionAmountRangeError(AppError):
+    """Requested withdrawal / conversion amount is below the configured
+    minimum (or too small to buy a whole credit). A client-side guard
+    duplicated in the service layer so it holds regardless of caller."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "commission_amount_range"
+
+
+class InsufficientCommissionError(AppError):
+    """The withdrawable commission balance can't cover the requested
+    withdrawal / conversion (frozen funds in the settlement hold don't
+    count). 400 — the client should refresh the balance and retry with a
+    smaller amount."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "insufficient_commission"
+
+
+class WithdrawalNotFoundError(AppError):
+    """No withdrawal request with that id is owned by the caller (or it
+    never existed). Folds the not-owned case into not-found so an id can't
+    be probed across users."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "withdrawal_not_found"
+
+
+class CheckInDisabledError(AppError):
+    """Daily check-in is off (``checkin_reward_credits`` is 0). 403 so the
+    frontend hides the check-in surface rather than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "check_in_disabled"
+
+
+class AlreadyCheckedInError(AppError):
+    """The user already claimed today's check-in. 409 (conflict) — the
+    client refreshes the status and shows the already-claimed state. The
+    double-guard (``check_in`` UNIQUE + ``CHECKIN`` ledger idempotency
+    key) makes this race-safe."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "already_checked_in"
+
+
+class AgentTypeDowngradeError(AppError):
+    """A message send carried a FULL → LITE ``agent_type``. Only the
+    LITE → FULL upgrade exists (a downgrade would strand the session's
+    sandbox and files); the UI never offers it, so this is a client
+    programming error — 400."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "agent_type_downgrade"

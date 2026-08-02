@@ -30,6 +30,35 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = Field(description="Secret key for JWT encoding")
+    # Fernet key (44-char urlsafe base64) for encrypting Connector credentials
+    # at rest. Generate with ``Fernet.generate_key()``. Empty default so a
+    # deploy without the Connector feature still boots; connector create/probe
+    # fails loudly at call time if unset. MUST match the worker's value.
+    mcp_credential_encryption_key: str = Field(
+        default="",
+        description="Fernet key for encrypting MCP Connector credentials at rest",
+    )
+    # OAuth Connector redirect URI — the public callback the provider sends the
+    # browser back to. Must match a route the frontend serves and be registered
+    # (for manual OAuth apps). Empty default → OAuth connectors fail loudly at
+    # authorize time (the huifu_notify_url convention).
+    # e.g. https://app.example.com/api/connectors/oauth/callback
+    mcp_oauth_redirect_uri: str = Field(
+        default="", description="Public OAuth callback URL for MCP Connectors",
+    )
+    mcp_oauth_state_ttl_seconds: int = Field(
+        default=600, description="TTL for the pending-OAuth-authorization Redis state",
+    )
+    # Public URL of our OAuth Client ID Metadata Document (CIMD): the URL *is*
+    # the client_id, and the authorization server fetches it instead of us
+    # registering. Must be HTTPS with a non-root path, and must resolve to this
+    # API's ``GET /connectors/client-metadata``. Empty default → fall back to
+    # Dynamic Client Registration, which is the only option for servers that
+    # don't advertise CIMD anyway.
+    # e.g. https://api.example.com/api/connectors/client-metadata
+    mcp_client_metadata_url: str = Field(
+        default="", description="Public URL of our OAuth client metadata document (CIMD)",
+    )
     algorithm: str = Field(default="HS256", description="Algorithm for JWT")
     access_token_expire_minutes: int = Field(
         default=MINUTES_PER_WEEK,
@@ -68,13 +97,36 @@ class Settings(BaseSettings):
     rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
     rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
+    rate_limit_upload_url: str = Field(
+        default="300/minute",
+        description=(
+            "Per-user presigned upload-URL mint rate. The composer mints one "
+            "URL per attached file, in parallel, up to the per-message file "
+            "cap — so this must sit comfortably above ``max_message_files`` to "
+            "leave headroom for a user attaching a full batch (and re-adding / "
+            "retrying) within one window. OSS storage abuse is gated by the "
+            "per-user size/count quota (``_enforce_session_file_quota``), not "
+            "by this request-rate limit."
+        ),
+    )
+    max_concurrent_running_tasks: int = Field(
+        default=10, ge=1,
+        description="Max simultaneously RUNNING tasks (sessions) per user; a new turn past this is rejected (429).",
+    )
     rate_limit_share_unlock: str = Field(
         default="5/5minute",
         description="Per-IP share-unlock attempts (password brute-force guard)",
     )
     rate_limit_register_code: str = Field(
-        default="5/hour",
-        description="Per-IP registration code-send attempts (mail-spam guard, on top of the per-email cooldown)",
+        default="3/minute;20/hour",
+        description=(
+            "Per-IP verification-code send limit (login/register/email-change "
+            "share this code-dispatch endpoint). Two layered limits per OWASP "
+            "OTP guidance: a 3/minute burst cap + a 20/hour ceiling — generous "
+            "enough not to false-positive NAT/CGNAT-shared IPs, on top of the "
+            "per-identity 60s resend cooldown and Aliyun's own per-number flow "
+            "control. slowapi enforces every ';'-separated limit."
+        ),
     )
     rate_limit_register: str = Field(
         default="20/hour",
@@ -136,7 +188,7 @@ class Settings(BaseSettings):
     redis_pool_timeout_seconds: float = Field(default=3.0, description="Wait N seconds for a short-op connection before failing")
 
     # Observability. Sentry stays a no-op until ``sentry_dsn`` is set, so
-    # dev boxes boot without it (same pattern as the DirectMail creds);
+    # dev boxes boot without it (same pattern as the SMTP creds);
     # the Prometheus ``/metrics`` endpoint has no external dependency, so
     # it defaults on.
     sentry_dsn: str = Field(default="", description="Sentry DSN; empty disables error tracking")
@@ -221,6 +273,29 @@ class Settings(BaseSettings):
         description="Per-call socket timeout for connect / EHLO / DATA",
     )
 
+    # Aliyun SMS (短信服务 / dysmsapi) — phone verification codes. Keys
+    # default to empty so dev boxes without SMS access still boot; a send
+    # that needs them fails loudly at call time, not at startup. Sign name
+    # + template are operator-approved values (not secrets), so they carry
+    # sane defaults; only the AccessKey must be supplied to go live.
+    aliyun_sms_access_key_id: str = Field(
+        default="", description="AccessKey id for an account with SMS (dysms) permission",
+    )
+    aliyun_sms_access_key_secret: str = Field(
+        default="", description="AccessKey secret paired with aliyun_sms_access_key_id",
+    )
+    aliyun_sms_sign_name: str = Field(
+        default="水杉智算深圳技术",
+        description="Approved 短信签名 (SignName), without the 【】 brackets",
+    )
+    aliyun_sms_template_code: str = Field(
+        default="SMS_305451063",
+        description="Approved verification-code 模板编码 (TemplateCode), variable ${code}",
+    )
+    aliyun_sms_region: str = Field(
+        default="cn-hangzhou", description="SMS service region (endpoint dysmsapi.aliyuncs.com)",
+    )
+
     # LLM — used only for light-weight synchronous calls from the
     # backend itself (e.g. session-title generation). Agent turns run
     # in the worker and use its own copy of these settings.
@@ -235,15 +310,15 @@ class Settings(BaseSettings):
     # baked into the per-file ``size_bytes`` Pydantic validator on
     # ``MessageCreate``.
     max_message_files: int = Field(
-        default=30,
+        default=100,
         description="Max attachments per single user message",
     )
     max_file_bytes: int = Field(
-        default=100 * 1024 * 1024,
+        default=600 * 1024 * 1024,
         description="Per-file upload size cap (bytes)",
     )
     max_session_files_bytes_per_user: int = Field(
-        default=10 * 1024 * 1024 * 1024,
+        default=1000 * 1024 * 1024 * 1024,
         description=(
             "Per-user total-size cap (bytes) for UPLOAD-origin session files "
             "across all sessions. The primary upload gate — tracks OSS storage "
@@ -252,7 +327,7 @@ class Settings(BaseSettings):
         ),
     )
     max_session_files_per_user: int = Field(
-        default=5000,
+        default=500000,
         description=(
             "Backstop cap on the COUNT of UPLOAD-origin session-file rows per "
             "user, guarding against many-tiny-files row explosion that the "
@@ -313,17 +388,27 @@ class Settings(BaseSettings):
     #   - ``reserve_max_output_tokens``: pessimistic upper bound on
     #     output, used at reserve time. Settle multi-refunds the unused
     #     portion from actual usage.
+    #   - ``reserve_est_input_tokens``: realistic estimate of a turn's
+    #     *cumulative* input tokens, used at reserve time (per-model p50
+    #     from production data — an agent turn re-sends its growing
+    #     context on every LLM call, so the cumulative figure is far
+    #     above any single call's prompt). Sizes the reserve hold to
+    #     ≈ the model's median turn cost: an entry gate + concurrency
+    #     throttle, NOT a worst-case bound — mid-turn overruns are the
+    #     budget enforcer's job (``app/workers/budget_enforcer.py``).
+    #     Missing → falls back to ``credit_reserve_max_input_tokens``.
     # The per-second knob (β) is global, not per-model — see
     # ``credit_per_second_credits`` below.
     credit_rates: dict[str, dict[str, float]] = Field(
         default_factory=lambda: {
-            "claude-opus-4-7":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096},
-            "fable":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096},
-            "claude-opus-4-6":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096},
-            "claude-sonnet-4-6": {"in_per_1k_usd": 0.003,   "out_per_1k_usd": 0.015,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "claude-opus-4-7":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096, "reserve_est_input_tokens": 50000},
+            "fable":             {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096, "reserve_est_input_tokens": 50000},
+            "claude-opus-4-6":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096, "reserve_est_input_tokens": 50000},
+            "claude-sonnet-4-6": {"in_per_1k_usd": 0.003,   "out_per_1k_usd": 0.015,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 250000},
+            "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
+            "kimi-k2-code":      {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 225000},
+            "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
+            "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
             # DashScope-hosted models. USD COGS derived from Aliyun 百炼 pricing pages
             # (CNY converted at ~1 USD = 7.2 CNY). Conservative: glm-5.1 uses the
             # <32K-context tier; longer turns nominally cost ~33% more on the wire
@@ -332,18 +417,18 @@ class Settings(BaseSettings):
             # officially published, expected ≤3.6's). deepseek-v4-pro uses post-promo
             # standard rates ($1.74/$3.48 per M) to avoid charging below COGS once
             # the 2026-05-31 promo expires.
-            "qwen3.7-max":       {"in_per_1k_usd": 0.0013,  "out_per_1k_usd": 0.0078, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "deepseek-v4-pro":   {"in_per_1k_usd": 0.00174, "out_per_1k_usd": 0.00348,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "qwen3.7-max":       {"in_per_1k_usd": 0.0013,  "out_per_1k_usd": 0.0078, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 45000},
+            "deepseek-v4-pro":   {"in_per_1k_usd": 0.00174, "out_per_1k_usd": 0.00348,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 225000},
             # deepseek-v4-flash budget tier — permanent ¥1/¥2 per M
             # tokens (≈$0.14/$0.28 per M), no promo expiry. Cheaper than
             # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
-            "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
-            "glm-5.2":           {"in_per_1k_usd": 0.00090, "out_per_1k_usd": 0.00350, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 2000},
+            "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 425000},
+            "glm-5.2":           {"in_per_1k_usd": 0.00070, "out_per_1k_usd": 0.00080, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 425000},
             # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
             # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
             # ¥0.42/M not separately tracked here; settle uses uncached rate.
-            "MiniMax/MiniMax-M2.7": {"in_per_1k_usd": 0.000292, "out_per_1k_usd": 0.00117, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192},
+            "MiniMax/MiniMax-M2.7": {"in_per_1k_usd": 0.000292, "out_per_1k_usd": 0.00117, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 60000},
         },
         description="Per-model rate card for credit billing. Snapshotted onto each credit_reservation at reserve time so a config change can't re-price open turns.",
     )
@@ -373,13 +458,32 @@ class Settings(BaseSettings):
         default=1860, gt=0,
         description="Upper bound on turn_seconds assumed at reserve time. Settle uses actual.",
     )
-    # Pessimistic estimate for the prompt size at reserve time, used when
-    # we can't measure the worker's compacted context cheaply from the
-    # backend side. Real cost is settled from the worker's actual
-    # ``usage.prompt_tokens`` post-turn.
+    # Fallback input-token estimate at reserve time, for models whose
+    # rate-card entry lacks ``reserve_est_input_tokens`` (the data-driven
+    # per-model figure above). Real cost is settled from the worker's
+    # actual ``usage.prompt_tokens`` post-turn.
     credit_reserve_max_input_tokens: int = Field(
         default=16_000,
-        description="Upper bound on input tokens assumed at reserve time. Settle uses actual usage.",
+        description="Fallback input-token estimate at reserve time for models without a per-model reserve_est_input_tokens. Settle uses actual usage.",
+    )
+    # Budget enforcer (``app/workers/budget_enforcer.py``) — the mid-turn
+    # half of spend control. Prices each running turn's heartbeat-reported
+    # interim usage and stops turns that would leave their user's projected
+    # post-settle balance at/below the buffer. On by default now that it's
+    # validated; set False to fall back to reserve-gate-only. Requires the
+    # worker to be reporting interim usage (deploy it first). Fail-open —
+    # disabled or crashed, the system degrades to reserve-gate-only semantics.
+    budget_enforcer_enabled: bool = Field(
+        default=True,
+        description="Run the mid-turn budget enforcer in the background process.",
+    )
+    budget_enforcer_interval_seconds: int = Field(
+        default=5, gt=0,
+        description="Seconds between budget-enforcer ticks. With the worker's 20s heartbeat, worst-case overrun detection latency is roughly one heartbeat + one tick.",
+    )
+    budget_enforcer_buffer_credits: int = Field(
+        default=80, ge=0,
+        description="Stop turns once the user's projected post-settle balance falls to this many credits. 0 = stop at exactly zero, tolerating one detection window of overshoot (Manus-style).",
     )
     # Auto-grant on registration. 500 credits at the post-redenomination
     # peg (1 credit = $0.01) is $5 of headroom — same USD value as the
@@ -395,6 +499,26 @@ class Settings(BaseSettings):
         default=1000,
         description="Whole credits granted to every new user at registration. Set to 0 to disable.",
     )
+    invite_referral_max_uses: int = Field(
+        default=20,
+        description="Max successful registrations per user's personal referral code. Growth-control cap; raise to widen referral reach.",
+    )
+    invite_referral_reward_credits: int = Field(
+        default=500,
+        description="Whole credits granted to the referrer for each successful registration via their referral code. Set to 0 to disable referral rewards.",
+    )
+    # Daily check-in: a user claims a fixed credit reward once per business
+    # day. Set the reward to 0 to disable the feature (403 on claim). The
+    # "day" is the calendar day in ``checkin_timezone`` — computed
+    # server-side so an early-morning claim lands on the right day.
+    checkin_reward_credits: int = Field(
+        default=100,
+        description="Whole credits granted per daily check-in. Set to 0 to disable check-in.",
+    )
+    checkin_timezone: str = Field(
+        default="Asia/Shanghai",
+        description="Business timezone whose calendar day defines one check-in per day.",
+    )
     # Customer-facing RMB sale price of ONE credit, used only to convert a
     # top-up payment (¥) into credits — the domestic-market recharge knob.
     # Deliberately distinct from the internal cost peg (1 credit ≈ $0.01 ≈
@@ -407,6 +531,84 @@ class Settings(BaseSettings):
     credit_price_cny: float = Field(
         default=0.1, gt=0.0,
         description="Customer-facing RMB price of 1 credit at top-up. ¥0.1 → ¥100 buys 1000 credits.",
+    )
+    credit_bonus_rate: float = Field(
+        default=0.1, ge=0.0,
+        description=(
+            "Promotional bonus credits granted on a recharge, as a fraction "
+            "of the paid base (0.1 → ¥100 buys 1000 + 100 bonus = 1100). "
+            "Frozen onto each order at create time. 0 disables the promo. "
+            "The frontend mirrors this in ``BONUS_RATE`` for the preview only."
+        ),
+    )
+
+    # ── Payments (汇付斗拱 / Huifu Dougong) ────────────────────────────
+    # Buy-side recharge: a user pays RMB and the credit ledger is topped
+    # up via ``credits.apply_topup``. Credentials default to empty strings
+    # so dev boxes without Huifu access still boot (same stance as the
+    # SMTP / OSS creds) — calls that need them fail loudly at request
+    # time, gated behind ``payment_enabled``, not at startup.
+    payment_enabled: bool = Field(
+        default=False,
+        description="Master switch for the payment/recharge endpoints. Off until Huifu creds are configured.",
+    )
+    huifu_merchant_id: str = Field(
+        default="", description="Huifu 商户号 (huifu_id); sent on every request, not part of SDK init",
+    )
+    huifu_sys_id: str = Field(default="", description="Huifu 系统号 (sys_id)")
+    huifu_product_id: str = Field(default="", description="Huifu 产品号 (product_id)")
+    huifu_rsa_private_key: str = Field(
+        default="", description="Merchant RSA private key (PKCS#8 base64 body); signs outbound requests",
+    )
+    huifu_rsa_public_key: str = Field(
+        default="", description="Huifu RSA public key; verifies responses + async notifications",
+    )
+    huifu_env: str = Field(
+        default="prod",
+        description="Huifu gateway env: 'prod' (api.huifu.com) or 'mertest' (sandbox opps-stbmertest.testpnr.com)",
+    )
+    huifu_notify_url: str = Field(
+        default="",
+        description="Public HTTPS async-notify URL, e.g. https://<host>/api/v1/payments/webhooks/huifu",
+    )
+    payment_min_cny: float = Field(
+        default=1.0, gt=0.0, description="Minimum single top-up amount in RMB",
+    )
+    payment_max_cny: float = Field(
+        default=10000.0, gt=0.0, description="Maximum single top-up amount in RMB",
+    )
+    payment_order_ttl_seconds: int = Field(
+        default=1800, description="How long a PENDING order / its QR stays payable",
+    )
+    payment_reconcile_interval_seconds: int = Field(
+        default=120, description="Background payment-reconciler poll interval (seconds)",
+    )
+
+    # ── Referral commission (返佣提现) ────────────────────────────────
+    # When an invitee recharges, the inviter earns a withdrawable cash
+    # commission (a fraction of the paid amount), held for a settlement
+    # window before it can be withdrawn. Off by default so dev boots and
+    # the feature stays dark until rollout; amounts are in RMB cents (分)
+    # except the human-facing rate / hold knobs.
+    commission_enabled: bool = Field(
+        default=False,
+        description="Master switch for referral-commission accrual + withdrawals/conversions.",
+    )
+    commission_rate: float = Field(
+        default=0.1, ge=0.0, le=1.0,
+        description="Commission as a fraction of the invitee's paid amount (0.1 → 10%).",
+    )
+    commission_hold_days: int = Field(
+        default=7, ge=0,
+        description="Settlement hold before earned commission is withdrawable (refund-clawback window).",
+    )
+    commission_min_withdraw_fen: int = Field(
+        default=1000, gt=0,
+        description="Minimum single cash withdrawal, in RMB cents (1000 = ¥10).",
+    )
+    commission_min_convert_fen: int = Field(
+        default=100, gt=0,
+        description="Minimum single commission→credits conversion, in RMB cents (100 = ¥1).",
     )
 
 

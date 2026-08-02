@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.common.filenames import validate_input_filename
 from app.models.session import AgentType, SessionStatus, Tier
@@ -59,11 +59,31 @@ class FileRef(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str = Field(..., min_length=1, max_length=100000)
+    # No ``min_length``: an attachments-only turn (files but no typed text)
+    # is a legal message — e.g. the user attaches a document, or a long
+    # paste was diverted to a ``.txt`` attachment, and sends without typing.
+    # ``_has_content`` below rejects the truly-empty case (no text, no
+    # files). ``.strip()`` on the way in so whitespace-only isn't "content".
+    content: str = Field(default="", max_length=100000)
     files: list[FileRef] = Field(
         default_factory=list, max_length=settings.max_message_files,
     )
     skills: list[str] = Field(default_factory=list, max_length=20)
+    # Optional recipe picked from the composer. The backend resolves it
+    # to a pinned snapshot on ``session_turn.recipe``; its instructions
+    # ride to the worker as a system-reminder. ``None`` = no recipe.
+    recipe_id: int | None = Field(default=None, ge=1)
+    # One-way LITE → FULL mode upgrade, committed atomically with this
+    # send (the composer's mode pick is local until the user actually
+    # sends). ``None`` = keep the session's current mode; FULL → LITE
+    # is rejected. Unlike ``skills``/``recipe_id`` (per-turn selections)
+    # this persists on the session.
+    agent_type: AgentType | None = None
+
+    @field_validator("content")
+    @classmethod
+    def _strip_content(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("files")
     @classmethod
@@ -71,6 +91,15 @@ class MessageCreate(BaseModel):
         if any(file_ref.size_bytes is None for file_ref in value):
             raise ValueError("Each file must include size_bytes")
         return value
+
+    @model_validator(mode="after")
+    def _has_content(self) -> "MessageCreate":
+        # A turn must carry something to act on: typed text or at least
+        # one attachment. Runs after ``_strip_content``, so whitespace-only
+        # text with no files is rejected.
+        if not self.content and not self.files:
+            raise ValueError("A message must have text or at least one file")
+        return self
 
 
 class MessageQueuedResponse(BaseModel):

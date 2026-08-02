@@ -8,7 +8,7 @@ sessions, worker crashes between RESERVE and the fenced terminal
 write.
 
 Sibling to :mod:`app.workers.settle_subscriber` — both run in the
-same background-settle process (see ``app/workers/run.py``). They're
+same background process (see ``app/workers/run.py``). They're
 the **pull and push** halves of the same settle responsibility:
 
 - sweeper polls the DB every 60s — correctness backstop;
@@ -20,8 +20,8 @@ on user endpoints.
 
 Process model: standalone sibling process to the web server, not
 inside the FastAPI lifespan — see ``app/workers/run.py`` and
-``scripts/deploy.sh settle``. Web and background-settle are deployed,
-restarted, and observed independently.
+``scripts/deploy.sh background``. Web and the background process are
+deployed, restarted, and observed independently.
 
 Concurrency: every host in a multi-node deployment runs its own
 sweeper. A Postgres **transaction-scoped** advisory lock

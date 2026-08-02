@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import jwt
 from jwt.exceptions import InvalidTokenError
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import models
 from app.api.dependencies import get_db
 from app.database import AsyncSessionLocal
-from app.errors import AccountPendingError
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -61,13 +60,13 @@ async def authenticate_user(
     """Return the user iff the credentials are valid, regardless of
     status.
 
-    Status checking is left to the calling endpoint so it can
-    distinguish ``PENDING`` (surface ``account_pending`` so the user
-    sees "awaiting admin approval") from ``DISABLED`` / ``SUSPENDED``
-    (collapse to a generic 401 indistinguishable from wrong creds —
-    admin-initiated lockouts shouldn't leak account state). Existing
-    JWTs aren't revoked by a status change; bump ``token_version``
-    separately if you need immediate force-logout.
+    Status checking is left to the calling endpoint via
+    :func:`assert_user_active` — ``DISABLED`` / ``SUSPENDED`` collapse
+    to a generic 401 indistinguishable from wrong creds so
+    admin-initiated lockouts don't leak account state. A status flip
+    also blocks any *existing* JWT at its next request (see the status
+    gate in :func:`_decode_and_get_user`); ``token_version`` is still the
+    lever for force-logout on a password / email change.
     """
     user = await get_user_by_username(db, username)
     if user is None or not await verify_password(password, user.password_hash):
@@ -78,15 +77,12 @@ async def authenticate_user(
 def assert_user_active(user: models.User, *, inactive_detail: str) -> None:
     """Gate sign-in on account status; no-op for an ``ACTIVE`` user.
 
-    ``PENDING`` raises ``AccountPendingError`` (403) so the frontend can
-    show "awaiting admin approval". ``DISABLED`` / ``SUSPENDED`` collapse
-    to an opaque 401 carrying ``inactive_detail`` — kept generic (and,
-    for password login, identical to the wrong-credentials message) so
-    admin-initiated lockouts don't leak account state. The caller passes
-    the detail because what's "opaque" differs by flow.
+    ``DISABLED`` / ``SUSPENDED`` collapse to an opaque 401 carrying
+    ``inactive_detail`` — kept generic (and, for password login,
+    identical to the wrong-credentials message) so admin-initiated
+    lockouts don't leak account state. The caller passes the detail
+    because what's "opaque" differs by flow.
     """
-    if user.status is models.UserStatus.PENDING:
-        raise AccountPendingError("Account awaiting administrator approval")
     if user.status is not models.UserStatus.ACTIVE:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -199,15 +195,31 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
     user = await get_user_by_username(db, username=username)
     if user is None or user.token_version != token_version:
         raise credentials_exception
+    if user.status is not models.UserStatus.ACTIVE:
+        # A flip to DISABLED / SUSPENDED takes effect on the very next
+        # request — no ``token_version`` bump required. The row is already
+        # loaded, so this is a free in-memory check. Same opaque 401 as a
+        # bad token so a lockout never leaks account state (mirrors
+        # :func:`assert_user_active`).
+        raise credentials_exception
     return user
 
 
 async def authenticate_and_get_user(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     token: str = Depends(oauth2_scheme),
 ) -> models.User:
-    """FastAPI dependency: extract Bearer token from header and validate."""
-    return await _decode_and_get_user(db, token)
+    """FastAPI dependency: extract Bearer token from header and validate.
+
+    Stamps the resolved id onto ``request.state.user_id`` so the rate
+    limiter keys authenticated requests on the user rather than the
+    client IP (NAT/CGNAT-shared IPs otherwise share one bucket). See
+    :func:`app.rate_limit._rate_limit_key`.
+    """
+    user = await _decode_and_get_user(db, token)
+    request.state.user_id = user.id
+    return user
 
 
 async def authenticate_for_streaming(

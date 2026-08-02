@@ -51,7 +51,11 @@ WORKER_NOTIFY_CHANNEL = "notify:worker"
 # Pub/Sub channel prefix for per-session cancel signals. Mirrored in
 # ``agent-worker/agent_worker/runtime/cancellation.py``; fire-and-forget
 # ``PUBLISH cancel:{session_id}`` reaches the worker holding that
-# session (if any) and fires :meth:`Agent.cancel` on its loop.
+# session (if any), which cancels the agent and stamps the payload as
+# ``session_turn.termination_reason`` (a ``TerminationReason`` value:
+# ``user_cancelled`` from the cancel endpoint, ``insufficient_credits``
+# from the budget enforcer; empty/unknown falls back to
+# ``user_cancelled``, so either side can deploy first).
 CANCEL_CHANNEL_PREFIX = "cancel"
 
 # Pub/Sub channel the worker publishes to after committing a terminal
@@ -69,15 +73,48 @@ SETTLE_NOTIFY_CHANNEL = "settle:notify"
 # window. See :mod:`app.services.auth.verification`.
 EMAIL_VERIFY_PREFIX = "email_verify"
 
+# Per-(phone) registration/login verification code prefix. Same JSON
+# shape as the email prefix; namespaced separately so phone and email
+# codes for the same person can't collide.
+PHONE_VERIFY_PREFIX = "phone_verify"
+
 # Per-(new-email) email-change verification code prefix. Same JSON
 # shape as the registration prefix, but namespaced separately so a
 # pending registration can't be hijacked by an email-change request
 # (or vice versa) targeting the same address.
 EMAIL_CHANGE_PREFIX = "email_change"
 
+# Per-(new-phone) phone-change verification code prefix. The SMS-channel
+# sibling of ``EMAIL_CHANGE_PREFIX``; namespaced separately from
+# registration/login phone codes for the same reason.
+PHONE_CHANGE_PREFIX = "phone_change"
+
+
+# Per-``state`` pending OAuth-authorization state for MCP Connectors. Holds the
+# PKCE code_verifier + connector_id + user_id for the redirect round-trip; the
+# opaque random ``state`` is the key. One-shot: deleted on callback consume.
+OAUTH_STATE_PREFIX = "connector_oauth_state"
+
 
 def stream_key(prefix: str, entity_id: str) -> str:
     return f"{prefix}:{entity_id}"
+
+
+def oauth_state_key(state: str) -> str:
+    """Redis key holding the pending OAuth-authorization state for ``state``."""
+    return f"{OAUTH_STATE_PREFIX}:{state}"
+
+
+def oauth_current_state_key(connector_id: int) -> str:
+    """Redis key naming the one authorization a Connector is currently waiting on.
+
+    Each ``state`` is independently valid for its whole TTL, so without this a
+    user who starts a second authorization — a second tab, a different account,
+    a first attempt they thought had failed — leaves two live flows for one
+    Connector, and whichever *finishes* last wins. This records which one they
+    started last, which is the one they meant.
+    """
+    return f"{OAUTH_STATE_PREFIX}:current:{connector_id}"
 
 
 def email_verify_key(email: str) -> str:
@@ -87,11 +124,26 @@ def email_verify_key(email: str) -> str:
     return f"{EMAIL_VERIFY_PREFIX}:{email.lower()}"
 
 
-def email_change_key(email: str) -> str:
-    """Redis key holding the pending email-change verification state
-    for the *new* address. Lowercased for the same reason as
-    :func:`email_verify_key`."""
-    return f"{EMAIL_CHANGE_PREFIX}:{email.lower()}"
+def phone_verify_key(phone: str) -> str:
+    """Redis key holding the active registration/login verification
+    state for ``phone``."""
+    return f"{PHONE_VERIFY_PREFIX}:{phone}"
+
+
+def email_change_key(user_id: int, email: str) -> str:
+    """Redis key holding the pending email-change verification state for
+    ``user_id`` switching to the *new* address. Bound to the requesting
+    user (not the address alone) so two users targeting the same new
+    address can't consume each other's code. Lowercased for the same
+    reason as :func:`email_verify_key`."""
+    return f"{EMAIL_CHANGE_PREFIX}:{user_id}:{email.lower()}"
+
+
+def phone_change_key(user_id: int, phone: str) -> str:
+    """Redis key holding the pending phone-change verification state for
+    ``user_id`` switching to the *new* number. User-bound for the same
+    reason as :func:`email_change_key`."""
+    return f"{PHONE_CHANGE_PREFIX}:{user_id}:{phone}"
 
 
 def cancel_channel(session_id: str) -> str:

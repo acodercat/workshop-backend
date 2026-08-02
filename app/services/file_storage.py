@@ -43,6 +43,37 @@ class FileTooLargeError(ValueError):
         )
 
 
+class FileObjectNotFoundError(ValueError):
+    """The OSS object doesn't exist (e.g. a presigned upload never
+    happened). Translates oss2's ``NoSuchKey`` at the storage boundary so
+    callers don't import ``oss2``. The session layer maps it to HTTP 400.
+    """
+
+    def __init__(self, file_key: str) -> None:
+        self.file_key = file_key
+        super().__init__(f"No OSS object for key {file_key!r}")
+
+
+class InlinePreviewNotAllowedError(ValueError):
+    """File type may not be served with an ``inline`` disposition → HTTP 415.
+
+    Inline preview renders the object as active content on the OSS
+    document origin; a script-bearing ``.svg`` would be stored XSS there.
+    The client should use the download URL instead.
+    """
+
+    def __init__(self, ext: str) -> None:
+        self.ext = ext
+        super().__init__(f"{ext!r} cannot be previewed inline; download it instead")
+
+
+# Extensions that must never be served inline (they execute script on the
+# document origin). SVG is the only scriptable type in the image
+# allow-list — raster images are inert, HTML deliverables are the intended
+# inline payload.
+_INLINE_FORBIDDEN_EXTENSIONS = frozenset({".svg"})
+
+
 UPLOAD_URL_TTL_SECONDS = 15 * 60
 _DOWNLOAD_URL_TTL_SECONDS = 60 * 60
 
@@ -240,8 +271,18 @@ def download(policy: UploadPolicy, file_key: str) -> bytes:
 
 
 def head_size(policy: UploadPolicy, file_key: str) -> int:
-    """Return the actual byte size of an object in OSS."""
-    return int(get_bucket(policy.bucket_name).head_object(file_key).content_length)
+    """Return the actual byte size of an object in OSS.
+
+    Raises :class:`FileObjectNotFoundError` if the object doesn't exist
+    (a presigned upload that never happened) — the caller reconciles the
+    trusted-at-mint client size against this real size. Blocking oss2
+    call; run it off the event loop (``asyncio.to_thread``).
+    """
+    try:
+        head = get_bucket(policy.bucket_name).head_object(file_key)
+    except oss2.exceptions.NoSuchKey as exc:
+        raise FileObjectNotFoundError(file_key) from exc
+    return int(head.content_length)
 
 
 def upload(policy: UploadPolicy, file_key: str, data: bytes) -> None:
@@ -300,7 +341,15 @@ def generate_inline_url(policy: UploadPolicy, file_key: str) -> tuple[str, int]:
     force-downloads HTML in mainland regions regardless of the ``inline``
     disposition. Falls back to the default endpoint when unset (the URL
     then downloads, but nothing breaks).
+
+    Raises :class:`InlinePreviewNotAllowedError` for a scriptable type
+    (``.svg``): serving it inline on the document origin would be stored
+    XSS. The single choke point for both the session and share preview
+    endpoints, so neither can mint an inline URL for one.
     """
+    ext = os.path.splitext(file_key)[1].lower()
+    if ext in _INLINE_FORBIDDEN_EXTENSIONS:
+        raise InlinePreviewNotAllowedError(ext)
     url = get_bucket(
         policy.bucket_name, cname_domain=settings.oss_document_domain
     ).sign_url(

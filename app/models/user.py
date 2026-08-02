@@ -22,13 +22,13 @@ if TYPE_CHECKING:
 class UserStatus(StrEnum):
     """Lifecycle status of a user account.
 
-    - ``ACTIVE`` — can log in.
+    - ``ACTIVE`` — can log in. Default for fresh inserts: a valid
+      invite code is the access grant, so registration activates
+      immediately.
     - ``DISABLED`` — manually disabled by an admin; login refused.
     - ``SUSPENDED`` — temporarily blocked (e.g. risk control); login refused.
-    - ``PENDING`` — created but not yet approved; login refused. Default
-      for fresh inserts so a new account is opt-in to access.
 
-    Only ``ACTIVE`` is allowed past :func:`authenticate_user`. Member
+    Only ``ACTIVE`` is allowed past :func:`assert_user_active`. Member
     values match the Postgres ``user_status`` enum and the Python
     member names — same convention as :class:`SessionStatus`.
     """
@@ -36,7 +36,6 @@ class UserStatus(StrEnum):
     ACTIVE = "ACTIVE"
     DISABLED = "DISABLED"
     SUSPENDED = "SUSPENDED"
-    PENDING = "PENDING"
 
 
 class User(Base):
@@ -57,6 +56,11 @@ class User(Base):
     # registrations always populate it. ``UNIQUE`` is partial (only
     # enforced on non-NULL rows) — see migration ``12dc6d69a9ad``.
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    # China-mainland mobile for SMS verification + login. ``NULL`` for
+    # users created via the email flow / before phone support. ``UNIQUE``
+    # is partial (only enforced on non-NULL rows), exactly like ``email``
+    # — see migration ``e5c1a9b7d2f4``.
+    phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
     # Avatar variant counter. ``0`` is the default look derived from
     # ``id`` alone; each "shuffle" click in the settings UI bumps it
     # by 1, picking a different deterministic variant. The renderer
@@ -68,10 +72,10 @@ class User(Base):
     avatar_revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
-    # Default ``PENDING`` so a freshly inserted row is locked out by
-    # default; promotion to ``ACTIVE`` is an explicit step (admin tool /
-    # seed script). Existing rows were backfilled to ``ACTIVE`` in the
-    # migration that introduced this column.
+    # Default ``ACTIVE``: registration is invite-gated, and a valid
+    # invite is itself the access grant, so a freshly inserted row can
+    # log in immediately. ``DISABLED`` / ``SUSPENDED`` are set later by
+    # admin / risk-control tooling.
     status: Mapped[UserStatus] = mapped_column(
         SAEnum(
             UserStatus,
@@ -79,8 +83,8 @@ class User(Base):
             values_callable=lambda enum_cls: [m.value for m in enum_cls],
         ),
         nullable=False,
-        default=UserStatus.PENDING,
-        server_default=UserStatus.PENDING.value,
+        default=UserStatus.ACTIVE,
+        server_default=UserStatus.ACTIVE.value,
     )
     last_login_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -108,6 +112,16 @@ class User(Base):
     # millions of rows). All writes go through
     # :mod:`app.services.credits._internal` so the invariant holds.
     credit_balance: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0"),
+    )
+    # Referral-commission wallet balance, in **RMB cents (整数分)** — real,
+    # withdrawable cash (a distinct liability class from ``credit_balance``,
+    # which is prepaid service credit). Cached materialization of
+    # ``SUM(commission_ledger.amount_fen WHERE user_id = self.id)``; the
+    # ledger is the source of truth. ``bigint`` keeps all arithmetic
+    # integer. All writes go through
+    # :mod:`app.services.commission._internal` so the invariant holds.
+    commission_balance_fen: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default=text("0"),
     )
     created_at: Mapped[datetime] = mapped_column(

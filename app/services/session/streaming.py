@@ -31,12 +31,13 @@ from enum import Enum
 from typing import AsyncIterator
 
 import redis.asyncio as aioredis
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.common.event_types import EventType
 from app.common.sse import event_to_sse, sse_event
 from app.database import AsyncSessionLocal
 from app.models.session import Session, SessionStatus
+from app.models.session_turn import SessionTurn
 from app.services.redis import (
     SESSION_STREAM_PREFIX,
     read_stream,
@@ -139,6 +140,51 @@ async def _session_liveness(session_id: str) -> _Liveness:
     return _Liveness.RUNNING
 
 
+async def _current_turn_id(session_id: str) -> str | None:
+    """The session's newest turn id — the one this SSE connection serves.
+
+    Returned as a **string** to compare directly against the Redis-stored
+    ``turn_id`` stamp. Resolved once at generator start via a short-lived
+    session (same posture as :func:`_session_liveness`); the current turn
+    is fixed for one connection (a new turn flips ``status`` → the client
+    reconnects and this re-resolves). ``None`` on a DB error or a session
+    with no turns yet → filtering is skipped (fail-open: never drop a real
+    event because we couldn't resolve the turn).
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            turn_id = await db.scalar(
+                select(func.max(SessionTurn.id)).where(
+                    SessionTurn.session_id == session_id
+                )
+            )
+    except Exception:
+        logger.warning(
+            "stream_events: current-turn lookup failed for session %s; "
+            "turn-id filtering disabled this connection", session_id,
+            exc_info=True,
+        )
+        return None
+    return str(turn_id) if turn_id is not None else None
+
+
+def _is_stale_entry(event: dict, current_turn_id: str | None) -> bool:
+    """True when a stream entry belongs to a turn other than the current one.
+
+    A worker that lost its lease mid-turn keeps XADDing for up to a
+    heartbeat interval; after enqueue DELETEs and the next turn recreates
+    the same stream key, those stale entries interleave into the next
+    turn's view. Each entry carries the ``turn_id`` it was produced under,
+    so a mismatch against the session's current turn is dropped. Entries
+    with no ``turn_id`` (pre-rollout workers, or when the current turn
+    couldn't be resolved) are never treated as stale.
+    """
+    if current_turn_id is None:
+        return False
+    entry_turn_id = event.get("turn_id")
+    return entry_turn_id is not None and entry_turn_id != current_turn_id
+
+
 async def stream_events(
     redis: aioredis.Redis,
     session_id: str,
@@ -190,6 +236,12 @@ async def stream_events(
     range_start = f"({cursor}" if cursor else "-"
     last_id = cursor or "0"
 
+    # The turn this connection serves. Entries stamped with a different
+    # turn_id (a zombie worker leaking its dead turn's events into the
+    # stream key the current turn recreated) are dropped below. Resolved
+    # once — the current turn is fixed for a connection's lifetime.
+    current_turn_id = await _current_turn_id(session_id)
+
     # Phase 1 — replay the backlog one page at a time. Each page advances
     # ``range_start`` to an exclusive cursor past the last entry seen (Redis
     # 6.2+ ``(id``), so pages don't overlap or skip. Whatever the worker
@@ -201,6 +253,8 @@ async def stream_events(
             break
         for entry_id, event in batch:
             last_id = entry_id
+            if _is_stale_entry(event, current_turn_id):
+                continue  # cursor still advances; a stale terminal can't close us
             yield event_to_sse(event, entry_id)
             if event["type"] == EventType.AGENT_STOPPED:
                 return
@@ -226,6 +280,8 @@ async def stream_events(
         for _, messages in entries:
             for entry_id, event in messages:
                 last_id = entry_id
+                if _is_stale_entry(event, current_turn_id):
+                    continue  # drop a dead turn's leaked events
                 yield event_to_sse(event, entry_id)
                 if event["type"] == EventType.AGENT_STOPPED:
                     return

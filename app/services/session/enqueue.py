@@ -6,7 +6,11 @@ the steps in a specific order:
 1. Lock the session row and reject if a live generation is in progress
    (:class:`GenerationInProgressError`). The lock serialises concurrent
    enqueue requests for the same session so the second one always sees
-   the first's ``running`` status.
+   the first's ``running`` status. Apply the one-way LITE → FULL
+   ``agent_type`` upgrade here when the send carries one — under the
+   same lock, committed atomically with the turn, so the worker's
+   claim (which JOINs ``session.agent_type``) runs this very turn in
+   the upgraded mode.
 2. In one transaction:
    - Lazy-sweep this user's open credit reservations into terminal
       state (settles from durable ``session_turn`` usage, or refunds
@@ -36,15 +40,17 @@ import logging
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from sqlalchemy import and_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import AgentTypeDowngradeError
+from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
-from app.models.session import Session, SessionStatus
+from app.models.recipe import Recipe, RecipeOrigin
+from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.models.skill import Skill, SkillOrigin
-from app.models.user_skill_preference import UserSkillPreference
 from app.schemas.session import FileRef
 from app.services import credits, file_storage
 from app.services.redis import (
@@ -54,8 +60,11 @@ from app.services.redis import (
 )
 from config import settings
 from app.services.session.exceptions import (
+    ConcurrentTaskLimitError,
     FileNotInSessionError,
+    FileNotUploadedError,
     GenerationInProgressError,
+    RecipeNotInvokableError,
     SessionGoneError,
 )
 
@@ -70,6 +79,8 @@ async def queue_user_message(
     content: str,
     files: list[FileRef],
     skills: list[str] | None = None,
+    recipe_id: int | None = None,
+    agent_type: AgentType | None = None,
 ) -> None:
     """Persist the user message + session_turn, flip status, wake worker.
 
@@ -79,7 +90,11 @@ async def queue_user_message(
        enqueues for the same session, then reject if status is already
        ``running``. PostgreSQL holds the lock until the transaction
        commits, so two racing requests pass through one at a time and
-       the second sees the first's ``running`` status.
+       the second sees the first's ``running`` status. ``agent_type``
+       (the send's one-way LITE → FULL mode upgrade; ``None`` = keep)
+       is applied here so the flip and the turn commit atomically —
+       the worker's claim JOINs ``session.agent_type`` post-commit, so
+       this very turn runs in the upgraded mode.
     2. Lazy-sweep this user's open credit reservations into terminal
        state. Settle reads durable ``session_turn.input_tokens`` /
        ``output_tokens`` / ``terminated_at`` written by the worker,
@@ -118,12 +133,16 @@ async def queue_user_message(
             endpoint's ownership check and this lock.
         InsufficientCreditsError: user's balance is below the
             estimated max cost.
+        ConcurrentTaskLimitError: the user is already at
+            ``settings.max_concurrent_running_tasks`` running tasks.
+        AgentTypeDowngradeError: ``agent_type`` asked for FULL → LITE.
     """
     session = await _lock_session(db, session.id)
     if session.status == SessionStatus.RUNNING:
         raise GenerationInProgressError(
             "A completion is already in progress for this session"
         )
+    _apply_agent_type_upgrade(session, agent_type)
 
     # Lazy sweep: settle any of this user's reservations from prior
     # turns whose session is already terminal. Source of truth is
@@ -141,13 +160,25 @@ async def queue_user_message(
     else:
         await credits.settle_open_for_user(db, session.user_id)
 
-    # Reject ``skills`` the user can't actually invoke — visible to
-    # them AND effective-enabled. Without this check, a client could
-    # POST ``skills: ["some-disabled-name"]`` and the worker's
-    # ``extra_names`` bypass would happily load it, defeating the
-    # toggle's "off means off" semantics.
+    # Drop ``skills`` the user can't see (someone else's CUSTOM, or a
+    # hidden SYSTEM row). Visibility is the only gate here: an explicit
+    # per-turn pick is its own authorization, so the enable toggle —
+    # which governs ambient auto-discovery, not manual selection — is
+    # deliberately not consulted.
     accepted_skills = await _filter_invokable_skills(
         db, session.user_id, skills or [],
+    )
+
+    # Snapshot the user's connected Connectors. Credentials are
+    # NOT snapshotted — the worker resolves url + decrypted credential live by id.
+    accepted_connectors = await _resolve_mcp_servers(db, session.user_id)
+
+    # Resolve the picked recipe server-side into a pinned snapshot — the
+    # client only sends ``recipe_id``, never the instruction text. A bad
+    # id (missing / not visible / disabled) raises rather than silently
+    # dropping, since a recipe is a single explicit pick.
+    recipe_snapshot = await _resolve_recipe_snapshot(
+        db, session.user_id, recipe_id,
     )
 
     file_dicts = [f.model_dump() for f in files]
@@ -159,6 +190,8 @@ async def queue_user_message(
         query=content,
         files=file_dicts,
         skills=accepted_skills,
+        mcp_servers=accepted_connectors,
+        recipe=recipe_snapshot,
         status=SessionTurnStatus.PENDING,
     )
     db.add(session_turn)
@@ -177,6 +210,7 @@ async def queue_user_message(
             turn_id=session_turn.id,
             model_id=session.model_id,
         )
+        await _enforce_concurrent_task_limit(db, session.user_id)
 
     user_msg = Message(
         session_id=session.id,
@@ -241,6 +275,54 @@ async def _clear_orphan_tags(file_keys: list[str]) -> None:
                 "lifecycle rule; re-clear within the window",
                 key, exc_info=result,
             )
+
+
+def _apply_agent_type_upgrade(
+    session: Session, requested: AgentType | None,
+) -> None:
+    """Apply the send's one-way LITE → FULL mode upgrade, if any.
+
+    ``None`` (no preference) and same-as-current are no-ops, so resends
+    are idempotent. A FULL → LITE request is rejected — only the upgrade
+    exists (a downgrade would strand the session's sandbox and files),
+    and the UI never offers it, so hitting this is a client programming
+    error. Runs on the locked session row, before the turn insert, so
+    the flip commits atomically with the turn.
+    """
+    if requested is None or requested == session.agent_type:
+        return
+    if requested is not AgentType.FULL:
+        raise AgentTypeDowngradeError(
+            "A session can only switch from LITE to FULL"
+        )
+    session.agent_type = requested
+
+
+async def _enforce_concurrent_task_limit(db: AsyncSession, user_id: int) -> None:
+    """Reject if the user is already at their running-task cap.
+
+    Must be called **after** ``reserve_for_turn`` so it runs under the
+    reservation's user-row ``FOR UPDATE`` lock: two concurrent enqueues for
+    the same user then serialize on that lock, so the count can't overshoot
+    (the second sees the first's committed ``RUNNING`` flip). The session
+    being enqueued isn't ``RUNNING`` yet, so ``>=`` rejects the would-be
+    (limit+1)-th; raising rolls the whole transaction back (turn +
+    reservation), leaving no trace.
+    """
+    running_count = await db.scalar(
+        select(func.count())
+        .select_from(Session)
+        .where(
+            Session.user_id == user_id,
+            Session.status == SessionStatus.RUNNING,
+            Session.deleted_at.is_(None),
+        )
+    )
+    if running_count >= settings.max_concurrent_running_tasks:
+        raise ConcurrentTaskLimitError(
+            f"user {user_id} already has {running_count} running task(s) "
+            f"(max {settings.max_concurrent_running_tasks})"
+        )
 
 
 async def _lock_session(db: AsyncSession, session_id: str) -> Session:
@@ -311,28 +393,62 @@ async def _bind_session_files(
         file_key: owner_session_id for file_key, owner_session_id in rows.all()
     }
 
-    newly_bound: list[str] = []
+    # Classify first (reject cross-session rebinds, skip idempotent
+    # same-session ones), then insert only the genuinely new keys.
+    to_insert: list[FileRef] = []
     for file_key, file_ref in unique_files.items():
         owner_session_id = existing.get(file_key)
         if owner_session_id is None:
-            db.add(
-                SessionFile(
-                    session_id=session_id,
-                    user_id=user_id,
-                    file_key=file_key,
-                    origin=SessionFileOrigin.UPLOAD,
-                    filename=file_ref.filename,
-                    mime_type=file_ref.mime_type,
-                    size_bytes=file_ref.size_bytes,
-                )
+            to_insert.append(file_ref)
+        elif owner_session_id != session_id:
+            raise FileNotInSessionError(
+                f"file_key {file_key!r} is already bound to another session"
             )
-            newly_bound.append(file_key)
-            continue
-        if owner_session_id == session_id:
-            continue
-        raise FileNotInSessionError(
-            f"file_key {file_key!r} is already bound to another session"
+        # owner_session_id == session_id → idempotent rebind, skip.
+    if not to_insert:
+        return []
+
+    # ``size_bytes`` is client-declared and untrusted: a low declaration
+    # slips past the per-file cap AND the per-user quota (which SUMs this
+    # column). The object provably exists in OSS only now, at bind, so
+    # reconcile against its true size here — the one place the persisted
+    # value becomes trustworthy. ``head_size`` is blocking oss2; thread it
+    # and fan out so N attachments cost ~one HEAD's latency, not N serial.
+    sizes = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                file_storage.head_size, file_storage.SESSION_FILE_POLICY,
+                file_ref.file_key,
+            )
+            for file_ref in to_insert
+        ),
+        return_exceptions=True,
+    )
+
+    newly_bound: list[str] = []
+    for file_ref, size in zip(to_insert, sizes):
+        if isinstance(size, file_storage.FileObjectNotFoundError):
+            raise FileNotUploadedError(
+                f"file_key {file_ref.file_key!r} was not uploaded"
+            )
+        if isinstance(size, BaseException):
+            raise size  # unexpected OSS/other error — surface as 500
+        if size > file_storage.SESSION_FILE_POLICY.max_bytes:
+            raise file_storage.FileTooLargeError(
+                size, file_storage.SESSION_FILE_POLICY.max_bytes
+            )
+        db.add(
+            SessionFile(
+                session_id=session_id,
+                user_id=user_id,
+                file_key=file_ref.file_key,
+                origin=SessionFileOrigin.UPLOAD,
+                filename=file_ref.filename,
+                mime_type=file_ref.mime_type,
+                size_bytes=size,
+            )
         )
+        newly_bound.append(file_ref.file_key)
     return newly_bound
 
 
@@ -345,20 +461,22 @@ async def _filter_invokable_skills(
     skill row that existed at enqueue time so the worker loads the
     exact bundle bytes the user picked, even if the row is later
     mutated (delete / re-upload / a same-named CUSTOM appearing and
-    overriding a BUILTIN). The ``id`` pins the lineage; the
+    overriding an OFFICIAL skill). The ``id`` pins the lineage; the
     ``bundle_key`` pins the bytes; ``name`` rides along for log and
     LLM-reminder display.
 
-    A skill is invokable when it's visible to the user (their own
-    CUSTOM, or any BUILTIN) AND its effective enabled state — the
-    per-user preference override taking precedence over the skill's
-    default — is true. Unknown / hidden / disabled names are silently
+    A skill is invokable when it's visible to the user: their own
+    CUSTOM, or any OFFICIAL skill. The enable toggle is deliberately
+    **not** checked — it governs ambient auto-discovery (whether the
+    skill's metadata rides in the LLM context every turn, see the
+    worker's ``list_enabled``), while an explicit composer pick is its
+    own per-turn authorization. Unknown / hidden names are silently
     dropped rather than raising; the user's intent (a free-text
     composer prompt) is still useful even if one chip was stale, and
     surfacing a 4xx mid-conversation would be a worse UX than gracefully
     proceeding without that skill.
 
-    Slug collisions between CUSTOM + BUILTIN resolve CUSTOM-wins, matching
+    Slug collisions between CUSTOM + OFFICIAL resolve CUSTOM-wins, matching
     the worker repo's ``ORDER BY (user_id IS NULL) ASC`` rule. Order is
     preserved from the request so the worker's reminder lists skills in
     the order the user picked them.
@@ -369,29 +487,13 @@ async def _filter_invokable_skills(
     # the snapshot list and the LLM reminder.
     requested_unique = list(dict.fromkeys(requested))
 
-    # Effective enabled = ``COALESCE(pref.enabled, skill.enabled)`` —
-    # mirrors the same expression used by the worker repo and the
-    # ``GET /skills`` endpoint so all three reads of "is this skill
-    # active for this user" agree.
-    pref_enabled = UserSkillPreference.enabled
-    stmt = (
-        select(Skill.id, Skill.name, Skill.bundle_key, Skill.user_id)
-        .outerjoin(
-            UserSkillPreference,
-            and_(
-                UserSkillPreference.skill_id == Skill.id,
-                UserSkillPreference.user_id == user_id,
-            ),
-        )
-        .where(
-            Skill.name.in_(requested_unique),
-            (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.BUILTIN),
-            (pref_enabled.is_(True)) | (pref_enabled.is_(None) & Skill.enabled),
-        )
+    stmt = select(Skill.id, Skill.name, Skill.bundle_key, Skill.user_id).where(
+        Skill.name.in_(requested_unique),
+        (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.OFFICIAL),
     )
     result = await db.execute(stmt)
     # CUSTOM-wins: keep the row owned by this user when both a CUSTOM
-    # and a BUILTIN of the same name pass the filter.
+    # and an OFFICIAL skill of the same name pass the filter.
     by_name: dict[str, dict[str, str | int]] = {}
     for skill_id, name, bundle_key, row_user_id in result.all():
         snapshot = {"id": skill_id, "name": name, "bundle_key": bundle_key}
@@ -399,3 +501,72 @@ async def _filter_invokable_skills(
         if existing is None or row_user_id is not None:
             by_name[name] = snapshot
     return [by_name[name] for name in requested_unique if name in by_name]
+
+
+async def _resolve_mcp_servers(
+    db: AsyncSession, user_id: int | None,
+) -> list[dict[str, str | int]]:
+    """Return per-turn snapshots ``{"id", "name"}`` for the user's CONNECTED Connectors.
+
+    Connectors follow a "connected = active" model (like Claude / ChatGPT
+    connectors): every connected Connector's tools are available each turn,
+    minus the ones the user switched off individually (``disabled_tools``,
+    resolved live by the worker rather than snapshotted here).
+
+    The snapshot caps the set — connecting a Connector after enqueue cannot add
+    it to a queued turn — but it does not freeze it: the worker re-reads each
+    row by id at connect time, so credentials never sit on the ``session_turn``
+    row, a rotation is picked up, and one disconnected before the claim drops
+    out. Only ``id`` is read; ``name`` rides along to keep a queued row legible
+    in psql, and the worker must not use it either — the tool namespace has to
+    come from the row actually connected to, or a Connector renamed between
+    enqueue and claim would expose its tools under a name that no longer
+    exists. (Contrast the skills snapshot, whose ``bundle_key`` *is*
+    load-bearing.)
+    """
+    if user_id is None:
+        return []
+    stmt = (
+        select(MCPServer.id, MCPServer.name)
+        .where(MCPServer.user_id == user_id, MCPServer.connected.is_(True))
+        .order_by(MCPServer.created_at)
+    )
+    result = await db.execute(stmt)
+    return [{"id": row_id, "name": name} for row_id, name in result.all()]
+
+
+async def _resolve_recipe_snapshot(
+    db: AsyncSession, user_id: int | None, recipe_id: int | None,
+) -> dict[str, str | int] | None:
+    """Resolve a picked recipe id into a pinned per-turn snapshot.
+
+    Returns ``{"id", "display_name", "instructions"}`` — the rendered
+    instructions captured at enqueue time so a later edit / delete of the
+    recipe can't change or strand this queued turn. The worker injects
+    ``instructions`` verbatim as an axon system-reminder.
+
+    A recipe is invokable when it's visible to the user (their own
+    CUSTOM, or any OFFICIAL) AND enabled. Unlike skills — silently
+    filtered, since a stale chip shouldn't block a free-text send — a
+    recipe is a single explicit pick, so a missing / hidden / disabled id
+    raises :class:`RecipeNotInvokableError` (→ 400) rather than vanishing.
+
+    Returns ``None`` when no recipe was picked.
+    """
+    if recipe_id is None:
+        return None
+    stmt = select(Recipe.id, Recipe.display_name, Recipe.instructions).where(
+        Recipe.id == recipe_id,
+        Recipe.enabled.is_(True),
+        (Recipe.user_id == user_id) | (Recipe.origin == RecipeOrigin.OFFICIAL),
+    )
+    row = (await db.execute(stmt)).first()
+    if row is None:
+        raise RecipeNotInvokableError(
+            f"recipe {recipe_id} is not available"
+        )
+    return {
+        "id": row.id,
+        "display_name": row.display_name,
+        "instructions": row.instructions,
+    }

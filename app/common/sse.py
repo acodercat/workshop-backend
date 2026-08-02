@@ -208,6 +208,15 @@ class AgentStoppedEvent(_EventBase):
       when the agent loop died before emitting its own stopped event) —
       only ``content`` (typically empty string).
 
+    ``termination_reason`` is the worker's persisted why-it-ended
+    (mirrors ``session_turn.termination_reason``; values from
+    :class:`app.models.session_turn.TerminationReason`). Orthogonal to
+    ``stop_reason`` (axon's agent-level finish reason): a budget-enforcer
+    stop and a user stop both carry ``stop_reason="cancelled"`` but
+    differ here (``insufficient_credits`` vs ``user_cancelled``), which
+    is what lets the frontend pick the right copy. Absent on
+    pre-rollout events.
+
     Everything except ``content`` is ``NotRequired``.
     """
     type: Literal["agent.stopped"]
@@ -215,6 +224,7 @@ class AgentStoppedEvent(_EventBase):
     turns: NotRequired[str]
     elapsed: NotRequired[str]
     stop_reason: NotRequired[str]
+    termination_reason: NotRequired[str]
     usage: NotRequired[str]
     total_model_latency: NotRequired[str]
 
@@ -245,13 +255,15 @@ StreamEvent = (
 
 
 # Header fields stripped from the per-event ``data`` payload sent over SSE.
-# ``type`` is redundant with the SSE ``event:`` line. ``ts`` stays on the
-# wire — it's the worker's emit-time clock (see
-# ``agent_worker/wire/session_events.py``) and the
+# ``type`` is redundant with the SSE ``event:`` line. ``turn_id`` is a
+# backend-only routing stamp — the SSE generator uses it to drop a zombie
+# worker's stale-turn events (see ``streaming._is_stale_entry``); it must
+# not leak to the frontend. ``ts`` stays on the wire — it's the worker's
+# emit-time clock (see ``agent_worker/wire/session_events.py``) and the
 # frontend uses it for elapsed-time displays. Keeping it here instead
 # of deriving from the SSE ``id:`` field avoids coupling the frontend to
 # the Redis Streams entry-id format.
-_INTERNAL_FIELDS = frozenset({"type"})
+_INTERNAL_FIELDS = frozenset({"type", "turn_id"})
 
 
 class SSEMessage(TypedDict, total=False):

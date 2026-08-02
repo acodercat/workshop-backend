@@ -43,7 +43,7 @@ from app.models.session_turn import SessionTurn
 from app.services.credits._internal import insert_ledger_and_bump_balance
 from app.services.credits.rates import (
     RateSnapshot,
-    _normalize_rate_snapshot,
+    normalize_rate_snapshot,
     cost_micro_credits,
 )
 
@@ -64,11 +64,26 @@ def _is_session_terminal(status: SessionStatus | None) -> bool:
 async def _load_reservation_for_update(
     db: AsyncSession, reservation_id: int,
 ) -> CreditReservation | None:
-    """Lock a reservation row by id. Returns ``None`` if missing."""
+    """Lock a reservation row by id and read its **current** state.
+
+    ``populate_existing`` is load-bearing for correctness under concurrency.
+    ``settle_open_for_session`` pre-loads the reservation into this session's
+    identity map (its ``SELECT`` runs before the lock). Without a forced
+    refresh, ``FOR UPDATE`` still takes the row lock, but the ORM hands back
+    that stale cached instance — so if a concurrent settle committed
+    ``state = SETTLED`` while we were blocked on the lock, we don't see it,
+    the ``state is OPEN`` guard in :func:`settle_turn` / :func:`refund_reservation`
+    passes on stale data, and the settle rows get double-posted. Refreshing
+    the attributes from the just-locked tuple is what makes the
+    lock-then-check read-modify-write actually serialize.
+
+    Returns ``None`` if the row is missing.
+    """
     result = await db.execute(
         select(CreditReservation)
         .where(CreditReservation.id == reservation_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
@@ -82,12 +97,15 @@ async def _read_usage_and_duration_from_session_turn(
     Returns ``None`` when:
 
     - the turn row no longer exists (cascade delete);
-    - the row exists but tokens are ``NULL`` (worker died before the
-      fenced terminal write, or the row is from the FAILED path where
-      we leave tokens NULL deliberately).
+    - the row exists but tokens are ``NULL`` — meaning no usage was
+      *measured*: the worker died before the fenced terminal write, or
+      the runner's finally-fallback failed the turn with ``usage=None``.
 
     Both cases route to refund — the user shouldn't pay for a turn
-    whose cost we can't measure.
+    whose cost we can't measure. Note a FAILED turn *with* measured usage
+    now carries its tokens (the worker's charge-for-produced-tokens
+    policy) and settles as a normal debit, so it never reaches this NULL
+    branch — only genuinely unmeasured turns refund.
 
     ``turn_seconds`` is ``terminated_at - created_at`` when
     ``terminated_at`` is set; ``0.0`` for legacy rows that pre-date
@@ -148,7 +166,7 @@ async def settle_turn(
         )
         return
 
-    rate: RateSnapshot = _normalize_rate_snapshot(reservation.rate_snapshot)
+    rate: RateSnapshot = normalize_rate_snapshot(reservation.rate_snapshot)
     actual = cost_micro_credits(
         rate,
         input_tokens=actual_input_tokens,
@@ -164,15 +182,15 @@ async def settle_turn(
         user_id=reservation.user_id,
         amount=+reservation.reserved,
         kind=CreditLedgerKind.SETTLE,
-        reference={"reservation_id": reservation.id},
+        reservation_id=reservation.id,
     )
     await insert_ledger_and_bump_balance(
         db,
         user_id=reservation.user_id,
         amount=-actual,
         kind=CreditLedgerKind.SETTLE,
+        reservation_id=reservation.id,
         reference={
-            "reservation_id": reservation.id,
             "turn_id": reservation.turn_id,
             "actual": {
                 "input_tokens": actual_input_tokens,
@@ -229,7 +247,8 @@ async def refund_reservation(
         user_id=reservation.user_id,
         amount=+reservation.reserved,
         kind=CreditLedgerKind.REFUND,
-        reference={"reservation_id": reservation.id, **reason_payload},
+        reservation_id=reservation.id,
+        reference=reason_payload,
     )
     reservation.state = CreditReservationState.CANCELLED
     reservation.settled_at = func.now()
@@ -316,9 +335,10 @@ async def settle_open_for_user(
       kicked in) → refund, the user got no value;
     - session non-terminal → leave open, the turn isn't finished;
     - session terminal + usage on ``session_turn`` → settle with that
-      usage;
-    - session terminal + ``session_turn`` usage NULL (worker died /
-      FAILED path) → refund.
+      usage (a FAILED turn that recorded measured tokens settles here too);
+    - session terminal + ``session_turn`` usage NULL (no measurement —
+      worker died before the fenced write, or a failure with no captured
+      usage) → refund.
 
     Typical N here is 0 or 1; partial index keeps the lookup cheap.
     """
@@ -334,6 +354,14 @@ async def settle_open_for_user(
             CreditReservation.user_id == user_id,
             CreditReservation.state == CreditReservationState.OPEN,
         )
+        # Deterministic lock order. Each iteration below takes the
+        # reservation-row ``FOR UPDATE`` then the user-row lock and holds
+        # both to the caller's commit; without a stable order two
+        # concurrent sweeps for the same user (a ``GET /credits`` racing
+        # ``queue_user_message``) could grab the same two reservations in
+        # opposite orders and deadlock. Mirrors ``settle_sweeper``'s
+        # ordered candidate scan.
+        .order_by(CreditReservation.id.asc())
     )
     for reservation_id, turn_id, session_id, session_status in rows.all():
         if session_id is None:

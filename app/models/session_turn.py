@@ -60,6 +60,51 @@ class SessionTurnStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class TerminationReason(StrEnum):
+    """Why a turn reached its terminal status — the *why* to
+    :class:`SessionTurnStatus`'s *what*.
+
+    Two orthogonal dimensions: ``status`` drives billing and recovery
+    (COMPLETE/CANCELLED settle actuals, FAILED-without-usage refunds);
+    this column NEVER drives logic — it is the persisted, queryable
+    record of which path ended the turn, for UI copy ("stopped: out of
+    credits" vs "cancelled") and operations analytics (how often does
+    the budget enforcer fire? how many hard timeouts?).
+
+    Values mirror the worker's
+    ``agent_worker.infra.database.TerminationReason`` (the worker is
+    the main writer; the backend writes only ``WORKER_LOST`` from
+    :func:`~app.services.session.recovery.fail_abandoned_turn`) and ride
+    the cancel-channel payload + the ``agent.stopped`` wire event —
+    change both repos together.
+
+    Grouped by the status each value accompanies:
+
+    - ``COMPLETE`` — ``COMPLETED`` (incl. the ran-to-a-limit family).
+    - ``CANCELLED`` — ``USER_CANCELLED`` (stop button),
+      ``INSUFFICIENT_CREDITS`` (budget enforcer),
+      ``WORKER_SHUTDOWN`` (graceful drain cancelled in-flight turns).
+    - ``FAILED`` — ``MODEL_ERROR`` (unrecoverable provider failure),
+      ``TIMEOUT`` (hard wall-clock kill), ``EMPTY_OUTPUT`` ("successful"
+      turn with nothing replayable), ``INTERNAL_ERROR`` (unexpected
+      exception), ``WORKER_LOST`` (lease expired — crash recovery).
+
+    Stored as plain VARCHAR (``native_enum=False``, no CHECK): a
+    descriptive field earns Python-side typing, not a Postgres enum
+    whose every new member costs an ``ALTER TYPE`` migration.
+    """
+
+    COMPLETED = "completed"
+    USER_CANCELLED = "user_cancelled"
+    INSUFFICIENT_CREDITS = "insufficient_credits"
+    WORKER_SHUTDOWN = "worker_shutdown"
+    MODEL_ERROR = "model_error"
+    TIMEOUT = "timeout"
+    EMPTY_OUTPUT = "empty_output"
+    INTERNAL_ERROR = "internal_error"
+    WORKER_LOST = "worker_lost"
+
+
 class SessionTurn(Base):
     """One queued turn. Joins to ``session`` for ``user_id``,
     ``model_id`` — those used to be cached here but are read live from
@@ -82,22 +127,60 @@ class SessionTurn(Base):
     # ``{"id": int, "name": str, "bundle_key": str}`` taken at enqueue
     # time so the worker loads the exact bundle the user picked, even
     # if the row is later mutated (delete / re-upload / a same-named
-    # CUSTOM overriding a BUILTIN). The ``id`` pins the lineage; the
-    # ``bundle_key`` pins the bytes; ``name`` is kept for log / reminder
-    # display so we don't need an extra JOIN to render the LLM-facing
-    # message.
+    # CUSTOM overriding a platform skill). The ``id`` pins the lineage;
+    # the ``bundle_key`` pins the bytes; ``name`` is kept for log /
+    # reminder display so we don't need an extra JOIN to render the
+    # LLM-facing message.
+    #
+    # A collection (0..N): NOT NULL DEFAULT '[]' so "no skills" is the
+    # empty array, never NULL — readers iterate without a null-guard.
+    # Contrast ``recipe`` below: an optional single value that IS NULL.
     skills: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
+    # Per-turn Connector selection. Each element is a snapshot
+    # ``{"id": int, "name": str}`` taken at enqueue time. The ``id`` pins
+    # the ``mcp_server`` row the worker resolves live (url + decrypted
+    # credential) — credentials are deliberately NOT snapshotted here, so a
+    # credential rotation is picked up and secrets never sit on this row.
+    # ``name`` is kept for the tool namespace / reminder display.
+    #
+    # A collection (0..N): NOT NULL DEFAULT '[]' so "no connectors" is the
+    # empty array, never NULL — mirrors ``skills`` above.
+    mcp_servers: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+    )
+    # Per-turn recipe snapshot, or NULL. The backend resolves the picked
+    # recipe id → its vetted ``instructions`` server-side (the client
+    # sends only ``recipe_id``, never raw text) and pins the rendered
+    # snapshot here, so a later recipe edit / delete can't strand a
+    # queued turn. The worker injects ``instructions`` verbatim as an
+    # axon ``<system-reminder>``. Shape:
+    #   {"id": int, "display_name": str, "instructions": str}
+    #
+    # An optional single value (0 or 1): nullable, NULL = "no recipe".
+    # No DEFAULT — an empty ``{}`` isn't a valid recipe, so unlike the
+    # ``skills`` array above there's no meaningful empty value to default to.
+    recipe: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # Token usage as reported by axon's ``AgentStoppedEvent.usage``,
     # written by the worker in the same fenced UPDATE that flips
-    # ``status`` to ``COMPLETE`` / ``CANCELLED`` (see
-    # ``agent_worker/infra/turn_repository.py::_terminate_turn``).
-    # Stays ``NULL`` on the ``FAILED`` path and on pre-V2 historical
-    # rows — backend's credit settle treats ``NULL`` as "refund the
-    # reservation": no value delivered, no charge.
+    # ``status`` terminal (see
+    # ``agent_worker/infra/turn_repository.py::_terminate_turn``) —
+    # every terminal that carries a measurement records it, FAILED
+    # included (charge-for-produced-tokens). Stays ``NULL`` only when
+    # nothing was measured (worker crash, the runner's finally
+    # fallback, pre-V2 rows) — backend's credit settle treats ``NULL``
+    # as "refund the reservation": cost we can't measure, no charge.
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Interim usage report — cumulative tokens consumed *so far*, updated
+    # by the worker's lease heartbeat while the turn runs (OCS-style
+    # "interim update"). Best-effort telemetry for the backend's budget
+    # enforcer, NEVER read by settle: billing only trusts the fenced
+    # terminal ``input_tokens`` / ``output_tokens`` above. ``NULL`` until
+    # the first heartbeat of a claimed turn.
+    interim_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    interim_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[SessionTurnStatus] = mapped_column(
         # ``values_callable`` keeps the Postgres enum holding the
         # ``.value`` strings (default would use Python member names,
@@ -110,6 +193,21 @@ class SessionTurn(Base):
         ),
         nullable=False,
         default=SessionTurnStatus.PENDING,
+    )
+    # Why the terminal ``status`` was reached — see :class:`TerminationReason`.
+    # NULL while PENDING/RUNNING; every terminal write stamps a value
+    # (pre-rollout historical FAILED rows stay NULL: their sub-reason is
+    # unknowable). Plain VARCHAR on the DB side (no native enum / CHECK) so
+    # a new reason is a code change, not a migration.
+    termination_reason: Mapped[TerminationReason | None] = mapped_column(
+        SAEnum(
+            TerminationReason,
+            native_enum=False,
+            create_constraint=False,
+            length=32,
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
+        nullable=True,
     )
     # Worker process id that holds the lease. Cleared by no one — kept
     # on terminal rows for forensics ("which worker's turns keep timing
@@ -148,6 +246,18 @@ class SessionTurn(Base):
             postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
         ),
         Index("ix_session_turn_session_id", "session_id"),
+        # DB backstop for "at most one non-terminal turn per session" —
+        # the invariant enqueue enforces via the session row lock (409 on
+        # ``status == RUNNING``) and both recovery paths rely on when they
+        # flip by ``session_id`` alone. A future writer that skips the
+        # lock discipline fails here instead of silently double-queueing.
+        # Mirrors ``uq_credit_reservation_open_session``.
+        Index(
+            "uq_session_turn_open_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
+        ),
     )
 
     def __repr__(self) -> str:

@@ -25,7 +25,20 @@ from app.logging_config import setup_logging
 setup_logging(log_dir="logs", level="INFO")
 logger = logging.getLogger(__name__)
 
-from app.api.endpoints import auth, credits, feedback, session, share, skill, user
+from app.api.endpoints import (
+    auth,
+    check_in,
+    commission,
+    credits,
+    feedback,
+    mcp_server,
+    payment,
+    recipe,
+    session,
+    share,
+    skill,
+    user,
+)
 from app.database import engine
 from app.errors import AppError
 from app.exception_handlers import (
@@ -45,8 +58,13 @@ from slowapi.middleware import SlowAPIMiddleware
 
 ROUTERS = [
     auth.router,
+    check_in.router,
+    commission.router,
     credits.router,
     feedback.router,
+    mcp_server.router,
+    payment.router,
+    recipe.router,
     session.router,
     share.router,
     skill.router,
@@ -214,11 +232,11 @@ async def lifespan(app: FastAPI):
     app.state.user_event_hub = UserEventHub(app.state.redis)
     await app.state.user_event_hub.start()
 
-    # Background-settle process (sweeper + subscriber) runs as a
-    # **sibling**, not inside this event loop — see ``app/workers/run.py``
-    # and ``scripts/deploy.sh settle``. Web's lifespan is HTTP-only
-    # again: separating background settle work from request handling
-    # lets each scale, restart, and fail independently.
+    # Background process (settle sweeper + subscriber + payment reconciler)
+    # runs as a **sibling**, not inside this event loop — see
+    # ``app/workers/run.py`` and ``scripts/deploy.sh background``. Web's
+    # lifespan is HTTP-only again: separating background work from request
+    # handling lets each scale, restart, and fail independently.
 
     logger.info("API started")
     try:

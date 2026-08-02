@@ -36,11 +36,12 @@ from app.services.skill_bundle import (
 
 logger = logging.getLogger(__name__)
 
-# Per-user CUSTOM skill count cap. Bounds account-level abuse (a real
-# user has a handful of skills; 20 is comfortable headroom). Paired
-# with the per-bundle ``SKILL_POLICY.max_bytes`` cap so total OSS
-# storage per user is implicitly bounded too.
-_MAX_SKILLS_PER_USER = 20
+# Per-user CUSTOM skill count cap. Bounds account-level abuse only —
+# paired with the per-bundle ``SKILL_POLICY.max_bytes`` cap so total
+# OSS storage per user is implicitly bounded too. The per-turn LLM
+# context cost is bounded separately (and much lower) by
+# ``skill_enablement.MAX_ENABLED_SKILLS``.
+_MAX_SKILLS_PER_USER = 100
 
 
 async def register_skill_bundle(
@@ -60,6 +61,12 @@ async def register_skill_bundle(
     - ``SkillQuotaExceededError`` (403) — at the per-user count cap.
     - ``SkillNameConflictError`` (409) — extracted name collides with an
       existing skill of this user.
+
+    The row lands **disabled**: enabling a skill puts its metadata in
+    every turn's LLM context, so it's an explicit user opt-in (from the
+    skills page), not an upload side effect — same posture as OFFICIAL
+    skills. The freshly uploaded skill is still usable immediately via
+    an explicit composer pick, which doesn't consult the toggle.
     """
     ext = os.path.splitext(filename)[1].lower()
     if ext not in SKILL_POLICY.allowed_types:
@@ -112,14 +119,19 @@ async def register_skill_bundle(
     await asyncio.to_thread(
         file_storage.upload, SKILL_POLICY, bundle_key, data,
     )
+    # ``enabled=False`` is explicit: the column's ``server_default`` is
+    # ``true``, so omitting it would enable the skill. Uploads land
+    # disabled (rationale in the docstring).
     skill = Skill(
         user_id=user_id,
         origin=SkillOrigin.CUSTOM,
         name=parsed.name,
-        display_name=parsed.name,
+        display_name=parsed.display_name,
+        display_name_i18n=parsed.display_name_i18n,
         description=parsed.description,
         bundle_key=bundle_key,
         bundle_size=len(data),
+        enabled=False,
     )
     db.add(skill)
     try:
@@ -168,7 +180,7 @@ def _validate_and_parse(data: bytes, *, is_zip: bool) -> tuple[bytes, ParsedSkil
 async def _enforce_user_quota(db: AsyncSession, user_id: int) -> None:
     """Reject the upload if the user is at the per-user skill count cap.
 
-    Counts the user's CUSTOM rows only — BUILTIN rows have
+    Counts the user's CUSTOM rows only — platform rows have
     ``user_id IS NULL`` so they don't count. Race-acceptable: two
     concurrent uploads at the boundary could both succeed, leaving
     the user one over. Not worth a row lock for a soft policy limit.

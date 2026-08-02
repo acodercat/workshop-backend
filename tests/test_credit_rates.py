@@ -88,7 +88,7 @@ def test_normalize_legacy_snapshot_uses_real_production_shape() -> None:
     ``max_output_tokens`` (not ``reserve_max_output_tokens``). β/γ
     fields are absent. Confirmed against production DB snapshots.
     """
-    snapshot = rates._normalize_rate_snapshot({
+    snapshot = rates.normalize_rate_snapshot({
         "model_id": "legacy-model",
         "in_per_1k_usd": 0.001,
         "out_per_1k_usd": 0.005,
@@ -105,7 +105,7 @@ def test_normalize_legacy_snapshot_uses_real_production_shape() -> None:
 
 def test_normalize_snapshot_requires_markup_or_legacy_margin() -> None:
     with pytest.raises(KeyError, match="token_markup"):
-        rates._normalize_rate_snapshot({
+        rates.normalize_rate_snapshot({
             "model_id": "broken",
             "in_per_1k_usd": 0.001,
             "out_per_1k_usd": 0.005,
@@ -116,7 +116,7 @@ def test_normalize_snapshot_requires_markup_or_legacy_margin() -> None:
 
 def test_normalize_snapshot_requires_reserve_max_output_or_legacy() -> None:
     with pytest.raises(KeyError, match="reserve_max_output_tokens"):
-        rates._normalize_rate_snapshot({
+        rates.normalize_rate_snapshot({
             "model_id": "broken",
             "in_per_1k_usd": 0.001,
             "out_per_1k_usd": 0.005,
@@ -152,3 +152,28 @@ def test_credits_from_cny_uses_sale_price(monkeypatch) -> None:
 def test_credits_from_cny_respects_configured_price(monkeypatch) -> None:
     monkeypatch.setattr(rates.settings, "credit_price_cny", 0.05)
     assert rates.credits_from_cny(100) == 2000   # ¥0.05/credit → ¥100 = 2000
+
+
+# ── reserve_est_input_tokens: per-model reserve sizing ───────────────────────
+
+
+def test_reserve_est_input_tokens_reads_per_model_value(monkeypatch) -> None:
+    """A model whose rate-card entry carries ``reserve_est_input_tokens``
+    sizes its hold from that per-model figure."""
+    monkeypatch.setattr(
+        rates.settings, "credit_rates",
+        {"m": {"reserve_est_input_tokens": 425_000}},
+    )
+
+    assert rates.reserve_est_input_tokens("m") == 425_000
+
+
+def test_reserve_est_input_tokens_falls_back_to_global(monkeypatch) -> None:
+    """Entries without the key (and unknown models) fall back to the global
+    ``credit_reserve_max_input_tokens`` — a card edit can't silently zero
+    the reserve estimate."""
+    monkeypatch.setattr(rates.settings, "credit_rates", {"m": {}})
+    monkeypatch.setattr(rates.settings, "credit_reserve_max_input_tokens", 16_000)
+
+    assert rates.reserve_est_input_tokens("m") == 16_000
+    assert rates.reserve_est_input_tokens("unknown-model") == 16_000

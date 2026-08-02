@@ -40,11 +40,15 @@ from config import settings
 from app.common.file_kind import FILE_KINDS, file_kind_case
 from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
-from app.errors import SessionFileQuotaExceededError
+from app.errors import (
+    FileCountQuotaExceededError,
+    FileSizeQuotaExceededError,
+)
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
+from app.models.session_turn import TerminationReason
 from app.models.session_share import SessionShare
 from app.models.session_site import SessionSite
 from app.models.user import User
@@ -63,6 +67,7 @@ from app.services import file_storage
 from app.services.file_storage import (
     SESSION_FILE_POLICY,
     FileTooLargeError,
+    InlinePreviewNotAllowedError,
     UnsupportedFileTypeError,
 )
 from app.schemas.session import (
@@ -79,10 +84,18 @@ from app.schemas.session import (
 from app.schemas.session_share import ShareCreate, ShareResponse
 from app.services import credits
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
-from app.services.session import generate_title, queue_user_message, stream_events
+from app.services.session import (
+    cancel_unclaimed_turn,
+    generate_title,
+    queue_user_message,
+    stream_events,
+)
 from app.services.session.exceptions import (
+    ConcurrentTaskLimitError,
     FileNotInSessionError,
+    FileNotUploadedError,
     GenerationInProgressError,
+    RecipeNotInvokableError,
     SessionGoneError,
 )
 from app.services.session.files import assert_file_belongs_to_session
@@ -231,7 +244,7 @@ async def list_sessions(
 # dispatching to a session handler) — but keeping the literal route first
 # is the explicit, order-independent guarantee.
 @router.post("/sessions/upload-url")
-@limiter.limit("60/minute")
+@limiter.limit(settings.rate_limit_upload_url)
 async def create_session_upload_url(
     request: Request,
     body: UploadUrlRequest,
@@ -259,7 +272,7 @@ async def create_session_upload_url(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except FileTooLargeError as exc:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc),
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc),
         )
 
 
@@ -562,6 +575,7 @@ async def create_message(
 
     Service-layer domain errors translate to HTTP here so the service
     stays unaware of FastAPI: ``GenerationInProgressError`` → 409,
+    ``ConcurrentTaskLimitError`` → 429 (user at their running-task cap),
     ``SessionGoneError`` → 404 (the session was deleted between our
     ownership check and the enqueue's row lock). The DB-lease design has
     no Redis-enqueue failure path: ``publish_wake`` is best-effort and
@@ -571,17 +585,34 @@ async def create_message(
     try:
         await queue_user_message(
             db, redis, session, content=body.content, files=body.files,
-            skills=body.skills,
+            skills=body.skills, recipe_id=body.recipe_id,
+            agent_type=body.agent_type,
         )
     except GenerationInProgressError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc),
+        )
+    except ConcurrentTaskLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc),
         )
     except SessionGoneError:
         raise HTTPException(status_code=404, detail="Session not found")
     except FileNotInSessionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
+        )
+    except FileNotUploadedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        )
+    except FileTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc),
+        )
+    except RecipeNotInvokableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
         )
     return MessageQueuedResponse()
 
@@ -605,6 +636,18 @@ async def cancel_session(
     :meth:`axon.Agent.cancel`, and the final ``agent.stopped`` event
     (with ``stop_reason="cancelled"``) arrives to the client via the
     existing SSE stream. Completed / failed sessions 409.
+
+    The payload is the :class:`TerminationReason` the worker stamps on
+    the turn — ``user_cancelled`` here; the budget enforcer publishes
+    ``insufficient_credits`` on the same channel. The worker treats an
+    empty/unknown payload as ``user_cancelled``, so the two sides can
+    deploy independently.
+
+    A turn still ``PENDING`` in the queue has no worker listening on the
+    cancel channel, so the pub/sub signal would be dropped and the turn
+    later claimed and billed. :func:`cancel_unclaimed_turn` hard-cancels
+    (and refunds) that case directly in the DB; only a claimed/``RUNNING``
+    turn takes the pub/sub path for graceful mid-turn shutdown.
     """
     session = await _get_or_404(db, session_id, current_user.id)
     if session.status != SessionStatus.RUNNING:
@@ -612,7 +655,12 @@ async def cancel_session(
             status_code=status.HTTP_409_CONFLICT,
             detail="Session is not running",
         )
-    await redis.publish(cancel_channel(str(session_id)), "")
+    if await cancel_unclaimed_turn(db, session_id=session_id):
+        await db.commit()
+        return
+    await redis.publish(
+        cancel_channel(str(session_id)), TerminationReason.USER_CANCELLED.value,
+    )
 
 
 @router.get("/sessions/{session_id}/stream")
@@ -867,9 +915,14 @@ async def get_preview_url(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="File is not part of this session",
         )
-    url, expires_in = file_storage.generate_inline_url(
-        file_storage.SESSION_FILE_POLICY, file_key,
-    )
+    try:
+        url, expires_in = file_storage.generate_inline_url(
+            file_storage.SESSION_FILE_POLICY, file_key,
+        )
+    except InlinePreviewNotAllowedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc),
+        )
     return PreviewUrlResponse(
         preview_url=url, file_key=file_key, expires_in=expires_in,
     )
@@ -1023,13 +1076,13 @@ async def _enforce_session_file_quota(
 
     size_cap = settings.max_session_files_bytes_per_user
     if used_bytes + incoming_size_bytes > size_cap:
-        raise SessionFileQuotaExceededError(
+        raise FileSizeQuotaExceededError(
             f"upload would put the user at "
             f"{(used_bytes + incoming_size_bytes) / 1024**3:.2f} GB of "
             f"uploaded files; per-user limit is {size_cap / 1024**3:.1f} GB"
         )
     if count >= settings.max_session_files_per_user:
-        raise SessionFileQuotaExceededError(
+        raise FileCountQuotaExceededError(
             f"user already has {count} uploaded files; "
             f"per-user limit is {settings.max_session_files_per_user}"
         )

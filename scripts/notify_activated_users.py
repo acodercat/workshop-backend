@@ -1,7 +1,7 @@
 """One-off admin notice: email users that their account was activated.
 
 Reuses the existing email service (``app.services.email.send_html_email``,
-Aliyun DirectMail) and the ``render_account_activated`` template — same
+SMTP) and the ``render_account_activated`` template — same
 visual shell as the verification emails, no ``{code}``.
 
 **DRY-RUN by default** — it only resolves recipients and renders the

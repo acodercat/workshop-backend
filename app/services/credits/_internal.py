@@ -60,6 +60,7 @@ async def insert_ledger_and_bump_balance(
     kind: CreditLedgerKind,
     reference: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    reservation_id: int | None = None,
 ) -> CreditLedger:
     """Atomic ledger INSERT + balance bump under user-row lock.
 
@@ -74,6 +75,10 @@ async def insert_ledger_and_bump_balance(
     ``amount`` is signed µ-credits; sign matches the operation
     (RESERVE / SETTLE-debit are negative; TOPUP / SETTLE-reverse /
     REFUND are positive; ADJUST is either).
+
+    ``reservation_id`` links a turn-related row (RESERVE / SETTLE /
+    REFUND) back to its :class:`~app.models.credit_reservation.CreditReservation`
+    via the typed FK column; ``None`` for rows unrelated to a hold.
     """
     # FOR UPDATE on the user row before reading or writing balance —
     # see module docstring. We re-issue the lock here even when callers
@@ -87,6 +92,7 @@ async def insert_ledger_and_bump_balance(
         kind=kind,
         reference=reference or {},
         idempotency_key=idempotency_key,
+        reservation_id=reservation_id,
     )
     db.add(entry)
 

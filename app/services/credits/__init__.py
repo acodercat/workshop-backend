@@ -30,6 +30,14 @@ billing).
 
 from app.services.credits.adjust import AdjustmentAlreadyApplied, apply_adjust
 from app.services.credits.balance import get_balance
+from app.services.credits.check_in import (
+    CheckInAlreadyClaimed,
+    apply_check_in_reward,
+)
+from app.services.credits.referral import (
+    ReferralRewardAlreadyApplied,
+    apply_referral_reward,
+)
 from app.services.credits.reserve import reserve_for_turn
 from app.services.credits.settle import (
     refund_reservation,
@@ -46,10 +54,14 @@ from app.services.credits.transactions import (
 
 __all__ = [
     "AdjustmentAlreadyApplied",
+    "CheckInAlreadyClaimed",
+    "ReferralRewardAlreadyApplied",
     "TopupAlreadyApplied",
     "TransactionKind",
     "TransactionRow",
     "apply_adjust",
+    "apply_check_in_reward",
+    "apply_referral_reward",
     "apply_topup",
     "get_balance",
     "list_transactions",

@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.common.email import NormalizedEmail
+from app.common.phone import NormalizedPhone
 
 
 class UserResponse(BaseModel):
@@ -17,10 +18,21 @@ class UserResponse(BaseModel):
     username: str
     name: str
     email: str | None
+    phone: str | None
     avatar_revision: int
     last_login_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class ReferralResponse(BaseModel):
+    """Body for ``GET /me/referral`` — the caller's personal referral
+    code plus the reward each successful registration grants them and
+    how many have redeemed it so far."""
+
+    code: str
+    reward_credits: int
+    invited_count: int
 
 
 class ProfileUpdate(BaseModel):
@@ -77,10 +89,36 @@ class EmailChangeRequest(BaseModel):
     code: str = Field(..., pattern=r"^\d{6}$")
 
 
+class PhoneChangeCodeRequest(BaseModel):
+    """Body for ``POST /me/phone/verification-codes`` (step 1 of phone
+    change).
+
+    ``current_password`` is the sudo gate — phone is a login + recovery
+    vector, so we re-verify possession of the credential before sending
+    an SMS code to the new number. No ``locale``: the SMS template is
+    fixed (unlike the localized email body)."""
+
+    new_phone: NormalizedPhone
+    current_password: str = Field(..., min_length=1)
+
+
+class PhoneChangeRequest(BaseModel):
+    """Body for ``PUT /me/phone`` (step 2 of phone change).
+
+    The caller proved possession of ``current_password`` in step 1; here
+    they prove possession of the *new* number by quoting back the
+    6-digit code sent there via SMS."""
+
+    new_phone: NormalizedPhone
+    code: str = Field(..., pattern=r"^\d{6}$")
+
+
 __all__ = [
     "UserResponse",
     "ProfileUpdate",
     "PasswordChange",
     "EmailChangeCodeRequest",
     "EmailChangeRequest",
+    "PhoneChangeCodeRequest",
+    "PhoneChangeRequest",
 ]

@@ -32,7 +32,11 @@ from app.services.credits._internal import (
     insert_ledger_and_bump_balance,
     lock_user_balance,
 )
-from app.services.credits.rates import reserve_micro_credits, snapshot_rate
+from app.services.credits.rates import (
+    reserve_est_input_tokens,
+    reserve_micro_credits,
+    snapshot_rate,
+)
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -57,11 +61,14 @@ async def reserve_for_turn(
 ) -> CreditReservation:
     """Reserve credits for one agent turn. Returns the open reservation.
 
-    ``max_input_tokens`` for the estimate comes from
-    :attr:`config.Settings.credit_reserve_max_input_tokens` — a single
-    knob that biases pessimism. Settling later multi-refunds the
-    unused portion based on actual usage, so over-reserving doesn't
-    permanently overcharge.
+    The hold is sized from the model's data-driven input estimate
+    (:func:`~app.services.credits.rates.reserve_est_input_tokens`) —
+    ≈ the model's median turn cost. It is an entry gate + per-user
+    concurrency throttle (the FOR UPDATE debit serializes concurrent
+    reserves against one balance), not a worst-case bound: mid-turn
+    overruns are the budget enforcer's job. Settling later refunds the
+    unused portion from actual usage, so over-reserving never
+    permanently overcharges.
 
     Raises:
         InsufficientCreditsError: balance below the estimated max
@@ -74,7 +81,7 @@ async def reserve_for_turn(
     balance = await lock_user_balance(db, user_id)
     rate = snapshot_rate(model_id)
     reserved = reserve_micro_credits(
-        rate, max_input_tokens=settings.credit_reserve_max_input_tokens,
+        rate, max_input_tokens=reserve_est_input_tokens(model_id),
     )
     if balance < reserved:
         # The exception message is dev-facing only; the wire payload
@@ -84,20 +91,14 @@ async def reserve_for_turn(
             f"Insufficient credits: balance={balance} reserved={reserved}"
         )
 
-    await insert_ledger_and_bump_balance(
-        db,
-        user_id=user_id,
-        amount=-reserved,
-        kind=CreditLedgerKind.RESERVE,
-        reference={
-            "session_id": str(session_id),
-            "turn_id": turn_id,
-            "model_id": model_id,
-        },
-    )
-    # Derived (see ``_EXPIRY_TO_MAX_TURN_RATIO``); defaults to 1860s × 8 ≈
-    # 4.1h. A heartbeat-based passive cancel (docs/credits-future.md) is the
-    # real fix and removes the need for any fixed timeout.
+    # Create the reservation first so its id can stamp the RESERVE ledger
+    # row's ``reservation_id`` — every row of the turn's credit trail then
+    # links back through that one column. Both writes are in the caller's
+    # transaction, so a rollback drops the pair together.
+    #
+    # ``expires_at`` is derived (see ``_EXPIRY_TO_MAX_TURN_RATIO``); defaults
+    # to 1860s × 8 ≈ 4.1h. A heartbeat-based passive cancel
+    # (docs/credits-future.md) is the real fix and removes the fixed timeout.
     expiry_seconds = (
         settings.credit_reserve_max_turn_seconds * _EXPIRY_TO_MAX_TURN_RATIO
     )
@@ -111,7 +112,20 @@ async def reserve_for_turn(
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=expiry_seconds),
     )
     db.add(reservation)
-    await db.flush()  # populate reservation.id for downstream callers
+    await db.flush()  # populate reservation.id for the ledger FK + callers
+
+    await insert_ledger_and_bump_balance(
+        db,
+        user_id=user_id,
+        amount=-reserved,
+        kind=CreditLedgerKind.RESERVE,
+        reservation_id=reservation.id,
+        reference={
+            "session_id": str(session_id),
+            "turn_id": turn_id,
+            "model_id": model_id,
+        },
+    )
 
     logger.info(
         "credit reserved: user=%s session=%s turn=%s reservation=%s reserved=%s",

@@ -16,9 +16,12 @@ my credits go" after an incident. All writes funnel through
 :mod:`app.services.credits._internal` to keep the invariant.
 
 ``kind`` is a Postgres native enum mirroring the project convention
-(see :class:`SessionStatus`). ``reference`` is JSONB — different
-``kind``s correlate to different business entities, and a discriminated
-column-per-kind would be a long sparse table.
+(see :class:`SessionStatus`). ``reference`` is JSONB for the *variable*
+per-kind audit payload (cause / reason / actual token breakdown / …) —
+a discriminated column-per-kind would be a long sparse table. The one
+relational key that used to live in it, ``reservation_id``, is now a
+typed FK column (see below): it is an identity, not variable metadata,
+so it earns integrity + a native index that a JSONB key can't give.
 
 ``idempotency_key`` is the single line of defense against duplicate
 top-ups / adjustments on retry: ``UNIQUE`` enforced at the DB layer
@@ -34,6 +37,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
     Index,
@@ -56,7 +60,7 @@ class CreditLedgerKind(StrEnum):
       ``idempotency_key``.
     - ``RESERVE``  — funds locked at the start of a turn. Always
       negative; paired with later ``SETTLE`` / ``REFUND`` row(s) by
-      ``reference.reservation_id``.
+      the ``reservation_id`` column.
     - ``SETTLE``   — closing a reservation with actual usage. Two rows
       per settle: one ``+reserved`` reversing the reservation, one
       ``-actual`` debiting the real cost.
@@ -64,6 +68,14 @@ class CreditLedgerKind(StrEnum):
       (worker crash, cancellation, etc.). One ``+reserved`` row.
     - ``ADJUST``   — manual correction by an operator. Signed; carries
       an ``idempotency_key`` + ``reference.reason``.
+    - ``REFERRAL`` — reward granted to a referrer when someone registers
+      via their referral code. Always positive; carries an
+      ``idempotency_key`` (``referral-{invitee_id}``) +
+      ``reference.invitee_user_id``.
+    - ``CHECKIN``  — daily check-in reward, one per user per business-day
+      (paired with a ``check_in`` row). Always positive; carries an
+      ``idempotency_key`` (``checkin:{user_id}:{date}``) +
+      ``reference.check_in_date`` / ``reference.streak_day``.
 
     Member values match the Postgres ``credit_ledger_kind`` enum and
     are intentionally UPPERCASE matching the project convention used
@@ -75,6 +87,8 @@ class CreditLedgerKind(StrEnum):
     SETTLE = "SETTLE"
     REFUND = "REFUND"
     ADJUST = "ADJUST"
+    REFERRAL = "REFERRAL"
+    CHECKIN = "CHECKIN"
 
 
 class CreditLedger(Base):
@@ -101,6 +115,18 @@ class CreditLedger(Base):
     reference: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
     )
+    # The turn hold this row belongs to (``credit_reservation.id``). A typed,
+    # FK-backed column rather than a ``reference`` JSONB key because it is a
+    # relational identity, not variable audit metadata — so it carries
+    # referential integrity + a native index + type safety the JSONB key
+    # couldn't. NULL on rows unrelated to a hold (TOPUP / ADJUST / REFERRAL /
+    # CHECKIN); set on every row of a turn's credit trail — RESERVE, SETTLE,
+    # REFUND — so they all join back through one column.
+    reservation_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("credit_reservation.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     # NULL on system-emitted rows (RESERVE / SETTLE / REFUND) where the
     # reservation state machine prevents duplicates anyway. Required
     # on TOPUP / ADJUST so admin scripts / future payment webhooks can
@@ -121,18 +147,34 @@ class CreditLedger(Base):
             "user_id",
             text("created_at DESC"),
         ),
-        # Point-lookup for the transactions view's per-reservation probe
-        # (``services/credits/transactions.py``): the negative SETTLE row
-        # for a given reservation. Without it that correlated subquery
-        # seq-scans the whole ledger once per SETTLED reservation on the
-        # page. Partial + expression so it stays tiny (only the ``-actual``
-        # settle rows) and matches the subquery's
-        # ``(reference->>'reservation_id')::bigint`` /
-        # ``kind='SETTLE' AND amount<0`` filters exactly.
+        # Backs the transactions view's per-reservation probe
+        # (``services/credits/transactions.py``) and any "ledger trail for
+        # this hold" lookup. Partial on ``reservation_id IS NOT NULL`` so it
+        # stays tiny (only turn-related rows carry one) while covering the
+        # whole trail — RESERVE / SETTLE / REFUND — not just the settle row.
         Index(
-            "ix_credit_ledger_settle_reservation",
-            text("((reference ->> 'reservation_id')::bigint)"),
-            postgresql_where=text("kind = 'SETTLE' AND amount < 0"),
+            "ix_credit_ledger_reservation_id",
+            "reservation_id",
+            postgresql_where=text("reservation_id IS NOT NULL"),
+        ),
+        # DB backstop for the per-kind sign conventions (enforced in
+        # Python by the ``_internal`` funnel). Text matches the live
+        # constraint exactly — created in ``f5d2c8a1e9b4``, extended for
+        # REFERRAL in ``d8b3f6a1c402`` and CHECKIN in ``c1e5b8a3d7f2``.
+        # SETTLE is deliberately unconstrained: two paired rows per
+        # settle (``+reserved`` reversal, ``-actual`` debit), and actual
+        # can be 0 for a zero-token turn. Declared here (not only in the
+        # migrations) so a ``create_all``-built DB carries the same
+        # guardrails and the model documents its own contract.
+        CheckConstraint(
+            "(kind = 'TOPUP'    AND amount > 0)  OR "
+            "(kind = 'RESERVE'  AND amount < 0)  OR "
+            "(kind = 'REFUND'   AND amount > 0)  OR "
+            "(kind = 'ADJUST'   AND amount <> 0) OR "
+            "(kind = 'REFERRAL' AND amount > 0)  OR "
+            "(kind = 'CHECKIN'  AND amount > 0)  OR "
+            "(kind = 'SETTLE')",
+            name="ck_credit_ledger_amount_sign",
         ),
     )
 

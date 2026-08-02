@@ -14,6 +14,15 @@ class GenerationInProgressError(SessionServiceError):
     """A new turn was requested while one is still running."""
 
 
+class ConcurrentTaskLimitError(SessionServiceError):
+    """The user already has the max number of simultaneously RUNNING tasks.
+
+    A per-user resource cap (``settings.max_concurrent_running_tasks``)
+    checked at enqueue under the reservation's user-row lock, so two racing
+    enqueues for the same user can't both slip past. The endpoint turns it
+    into 429 (Too Many Requests)."""
+
+
 class SessionGoneError(SessionServiceError):
     """The session was soft-deleted (or hard-deleted) out from under an
     in-flight enqueue.
@@ -31,3 +40,22 @@ class FileNotInSessionError(SessionServiceError):
     Surfaces both the owner-side (caller's own session) and share-side
     (recipient's accessible share) authorization miss in one shape; the
     endpoint layer turns it into 403."""
+
+
+class FileNotUploadedError(SessionServiceError):
+    """A message referenced a ``file_key`` with no object in OSS.
+
+    Raised at bind time when the real-size lookup (``head_size``) finds
+    the object missing — the presigned upload never completed. Binding a
+    phantom file would let a zero-size row through the quota, so the
+    endpoint turns this into 400."""
+
+
+class RecipeNotInvokableError(SessionServiceError):
+    """A ``recipe_id`` was sent that the caller can't invoke.
+
+    The recipe doesn't exist, isn't visible to this user (a CUSTOM
+    recipe they don't own), or is disabled. Unlike skills — silently
+    filtered so a stale toggle doesn't block a send — a recipe is an
+    explicit single pick, so the endpoint turns this into 400 rather
+    than dropping it silently."""

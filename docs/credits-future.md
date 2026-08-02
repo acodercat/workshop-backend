@@ -20,7 +20,7 @@ OPEN reservation per session, removed unused
 `settle_subscriber` push path alongside the existing `settle_sweeper`
 poll.
 
-## Shipped — Background-settle process
+## Shipped — Background process
 
 Both `app/workers/settle_sweeper.py` and `settle_subscriber.py` run
 together as one sibling process (see `app/workers/run.py`), coordinated
@@ -103,18 +103,31 @@ limited to trusted/internal users.
 - Hard cap: `ABSOLUTE_MAX_PER_TURN_MICRO`, product-defined.
 - `cost_cap_micro = min(soft, hard)`.
 
-## Payment integration
+## Shipped — Payment integration (汇付斗拱 / Huifu)
 
-**What.** Add provider webhook endpoints such as Stripe / Alipay /
-WeChat Pay. A verified payment-success event calls
-`credits.apply_topup(...)` with:
+Buy-side recharge is implemented in `app/services/payment/` +
+`app/api/endpoints/payment.py` + the `payment_order` table, exactly as
+this section anticipated: a verified async notification calls
+`credits.apply_topup(...)` with `idempotency_key="hf:"+out_trade_no`
+and provider metadata in `reference`. The ledger layer was unchanged.
 
-- `reference` carrying provider metadata;
-- `idempotency_key` derived from the provider event id.
+What was added on top of the prediction:
 
-Existing `TOPUP` ledger rows already support this shape. The main new
-surface is webhook signature verification and provider-specific event
-translation.
+- A `payment_order` row per recharge attempt (UUID PK, `out_trade_no`
+  UNIQUE) with the credit grant **frozen at create** via
+  `credits_from_cny` (a `credit_price_cny` change can't re-price an open
+  order — same property as a reservation's `rate_snapshot`).
+- A `PaymentGateway` protocol with all 汇付 / `dg-sdk` specifics
+  confined to `services/payment/huifu.py` (impl `HuifuGateway`); RSA
+  signature verification over the **raw `resp_data` string**.
+- A reconciler (`app/workers/payment_reconciler.py`) as the pull
+  backstop for lost notifications, mirroring `settle_sweeper`'s
+  advisory-lock single-poller, folded into `python -m app.workers.run`.
+
+PC-scan (Alipay/WeChat `*_NATIVE`) is the only terminal form today.
+Deferred: provider-side **refunds** (use `apply_adjust` for manual
+clawbacks for now); H5 / 微信内 JSAPI flows (another `trade_type` in the
+same adapter); a second provider (a new adapter behind the Protocol).
 
 ## Decisions Worth Revisiting
 
