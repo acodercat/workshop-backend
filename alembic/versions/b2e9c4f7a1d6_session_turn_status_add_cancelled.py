@@ -16,7 +16,8 @@ usage off the turn row by id and gates on ``session.status``, never on
 ``session_turn.status``.
 
 ``ALTER TYPE ... ADD VALUE`` is non-locking on Postgres 12+ (transaction-
-safe; the new label cannot be USED in the same transaction, but no DML
+safe; the new label cannot be USED in the same transaction — hence the
+autocommit block, since Alembic runs a whole ``upgrade`` in one — but no DML
 in this migration uses it). Idempotent via ``IF NOT EXISTS`` so
 re-running on a partially-applied environment is safe.
 
@@ -40,9 +41,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute(
+    with op.get_context().autocommit_block():
+        # Committed on its own: Postgres refuses to *use* a value added
+        # in the still-open transaction, and Alembic runs a whole
+        # ``upgrade`` in one. A later revision in the same run naming
+        # this label — a CHECK constraint, a backfill — would fail
+        # without this, and which revision that is, is not something
+        # this one can know.
+        op.execute(
         "ALTER TYPE session_turn_status ADD VALUE IF NOT EXISTS 'CANCELLED'"
-    )
+        )
 
 
 def downgrade() -> None:

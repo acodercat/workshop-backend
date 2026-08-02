@@ -40,9 +40,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute(
+    with op.get_context().autocommit_block():
+        # Committed on its own: Postgres refuses to *use* a value added
+        # in the still-open transaction, and Alembic runs a whole
+        # ``upgrade`` in one. A later revision in the same run naming
+        # this label — a CHECK constraint, a backfill — would fail
+        # without this, and which revision that is, is not something
+        # this one can know.
+        op.execute(
         "ALTER TYPE session_status ADD VALUE IF NOT EXISTS 'IDLE'"
-    )
+        )
 
 
 def downgrade() -> None:
