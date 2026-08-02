@@ -48,6 +48,9 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | Email brand | `grep "HKGAI Agent\|香港生成式人工智能研发中心" app/services/email/templates.py` | present |
 | Model whitelist | `grep -E "glm-5.1\|fable" config.py` | both present |
 | Tier mapping | `grep -A4 session_tier_models config.py` | `FAST: "HKGAI-V3"` |
+| No phone / SMS channel | `grep -rniE "phone\|sms\|dysms" app/ config.py \| grep -v models/user.py` | empty. The channel was removed on this branch (email only); `user.phone` stays as a column because dropping it needs a migration and this branch takes its schema from master — see below |
+| SMS dep gone | `grep -c 'dysmsapi' pyproject.toml uv.lock` | 0 in both |
+| DCR client name | `grep _CLIENT_NAME app/services/mcp/oauth.py` | `"HKGAI Connector"` — master says `"Metaseq Connector"`, and this string is what an authorization server shows the user on its consent screen |
 | Single migration head | `uv run alembic heads` | exactly one head; `uv run alembic branches` empty |
 | No payment code | `grep -rn "services.payment\|services.commission\|dg_sdk" app/ scripts/ tests/` | empty |
 | No payment routes | `uv run python -c "from app.main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'commission' in p])"` | `[]` |
@@ -92,6 +95,29 @@ Keep hkgai's (`--ours`).
 ### `CLAUDE.md`
 Take master's flow description, but swap the email transport back to SMTP / Lark Suite
 (`aiosmtplib`) and keep the SMTP creds / Lark-cap notes.
+
+## Excluding the phone channel — the second thing a plain merge gets wrong
+
+Master registers and logs users in by **email or phone**, the phone half
+delivered by Aliyun SMS. This branch is email-only, so a merge that touches
+auth needs the same treatment payment gets: the code comes back silently
+because it is *addition*, not conflict.
+
+| File | Edit |
+|---|---|
+| `app/schemas/auth.py` | `_IdentifierBody` carries `email` alone — no `phone`, no `channel`/`identifier` properties, no "exactly one" validator |
+| `app/services/auth/verification.py` | one channel: no `Channel` type, no `_sms_sender`, keys come straight from `email_verify_key` |
+| `app/services/auth/{login,register}.py` | look up `User.email` directly; no `channel` parameter |
+| `app/api/endpoints/auth.py` | pass `identifier=body.email` |
+| `app/api/endpoints/user.py` | no `/me/phone` endpoints |
+| `app/errors.py` | no `PhoneTakenError` / `SamePhoneError` / `SmsSendFailedError` |
+| `app/services/redis.py` | no `phone_verify` / `phone_change` prefixes or key builders |
+| `config.py` | no `aliyun_sms_*` block — note master's default `SignName` is the **水杉智算** brand |
+| deleted outright | `app/services/sms/`, `app/common/phone.py`, `app/services/auth/phone_change.py`, `scripts/test_send_verify_sms.py`, `tests/test_phone_normalization.py` |
+
+`user.phone` **stays**: dropping a column is a migration, and this branch
+has none of its own. It is `NULL` for every user here and its partial
+`UNIQUE` costs nothing at that.
 
 ## Excluding payment (充值) — the one thing a plain merge gets wrong
 

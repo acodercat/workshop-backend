@@ -59,22 +59,6 @@ class EmailTakenError(AppError):
     error_type = "email_taken"
 
 
-class PhoneTakenError(AppError):
-    """The phone number is already registered. Mirror of
-    :class:`EmailTakenError` for the SMS-OTP registration path."""
-
-    status_code = status.HTTP_409_CONFLICT
-    error_type = "phone_taken"
-
-
-class SmsSendFailedError(AppError):
-    """Aliyun SMS dispatch failed. Mirror of
-    :class:`EmailSendFailedError` for the phone verification path."""
-
-    status_code = status.HTTP_502_BAD_GATEWAY
-    error_type = "sms_send_failed"
-
-
 class NotRegisteredError(AppError):
     """Login attempt for an email with no account. The frontend steers
     the user to the (invite-gated) register tab rather than auto-creating."""
@@ -136,11 +120,6 @@ class IncorrectPasswordError(AppError):
 class SameEmailError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "same_email"
-
-
-class SamePhoneError(AppError):
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "same_phone"
 
 
 class SamePasswordError(AppError):

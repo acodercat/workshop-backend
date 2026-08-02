@@ -100,8 +100,7 @@ async def create_verification_code(
     """
     await request_verification_code(
         redis,
-        channel=body.channel,
-        identifier=body.identifier,
+        identifier=body.email,
         locale=body.locale,
     )
 
@@ -129,7 +128,7 @@ async def access_token_by_code(
       as :func:`login_for_access_token`.
     """
     return await login_by_code(
-        db, redis, channel=body.channel, identifier=body.identifier, code=body.code
+        db, redis, identifier=body.email, code=body.code
     )
 
 
@@ -164,8 +163,7 @@ async def create_user(
     return await register_user(
         db,
         redis,
-        channel=body.channel,
-        identifier=body.identifier,
+        identifier=body.email,
         code=body.code,
         invite_code=body.invite_code,
         name=body.name,

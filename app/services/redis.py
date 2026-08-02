@@ -73,21 +73,12 @@ SETTLE_NOTIFY_CHANNEL = "settle:notify"
 # window. See :mod:`app.services.auth.verification`.
 EMAIL_VERIFY_PREFIX = "email_verify"
 
-# Per-(phone) registration/login verification code prefix. Same JSON
-# shape as the email prefix; namespaced separately so phone and email
-# codes for the same person can't collide.
-PHONE_VERIFY_PREFIX = "phone_verify"
 
 # Per-(new-email) email-change verification code prefix. Same JSON
 # shape as the registration prefix, but namespaced separately so a
 # pending registration can't be hijacked by an email-change request
 # (or vice versa) targeting the same address.
 EMAIL_CHANGE_PREFIX = "email_change"
-
-# Per-(new-phone) phone-change verification code prefix. The SMS-channel
-# sibling of ``EMAIL_CHANGE_PREFIX``; namespaced separately from
-# registration/login phone codes for the same reason.
-PHONE_CHANGE_PREFIX = "phone_change"
 
 
 # Per-``state`` pending OAuth-authorization state for MCP Connectors. Holds the
@@ -124,12 +115,6 @@ def email_verify_key(email: str) -> str:
     return f"{EMAIL_VERIFY_PREFIX}:{email.lower()}"
 
 
-def phone_verify_key(phone: str) -> str:
-    """Redis key holding the active registration/login verification
-    state for ``phone``."""
-    return f"{PHONE_VERIFY_PREFIX}:{phone}"
-
-
 def email_change_key(user_id: int, email: str) -> str:
     """Redis key holding the pending email-change verification state for
     ``user_id`` switching to the *new* address. Bound to the requesting
@@ -137,13 +122,6 @@ def email_change_key(user_id: int, email: str) -> str:
     address can't consume each other's code. Lowercased for the same
     reason as :func:`email_verify_key`."""
     return f"{EMAIL_CHANGE_PREFIX}:{user_id}:{email.lower()}"
-
-
-def phone_change_key(user_id: int, phone: str) -> str:
-    """Redis key holding the pending phone-change verification state for
-    ``user_id`` switching to the *new* number. User-bound for the same
-    reason as :func:`email_change_key`."""
-    return f"{PHONE_CHANGE_PREFIX}:{user_id}:{phone}"
 
 
 def cancel_channel(session_id: str) -> str:

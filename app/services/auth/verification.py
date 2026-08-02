@@ -1,20 +1,19 @@
-"""Verification-code lifecycle (email + phone).
+"""Verification-code lifecycle (email).
 
 A 6-digit code, ``{code, sent_at, attempts}`` JSON in Redis with a TTL.
 Three flows share the same envelope (TTL / cooldown / max-attempts from
 the ``register_code_*`` settings) but namespace their state under
 different key prefixes so they can't collide:
 
-- **Registration / login** — ``email_verify:{email}`` (channel email,
-  delivered over SMTP) or ``phone_verify:{phone}`` (channel
-  phone, delivered by Aliyun SMS). See :func:`request_verification_code`
+- **Registration / login** — ``email_verify:{email}``, delivered over
+  SMTP. See :func:`request_verification_code`
   / :func:`verify_verification_code`.
 - **Email change** — ``email_change:{email}`` (verify the *new* address
   an authenticated user wants to switch to). See
   :func:`send_email_change_code` / :func:`verify_email_change_code`.
 
 The state machine (generate, cooldown, attempts, TTL) is delivery-
-agnostic; only the **send step** differs by channel, so it's passed in
+agnostic; only the **send step** varies, so it's passed in
 as a ``send`` callable. A send that fails raises a typed
 ``*SendFailedError`` and the code is **not** persisted, so the user can
 retry immediately.
@@ -24,7 +23,7 @@ import json
 import logging
 import secrets
 import time
-from typing import Awaitable, Callable, Literal
+from typing import Awaitable, Callable
 
 import redis.asyncio as aioredis
 
@@ -32,7 +31,6 @@ from app.errors import (
     CooldownError,
     EmailSendFailedError,
     InvalidVerificationCodeError,
-    SmsSendFailedError,
     TooManyVerificationAttemptsError,
 )
 from app.services.email import (
@@ -45,16 +43,11 @@ from app.services.email.templates import Locale
 from app.services.redis import (
     email_change_key,
     email_verify_key,
-    phone_change_key,
-    phone_verify_key,
 )
-from app.services.sms import SmsSendError, send_verification_sms
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-# The two delivery channels for a registration/login code.
-Channel = Literal["email", "phone"]
 
 # Sends the 6-digit code to its destination; raises a ``*SendFailedError``
 # on failure (the code is not persisted, so the user can retry).
@@ -106,18 +99,6 @@ def _email_sender(identifier: str, render, locale: Locale) -> _SendFn:
             await send_html_email(to=identifier, subject=subject, html_body=html_body)
         except EmailSendError as exc:
             raise EmailSendFailedError("Verification email send failed") from exc
-
-    return send
-
-
-def _sms_sender(identifier: str) -> _SendFn:
-    """Build a send callable that texts the code via Aliyun SMS."""
-
-    async def send(code: str) -> None:
-        try:
-            await send_verification_sms(phone=identifier, code=code)
-        except SmsSendError as exc:
-            raise SmsSendFailedError("Verification SMS send failed") from exc
 
     return send
 
@@ -201,42 +182,26 @@ async def _verify_code(
     raise InvalidVerificationCodeError("Incorrect verification code")
 
 
-def _verify_key(channel: Channel, identifier: str) -> str:
-    return (
-        phone_verify_key(identifier)
-        if channel == "phone"
-        else email_verify_key(identifier)
-    )
-
-
 async def request_verification_code(
     redis: aioredis.Redis,
     *,
-    channel: Channel,
     identifier: str,
     locale: Locale = "zh-CN",
 ) -> None:
-    """Generate + send a registration/login verification code.
+    """Generate + send a registration/login verification code by email.
 
-    ``channel="phone"`` texts via Aliyun SMS; ``channel="email"`` emails
-    over SMTP (``locale`` picks the template). Raises
+    ``locale`` picks the template. Raises
     :class:`~app.errors.CooldownError` within the resend window, or
-    :class:`~app.errors.SmsSendFailedError` /
-    :class:`~app.errors.EmailSendFailedError` if the provider rejects.
+    :class:`~app.errors.EmailSendFailedError` if SMTP rejects.
     """
-    send = (
-        _sms_sender(identifier)
-        if channel == "phone"
-        else _email_sender(identifier, render_register_verification, locale)
-    )
-    await _request_code(redis, key=_verify_key(channel, identifier), send=send)
-    logger.info("register/%s code issued: %s", channel, identifier)
+    send = _email_sender(identifier, render_register_verification, locale)
+    await _request_code(redis, key=email_verify_key(identifier), send=send)
+    logger.info("register/email code issued: %s", identifier)
 
 
 async def verify_verification_code(
     redis: aioredis.Redis,
     *,
-    channel: Channel,
     identifier: str,
     code: str,
     consume: bool = True,
@@ -249,10 +214,10 @@ async def verify_verification_code(
     """
     await _verify_code(
         redis,
-        key=_verify_key(channel, identifier),
+        key=email_verify_key(identifier),
         identifier=identifier,
         code=code,
-        log_label=f"register/{channel}",
+        log_label="register/email",
         consume=consume,
     )
 
@@ -263,7 +228,7 @@ async def send_email_change_code(
     """Generate + send an email-change verification code to ``email``
     (the *new* address ``user_id`` wants to switch to). The code is
     bound to the requesting user (see :func:`email_change_key`). Same
-    failure modes as :func:`request_verification_code`'s email channel."""
+    failure modes as :func:`request_verification_code`."""
     await _request_code(
         redis,
         key=email_change_key(user_id, email),
@@ -283,32 +248,4 @@ async def verify_email_change_code(
         identifier=email,
         code=code,
         log_label="email_change",
-    )
-
-
-async def send_phone_change_code(
-    redis: aioredis.Redis, *, user_id: int, phone: str
-) -> None:
-    """Generate + send a phone-change verification code (via Aliyun SMS)
-    to ``phone`` (the *new* number ``user_id`` wants to switch to). The
-    code is bound to the requesting user (see :func:`phone_change_key`).
-    The SMS-channel sibling of :func:`send_email_change_code`; same
-    failure modes as :func:`request_verification_code`'s phone channel."""
-    await _request_code(
-        redis, key=phone_change_key(user_id, phone), send=_sms_sender(phone)
-    )
-    logger.info("phone_change code issued: user_id=%s phone=%s", user_id, phone)
-
-
-async def verify_phone_change_code(
-    redis: aioredis.Redis, *, user_id: int, phone: str, code: str
-) -> None:
-    """Verify and consume the pending phone-change code for ``user_id``'s
-    switch to ``phone``. See :func:`_verify_code` for failure modes."""
-    await _verify_code(
-        redis,
-        key=phone_change_key(user_id, phone),
-        identifier=phone,
-        code=code,
-        log_label="phone_change",
     )

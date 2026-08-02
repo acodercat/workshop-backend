@@ -1,9 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.common.email import NormalizedEmail
-from app.common.phone import NormalizedPhone
 from app.schemas.user import UserResponse
 
 
@@ -13,38 +12,21 @@ class AccessTokenResponse(BaseModel):
 
 
 #
-# Code flows (registration + login) take **exactly one** of ``email`` /
-# ``phone`` as the identifier; the channel decides delivery (SMTP
-# vs Aliyun SMS) and lookup column. The ``axon_${id}`` username and a
-# random password placeholder are generated server-side. ``locale`` on
-# the code-request payload picks the email template (ignored for SMS).
+# Code flows (registration + login) identify the account by email, and the
+# code is delivered over SMTP. The ``axon_${id}`` username and a random
+# password placeholder are generated server-side. ``locale`` on the
+# code-request payload picks the email template.
 
 
 class _IdentifierBody(BaseModel):
-    """Exactly one of ``email`` / ``phone`` identifies the account.
-    Exposes ``(channel, identifier)`` for the service layer."""
+    """The email that identifies the account."""
 
-    email: NormalizedEmail | None = None
-    phone: NormalizedPhone | None = None
-
-    @model_validator(mode="after")
-    def _exactly_one_identifier(self) -> "_IdentifierBody":
-        if bool(self.email) == bool(self.phone):
-            raise ValueError("Exactly one of 'email' or 'phone' is required")
-        return self
-
-    @property
-    def channel(self) -> Literal["email", "phone"]:
-        return "phone" if self.phone else "email"
-
-    @property
-    def identifier(self) -> str:
-        return self.phone or self.email  # type: ignore[return-value]
+    email: NormalizedEmail
 
 
 class RegisterCodeRequest(_IdentifierBody):
     """Body for ``POST /auth/verification-codes`` — send a verification
-    code to ``email`` (SMTP) or ``phone`` (SMS)."""
+    code to ``email``."""
 
     locale: Literal["zh-CN", "en-US"] = "zh-CN"
 

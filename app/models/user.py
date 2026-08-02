@@ -56,10 +56,11 @@ class User(Base):
     # registrations always populate it. ``UNIQUE`` is partial (only
     # enforced on non-NULL rows) — see migration ``12dc6d69a9ad``.
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
-    # China-mainland mobile for SMS verification + login. ``NULL`` for
-    # users created via the email flow / before phone support. ``UNIQUE``
-    # is partial (only enforced on non-NULL rows), exactly like ``email``
-    # — see migration ``e5c1a9b7d2f4``.
+    # Vestigial on this deployment: the phone channel was removed and
+    # nothing reads or writes this. Kept as a column because dropping it
+    # needs a migration, and this branch takes its schema from master's
+    # alembic chain rather than forking it — see ``e5c1a9b7d2f4``. Always
+    # ``NULL`` here, and the partial ``UNIQUE`` costs nothing at that.
     phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
     # Avatar variant counter. ``0`` is the default look derived from
     # ``id`` alone; each "shuffle" click in the settings UI bumps it

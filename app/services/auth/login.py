@@ -18,7 +18,7 @@ from app.auth import assert_user_active, create_access_token
 from app.errors import NotRegisteredError
 from app.models.user import User
 from app.schemas.auth import LoggedInResponse
-from app.services.auth.verification import Channel, verify_verification_code
+from app.services.auth.verification import verify_verification_code
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,6 @@ async def login_by_code(
     db: AsyncSession,
     redis: aioredis.Redis,
     *,
-    channel: Channel,
     identifier: str,
     code: str,
 ) -> LoggedInResponse:
@@ -43,12 +42,11 @@ async def login_by_code(
     # Peek mode — validates the code, increments attempts on mismatch
     # (brute-force stays rate-limited), but doesn't delete on success.
     await verify_verification_code(
-        redis, channel=channel, identifier=identifier, code=code, consume=False
+        redis, identifier=identifier, code=code, consume=False
     )
 
-    id_column = User.phone if channel == "phone" else User.email
     existing = (
-        await db.execute(select(User).where(id_column == identifier))
+        await db.execute(select(User).where(User.email == identifier))
     ).scalar_one_or_none()
     if existing is None:
         raise NotRegisteredError("No account for this identifier")
@@ -59,7 +57,7 @@ async def login_by_code(
     # code vanished between the peek and now, ``verify_verification_code``
     # raises ``InvalidVerificationCodeError`` for the global handler.
     await verify_verification_code(
-        redis, channel=channel, identifier=identifier, code=code, consume=True
+        redis, identifier=identifier, code=code, consume=True
     )
 
     existing.last_login_at = datetime.now(timezone.utc)

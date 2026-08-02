@@ -273,29 +273,6 @@ class Settings(BaseSettings):
         description="Per-call socket timeout for connect / EHLO / DATA",
     )
 
-    # Aliyun SMS (短信服务 / dysmsapi) — phone verification codes. Keys
-    # default to empty so dev boxes without SMS access still boot; a send
-    # that needs them fails loudly at call time, not at startup. Sign name
-    # + template are operator-approved values (not secrets), so they carry
-    # sane defaults; only the AccessKey must be supplied to go live.
-    aliyun_sms_access_key_id: str = Field(
-        default="", description="AccessKey id for an account with SMS (dysms) permission",
-    )
-    aliyun_sms_access_key_secret: str = Field(
-        default="", description="AccessKey secret paired with aliyun_sms_access_key_id",
-    )
-    aliyun_sms_sign_name: str = Field(
-        default="水杉智算深圳技术",
-        description="Approved 短信签名 (SignName), without the 【】 brackets",
-    )
-    aliyun_sms_template_code: str = Field(
-        default="SMS_305451063",
-        description="Approved verification-code 模板编码 (TemplateCode), variable ${code}",
-    )
-    aliyun_sms_region: str = Field(
-        default="cn-hangzhou", description="SMS service region (endpoint dysmsapi.aliyuncs.com)",
-    )
-
     # LLM — used only for light-weight synchronous calls from the
     # backend itself (e.g. session-title generation). Agent turns run
     # in the worker and use its own copy of these settings.
@@ -490,7 +467,7 @@ class Settings(BaseSettings):
     # pre-2026-05 5_000-credit grant, just renumbered with the 10×
     # denomination change. Generous "try the product" allowance; note
     # this is large enough that signup-farming abuse is a real
-    # consideration (gate behind email/phone verification + rate limits).
+    # consideration (gate behind email verification + rate limits).
     # Set to 0 to disable (every new user starts at 0 balance, admin must
     # top up). The grant uses a deterministic idempotency key
     # ``welcome-{user_id}`` so a registration retry after partial

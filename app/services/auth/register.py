@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import create_access_token, get_password_hash
-from app.errors import EmailTakenError, PhoneTakenError
+from app.errors import EmailTakenError
 from app.models.organization import (
     Organization,
     OrganizationKind,
@@ -39,7 +39,7 @@ from app.services.auth.invite import (
     create_referral_code,
     record_redemption,
 )
-from app.services.auth.verification import Channel, verify_verification_code
+from app.services.auth.verification import verify_verification_code
 from app.services.credits.rates import micro_from_credits
 from config import settings
 
@@ -50,7 +50,6 @@ async def register_user(
     db: AsyncSession,
     redis: aioredis.Redis,
     *,
-    channel: Channel,
     identifier: str,
     code: str,
     invite_code: str,
@@ -80,13 +79,8 @@ async def register_user(
     # Cheap pre-check — only ``email`` is user-supplied here; the
     # generated ``axon_${id}`` is unique by construction (id is from a
     # sequence). Fail fast before the expensive steps below.
-    id_column = User.phone if channel == "phone" else User.email
-    taken_error = (
-        PhoneTakenError("Phone already registered")
-        if channel == "phone"
-        else EmailTakenError("Email already registered")
-    )
-    existing = await db.execute(select(User.id).where(id_column == identifier))
+    taken_error = EmailTakenError("Email already registered")
+    existing = await db.execute(select(User.id).where(User.email == identifier))
     if existing.first() is not None:
         raise taken_error
 
@@ -106,7 +100,7 @@ async def register_user(
     # the code; a DB failure after this rolls back the row (and the
     # claim) but not the OTP, so the user just re-requests a code.
     await verify_verification_code(
-        redis, channel=channel, identifier=identifier, code=code
+        redis, identifier=identifier, code=code
     )
 
     # Reserve the id up-front so the username can encode it. ``nextval``
@@ -133,7 +127,7 @@ async def register_user(
         name=name,
         password_hash=password_hash,
         status=UserStatus.ACTIVE,
-        **{channel: identifier},
+        email=identifier,
     )
     db.add(user)
     try:
@@ -145,7 +139,7 @@ async def register_user(
         await db.flush()
     except IntegrityError as exc:
         await db.rollback()
-        logger.info("register race: %s=%s", channel, identifier)
+        logger.info("register race: email=%s", identifier)
         raise taken_error from exc
 
     # Org + member inserts can't trip a uniqueness constraint (org has
@@ -273,10 +267,9 @@ async def register_user(
 
     await db.refresh(user)
     logger.info(
-        "user registered: id=%s username=%s %s=%s organization_id=%s",
+        "user registered: id=%s username=%s email=%s organization_id=%s",
         user.id,
         user.username,
-        channel,
         identifier,
         user.organization_id,
     )

@@ -64,7 +64,7 @@ _HTTP_TIMEOUT = 20.0
 # two protected-resource candidates, three authorization-server ones), so a
 # per-call bound would let a working-but-slow server take two minutes.
 _DISCOVERY_TIMEOUT = 30.0
-_CLIENT_NAME = "Metaseq Connector"
+_CLIENT_NAME = "HKGAI Connector"
 # The scope that asks for a refresh token (SEP-2207). Requested whenever the
 # authorization server advertises it; without one, every access-token expiry
 # becomes a browser round-trip.

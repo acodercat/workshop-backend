@@ -107,7 +107,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
 #   1. They carry ``scope == "share-view"``; the user-token decoder rejects
 #      anything with a ``scope`` field, and the share decoder rejects
 #      anything without one. Two tokens, two decoders, zero crossover.
-#   2. ``sub`` is the share token (URL-safe) rather than a user phone, so
+#   2. ``sub`` is the share token (URL-safe) rather than a username, so
 #      a forged token has nothing to bind to a user account even if the
 #      decoder were tricked.
 #   3. TTL is short (15 minutes by default) — the recipient is expected to
@@ -184,9 +184,9 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
         # worst. Refuse without distinguishing the two.
         raise credentials_exception
 
-    # ``sub`` was previously the user's phone number; we backfilled
-    # pre-existing values into ``username`` 1:1, so old tokens keep
-    # working unchanged after the rename.
+    # ``sub`` carries the username. Older tokens carried another
+    # identifier, backfilled into ``username`` 1:1, so they keep working
+    # unchanged after the rename.
     username: str | None = payload.get("sub")
     token_version: int = payload.get("token_version", 0)
     if username is None:
