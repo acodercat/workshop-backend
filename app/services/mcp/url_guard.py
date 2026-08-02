@@ -128,6 +128,13 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
     address we connect to, so a resolver flip between check and connect can't
     reach an internal host. Host header + TLS SNI stay the original hostname, so
     virtual-host routing and certificate verification are unaffected.
+
+    One consequence of the rewrite: httpcore keys its connection pool on the
+    request origin, which now holds the IP — so a client reused across
+    *hostnames* that share an IP could reuse a TLS connection whose
+    certificate was verified for the other name. Give each client one
+    hostname, or send ``Connection: close`` where several must share one
+    (as OAuth discovery does).
     """
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

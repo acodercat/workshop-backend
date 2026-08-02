@@ -33,16 +33,16 @@ Pairing rule:
 Usage::
 
     # preview only (default — no writes)
-    uv run python -m scripts.backfill_duplicate_tool_use
+    uv run python -m scripts.archive.backfill_duplicate_tool_use
 
     # apply renames in batches of 50
-    uv run python -m scripts.backfill_duplicate_tool_use --apply --batch-size 50
+    uv run python -m scripts.archive.backfill_duplicate_tool_use --apply --batch-size 50
 
     # scope to one session id (uuid) — useful for staged rollout
-    uv run python -m scripts.backfill_duplicate_tool_use --session-id <uuid> --apply
+    uv run python -m scripts.archive.backfill_duplicate_tool_use --session-id <uuid> --apply
 
     # focus on one message (preview only)
-    uv run python -m scripts.backfill_duplicate_tool_use --message-id 1706
+    uv run python -m scripts.archive.backfill_duplicate_tool_use --message-id 1706
 """
 
 from __future__ import annotations
@@ -311,7 +311,7 @@ def main() -> int:
         else:
             print(
                 "\n  Verification: re-run "
-                "``uv run python -m scripts.diagnose_duplicate_tool_use --days 0``. "
+                "``uv run python -m scripts.archive.diagnose_duplicate_tool_use --days 0``. "
                 "Pass 1 should now report 0 hits."
             )
     return 0

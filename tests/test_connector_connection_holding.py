@@ -37,11 +37,12 @@ class TestTheReleaseIsRefusedOverPendingWork:
     async def test_a_pending_change_is_refused_rather_than_committed(self):
         # The failure this exists to prevent is silent: a mutation committed by
         # the release, then stranded by a probe that raises. Without the commit
-        # the same exception leaves the row untouched.
+        # the same exception leaves the row untouched. A ``RuntimeError``, not
+        # an ``AssertionError`` — the guard must survive ``python -O``.
         db = _session()
         db.dirty = {MagicMock()}
 
-        with pytest.raises(AssertionError, match="pending change"):
+        with pytest.raises(RuntimeError, match="pending change"):
             await endpoint._release_connection(db)
 
         db.commit.assert_not_awaited()

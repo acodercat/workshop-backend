@@ -24,7 +24,7 @@ the middle of a turn legitimately has rows here that aren't yet in
 "old enough to be orphaned"; out of scope for a sync.
 
 Usage:
-    uv run python -m scripts.sync_session_files
+    uv run python -m scripts.archive.sync_session_files
 """
 
 import psycopg

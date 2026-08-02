@@ -18,8 +18,8 @@ would produce. Idempotent: re-running sets the same values.
 
 Dry-run by default (prints what would change); pass ``--apply`` to write.
 
-    uv run python -m scripts.backfill_official_skill_i18n           # preview
-    uv run python -m scripts.backfill_official_skill_i18n --apply   # commit
+    uv run python -m scripts.archive.backfill_official_skill_i18n           # preview
+    uv run python -m scripts.archive.backfill_official_skill_i18n --apply   # commit
 """
 
 from __future__ import annotations

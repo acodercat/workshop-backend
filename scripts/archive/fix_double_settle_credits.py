@@ -22,8 +22,8 @@ the correcting entries.
 Dry-run by default — pass ``--apply`` to write.
 
 Usage:
-    uv run python -m scripts.fix_double_settle_credits           # show the plan
-    uv run python -m scripts.fix_double_settle_credits --apply   # write ADJUST rows
+    uv run python -m scripts.archive.fix_double_settle_credits           # show the plan
+    uv run python -m scripts.archive.fix_double_settle_credits --apply   # write ADJUST rows
 """
 
 import argparse

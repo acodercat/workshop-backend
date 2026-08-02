@@ -18,10 +18,10 @@ filter, so re-running this script on a clean DB is a no-op.
 Usage::
 
     # preview (default — no writes)
-    uv run python -m scripts.migrate_error_block_field
+    uv run python -m scripts.archive.migrate_error_block_field
 
     # apply the migration
-    uv run python -m scripts.migrate_error_block_field --apply
+    uv run python -m scripts.archive.migrate_error_block_field --apply
 """
 
 from __future__ import annotations

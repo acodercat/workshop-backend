@@ -24,7 +24,7 @@ stay untouched:
 
 Idempotent — safe to re-run.
 
-    uv run python -m scripts.fix_session_file_origin
+    uv run python -m scripts.archive.fix_session_file_origin
 """
 
 import asyncio

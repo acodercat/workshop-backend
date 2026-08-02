@@ -10,7 +10,7 @@ and content-type (mime); the filename comes from the key.
 Targets visible rows (UPLOAD / DELIVERABLE) still missing a filename.
 Objects that have been deleted from OSS are skipped. Idempotent.
 
-    uv run python -m scripts.backfill_session_file_metadata_from_oss
+    uv run python -m scripts.archive.backfill_session_file_metadata_from_oss
 """
 
 import asyncio

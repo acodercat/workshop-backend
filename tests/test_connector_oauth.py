@@ -410,6 +410,31 @@ class TestDiscoverAuthorization:
         assert isinstance(discovered.metadata, OAuthMetadata)
         assert str(discovered.metadata.token_endpoint) == "https://as.example.com/token"
 
+    async def test_the_discovery_client_declines_connection_reuse(self, monkeypatch):
+        # Discovery is the one client that crosses hostnames, and the pinning
+        # transport pools connections by resolved IP — so two hostnames behind
+        # one CDN IP could reuse a TLS connection verified for the other name.
+        # ``Connection: close`` is what rules that out; pin it here so a
+        # refactor of ``_discover`` cannot quietly drop it.
+        from app.services.mcp import oauth
+
+        built_with: list[dict] = []
+
+        def capture(**kwargs):
+            built_with.append(kwargs)
+            return httpx.AsyncClient(
+                headers=kwargs.get("headers"),
+                transport=httpx.MockTransport(_streaming(self._handler())),
+            )
+
+        monkeypatch.setattr(oauth, "guard_public_url", _allow)
+        monkeypatch.setattr(oauth, "guarded_client", capture)
+
+        await discover_authorization("https://mcp.example.com/mcp")
+
+        assert built_with, "discovery never built a client"
+        assert built_with[0].get("headers") == {"Connection": "close"}
+
     async def test_takes_the_scopes_the_protected_resource_declares(self, monkeypatch):
         # Also the proof that the RFC 9728 document was parsed rather than left
         # as a coroutine: unparsed, it contributes no scopes at all.
@@ -1268,6 +1293,26 @@ class TestProbeCredential:
             endpoint._probe_credential(
                 self._connector(
                     auth_type=MCPServerAuthType.OAUTH, oauth_tokens_encrypted=None
+                )
+            )
+
+    def test_a_token_past_its_lifetime_steers_rather_than_probing_dead(self):
+        # A dead token produces a 401 that ``probe`` reports as an unreachable
+        # server — blaming the MCP server for a fact already on the row
+        # (mirrors the worker's connect-time refusal, ``_usable_unrenewed``).
+        from datetime import datetime, timedelta, timezone
+
+        from app.api.endpoints import mcp_server as endpoint
+        from app.models.mcp_server import MCPServerAuthType
+
+        with pytest.raises(ConnectorOAuthError, match="recorded lifetime"):
+            endpoint._probe_credential(
+                self._connector(
+                    auth_type=MCPServerAuthType.OAUTH,
+                    oauth_tokens_encrypted="enc",
+                    oauth_tokens_expires_at=(
+                        datetime.now(timezone.utc) - timedelta(minutes=1)
+                    ),
                 )
             )
 

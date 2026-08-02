@@ -19,8 +19,8 @@ Careful / idempotent (mirrors the publish_id->slug migration):
 
 Dry-run by default; pass ``--apply`` to write.
 
-    uv run python -m scripts.sync_message_title_from_session_site
-    uv run python -m scripts.sync_message_title_from_session_site --apply
+    uv run python -m scripts.archive.sync_message_title_from_session_site
+    uv run python -m scripts.archive.sync_message_title_from_session_site --apply
 """
 
 import asyncio
