@@ -23,7 +23,7 @@ from fastapi import (
     Request,
     status,
 )
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from mcp.shared.auth import (
@@ -44,14 +44,12 @@ from app.errors import (
     ConnectorOAuthChangeUnsupportedError,
     ConnectorOAuthClientUnusableError,
     ConnectorOAuthError,
-    ConnectorQuotaExceededError,
     OAuthNotConfiguredError,
 )
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.mcp_server import (
-    MAX_CONNECTORS_PER_USER,
     ConnectionTestRequest,
     ConnectionTestResponse,
     ConnectorAuthorizationResponse,
@@ -136,16 +134,7 @@ async def create_connector(
     user authorizes (see ``/connectors/{id}/authorizations``). Adding the same
     catalog entry twice collides on the per-user name uniqueness and surfaces as
     the usual 409.
-
-    The quota is checked here and nowhere else because this is the only
-    statement that creates one: all three branches below build a row and fall
-    through to a single ``db.add``. It is a plain count, not a locked one — two
-    simultaneous creates can both see room and leave the user one over, which
-    costs a turn a few hundred tokens and self-corrects on the next delete. The
-    price of exactness would be serialising every create against a lock.
     """
-    await _reject_over_quota(db, current_user.id)
-
     if body.catalog_id is not None:
         connector = await _build_catalog_connector(db, body.catalog_id, current_user.id)
     elif body.auth_type == MCPServerAuthType.OAUTH:
@@ -535,20 +524,6 @@ async def delete_connector(
     await _release_authorization(redis, background_tasks, connector)
     await db.delete(connector)
     await db.commit()
-
-
-async def _reject_over_quota(db: AsyncSession, user_id: int) -> None:
-    """Refuse a create that would take the user past ``MAX_CONNECTORS_PER_USER``."""
-    held = await db.scalar(
-        select(func.count())
-        .select_from(MCPServer)
-        .where(MCPServer.user_id == user_id)
-    )
-    if held >= MAX_CONNECTORS_PER_USER:
-        raise ConnectorQuotaExceededError(
-            f"You can hold at most {MAX_CONNECTORS_PER_USER} Connectors. "
-            "Delete one to add another."
-        )
 
 
 async def _release_connection(db: AsyncSession) -> None:
