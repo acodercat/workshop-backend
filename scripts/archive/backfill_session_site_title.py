@@ -11,8 +11,8 @@ Careful / idempotent:
   non-empty ``<title>`` — those stay NULL.
 - Dry-run by default; pass ``--apply`` to write.
 
-    uv run python -m scripts.backfill_session_site_title           # dry-run
-    uv run python -m scripts.backfill_session_site_title --apply   # write
+    uv run python -m scripts.archive.backfill_session_site_title           # dry-run
+    uv run python -m scripts.archive.backfill_session_site_title --apply   # write
 """
 
 import asyncio

@@ -10,7 +10,7 @@ outputs), so this lifts it onto ``session_files``.
 Only fills rows where ``filename IS NULL`` — idempotent, and never clobbers
 a value a producer already wrote. Run:
 
-    uv run python -m scripts.backfill_session_file_metadata
+    uv run python -m scripts.archive.backfill_session_file_metadata
 """
 
 import asyncio

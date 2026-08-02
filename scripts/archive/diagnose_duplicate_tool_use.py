@@ -36,16 +36,16 @@ Pass 3 — message-by-message detail dump
 Usage::
 
     # default: last 14 days, summary + top 20 offenders
-    uv run python -m scripts.diagnose_duplicate_tool_use
+    uv run python -m scripts.archive.diagnose_duplicate_tool_use
 
     # focus on one session (uuid)
-    uv run python -m scripts.diagnose_duplicate_tool_use --session-id <uuid>
+    uv run python -m scripts.archive.diagnose_duplicate_tool_use --session-id <uuid>
 
     # change the lookback window
-    uv run python -m scripts.diagnose_duplicate_tool_use --days 30
+    uv run python -m scripts.archive.diagnose_duplicate_tool_use --days 30
 
     # dump full block JSON for a specific message id (skips passes 1+2)
-    uv run python -m scripts.diagnose_duplicate_tool_use --message-id 4321
+    uv run python -m scripts.archive.diagnose_duplicate_tool_use --message-id 4321
 """
 
 from __future__ import annotations

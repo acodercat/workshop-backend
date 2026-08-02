@@ -275,7 +275,17 @@ async def discover_authorization(server_url: str) -> DiscoveredAuthorization:
 
 async def _discover(server_url: str) -> DiscoveredAuthorization:
     """The discovery sequence itself, run under its caller's deadline."""
-    async with guarded_client(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as client:
+    # The one client that crosses hostnames — the MCP server's, then its
+    # authorization server's. The pinning transport keys httpcore's pool on
+    # the resolved IP (see :class:`~app.services.mcp.url_guard
+    # ._PinnedResolveTransport`), so two hostnames behind one CDN IP could
+    # otherwise reuse a TLS connection whose certificate was verified for the
+    # other name. Every request here is a credential-free document GET, so
+    # declining reuse costs one handshake per host and buys that check back.
+    async with guarded_client(
+        headers={"Connection": "close"},
+        timeout=httpx.Timeout(_HTTP_TIMEOUT),
+    ) as client:
         challenge = await _read_challenge(client, server_url)
         resource = await _discover_protected_resource(
             client, server_url, challenge.resource_metadata_url,

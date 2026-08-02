@@ -22,7 +22,7 @@ denormalized copy of the file's presentation metadata (``filename`` /
 ``mime_type`` / ``size_bytes``) so the library (``GET /sessions/files``) renders
 without scanning the message blocks. The blocks JSON stays the
 write-time source of truth; these columns are a read-optimized mirror,
-backfilled for history by ``scripts/backfill_session_file_metadata.py``.
+backfilled for history by ``scripts/archive/backfill_session_file_metadata.py``.
 """
 
 import uuid

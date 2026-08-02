@@ -12,6 +12,7 @@ callback flow obtains and stores the tokens (see ``app.services.mcp.oauth``).
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 from fastapi import (
@@ -570,14 +571,15 @@ async def _release_connection(db: AsyncSession) -> None:
 
     **Nothing may be pending.** This commits, so a mutation made above it would
     be persisted and then stranded by a probe that fails — where today the whole
-    handler is one transaction that rolls back together. The assertion is not
-    decoration: that partial write is silent, and this is the only place that can
-    see it coming.
+    handler is one transaction that rolls back together. A plain ``raise``
+    rather than an ``assert``, because ``python -O`` strips assertions: that
+    partial write is silent, and this is the only place that can see it coming.
     """
-    assert not db.new and not db.dirty and not db.deleted, (
-        "_release_connection would commit a pending change; move it above the "
-        "read it belongs to, or move this call above the change"
-    )
+    if db.new or db.dirty or db.deleted:
+        raise RuntimeError(
+            "_release_connection would commit a pending change; move it above "
+            "the read it belongs to, or move this call above the change"
+        )
     await db.commit()
 
 
@@ -903,14 +905,26 @@ def _probe_credential(
 
     OAuth is probed as a bearer carrying the stored access token — the MCP
     server takes it the same way either route, and ``probe`` has no OAuth path
-    of its own. Raises when an OAuth Connector holds no tokens yet, since a
-    probe would then be indistinguishable from an unauthenticated one.
+    of its own. Raises when an OAuth Connector holds no tokens yet (a probe
+    would be indistinguishable from an unauthenticated one) and when the token
+    it holds is past its recorded lifetime: presenting it produces a 401 that
+    ``probe`` reports as an unreachable server, blaming the MCP server for a
+    fact already on the row. Renewal is the worker's, on demand during a turn
+    — this surface steers instead of renewing. "Recorded lifetime" rather
+    than "expired", because for providers that state none the deadline is an
+    assumption (``grant.ASSUMED_TOKEN_LIFETIME``).
     """
     if connector.auth_type != MCPServerAuthType.OAUTH:
         return connector.auth_type, _decrypt_or_none(connector.encrypted_credential)
     if not connector.oauth_tokens_encrypted:
         raise ConnectorOAuthError(
             "This Connector is not authorized yet; authorize it first."
+        )
+    expires_at = connector.oauth_tokens_expires_at
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        raise ConnectorOAuthError(
+            "This Connector's access token is past its recorded lifetime; "
+            "running a turn renews it automatically, or re-authorize it here."
         )
     tokens = OAuthToken.model_validate_json(
         open_secret(connector.oauth_tokens_encrypted, what="authorization")

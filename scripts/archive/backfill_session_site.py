@@ -24,7 +24,7 @@ has run, so historical blocks key on ``slug``.
 
 Run:
 
-    uv run python -m scripts.backfill_session_site
+    uv run python -m scripts.archive.backfill_session_site
 """
 
 import asyncio
