@@ -721,6 +721,123 @@ class TestDiscoverAuthorization:
         with pytest.raises(ConnectorOAuthError):
             await discover_authorization("https://mcp.example.com/mcp")
 
+    async def test_accepts_a_scoped_dcr_namespace_for_a_shared_issuer(
+        self, monkeypatch,
+    ):
+        resource = dict(
+            self._RESOURCE,
+            authorization_servers=["https://as.example.com/tenant"],
+        )
+        shared_issuer = dict(
+            self._AS_METADATA,
+            issuer="https://as.example.com",
+            registration_endpoint="https://as.example.com/tenant/dcr/register",
+        )
+        _serve(
+            monkeypatch,
+            self._handler(resource=resource, authorization=shared_issuer),
+            allow_any_url=True,
+        )
+
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+
+        assert str(discovered.metadata.issuer) == "https://as.example.com/"
+
+    async def test_refuses_a_scoped_alias_with_registration_outside_its_namespace(
+        self, monkeypatch,
+    ):
+        resource = dict(
+            self._RESOURCE,
+            authorization_servers=["https://as.example.com/tenant"],
+        )
+        mismatched_registration = dict(
+            self._AS_METADATA,
+            issuer="https://as.example.com",
+            registration_endpoint="https://as.example.com/other/dcr/register",
+        )
+        _serve(
+            monkeypatch,
+            self._handler(
+                resource=resource, authorization=mismatched_registration,
+            ),
+            allow_any_url=True,
+        )
+
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
+    async def test_prefers_an_exact_issuer_over_a_scoped_alias(self, monkeypatch):
+        """The alias is a last resort, not the first answer that fits.
+
+        The SDK offers three metadata URLs. The first two hang the tenant off
+        ``/.well-known/…``; the third puts it in front, which is where a
+        provider that scopes its issuer per tenant publishes a document
+        claiming that exact issuer. Taking the alias as soon as it appears
+        would never reach it — and would keep taking it after the provider
+        started conforming.
+        """
+        resource = dict(
+            self._RESOURCE,
+            authorization_servers=["https://as.example.com/tenant"],
+        )
+        shared_issuer = dict(
+            self._AS_METADATA,
+            issuer="https://as.example.com",
+            registration_endpoint="https://as.example.com/tenant/dcr/register",
+        )
+        exact_issuer = dict(
+            self._AS_METADATA,
+            issuer="https://as.example.com/tenant",
+            registration_endpoint="https://as.example.com/tenant/dcr/register",
+        )
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "oauth-protected-resource" in path:
+                return httpx.Response(200, json=resource)
+            # Only the third candidate puts the tenant before ``.well-known``.
+            if path.startswith("/tenant/"):
+                return httpx.Response(200, json=exact_issuer)
+            if "oauth-authorization-server" in path or "openid-configuration" in path:
+                return httpx.Response(200, json=shared_issuer)
+            return httpx.Response(404)
+
+        _serve(monkeypatch, handle, allow_any_url=True)
+
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+
+        assert str(discovered.metadata.issuer) == "https://as.example.com/tenant"
+
+    async def test_refuses_a_scoped_alias_whose_token_endpoint_left_the_origin(
+        self, monkeypatch,
+    ):
+        """The registration endpoint is not the only one worth pinning.
+
+        The browser is sent to ``authorization_endpoint`` and the code is spent
+        at ``token_endpoint``; an alias that moved either off the origin the
+        resource named is not a tenant of it.
+        """
+        resource = dict(
+            self._RESOURCE,
+            authorization_servers=["https://as.example.com/tenant"],
+        )
+        exfiltrating_token_endpoint = dict(
+            self._AS_METADATA,
+            issuer="https://as.example.com",
+            registration_endpoint="https://as.example.com/tenant/dcr/register",
+            token_endpoint="https://elsewhere.example.com/token",
+        )
+        _serve(
+            monkeypatch,
+            self._handler(
+                resource=resource, authorization=exfiltrating_token_endpoint,
+            ),
+            allow_any_url=True,
+        )
+
+        with pytest.raises(ConnectorOAuthError):
+            await discover_authorization("https://mcp.example.com/mcp")
+
     async def test_refuses_a_plaintext_authorization_endpoint(self, monkeypatch):
         # The one endpoint no transport of ours protects: the browser is sent
         # there carrying client_id, state and the PKCE challenge.
