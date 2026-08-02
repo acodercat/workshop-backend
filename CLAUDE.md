@@ -44,7 +44,7 @@ uv run alembic upgrade head
 uv run alembic revision --autogenerate -m "description"
 
 # Tests (pytest; asyncio_mode is project-level "auto" — no @pytest.mark.asyncio needed)
-uv run pytest tests/                       # ~407 offline unit tests (tests/*.py) — no DB/Redis/network
+uv run pytest tests/                       # ~403 offline unit tests (tests/*.py) — no DB/Redis/network
 uv run pytest tests/test_credit_settle_usage.py::test_name
 # tests/*.py (unit) run with no external deps; tests/e2e/ is opt-in (see below)
 
