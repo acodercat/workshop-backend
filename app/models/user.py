@@ -53,13 +53,17 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
     # Used for verification email + future contact. ``NULL`` for legacy
     # users created before the email-verification flow existed; new
-    # registrations always populate it. ``UNIQUE`` is partial (only
-    # enforced on non-NULL rows) — see migration ``12dc6d69a9ad``.
+    # registrations always populate it. ``12dc6d69a9ad`` made it unique via a
+    # partial index (non-NULL rows only); ``b1c7e29f4d8a`` replaced that with
+    # the plain ``user_email_key`` constraint this declaration renders, which
+    # allows multiple NULLs anyway (Postgres treats them as distinct).
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     # China-mainland mobile for SMS verification + login. ``NULL`` for
-    # users created via the email flow / before phone support. ``UNIQUE``
-    # is partial (only enforced on non-NULL rows), exactly like ``email``
-    # — see migration ``e5c1a9b7d2f4``.
+    # users created via the email flow / before phone support. In the DB its
+    # uniqueness is still the partial index from ``e5c1a9b7d2f4`` — the one
+    # column ``b1c7e29f4d8a``'s index→constraint cleanup missed — so this
+    # ``unique=True`` is the model's intent, not yet the schema's shape, and
+    # autogenerate flags the difference until a migration aligns them.
     phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
     # Avatar variant counter. ``0`` is the default look derived from
     # ``id`` alone; each "shuffle" click in the settings UI bumps it
