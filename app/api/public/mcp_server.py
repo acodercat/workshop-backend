@@ -572,13 +572,31 @@ async def _build_catalog_connector(
     entry = await catalog.get_published_entry(db, catalog_id)
     connector = catalog.build_connector(entry, user_id)
     await _reject_duplicate_name(db, user_id, connector.name)
+    # Decrypted before the connection is released: ``entry`` belongs to this
+    # session, and a Fernet failure should surface as the usual
+    # credential-unreadable error, not as a lazy-load surprise later.
+    client_secret = (
+        open_secret(
+            entry.oauth_client_secret_encrypted,
+            what=f"catalog entry {entry.key!r} OAuth client secret",
+        )
+        if entry.oauth_client_secret_encrypted is not None
+        else None
+    )
     # ``connector`` is unsaved and not in the session, so this commits the two
     # reads above and nothing else.
     await _release_connection(db)
     if connector.auth_type == MCPServerAuthType.OAUTH:
+        # An entry carrying a pre-registered app (a provider without DCR/CIMD —
+        # Figma requires one) hands it in here, and ``ensure_client`` treats it
+        # as a manual client. Entries without one keep the DCR/CIMD path
+        # exactly as before.
         connector.oauth_client_encrypted, connector.oauth_metadata = (
             await _register_oauth_client(
-                url=connector.url, scope=connector.oauth_scope,
+                url=connector.url,
+                scope=connector.oauth_scope,
+                client_id=entry.oauth_client_id,
+                client_secret=client_secret,
             )
         )
     else:

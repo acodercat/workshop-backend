@@ -14,10 +14,20 @@ Usage::
     uv run python -m scripts.manage_connector_catalog list
     uv run python -m scripts.manage_connector_catalog unpublish --key notion
     uv run python -m scripts.manage_connector_catalog publish --key notion
+
+    # attach a pre-registered OAuth app (providers without DCR/CIMD, e.g.
+    # Figma). The secret is read from $CATALOG_OAUTH_CLIENT_SECRET or an
+    # interactive prompt — never from argv, which lands in shell history.
+    uv run python -m scripts.manage_connector_catalog set-oauth-client \
+        --key figma --client-id vFtd...
+    uv run python -m scripts.manage_connector_catalog set-oauth-client \
+        --key figma --clear
 """
 
 import argparse
 import asyncio
+import getpass
+import os
 import sys
 
 from sqlalchemy import select
@@ -26,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
+from app.services.crypto import encrypt_secret
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
 
 
@@ -52,6 +63,49 @@ async def _add(db: AsyncSession, args: argparse.Namespace) -> int:
     return 0
 
 
+async def _set_oauth_client(db: AsyncSession, args: argparse.Namespace) -> int:
+    """Attach, rotate or clear an entry's pre-registered OAuth app.
+
+    Rotation is the same call as attachment — the columns are overwritten, and
+    only *new* adds see the change: every existing Connector snapshotted the
+    old app into its own row at add time.
+    """
+    entry = await _find(db, args.key)
+    if entry is None:
+        print(f"no catalog entry with key {args.key!r}", file=sys.stderr)
+        return 1
+
+    if args.clear:
+        entry.oauth_client_id = None
+        entry.oauth_client_secret_encrypted = None
+        await db.commit()
+        print(f"{args.key!r}: pre-registered OAuth app cleared")
+        return 0
+
+    if entry.auth_type != MCPServerAuthType.OAUTH:
+        print(
+            f"{args.key!r} is {entry.auth_type.value}, not OAUTH — a"
+            f" pre-registered app would never be used",
+            file=sys.stderr,
+        )
+        return 1
+
+    # From the environment or a prompt, never argv: a secret on the command
+    # line outlives the command in shell history. Empty means a public client
+    # (an app the provider issued without a secret).
+    secret = os.environ.get("CATALOG_OAUTH_CLIENT_SECRET")
+    if secret is None:
+        secret = getpass.getpass("client secret (empty for a public client): ")
+    entry.oauth_client_id = args.client_id
+    entry.oauth_client_secret_encrypted = encrypt_secret(secret) if secret else None
+    await db.commit()
+    print(
+        f"{args.key!r}: OAuth app set (client_id={args.client_id},"
+        f" secret={'stored encrypted' if secret else 'none — public client'})"
+    )
+    return 0
+
+
 async def _set_published(db: AsyncSession, key: str, published: bool) -> int:
     entry = await _find(db, key)
     if entry is None:
@@ -73,9 +127,12 @@ async def _list(db: AsyncSession) -> int:
         return 0
     for entry in entries:
         state = "published" if entry.published else "unpublished"
+        app_marker = (
+            f"  app={entry.oauth_client_id}" if entry.oauth_client_id else ""
+        )
         print(
             f"{entry.id:>4}  {entry.key:<20} {entry.auth_type.value:<7} "
-            f"{state:<12} {entry.url}"
+            f"{state:<12} {entry.url}{app_marker}"
         )
     return 0
 
@@ -95,6 +152,8 @@ async def main(args: argparse.Namespace) -> int:
             return await _set_published(db, args.key, True)
         if args.command == "unpublish":
             return await _set_published(db, args.key, False)
+        if args.command == "set-oauth-client":
+            return await _set_oauth_client(db, args)
     return 1  # pragma: no cover — argparse rejects unknown commands first
 
 
@@ -118,6 +177,18 @@ def _parse_args() -> argparse.Namespace:
     add.add_argument("--sort-order", type=int, default=0)
 
     sub.add_parser("list", help="list every entry, published or not")
+
+    set_client = sub.add_parser(
+        "set-oauth-client",
+        help="attach, rotate or clear an entry's pre-registered OAuth app",
+    )
+    set_client.add_argument("--key", required=True)
+    group = set_client.add_mutually_exclusive_group(required=True)
+    group.add_argument("--client-id", help="the app's public client id")
+    group.add_argument(
+        "--clear", action="store_true",
+        help="remove the app; adds fall back to DCR/CIMD",
+    )
 
     for name, help_text in (
         ("publish", "list an entry in the catalog"),

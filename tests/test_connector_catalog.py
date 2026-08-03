@@ -4,11 +4,14 @@ import contextlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
 
+from app.api.public import mcp_server as endpoint
 from app.errors import ConnectorCatalogEntryNotFoundError
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.schemas.mcp_server import ConnectorCatalogEntryResponse
+from app.services import crypto
 from app.services.mcp import catalog
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES, build_connector
 
@@ -107,7 +110,17 @@ class TestInstantiableAuthTypes:
 
 
 class TestCatalogEntryResponse:
-    @pytest.mark.parametrize("field", ["published", "sort_order"])
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "published",
+            "sort_order",
+            # The pre-registered OAuth app is the platform's, not the caller's
+            # to see — least of all the encrypted secret.
+            "oauth_client_id",
+            "oauth_client_secret_encrypted",
+        ],
+    )
     def test_operator_fields_stay_server_side(self, field):
         assert field not in ConnectorCatalogEntryResponse.model_fields
 
@@ -116,3 +129,61 @@ class TestCatalogEntryResponse:
         assert response.key == "notion"
         assert response.name == "Notion"
         assert response.description == "Search your pages"
+
+
+class TestPreRegisteredClientPassThrough:
+    """The add path hands an entry's own OAuth app to client registration.
+
+    A provider without DCR or CIMD (Figma) can only be a catalog entry if the
+    platform's pre-registered app rides along; an entry without one must keep
+    the DCR/CIMD path exactly as before, which is why the absent case pins
+    ``client_id=None`` rather than merely not caring.
+    """
+
+    @pytest.fixture
+    def fernet_key(self, monkeypatch):
+        monkeypatch.setattr(
+            crypto.settings,
+            "mcp_credential_encryption_key",
+            Fernet.generate_key().decode(),
+        )
+        crypto._cipher.cache_clear()
+        yield
+        crypto._cipher.cache_clear()
+
+    async def _add(self, monkeypatch, entry):
+        registered: dict = {}
+
+        async def _capture(**kwargs):
+            registered.update(kwargs)
+            return "sealed-client", {"issuer": "https://as.example.com"}
+
+        monkeypatch.setattr(
+            endpoint.catalog, "get_published_entry", AsyncMock(return_value=entry)
+        )
+        monkeypatch.setattr(endpoint, "_reject_duplicate_name", AsyncMock())
+        monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
+        monkeypatch.setattr(endpoint, "_register_oauth_client", _capture)
+        await endpoint._build_catalog_connector(
+            MagicMock(), catalog_id=entry.id, user_id=42
+        )
+        return registered
+
+    async def test_the_entrys_app_reaches_registration_decrypted(
+        self, monkeypatch, fernet_key
+    ):
+        entry = _entry(
+            oauth_client_id="app-id",
+            oauth_client_secret_encrypted=crypto.encrypt_secret("app-secret"),
+        )
+
+        registered = await self._add(monkeypatch, entry)
+
+        assert registered["client_id"] == "app-id"
+        assert registered["client_secret"] == "app-secret"
+
+    async def test_an_entry_without_an_app_keeps_the_dcr_path(self, monkeypatch):
+        registered = await self._add(monkeypatch, _entry())
+
+        assert registered["client_id"] is None
+        assert registered["client_secret"] is None

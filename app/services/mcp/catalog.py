@@ -66,11 +66,15 @@ async def get_published_entry(
 def build_connector(entry: MCPServerCatalogEntry, user_id: int) -> MCPServer:
     """An unsaved user-owned Connector copied from *entry*.
 
-    Credentials are deliberately absent — the catalog never carries secrets,
-    and OAUTH entries get theirs from the authorize flow. That is why only
+    Per-user credentials are deliberately absent — OAUTH entries get theirs
+    from the authorize flow. That is why only
     :data:`INSTANTIABLE_AUTH_TYPES` can be offered: BEARER/HEADER need a
     per-user secret nobody here can supply, so the Connector would probe fine
-    and then 401 on every real tool call.
+    and then 401 on every real tool call. What an entry *may* carry is the
+    platform's own pre-registered OAuth app (``oauth_client_id`` + encrypted
+    secret, for providers without DCR/CIMD) — that is one app shared by every
+    user, not a credential, and the add endpoint applies it at client
+    registration rather than copying it here.
     """
     if entry.auth_type not in INSTANTIABLE_AUTH_TYPES:
         raise ConnectorCatalogEntryNotFoundError(

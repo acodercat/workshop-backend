@@ -60,6 +60,22 @@ class MCPServerCatalogEntry(Base):
         server_default=text("'NONE'"),
     )
     oauth_scope: Mapped[str | None] = mapped_column(String, nullable=True)
+    # A pre-registered OAuth app, for providers that offer neither dynamic
+    # client registration nor CIMD (Figma requires an app created by hand).
+    # NULL on entries whose provider can mint a client on demand — the add
+    # flow then falls back to DCR/CIMD exactly as before. The id is the app's
+    # public identifier and stays plaintext; the secret is Fernet-encrypted
+    # under ``mcp_credential_encryption_key``, the same envelope every stored
+    # Connector credential uses (``services/crypto.py``).
+    #
+    # Add time *snapshots* the pair into the user row's
+    # ``oauth_client_encrypted``, so rotating it here reaches new adds only:
+    # existing Connectors keep their copy until the provider revokes the old
+    # app, at which point re-adding from the catalog picks up the new one.
+    oauth_client_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    oauth_client_secret_encrypted: Mapped[str | None] = mapped_column(
+        String, nullable=True,
+    )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Operator-set so a new entry needs no frontend deploy; the card falls back
     # to its generic icon when NULL.
