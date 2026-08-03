@@ -101,7 +101,9 @@ async def get_client_metadata() -> dict:
             status_code=status.HTTP_404_NOT_FOUND, detail="CIMD is not configured",
         )
     return oauth.client_metadata_document(
-        settings.mcp_client_metadata_url, redirect_uri=_require_redirect_uri(),
+        settings.mcp_client_metadata_url,
+        redirect_uri=_require_redirect_uri(),
+        client_name=settings.mcp_client_name,
     )
 
 
@@ -638,6 +640,7 @@ async def _register_oauth_client(
         client_id=client_id,
         client_secret=client_secret,
         client_metadata_url=settings.mcp_client_metadata_url or None,
+        client_name=settings.mcp_client_name,
     )
     return encrypt_secret(client.model_dump_json()), discovered.as_stored()
 
@@ -1100,6 +1103,7 @@ async def _client_for_authorization(
                 redirect_uri=_require_redirect_uri(),
                 scope=discovered.scope_for(connector.oauth_scope),
                 client_metadata_url=settings.mcp_client_metadata_url or None,
+                client_name=settings.mcp_client_name,
             )
         ).model_dump_json()
     )

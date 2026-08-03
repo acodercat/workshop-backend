@@ -4,7 +4,7 @@ This is the design doc for the per-user notification stream (`GET
 /me/events`) — the lightweight SSE feed that keeps the sidebar's
 RUNNING/COMPLETE/FAILED indicators in sync across a user's tabs and
 sessions. Code lives in `app/services/user/hub.py` (the fan-out),
-`app/services/user/events.py` (the SSE generator), `app/api/endpoints/user.py`
+`app/services/user/events.py` (the SSE generator), `app/api/public/user.py`
 (the endpoint), and the `USER_EVENTS_CHANNEL` constant in
 `app/services/redis.py`.
 

@@ -64,7 +64,6 @@ _HTTP_TIMEOUT = 20.0
 # two protected-resource candidates, three authorization-server ones), so a
 # per-call bound would let a working-but-slow server take two minutes.
 _DISCOVERY_TIMEOUT = 30.0
-_CLIENT_NAME = "Metaseq Connector"
 # The scope that asks for a refresh token (SEP-2207). Requested whenever the
 # authorization server advertises it; without one, every access-token expiry
 # becomes a browser round-trip.
@@ -605,7 +604,10 @@ async def _discover_protected_resource(
 
 
 def cimd_client(
-    client_metadata_url: str, *, redirect_uri: str
+    client_metadata_url: str,
+    *,
+    redirect_uri: str,
+    client_name: str,
 ) -> OAuthClientInformationFull:
     """Our OAuth identity when the client id is a published URL (CIMD).
 
@@ -617,21 +619,26 @@ def cimd_client(
     """
     return OAuthClientInformationFull(
         client_id=client_metadata_url,
-        client_name=_CLIENT_NAME,
+        client_name=client_name,
         redirect_uris=[redirect_uri],
         token_endpoint_auth_method="none",
     )
 
 
-def client_metadata_document(client_metadata_url: str, *, redirect_uri: str) -> dict:
+def client_metadata_document(
+    client_metadata_url: str,
+    *,
+    redirect_uri: str,
+    client_name: str,
+) -> dict:
     """The published form of :func:`cimd_client` — what the server fetches.
 
     Serialized from the very object we authorize with, so the identity we
     publish and the identity we use cannot drift.
     """
-    return cimd_client(client_metadata_url, redirect_uri=redirect_uri).model_dump(
-        mode="json", exclude_none=True
-    )
+    return cimd_client(
+        client_metadata_url, redirect_uri=redirect_uri, client_name=client_name
+    ).model_dump(mode="json", exclude_none=True)
 
 
 async def ensure_client(
@@ -642,6 +649,7 @@ async def ensure_client(
     client_id: str | None = None,
     client_secret: str | None = None,
     client_metadata_url: str | None = None,
+    client_name: str,
 ) -> OAuthClientInformationFull:
     """Return the OAuth client: a manually-configured one, else CIMD, else DCR.
 
@@ -665,13 +673,21 @@ async def ensure_client(
             raise ConnectorOAuthError(
                 "mcp_client_metadata_url must be an https URL with a non-root path."
             )
-        return cimd_client(client_metadata_url, redirect_uri=redirect_uri)
+        return cimd_client(
+            client_metadata_url, redirect_uri=redirect_uri, client_name=client_name
+        )
 
-    return await _register_client(metadata, redirect_uri=redirect_uri, scope=scope)
+    return await _register_client(
+        metadata, redirect_uri=redirect_uri, scope=scope, client_name=client_name
+    )
 
 
 async def _register_client(
-    metadata: OAuthMetadata, *, redirect_uri: str, scope: str | None,
+    metadata: OAuthMetadata,
+    *,
+    redirect_uri: str,
+    scope: str | None,
+    client_name: str,
 ) -> OAuthClientInformationFull:
     """Register a client with the server (RFC 7591 dynamic registration).
 
@@ -704,7 +720,7 @@ async def _register_client(
         # only does Basic rejects the request outright rather than substituting
         # a method, so a hardcoded preference locks us out of those servers.
         token_endpoint_auth_method=_preferred_auth_method(metadata),
-        client_name=_CLIENT_NAME,
+        client_name=client_name,
     )
     # The deadline sits outside the ``try`` so its ``TimeoutError`` lands in the
     # same conversion as every other failure — inside, it would escape as a raw

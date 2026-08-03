@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 MINUTES_PER_WEEK = 60 * 24 * 7
+MINUTES_PER_WORKDAY = 60 * 8
 
 
 class Settings(BaseSettings):
@@ -51,13 +52,35 @@ class Settings(BaseSettings):
     )
     # Public URL of our OAuth Client ID Metadata Document (CIMD): the URL *is*
     # the client_id, and the authorization server fetches it instead of us
-    # registering. Must be HTTPS with a non-root path, and must resolve to this
-    # API's ``GET /connectors/client-metadata``. Empty default → fall back to
-    # Dynamic Client Registration, which is the only option for servers that
-    # don't advertise CIMD anyway.
-    # e.g. https://api.example.com/api/connectors/client-metadata
+    # registering. Empty default → fall back to Dynamic Client Registration,
+    # which is the only option for servers that don't advertise CIMD anyway.
+    #
+    # **The app's origin, not this API's.** The document is served by the app's
+    # ``/api/connectors/client-metadata`` proxy route, which relays this API's
+    # ``GET /connectors/client-metadata`` — the same origin the redirect URI
+    # above uses, and the only one published: nginx fronts the app, and this
+    # API's own port is not reachable from outside. Reachability is never
+    # checked (``is_valid_client_metadata_url`` only asks for HTTPS and a
+    # non-root path), and the CIMD branch returns without falling back to
+    # registration, so a URL the provider cannot fetch does not degrade to DCR —
+    # it fails the authorization outright, which is worse than leaving this empty.
+    # e.g. https://app.example.com/api/connectors/client-metadata
     mcp_client_metadata_url: str = Field(
         default="", description="Public URL of our OAuth client metadata document (CIMD)",
+    )
+    # How this client names itself to an authorization server — what the user
+    # reads on the consent screen, so it has to be this deployment's own brand.
+    #
+    # It lives here rather than in ``services/mcp/oauth.py`` because that module
+    # must stay byte-identical across the forks and this is the one line in it
+    # each of them wants different: forking it there is a conflict on every OAuth
+    # sync, resolved by hand, where getting it wrong shows another deployment's
+    # name to the user and nothing else notices. ``config.py`` is where they
+    # already diverge on purpose, and the **default** carries it — not the
+    # ``.env`` — so a deployment is correct without anyone remembering to set it.
+    mcp_client_name: str = Field(
+        default="PPIG Connector",
+        description="Client name presented to OAuth authorization servers",
     )
     algorithm: str = Field(default="HS256", description="Algorithm for JWT")
     access_token_expire_minutes: int = Field(
@@ -74,11 +97,27 @@ class Settings(BaseSettings):
     )
     bcrypt_rounds: int = Field(default=12, description="Bcrypt work factor (10-14 typical)")
 
+    # Admin-console tokens (``scope="staff"``). A workday rather than the
+    # customer token's week: the console is the highest-privilege surface
+    # and is used from a workstation, so a stolen token's window should
+    # close by the next morning.
+    admin_access_token_expire_minutes: int = Field(
+        default=MINUTES_PER_WORKDAY,
+        description="Staff access token lifetime in minutes",
+    )
+
     # CORS — explicit allowlist; wildcard is forbidden because we use
     # ``allow_credentials=True`` (browsers reject the combination).
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3300"],
         description="Allowed origins for CORS",
+    )
+    # The admin console runs as its own app on its own port and must not
+    # inherit the customer allowlist — a customer-facing origin has no
+    # business calling admin endpoints from a browser.
+    admin_cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3400"],
+        description="Allowed origins for CORS on the admin app",
     )
 
     # Rate limits — slowapi key is the client IP. Sized for human use;
@@ -96,6 +135,13 @@ class Settings(BaseSettings):
     )
     rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
+    # Staff sign-in. Tighter than the customer limit: the operator pool is
+    # tiny and known, so a burst of attempts is far more likely to be an
+    # attack than a forgetful user.
+    rate_limit_admin_login: str = Field(
+        default="5/minute",
+        description="Per-IP admin-console login attempts",
+    )
     rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
     rate_limit_upload_url: str = Field(
         default="300/minute",

@@ -745,7 +745,7 @@ async def generate_session_title(
 #
 # Singleton sub-resource of the session: one share per session.
 # Public-side read access for share recipients lives in
-# :mod:`app.api.endpoints.share`; the two surfaces deliberately don't
+# :mod:`app.api.public.share`; the two surfaces deliberately don't
 # overlap on auth (user JWTs are rejected on the public path, share-
 # view tokens are rejected here).
 

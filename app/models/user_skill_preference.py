@@ -10,7 +10,7 @@ This table fills that gap. One row per ``(user_id, skill_id)`` —
 ``enabled`` overrides ``skill.enabled`` when present; absent rows fall
 back to the skill's default. Mechanically the override works for any
 origin, but the only path that writes to it today is the platform-skill
-toggle in :func:`app.api.endpoints.skill.update_skill`.
+toggle in :func:`app.api.public.skill.update_skill`.
 """
 
 from datetime import datetime

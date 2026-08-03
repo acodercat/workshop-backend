@@ -1,18 +1,21 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
 from jwt.exceptions import InvalidTokenError
 from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
 from app.api.dependencies import get_db
 from app.database import AsyncSessionLocal
+from app.errors import StaffAuthenticationError
+from app.rate_limit import set_rate_limit_principal
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -212,13 +215,13 @@ async def authenticate_and_get_user(
 ) -> models.User:
     """FastAPI dependency: extract Bearer token from header and validate.
 
-    Stamps the resolved id onto ``request.state.user_id`` so the rate
+    Stamps the resolved identity as the rate-limit principal so the
     limiter keys authenticated requests on the user rather than the
     client IP (NAT/CGNAT-shared IPs otherwise share one bucket). See
-    :func:`app.rate_limit._rate_limit_key`.
+    :func:`app.rate_limit.set_rate_limit_principal`.
     """
     user = await _decode_and_get_user(db, token)
-    request.state.user_id = user.id
+    set_rate_limit_principal(request, "user", user.id)
     return user
 
 
@@ -251,3 +254,191 @@ def revoke_user_tokens(user: models.User) -> None:
     Use after password change, "logout everywhere", or admin-forced logout.
     """
     user.token_version += 1
+
+
+#
+# Staff tokens are the third and last JWT class, issued to admin-console
+# operators. All three live in this module on purpose: they are defined by
+# their mutual exclusion, and that property is only auditable if the
+# decoders sit next to each other.
+#
+#   ==============  ==================  ==============================
+#   Token           ``scope`` claim     Decoder
+#   ==============  ==================  ==============================
+#   user access     *(absent)*          :func:`_decode_and_get_user`
+#   share view      ``"share-view"``    :func:`decode_share_view_token`
+#   staff access    ``"staff"``         :func:`decode_staff_token`
+#   ==============  ==================  ==============================
+#
+# ``_decode_and_get_user`` rejects any token carrying a ``scope``, so a
+# staff token can never authenticate a customer request.
+# :func:`decode_staff_token` requires ``scope == "staff"``, so neither a
+# customer token (no scope) nor a share-view token reaches the console.
+# Each decoder fails closed.
+#
+# ``sub`` is the staff username, resolved against the ``staff`` table
+# only — a forged token has nothing to bind to a customer account.
+#
+# TTL is a workday rather than the customer token's week: the console is
+# the highest-privilege surface and is used from a workstation, so a
+# stolen token's window should close by the next morning.
+
+STAFF_SCOPE = "staff"
+
+# ``HTTPBearer``, not ``OAuth2PasswordBearer``: the console signs in with
+# a JSON body, and advertising an OAuth2 *password-form* flow in the
+# schema would describe an endpoint that does not exist — Swagger's
+# Authorize dialog would post form-encoded fields and fail. Plain bearer
+# is what the console actually sends.
+#
+# ``auto_error=False`` so a missing or malformed ``Authorization`` header
+# reaches our own handling below and collapses into the same opaque 401
+# as every other failure, instead of HTTPBearer's distinguishable
+# "Not authenticated".
+staff_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+@dataclass(frozen=True)
+class StaffTokenClaims:
+    """The claims the console cares about once signatures check out.
+
+    Frozen because a decoded token describes a past event; nothing
+    downstream should edit it in place.
+    """
+
+    username: str
+    token_version: int
+
+
+def create_staff_access_token(staff: models.Staff) -> tuple[str, datetime]:
+    """Mint a staff access token.
+
+    Returns the encoded JWT **and** its absolute expiry so the login
+    endpoint doesn't have to decode what it just encoded (same shape as
+    :func:`create_share_view_token`).
+    """
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.admin_access_token_expire_minutes
+    )
+    payload = {
+        "sub": staff.username,
+        "scope": STAFF_SCOPE,
+        "token_version": staff.token_version,
+        "exp": expires_at,
+    }
+    encoded = jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+    return encoded, expires_at
+
+
+def decode_staff_token(token: str) -> StaffTokenClaims | None:
+    """Verify a staff JWT and return its claims.
+
+    Returns ``None`` on every failure mode — bad signature, expired,
+    wrong or missing scope, ill-typed claims — so the caller raises one
+    indistinguishable 401 instead of telling an attacker which check
+    failed.
+    """
+    try:
+        payload = jwt.decode(
+            token, settings.secret_key, algorithms=[settings.algorithm]
+        )
+    except InvalidTokenError as exc:
+        logger.info("Rejected staff token: %s: %s", type(exc).__name__, exc)
+        return None
+
+    if payload.get("scope") != STAFF_SCOPE:
+        # A customer or share-view token reaching the console is a client
+        # bug at best and an escalation attempt at worst. Refuse without
+        # distinguishing the two.
+        return None
+
+    username = payload.get("sub")
+    token_version = payload.get("token_version", 0)
+    if not isinstance(username, str) or not isinstance(token_version, int):
+        return None
+    return StaffTokenClaims(username=username, token_version=token_version)
+
+
+async def get_staff_by_username(
+    db: AsyncSession, username: str
+) -> models.Staff | None:
+    """Look up a staff account by its login identifier."""
+    stmt = select(models.Staff).where(models.Staff.username == username)
+    result = await db.execute(stmt)
+    return result.scalar()
+
+
+async def authenticate_staff(
+    db: AsyncSession, username: str, password: str
+) -> models.Staff | None:
+    """Return the staff row iff the credentials are valid, regardless of
+    status.
+
+    Status is left to the caller so a ``DISABLED`` account yields the
+    *same* opaque 401 as a wrong password — a former operator should not
+    be able to confirm their account still exists. Mirrors
+    :func:`authenticate_user`.
+    """
+    staff = await get_staff_by_username(db, username)
+    if staff is None or not await verify_password(password, staff.password_hash):
+        return None
+    return staff
+
+
+def is_staff_active(staff: models.Staff) -> bool:
+    """Whether the account may hold a session right now.
+
+    Checked at login *and* on every authenticated request, so flipping a
+    departing operator to ``DISABLED`` takes effect on their next call
+    without a ``token_version`` bump.
+    """
+    return staff.status is models.StaffStatus.ACTIVE
+
+
+async def authenticate_and_get_staff(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials | None = Depends(staff_bearer_scheme),
+) -> models.Staff:
+    """FastAPI dependency: resolve and validate the calling operator.
+
+    Every failure — absent header, malformed token, wrong scope, unknown
+    username, stale ``token_version``, deactivated account — collapses to
+    the same :class:`~app.errors.StaffAuthenticationError`. Telling the
+    caller *why* their token was refused is free reconnaissance against
+    the highest-privilege surface in the system.
+
+    Stamps the operator as the rate-limit principal so slowapi keys
+    console traffic on them rather than on the shared office egress IP.
+
+    Authorization (role gating) is a separate concern and lives in
+    :mod:`app.api.admin.dependencies`.
+    """
+    unauthenticated = StaffAuthenticationError("Could not validate credentials")
+
+    if credentials is None:
+        raise unauthenticated
+
+    claims = decode_staff_token(credentials.credentials)
+    if claims is None:
+        raise unauthenticated
+
+    staff = await get_staff_by_username(db, claims.username)
+    if staff is None or staff.token_version != claims.token_version:
+        raise unauthenticated
+    if not is_staff_active(staff):
+        # Already-loaded row, so this costs nothing and makes a DISABLED
+        # flip effective on the very next request.
+        raise unauthenticated
+
+    set_rate_limit_principal(request, "staff", staff.id)
+    return staff
+
+
+def revoke_staff_tokens(staff: models.Staff) -> None:
+    """Invalidate every token issued to this account so far.
+
+    Use after a password change, an explicit "sign out everywhere", or a
+    suspected credential leak. Caller commits.
+    """
+    staff.token_version += 1

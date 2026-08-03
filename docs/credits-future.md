@@ -106,7 +106,7 @@ limited to trusted/internal users.
 ## Shipped — Payment integration (汇付斗拱 / Huifu)
 
 Buy-side recharge is implemented in `app/services/payment/` +
-`app/api/endpoints/payment.py` + the `payment_order` table, exactly as
+`app/api/public/payment.py` + the `payment_order` table, exactly as
 this section anticipated: a verified async notification calls
 `credits.apply_topup(...)` with `idempotency_key="hf:"+out_trade_no`
 and provider metadata in `reference`. The ledger layer was unchanged.

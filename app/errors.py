@@ -462,3 +462,62 @@ class AgentTypeDowngradeError(AppError):
 
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "agent_type_downgrade"
+
+
+class StaffAuthenticationError(AppError):
+    """The admin console could not identify the caller — absent, malformed,
+    expired, wrongly-scoped or revoked token, or a deactivated account. All
+    of those collapse into this one error on purpose: distinguishing them
+    hands an attacker a probe against the highest-privilege surface in the
+    system. The console reads it as "sign in again"."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "staff_unauthenticated"
+
+
+class StaffForbiddenError(AppError):
+    """An authenticated operator lacks the role an admin-console action
+    requires. 403 rather than 401 on purpose: the caller *is* signed in,
+    and the console UI has to tell "your session expired, sign in again"
+    apart from "your account can't do this"."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "staff_forbidden"
+
+
+class StaffCredentialsError(AppError):
+    """Admin-console sign-in failed. A wrong password and a ``DISABLED``
+    account raise the *same* error: a former operator probing the console
+    should not be able to confirm their account still exists."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "staff_invalid_credentials"
+
+
+class StaffNotFoundError(AppError):
+    """No staff account with that id."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "staff_not_found"
+
+
+class StaffUsernameTakenError(AppError):
+    """A staff account with that username already exists. Usernames are the
+    console's login key, so this is a conflict rather than a validation
+    error — the caller picks another, it isn't a malformed request."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "staff_username_taken"
+
+
+class LastOwnerError(AppError):
+    """The change would leave the console with no active ``OWNER``.
+
+    Refused because ``OWNER`` is the only role that can manage staff
+    accounts: demoting or disabling the last one locks *everybody* out of
+    account management, recoverable only by someone with database
+    credentials running ``scripts/manage_staff.py``. Promote a replacement
+    first."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "staff_last_owner"

@@ -4,12 +4,14 @@ Endpoints opt in by adding ``@limiter.limit(...)`` and accepting a
 ``request: Request`` parameter (slowapi reads the key from the request).
 Limits live in :mod:`config` so they can be tuned per-environment.
 
-The key is the **authenticated user** when one is present, falling back
-to the **client IP** for anonymous (pre-login) endpoints — see
-:func:`_rate_limit_key`. Keying authenticated traffic on the user (not
-the IP) is the standard fix for NAT/CGNAT: hundreds of real users behind
-one corporate / mobile-carrier egress IP otherwise share a single bucket
-and throttle each other.
+The key is the **authenticated principal** when one is present, falling
+back to the **client IP** for anonymous (pre-login) endpoints — see
+:func:`_rate_limit_key`. Keying authenticated traffic on the principal
+(not the IP) is the standard fix for NAT/CGNAT: hundreds of real users
+behind one corporate / mobile-carrier egress IP otherwise share a single
+bucket and throttle each other. A principal is a customer (``user:{id}``)
+or a console operator (``staff:{id}``), stamped by
+:func:`set_rate_limit_principal`.
 
 Counters are stored in **Redis** (``settings.redis_url``), not in
 process memory. With multiple uvicorn workers / hosts an in-memory
@@ -22,6 +24,8 @@ limiter degrades gracefully rather than failing requests:
 ``swallow_errors`` ensures a storage blip never turns a request into a
 500.
 """
+
+from typing import Literal
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -51,19 +55,38 @@ def _client_ip(request: Request) -> str:
     return get_remote_address(request)
 
 
-def _rate_limit_key(request: Request) -> str:
-    """Rate-limit key: the authenticated user if known, else the client IP.
+def set_rate_limit_principal(
+    request: Request, kind: Literal["user", "staff"], id_: object
+) -> None:
+    """Record the authenticated identity slowapi should key on.
 
-    :func:`app.auth.authenticate_and_get_user` stamps
-    ``request.state.user_id`` once a Bearer token is validated, and
-    FastAPI resolves that dependency before slowapi evaluates this key —
-    so an authenticated request keys on ``user:{id}`` and is immune to
-    NAT-shared IPs, while a pre-login request keys on ``ip:{addr}``. The
-    namespaces are prefixed so a user id can never collide with an IP.
+    Called by the authentication dependencies in :mod:`app.auth` once a
+    Bearer token is validated. ``kind`` namespaces the id — ``"user"``
+    for customers, ``"staff"`` for console operators — so the two id
+    spaces cannot collide in the shared Redis keyspace, and neither can
+    collide with the ``ip:`` fallback. The ``Literal`` is the registry of
+    principal kinds: a new surface extends it here, visibly, rather than
+    minting an ad-hoc prefix at its call site.
+
+    Namespacing happens **here**, once. Callers pass their kind and their
+    raw id and never pre-format the key themselves; two places building
+    the same string is how a key ends up prefixed twice.
     """
-    user_id = getattr(request.state, "user_id", None)
-    if user_id is not None:
-        return f"user:{user_id}"
+    request.state.rate_limit_principal = f"{kind}:{id_}"
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Rate-limit key: the authenticated principal if known, else the IP.
+
+    :func:`set_rate_limit_principal` stamps the principal once a Bearer
+    token is validated, and FastAPI resolves that dependency before
+    slowapi evaluates this key — so an authenticated request keys on
+    ``user:{id}`` / ``staff:{id}`` and is immune to NAT-shared IPs,
+    while a pre-login request keys on ``ip:{addr}``.
+    """
+    principal = getattr(request.state, "rate_limit_principal", None)
+    if principal is not None:
+        return principal
     return f"ip:{_client_ip(request)}"
 
 

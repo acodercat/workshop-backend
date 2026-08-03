@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from app.api.endpoints import mcp_server as endpoint
+from app.api.public import mcp_server as endpoint
 
 
 def _db_returning(connector):

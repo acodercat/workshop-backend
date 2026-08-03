@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import app.api.endpoints.payment as ep
+import app.api.public.payment as ep
 from app.services.payment.exceptions import NotifySignatureError
 from app.services.payment.provider import VerifiedEvent
 

@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from cryptography.fernet import Fernet
 
-from app.api.endpoints import mcp_server as endpoint
+from app.api.public import mcp_server as endpoint
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.schemas.mcp_server import ConnectorUpdate
 
