@@ -47,6 +47,11 @@ from app.services.mcp.oauth import (
 )
 
 
+# Stands in for ``settings.mcp_client_name``, which is a per-deployment brand and
+# so is never a literal in this module's code either.
+CLIENT_NAME = "Test Connector"
+
+
 def _metadata() -> OAuthMetadata:
     return OAuthMetadata(
         issuer="https://as.example.com",
@@ -203,7 +208,7 @@ class TestEnsureClientManual:
                 response_types_supported=["code"],
                 token_endpoint_auth_methods_supported=supported,
             ),
-            redirect_uri="https://app/cb", scope="read",
+            redirect_uri="https://app/cb", scope="read", client_name=CLIENT_NAME,
             client_id="cid", client_secret=client_secret,
         )
 
@@ -902,7 +907,7 @@ class TestDynamicClientRegistration:
 
         with pytest.raises(ConnectorOAuthError, match="dynamic client registration"):
             await ensure_client(
-                no_dcr, redirect_uri="https://app/cb", scope=None,
+                no_dcr, redirect_uri="https://app/cb", scope=None, client_name=CLIENT_NAME,
             )
 
     def _registration_metadata(self) -> OAuthMetadata:
@@ -924,7 +929,7 @@ class TestDynamicClientRegistration:
         _serve(monkeypatch, lambda _request: httpx.Response(201, json=registered))
 
         client = await ensure_client(
-            self._registration_metadata(), redirect_uri="https://app/cb", scope=None,
+            self._registration_metadata(), redirect_uri="https://app/cb", scope=None, client_name=CLIENT_NAME,
         )
 
         assert isinstance(client, OAuthClientInformationFull)
@@ -953,7 +958,12 @@ class TestDynamicClientRegistration:
             update={"token_endpoint_auth_methods_supported": ["client_secret_basic"]}
         )
 
-        await ensure_client(basic_only, redirect_uri="https://app/cb", scope=None)
+        await ensure_client(
+            basic_only,
+            redirect_uri="https://app/cb",
+            scope=None,
+            client_name=CLIENT_NAME,
+        )
 
         assert '"token_endpoint_auth_method":"client_secret_basic"' in (
             sent[0].content.decode().replace(" ", "")
@@ -973,7 +983,7 @@ class TestDynamicClientRegistration:
         _serve(monkeypatch, lambda _request: httpx.Response(201, json=registered))
 
         client = await ensure_client(
-            self._registration_metadata(), redirect_uri="https://app/cb", scope=None,
+            self._registration_metadata(), redirect_uri="https://app/cb", scope=None, client_name=CLIENT_NAME,
         )
 
         assert client.token_endpoint_auth_method == "client_secret_basic"
@@ -985,7 +995,7 @@ class TestDynamicClientRegistration:
         with pytest.raises(ConnectorOAuthError, match="Client ID"):
             await ensure_client(
                 self._registration_metadata(),
-                redirect_uri="https://app/cb", scope=None,
+                redirect_uri="https://app/cb", scope=None, client_name=CLIENT_NAME,
             )
 
 
@@ -1090,7 +1100,7 @@ class TestClientIdMetadataDocument:
     async def test_uses_the_metadata_url_as_client_id_when_advertised(self):
         client = await ensure_client(
             self._metadata_supporting_cimd(),
-            redirect_uri="https://app/cb", scope="read",
+            redirect_uri="https://app/cb", scope="read", client_name=CLIENT_NAME,
             client_metadata_url=self._METADATA_URL,
         )
         assert client.client_id == self._METADATA_URL
@@ -1110,7 +1120,7 @@ class TestClientIdMetadataDocument:
                     response_types_supported=["code"],
                     registration_endpoint="https://10.0.0.1/register",
                 ),
-                redirect_uri="https://app/cb", scope=None,
+                redirect_uri="https://app/cb", scope=None, client_name=CLIENT_NAME,
                 client_metadata_url=self._METADATA_URL,
             )
 
@@ -1118,7 +1128,7 @@ class TestClientIdMetadataDocument:
         # An operator who configured a real OAuth app must keep using it.
         client = await ensure_client(
             self._metadata_supporting_cimd(),
-            redirect_uri="https://app/cb", scope=None,
+            redirect_uri="https://app/cb", scope=None, client_name=CLIENT_NAME,
             client_id="manual-cid", client_secret="sek",
             client_metadata_url=self._METADATA_URL,
         )
@@ -1132,7 +1142,7 @@ class TestClientIdMetadataDocument:
             with pytest.raises(ConnectorOAuthError):
                 await ensure_client(
                     self._metadata_supporting_cimd(),
-                    redirect_uri="https://app/cb", scope=None,
+                    redirect_uri="https://app/cb", scope=None, client_name=CLIENT_NAME,
                     client_metadata_url=bad,
                 )
 
@@ -1148,7 +1158,7 @@ class TestClientIdMetadataDocument:
                     response_types_supported=["code"],
                     registration_endpoint="https://10.0.0.1/register",
                 ),
-                redirect_uri="https://app/cb", scope=None,
+                redirect_uri="https://app/cb", scope=None, client_name=CLIENT_NAME,
                 client_metadata_url="http://not-https/root",
             )
 
@@ -1156,7 +1166,9 @@ class TestClientIdMetadataDocument:
         # Binding the id to the URL is what stops the document being
         # republished elsewhere under a different identity.
         url = "https://api.example.com/api/connectors/client-metadata"
-        doc = client_metadata_document(url, redirect_uri="https://app/cb")
+        doc = client_metadata_document(
+            url, redirect_uri="https://app/cb", client_name=CLIENT_NAME
+        )
         assert doc["client_id"] == url
         assert doc["redirect_uris"] == ["https://app/cb"]
         assert doc["token_endpoint_auth_method"] == "none"
@@ -1169,11 +1181,15 @@ class TestClientIdMetadataDocument:
         url = "https://api.example.com/api/connectors/client-metadata"
         authorized = await ensure_client(
             self._metadata_supporting_cimd(),
-            redirect_uri="https://app/cb", scope="read", client_metadata_url=url,
+            redirect_uri="https://app/cb", scope="read", client_name=CLIENT_NAME, client_metadata_url=url,
         )
-        published = client_metadata_document(url, redirect_uri="https://app/cb")
+        published = client_metadata_document(
+            url, redirect_uri="https://app/cb", client_name=CLIENT_NAME
+        )
         assert published == authorized.model_dump(mode="json", exclude_none=True)
-        assert authorized == cimd_client(url, redirect_uri="https://app/cb")
+        assert authorized == cimd_client(
+            url, redirect_uri="https://app/cb", client_name=CLIENT_NAME
+        )
 
 
 class TestClientMetadataEndpoint:

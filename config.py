@@ -51,13 +51,37 @@ class Settings(BaseSettings):
     )
     # Public URL of our OAuth Client ID Metadata Document (CIMD): the URL *is*
     # the client_id, and the authorization server fetches it instead of us
-    # registering. Must be HTTPS with a non-root path, and must resolve to this
-    # API's ``GET /connectors/client-metadata``. Empty default → fall back to
-    # Dynamic Client Registration, which is the only option for servers that
-    # don't advertise CIMD anyway.
-    # e.g. https://api.example.com/api/connectors/client-metadata
+    # registering. Empty default → fall back to Dynamic Client Registration,
+    # which is the only option for servers that don't advertise CIMD anyway.
+    #
+    # **The app's origin, not this API's.** The document is served by the app's
+    # ``/api/connectors/client-metadata`` proxy route, which relays this API's
+    # ``GET /connectors/client-metadata`` — the same origin the redirect URI
+    # above uses, and the only one published: nginx fronts the app, and this
+    # API's own port is not reachable from outside. Reachability is never
+    # checked (``is_valid_client_metadata_url`` only asks for HTTPS and a
+    # non-root path), and the CIMD branch returns without falling back to
+    # registration, so a URL the provider cannot fetch does not degrade to DCR —
+    # it fails the authorization outright, which is worse than leaving this empty.
+    # e.g. https://app.example.com/api/connectors/client-metadata
     mcp_client_metadata_url: str = Field(
         default="", description="Public URL of our OAuth client metadata document (CIMD)",
+    )
+    # How this client names itself to an authorization server — what the user
+    # reads on the consent screen, so it has to be this deployment's own brand.
+    #
+    # It lives here rather than in ``services/mcp/oauth.py`` because that module
+    # must stay byte-identical with master and this is the one line in it each
+    # deployment wants different: forking it there is a conflict on every OAuth
+    # sync, resolved by hand, where getting it wrong shows another deployment's
+    # name to the user and nothing else notices. ``config.py`` is where the two
+    # already diverge on purpose, and the **default** carries it — not the
+    # ``.env`` — so this deployment is correct without anyone remembering to set
+    # it. Master's default reads ``PPIG Connector``; a merge conflicts here, and
+    # that is the point.
+    mcp_client_name: str = Field(
+        default="HKGAI Connector",
+        description="Client name presented to OAuth authorization servers",
     )
     algorithm: str = Field(default="HS256", description="Algorithm for JWT")
     access_token_expire_minutes: int = Field(
