@@ -25,7 +25,6 @@ throttle here.
 """
 
 import logging
-import smtplib
 import ssl
 import uuid
 from email.message import EmailMessage
@@ -148,7 +147,14 @@ async def send_html_email(*, to: str, subject: str, html_body: str) -> str:
             code=code,
             request_id=message_id,
         ) from exc
-    except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
+    # Deliberately everything else, not a tuple of transport types. What the
+    # caller does with a failure is the same whichever way the send broke —
+    # `EmailSendFailedError` (502) says "could not send, try again" and leaves
+    # the code unstored so the user can. Anything that escapes here instead
+    # reaches the generic 500 handler, and the user is told that an unexpected
+    # error occurred with nothing to do about it. A malformed `smtp_from_address`
+    # raising `ValueError` out of `aiosmtplib.send` is enough to reach that.
+    except Exception as exc:
         logger.exception("SMTP transport failure to %s", to)
         raise EmailSendError(
             message=f"SMTP transport failure: {type(exc).__name__}: {exc}",

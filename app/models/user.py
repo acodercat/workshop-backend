@@ -53,15 +53,16 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
     # Used for verification email + future contact. ``NULL`` for legacy
     # users created before the email-verification flow existed; new
-    # registrations always populate it. ``UNIQUE`` is partial (only
-    # enforced on non-NULL rows) — see migration ``12dc6d69a9ad``.
+    # registrations always populate it. ``12dc6d69a9ad`` made it unique through a
+    # partial index (non-NULL rows only); ``b1c7e29f4d8a`` replaced that with the
+    # plain ``user_email_key`` constraint this declaration renders, which allows
+    # multiple NULLs anyway (Postgres treats them as distinct).
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
-    # Vestigial on this deployment: the phone channel was removed and
-    # nothing reads or writes this. Kept as a column because dropping it
-    # needs a migration, and this branch takes its schema from master's
-    # alembic chain rather than forking it — see ``e5c1a9b7d2f4``. Always
-    # ``NULL`` here, and the partial ``UNIQUE`` costs nothing at that.
-    phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
+    # No ``phone``: the channel was removed on this branch and the column went
+    # with it in ``b7e2d9a4c1f5``. Master still has both — a merge that brings
+    # the field back is bringing back a column this database does not have, and
+    # ``e5c1a9b7d2f4`` (its partial unique index) is not in the graph to
+    # recreate it.
     # Avatar variant counter. ``0`` is the default look derived from
     # ``id`` alone; each "shuffle" click in the settings UI bumps it
     # by 1, picking a different deterministic variant. The renderer

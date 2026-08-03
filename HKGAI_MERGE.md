@@ -48,10 +48,11 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | Email brand | `grep "HKGAI Agent\|香港生成式人工智能研发中心" app/services/email/templates.py` | present |
 | Model whitelist | `grep -E "glm-5.1\|fable" config.py` | both present |
 | Tier mapping | `grep -A4 session_tier_models config.py` | `FAST: "HKGAI-V3"` |
-| No phone / SMS channel | `grep -rniE "phone\|sms\|dysms" app/ config.py \| grep -v models/user.py` | empty. The channel was removed on this branch (email only); `user.phone` stays as a column because dropping it needs a migration and this branch takes its schema from master — see below |
+| No phone / SMS channel | `grep -rniE "phone\|sms\|dysms" app/ config.py` | Only the comment in `models/user.py` saying the field is gone. The channel was removed in `5fcf505` and the column in `b7e2d9a4c1f5`; a `phone:` field reappearing on the model is a merge bringing back a column this database does not have |
 | SMS dep gone | `grep -c 'dysmsapi' pyproject.toml uv.lock` | 0 in both |
-| DCR client name | `grep _CLIENT_NAME app/services/mcp/oauth.py` | `"HKGAI Connector"` — master says `"Metaseq Connector"`, and this string is what an authorization server shows the user on its consent screen |
-| Single migration head | `uv run alembic heads` | exactly one head; `uv run alembic branches` empty |
+| OAuth client name | `grep -A1 "mcp_client_name" config.py` and `grep -c _CLIENT_NAME app/services/mcp/oauth.py` | `default="HKGAI Connector"` in `config.py`, and **0** in `oauth.py`. This is the name an authorization server prints on its consent screen, so a wrong value is visible only to the user and to nothing else. It moved out of `oauth.py` precisely so the conflict lands in `config.py`, where the two branches diverge by design — master's default reads `PPIG Connector`, and taking master's side here is the mistake this row exists to catch. A `_CLIENT_NAME` constant reappearing in `oauth.py` means a merge undid the move |
+| Migration head | `uv run alembic heads` | **One head, after you resolve it.** This branch owns `b7e2d9a4c1f5`, so a sync that brought new master revisions leaves two siblings: `uv run alembic merge heads -m "sync"`, once, then one head again. Two heads at deploy time is the failure this row exists to catch |
+| Removed schema stays removed | `ls alembic/versions/b7e2d9a4c1f5_*.py` | exactly one file. It drops `payment_order` / `commission_ledger` / `withdrawal_request`, their four enum types, `user.commission_balance_fen` and `user.phone` — a merge that loses the file loses all of it. **A master revision that alters any of them will fail this branch's `upgrade`** — about one in ten historically; the fix is a local revision here, never an edit to master's file |
 | No payment code | `grep -rn "services.payment\|services.commission\|dg_sdk" app/ scripts/ tests/` | empty |
 | No payment routes | `uv run python -c "from app.main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'commission' in p])"` | `[]` |
 | No 汇付 dep | `grep -c 'dg-sdk' pyproject.toml uv.lock` | 0 in both |
@@ -115,9 +116,12 @@ because it is *addition*, not conflict.
 | `config.py` | no `aliyun_sms_*` block — note master's default `SignName` is the **水杉智算** brand |
 | deleted outright | `app/services/sms/`, `app/common/phone.py`, `app/services/auth/phone_change.py`, `scripts/test_send_verify_sms.py`, `tests/test_phone_normalization.py` |
 
-`user.phone` **stays**: dropping a column is a migration, and this branch
-has none of its own. It is `NULL` for every user here and its partial
-`UNIQUE` costs nothing at that.
+`user.phone` **goes too**, in `b7e2d9a4c1f5` — along with its partial
+`UNIQUE` index, which Postgres drops with the column. That revision is
+this branch's first of its own; before it, the column had to stay because
+dropping one is a migration and there was nowhere to put it. Master keeps
+the field, so `user.py` is a merge conflict every time and taking master's
+side there reintroduces a column this database does not have.
 
 ## Excluding payment (充值) — the one thing a plain merge gets wrong
 
