@@ -22,6 +22,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.public.session import _owned_mcp_server_ids
+from app.services.session import connectors as session_connectors
 from app.models.session import SessionStatus
 from app.models.session_mcp_server import SessionMCPServer
 from app.schemas.session import (
@@ -164,3 +165,40 @@ class TestWhyItIsATableAndNotAnArray:
             index.name == "ix_session_mcp_server_mcp_server_id"
             for index in SessionMCPServer.__table__.indexes
         )
+
+
+class TestWritingTheConfiguration:
+    async def test_the_delete_runs_before_the_insert(self):
+        # Both statements are Core so the order is the code's, not the unit of
+        # work's. Adding the rows through the session would let a set that
+        # overlaps the old one re-insert keys the delete has not run yet.
+        db = MagicMock()
+        db.execute = AsyncMock()
+
+        await session_connectors.replace(db, uuid4(), [3, 7])
+
+        statements = [str(call.args[0]) for call in db.execute.await_args_list]
+        assert len(statements) == 2
+        assert statements[0].startswith("DELETE FROM session_mcp_server")
+        assert statements[1].startswith("INSERT INTO session_mcp_server")
+
+    async def test_an_empty_configuration_deletes_and_inserts_nothing(self):
+        # ``insert()`` with no rows is an error in SQLAlchemy, not a no-op.
+        db = MagicMock()
+        db.execute = AsyncMock()
+
+        await session_connectors.replace(db, uuid4(), [])
+
+        assert db.execute.await_count == 1
+        assert str(db.execute.await_args.args[0]).startswith("DELETE FROM")
+
+    async def test_reading_is_ordered_so_the_payload_is_stable(self):
+        # The table does not keep the order they were picked in, and an
+        # arbitrary one would make the detail response diff-noisy for no gain.
+        db = MagicMock()
+        result = MagicMock()
+        result.scalars.return_value = [3, 7]
+        db.execute = AsyncMock(return_value=result)
+
+        assert await session_connectors.configured_ids(db, uuid4()) == [3, 7]
+        assert "ORDER BY" in str(db.execute.await_args.args[0])

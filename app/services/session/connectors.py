@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.session_mcp_server import SessionMCPServer
@@ -42,13 +42,23 @@ async def replace(
 
     Replace rather than diff: the client sends the set it wants, and the set is
     small enough that computing the delta would be more code than it saves.
-    Does not commit — the caller owns the transaction, so the delete and the
-    insert land together or not at all.
+
+    Both statements are Core, so the delete provably precedes the insert. Adding
+    the rows through the session instead would leave that order to the unit of
+    work — and a set that overlaps the old one re-inserts keys the delete has
+    not run yet, which is a primary-key violation rather than a replacement.
+
+    Does not commit: the caller owns the transaction, so the two land together
+    or not at all.
     """
     await db.execute(
         delete(SessionMCPServer).where(SessionMCPServer.session_id == session_id)
     )
-    db.add_all(
-        SessionMCPServer(session_id=session_id, mcp_server_id=mcp_server_id)
-        for mcp_server_id in mcp_server_ids
-    )
+    if mcp_server_ids:
+        await db.execute(
+            insert(SessionMCPServer),
+            [
+                {"session_id": session_id, "mcp_server_id": mcp_server_id}
+                for mcp_server_id in mcp_server_ids
+            ],
+        )

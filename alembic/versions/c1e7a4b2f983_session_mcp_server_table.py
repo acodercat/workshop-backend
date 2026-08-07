@@ -26,6 +26,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 
 revision: str = "c1e7a4b2f983"
@@ -66,7 +67,7 @@ def downgrade() -> None:
         "session",
         sa.Column(
             "mcp_server_ids",
-            sa.dialects.postgresql.JSONB(astext_type=sa.Text()),
+            postgresql.JSONB(astext_type=sa.Text()),
             server_default=sa.text("'[]'::jsonb"),
             nullable=False,
         ),
