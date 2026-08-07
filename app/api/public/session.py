@@ -11,8 +11,8 @@ clients still send ``Authorization`` because the frontend uses
 ``@microsoft/fetch-event-source``.
 
 DB queries live inline in the handlers; the genuinely shared query helpers
-(``_get_or_404``, ``_owned_mcp_server_ids``, ``_load_messages``) sit at
-module top.
+(``_get_or_404``, ``_owned_mcp_server_ids``, ``_owned_connector_or_404``,
+``_load_messages``) sit at module top.
 Non-trivial logic — message enqueue with its ordering invariants and
 SSE streaming — lives in :mod:`app.services.session`.
 """
@@ -174,6 +174,25 @@ async def _owned_mcp_server_ids(
             detail=f"Unknown connector ids: {unknown}",
         )
     return unique_ids
+
+
+async def _owned_connector_or_404(
+    db: AsyncSession, connector_id: int, user_id: int
+) -> None:
+    """404 unless *connector_id* is one of this user's Connectors.
+
+    404 rather than the 400 :func:`_owned_mcp_server_ids` raises: there the id
+    is one of several in a body the client composed, and naming it back is the
+    useful answer; here it is the path, and a 404 keeps the existence of other
+    users' Connectors unsaid — the rule :func:`_get_or_404` already follows.
+    """
+    exists = await db.execute(
+        select(MCPServer.id).where(
+            MCPServer.id == connector_id, MCPServer.user_id == user_id,
+        )
+    )
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
 
 
 async def _load_messages(
@@ -543,15 +562,53 @@ async def update_session(
     session = await _get_or_404(db, session_id, current_user.id)
     if body.title is not None:
         session.title = body.title
-    if body.connectors is not None:
-        await session_connectors.replace(
-            db,
-            session.id,
-            await _owned_mcp_server_ids(db, current_user.id, body.connectors),
-        )
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
+
+
+@router.put(
+    "/sessions/{session_id}/connectors/{connector_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit("60/minute")
+async def add_session_connector(
+    request: Request,
+    session_id: uuid.UUID,
+    connector_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> None:
+    """Switch one Connector on for this session. Idempotent.
+
+    One Connector per request rather than a whole set on ``PATCH /sessions``:
+    that is what the composer's switch does, and it is what keeps two tabs
+    toggling different Connectors from overwriting each other. It also keeps
+    the session's *capabilities* off the endpoint that renames it.
+    """
+    await _get_or_404(db, session_id, current_user.id)
+    await _owned_connector_or_404(db, connector_id, current_user.id)
+    await session_connectors.add(db, session_id, connector_id)
+    await db.commit()
+
+
+@router.delete(
+    "/sessions/{session_id}/connectors/{connector_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit("60/minute")
+async def remove_session_connector(
+    request: Request,
+    session_id: uuid.UUID,
+    connector_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> None:
+    """Switch one Connector off. Idempotent — a no-op when it was not on."""
+    await _get_or_404(db, session_id, current_user.id)
+    await _owned_connector_or_404(db, connector_id, current_user.id)
+    await session_connectors.remove(db, session_id, connector_id)
+    await db.commit()
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

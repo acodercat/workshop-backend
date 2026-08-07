@@ -1,8 +1,13 @@
 """Reading and writing a session's Connector configuration.
 
 Two callers on two layers — the endpoints that show and edit it, and the
-enqueue that resolves it into a turn — so the query lives here rather than
+enqueue that resolves it into a turn — so the queries live here rather than
 beside either of them.
+
+Creation sets the whole configuration at once (:func:`replace`); afterwards it
+moves one Connector at a time (:func:`add` / :func:`remove`), because that is
+what a switch does. Sending the whole set on every toggle would make two tabs
+flipping different Connectors overwrite each other.
 
 Ownership is not checked here. It is validated once, where the configuration
 is written (``_owned_mcp_server_ids``), and enforced again where it is spent:
@@ -15,6 +20,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import delete, insert, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.session_mcp_server import SessionMCPServer
@@ -62,3 +68,34 @@ async def replace(
                 for mcp_server_id in mcp_server_ids
             ],
         )
+
+
+async def add(db: AsyncSession, session_id: uuid.UUID, mcp_server_id: int) -> None:
+    """Configure one Connector for this session. Idempotent.
+
+    ``ON CONFLICT DO NOTHING`` against the composite primary key: switching on
+    something already on is not an error, and a second tab that got there first
+    must not turn this into a 500.
+
+    Does not commit — the caller owns the transaction.
+    """
+    await db.execute(
+        pg_insert(SessionMCPServer)
+        .values(session_id=session_id, mcp_server_id=mcp_server_id)
+        .on_conflict_do_nothing()
+    )
+
+
+async def remove(
+    db: AsyncSession, session_id: uuid.UUID, mcp_server_id: int
+) -> None:
+    """Unconfigure one Connector. Idempotent — a no-op when it was not on.
+
+    Does not commit — the caller owns the transaction.
+    """
+    await db.execute(
+        delete(SessionMCPServer).where(
+            SessionMCPServer.session_id == session_id,
+            SessionMCPServer.mcp_server_id == mcp_server_id,
+        )
+    )

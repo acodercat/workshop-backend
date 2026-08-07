@@ -31,9 +31,6 @@ class SessionCreate(BaseModel):
 
 class SessionUpdate(BaseModel):
     title: str | None = None
-    # ``None`` = leave alone (what a title-only rename sends); ``[]`` turns
-    # every Connector off. The two cannot be collapsed.
-    connectors: list[int] | None = Field(default=None, max_length=CONNECTORS_MAX)
 
 
 class SessionResponse(BaseModel):

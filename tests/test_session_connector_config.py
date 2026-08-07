@@ -99,13 +99,15 @@ class TestTheWireCarriesItOnTheSession:
         # of asserting it here rather than trusting the schema to complain.
         assert "connectors" not in MessageCreate.model_fields
 
-    def test_a_session_is_created_and_updated_with_them(self):
+    def test_creation_carries_the_initial_set(self):
         assert SessionCreate().connectors == []
         assert SessionCreate(connectors=[3]).connectors == [3]
-        # ``None`` and ``[]`` are different answers: leave alone, or turn
-        # everything off.
-        assert SessionUpdate(title="x").connectors is None
-        assert SessionUpdate(connectors=[]).connectors == []
+
+    def test_renaming_a_session_cannot_touch_them(self):
+        # They moved to their own sub-resource. Leaving them on ``PATCH`` too
+        # would be two ways to write one thing, and the whole-set shape is the
+        # one where two tabs toggling different Connectors overwrite each other.
+        assert "connectors" not in SessionUpdate.model_fields
 
     def test_only_the_detail_response_carries_them(self):
         # The list endpoint returns ``SessionResponse`` per row; reading the
@@ -202,3 +204,30 @@ class TestWritingTheConfiguration:
 
         assert await session_connectors.configured_ids(db, uuid4()) == [3, 7]
         assert "ORDER BY" in str(db.execute.await_args.args[0])
+
+
+class TestTogglingOne:
+    async def test_switching_on_twice_is_not_an_error(self):
+        # Idempotent against the composite primary key. A second tab that got
+        # there first must not turn this into a 500.
+        db = MagicMock()
+        db.execute = AsyncMock()
+
+        await session_connectors.add(db, uuid4(), 7)
+
+        statement = str(db.execute.await_args.args[0])
+        assert statement.startswith("INSERT INTO session_mcp_server")
+        assert "ON CONFLICT" in statement and "DO NOTHING" in statement
+
+    async def test_switching_off_names_both_halves_of_the_key(self):
+        # Without ``mcp_server_id`` this would clear the session's whole
+        # configuration instead of one Connector.
+        db = MagicMock()
+        db.execute = AsyncMock()
+
+        await session_connectors.remove(db, uuid4(), 7)
+
+        statement = str(db.execute.await_args.args[0])
+        assert statement.startswith("DELETE FROM session_mcp_server")
+        assert "session_mcp_server.session_id = " in statement
+        assert "session_mcp_server.mcp_server_id = " in statement
