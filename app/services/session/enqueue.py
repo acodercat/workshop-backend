@@ -170,8 +170,11 @@ async def queue_user_message(
         db, session.user_id, skills or [],
     )
 
-    # Snapshot the Connectors this turn picked. Credentials are NOT
-    # snapshotted — the worker resolves url + decrypted credential live by id.
+    # Snapshot what the session's standing configuration resolves to right now
+    # — not a per-turn pick any more: the switch says "from now on", and this
+    # is the subset still owned and still connected when the turn ran.
+    # Credentials are NOT snapshotted; the worker resolves url + decrypted
+    # credential live by id.
     accepted_connectors = await _resolve_mcp_servers(
         db, session.user_id, await session_connectors.configured_ids(db, session.id),
     )

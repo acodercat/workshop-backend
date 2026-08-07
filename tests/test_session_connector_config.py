@@ -21,7 +21,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.api.public.session import _owned_mcp_server_ids
+from app.api.public.session import _owned_connector_or_404, _owned_mcp_server_ids
 from app.services.session import connectors as session_connectors
 from app.models.session import SessionStatus
 from app.models.session_mcp_server import SessionMCPServer
@@ -204,6 +204,45 @@ class TestWritingTheConfiguration:
 
         assert await session_connectors.configured_ids(db, uuid4()) == [3, 7]
         assert "ORDER BY" in str(db.execute.await_args.args[0])
+
+
+class TestTheGuardOnTheSubResource:
+    """``_owned_connector_or_404`` — what ``PUT`` checks before it writes.
+
+    Only the PUT. The DELETE is authorized by owning the session alone: its
+    statement is scoped to that session's row, so an id that is not the
+    caller's reaches nothing, and demanding the Connector still exist would
+    404 the one case the endpoint has to survive — switching off something a
+    cascade already took away.
+    """
+
+    @staticmethod
+    def _db_finding(row):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = row
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    async def test_a_connector_the_caller_owns_passes(self):
+        assert await _owned_connector_or_404(self._db_finding(7), 7, 42) is None
+
+    async def test_someone_elses_connector_is_a_404_not_a_403(self):
+        # 404 rather than 403: the id is in the path, and answering "exists,
+        # but not yours" would confirm a neighbour's Connector by its id.
+        with pytest.raises(HTTPException) as excinfo:
+            await _owned_connector_or_404(self._db_finding(None), 7, 42)
+
+        assert excinfo.value.status_code == 404
+
+    async def test_ownership_is_in_the_query_not_checked_after(self):
+        db = self._db_finding(7)
+
+        await _owned_connector_or_404(db, 7, 42)
+
+        compiled = str(db.execute.await_args.args[0])
+        assert "mcp_server.id = " in compiled
+        assert "mcp_server.user_id = " in compiled
 
 
 class TestTogglingOne:

@@ -11,9 +11,9 @@ clients still send ``Authorization`` because the frontend uses
 ``@microsoft/fetch-event-source``.
 
 DB queries live inline in the handlers. What sits at module top is what more
-than one handler needs (``_get_or_404``, ``_owned_connector_or_404``,
-``_load_messages``) plus ``_owned_mcp_server_ids``, which one handler needs
-but is long enough to name.
+than one handler needs (``_get_or_404``, ``_load_messages``) plus the two
+guards a single handler each needs but that are long enough to name —
+``_owned_mcp_server_ids`` and ``_owned_connector_or_404``.
 Non-trivial logic — message enqueue with its ordering invariants and
 SSE streaming — lives in :mod:`app.services.session`.
 """
@@ -605,9 +605,17 @@ async def remove_session_connector(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> None:
-    """Switch one Connector off. Idempotent — a no-op when it was not on."""
+    """Switch one Connector off. Idempotent — a no-op when it was not on.
+
+    Owning the session is the whole authorization: the delete is scoped to
+    this session's row, so an id that is not the caller's reaches nothing.
+    Requiring the Connector to still exist — as the PUT does, because it
+    writes a reference to it — would make the one case this must handle a
+    404: a Connector deleted in another tab is already gone from here by
+    cascade, and a client that has not caught up would be told its attempt
+    to switch off something it can still see had failed.
+    """
     await _get_or_404(db, session_id, current_user.id)
-    await _owned_connector_or_404(db, connector_id, current_user.id)
     await session_connectors.remove(db, session_id, connector_id)
     await db.commit()
 
