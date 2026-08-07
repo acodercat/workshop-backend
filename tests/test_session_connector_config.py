@@ -23,6 +23,7 @@ from fastapi import HTTPException
 
 from app.api.public.session import _owned_mcp_server_ids
 from app.models.session import SessionStatus
+from app.models.session_mcp_server import SessionMCPServer
 from app.schemas.session import (
     AgentType,
     MessageCreate,
@@ -105,25 +106,61 @@ class TestTheWireCarriesItOnTheSession:
         assert SessionUpdate(title="x").connectors is None
         assert SessionUpdate(connectors=[]).connectors == []
 
-    def test_both_responses_can_actually_be_built(self):
-        # Each is built a different way — ``SessionResponse`` by validating the
-        # ORM row, the detail one field by field in the handler — and the first
-        # cut got the second wrong: a ``validation_alias`` made ``connectors``
-        # unreachable by name, so every ``GET /sessions/{id}`` raised. Nothing
-        # else in the suite constructs either.
+    def test_only_the_detail_response_carries_them(self):
+        # The list endpoint returns ``SessionResponse`` per row; reading the
+        # configuration for each would be a query per session for something no
+        # caller reads there. The detail response is where the composer gets it,
+        # and the handler passes it explicitly — nothing else in the suite
+        # constructs either, and the first cut of this shipped a detail response
+        # that could not be built at all.
         now = datetime.now(timezone.utc)
         row = SimpleNamespace(
             id=uuid4(), user_id=1, title="t", status=SessionStatus.IDLE,
             tier=list(Tier)[0], agent_type=list(AgentType)[0],
-            mcp_server_ids=[3, 7], created_at=now, updated_at=now,
+            created_at=now, updated_at=now,
         )
 
-        assert SessionResponse.model_validate(row).connectors == [3, 7]
+        assert "connectors" not in SessionResponse.model_fields
+        SessionResponse.model_validate(row)
         assert (
             SessionDetailResponse(
                 id=row.id, title=row.title, status=row.status, tier=row.tier,
-                agent_type=row.agent_type, connectors=row.mcp_server_ids,
+                agent_type=row.agent_type, connectors=[3, 7],
                 created_at=now, updated_at=now, messages=[],
             ).connectors
             == [3, 7]
+        )
+
+
+class TestWhyItIsATableAndNotAnArray:
+    def test_deleting_a_connector_takes_it_out_of_every_session(self):
+        # The whole reason for the table. As a JSONB id array on ``session``
+        # this could not be expressed, and every deletion path would have had
+        # to remember to prune — starting with the one that forgot.
+        column = SessionMCPServer.__table__.c.mcp_server_id
+        foreign_key = next(iter(column.foreign_keys))
+
+        assert foreign_key.column.table.name == "mcp_server"
+        assert foreign_key.ondelete == "CASCADE"
+
+    def test_deleting_a_session_takes_its_configuration_with_it(self):
+        column = SessionMCPServer.__table__.c.session_id
+        foreign_key = next(iter(column.foreign_keys))
+
+        assert foreign_key.column.table.name == "session"
+        assert foreign_key.ondelete == "CASCADE"
+
+    def test_the_same_connector_cannot_be_configured_twice(self):
+        # Deduplication happens in ``_owned_mcp_server_ids`` too; this is the
+        # backstop that does not depend on remembering to call it.
+        assert [c.name for c in SessionMCPServer.__table__.primary_key] == [
+            "session_id", "mcp_server_id",
+        ]
+
+    def test_the_cascade_from_mcp_server_has_an_index(self):
+        # The composite PK leads with ``session_id``, so it cannot serve that
+        # cascade; Postgres does not auto-index foreign keys.
+        assert any(
+            index.name == "ix_session_mcp_server_mcp_server_id"
+            for index in SessionMCPServer.__table__.indexes
         )

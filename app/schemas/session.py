@@ -44,7 +44,6 @@ class SessionResponse(BaseModel):
     status: SessionStatus
     tier: Tier
     agent_type: AgentType
-    connectors: list[int] = Field(validation_alias="mcp_server_ids")
     created_at: datetime
     updated_at: datetime
 

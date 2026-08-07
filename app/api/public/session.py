@@ -86,6 +86,7 @@ from app.schemas.session import (
 from app.schemas.session_share import ShareCreate, ShareResponse
 from app.services import credits
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
+from app.services.session import connectors as session_connectors
 from app.services.session import (
     cancel_unclaimed_turn,
     generate_title,
@@ -241,12 +242,14 @@ async def create_session(
         tier=body.tier,
         agent_type=body.agent_type,
         thinking_enabled=body.thinking_enabled,
-        mcp_server_ids=await _owned_mcp_server_ids(
-            db, current_user.id, body.connectors
-        ),
         status=SessionStatus.IDLE,
     )
+    configured = await _owned_mcp_server_ids(db, current_user.id, body.connectors)
     db.add(session)
+    # The Connector rows key off ``session.id``, which a Python-side default
+    # only assigns at flush.
+    await db.flush()
+    await session_connectors.replace(db, session.id, configured)
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -521,7 +524,7 @@ async def get_session(
         status=session.status,
         tier=session.tier,
         agent_type=session.agent_type,
-        connectors=session.mcp_server_ids,
+        connectors=await session_connectors.configured_ids(db, session_id),
         created_at=session.created_at,
         updated_at=session.updated_at,
         messages=messages,
@@ -541,8 +544,10 @@ async def update_session(
     if body.title is not None:
         session.title = body.title
     if body.connectors is not None:
-        session.mcp_server_ids = await _owned_mcp_server_ids(
-            db, current_user.id, body.connectors
+        await session_connectors.replace(
+            db,
+            session.id,
+            await _owned_mcp_server_ids(db, current_user.id, body.connectors),
         )
     await db.commit()
     await db.refresh(session)

@@ -13,7 +13,6 @@ from sqlalchemy import (
     Uuid,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -175,16 +174,6 @@ class Session(Base):
             values_callable=lambda enum_cls: [m.value for m in enum_cls],
         ),
         nullable=False,
-    )
-    # Session configuration, like ``tier`` above: declared once, applied to
-    # every turn. Not a duplicate of ``session_turn.mcp_servers`` — this is
-    # the current intent, that is the immutable record of what a turn got,
-    # resolved from this against the live rows at enqueue.
-    #
-    # ``_ids`` because it holds bare ids where that column holds
-    # ``{"id", "name"}`` snapshots; matching its name would be a trap.
-    mcp_server_ids: Mapped[list[int]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False

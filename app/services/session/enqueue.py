@@ -172,7 +172,7 @@ async def queue_user_message(
     # Snapshot the Connectors this turn picked. Credentials are NOT
     # snapshotted — the worker resolves url + decrypted credential live by id.
     accepted_connectors = await _resolve_mcp_servers(
-        db, session.user_id, session.mcp_server_ids,
+        db, session.user_id, await session_connectors.configured_ids(db, session.id),
     )
 
     # Resolve the picked recipe server-side into a pinned snapshot — the
@@ -510,7 +510,7 @@ async def _resolve_mcp_servers(
 ) -> list[dict[str, str | int]]:
     """Snapshot ``{"id", "name"}`` for each of the session's live Connectors.
 
-    ``requested`` is ``session.mcp_server_ids`` — the configuration, whose
+    ``requested`` is the session's configured Connector ids, whose
     ownership was validated when it was written. Liveness cannot be: one
     disconnected since is dropped here rather than raising, so it costs the
     turn that Connector and not the message.

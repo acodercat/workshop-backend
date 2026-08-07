@@ -24,9 +24,10 @@ from app.models.sandbox import Sandbox
 from app.models.session import Session
 from app.models.session_context import SessionContext
 from app.models.session_files import SessionFile
+from app.models.session_mcp_server import SessionMCPServer
 from app.models.session_share import SessionShare
 from app.models.skill import Skill, SkillOrigin
-from app.models.staff import Staff, StaffRole, StaffStatus
+from app.models.staff import Staff, StaffStatus
 from app.models.user import User, UserStatus
 from app.models.user_feedback import FeedbackStatus, UserFeedback
 from app.models.user_skill_preference import UserSkillPreference
@@ -54,7 +55,6 @@ __all__ = [
     "Skill",
     "SkillOrigin",
     "Staff",
-    "StaffRole",
     "StaffStatus",
     "User",
     "UserFeedback",
