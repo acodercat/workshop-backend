@@ -44,6 +44,7 @@ from app.errors import (
     FileCountQuotaExceededError,
     FileSizeQuotaExceededError,
 )
+from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
@@ -138,6 +139,41 @@ async def _get_or_404(
     return session
 
 
+async def _owned_mcp_server_ids(
+    db: AsyncSession, user_id: int, requested: list[int]
+) -> list[int]:
+    """Validate a Connector configuration, preserving the caller's order.
+
+    Rejects rather than drops: an id the caller does not own is a client
+    bug, and storing it would leave a foreign id sitting in this user's
+    row. Deduplicated because the same Connector twice is one Connector.
+
+    Ownership only — not ``connected``. Configuration records intent, and
+    a Connector disconnected later must not retroactively invalidate it;
+    enqueue re-checks liveness every turn.
+    """
+    unique_ids = list(dict.fromkeys(requested))
+    if not unique_ids:
+        return []
+    owned = set(
+        (
+            await db.execute(
+                select(MCPServer.id).where(
+                    MCPServer.id.in_(unique_ids),
+                    MCPServer.user_id == user_id,
+                )
+            )
+        ).scalars()
+    )
+    unknown = [server_id for server_id in unique_ids if server_id not in owned]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown connector ids: {unknown}",
+        )
+    return unique_ids
+
+
 async def _load_messages(
     db: AsyncSession, session_id: uuid.UUID, user_id: int,
 ) -> list[MessageResponse]:
@@ -204,6 +240,9 @@ async def create_session(
         tier=body.tier,
         agent_type=body.agent_type,
         thinking_enabled=body.thinking_enabled,
+        mcp_server_ids=await _owned_mcp_server_ids(
+            db, current_user.id, body.connectors
+        ),
         status=SessionStatus.IDLE,
     )
     db.add(session)
@@ -499,6 +538,10 @@ async def update_session(
     session = await _get_or_404(db, session_id, current_user.id)
     if body.title is not None:
         session.title = body.title
+    if body.connectors is not None:
+        session.mcp_server_ids = await _owned_mcp_server_ids(
+            db, current_user.id, body.connectors
+        )
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -585,7 +628,7 @@ async def create_message(
     try:
         await queue_user_message(
             db, redis, session, content=body.content, files=body.files,
-            skills=body.skills, connectors=body.connectors,
+            skills=body.skills,
             recipe_id=body.recipe_id,
             agent_type=body.agent_type,
         )
