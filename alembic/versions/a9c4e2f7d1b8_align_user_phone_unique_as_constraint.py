@@ -1,0 +1,43 @@
+"""align user.phone unique as constraint
+
+The last straggler of ``b1c7e29f4d8a``'s cleanup: ``user.phone`` is
+``unique=True`` on the model (SQLAlchemy → ``UniqueConstraint``) but
+lives in the DB as the **partial** unique index ``ix_user_phone``
+(``WHERE phone IS NOT NULL``), so ``alembic check`` flags the
+declaration-style mismatch on every run.
+
+Same reasoning as that migration's ``ix_user_email`` path: Postgres
+refuses ``USING INDEX`` on partial indexes, so build a fresh full
+unique constraint and drop the partial. Functionally equivalent on a
+nullable column — the default ``NULLS DISTINCT`` means the many
+phone-less accounts were allowed before and remain allowed after;
+non-NULL uniqueness is preserved. The constraint name follows
+Postgres' default ``<table>_<column>_key`` form so ``alembic check``
+agrees with the unnamed ``UniqueConstraint`` the model synthesises.
+
+Revision ID: a9c4e2f7d1b8
+Revises: e2b7d4f9a1c6
+Create Date: 2026-08-06
+"""
+from typing import Sequence, Union
+
+from alembic import op
+
+
+revision: str = "a9c4e2f7d1b8"
+down_revision: Union[str, Sequence[str], None] = "e2b7d4f9a1c6"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.execute('ALTER TABLE "user" ADD CONSTRAINT user_phone_key UNIQUE (phone)')
+    op.execute("DROP INDEX ix_user_phone")
+
+
+def downgrade() -> None:
+    op.execute('ALTER TABLE "user" DROP CONSTRAINT user_phone_key')
+    op.execute(
+        "CREATE UNIQUE INDEX ix_user_phone "
+        'ON "user" (phone) WHERE phone IS NOT NULL'
+    )
