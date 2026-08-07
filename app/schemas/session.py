@@ -144,7 +144,7 @@ class SessionDetailResponse(BaseModel):
     tier: Tier
     agent_type: AgentType
     # What the composer renders its switches from on open.
-    connectors: list[int] = Field(validation_alias="mcp_server_ids")
+    connectors: list[int]
     created_at: datetime
     updated_at: datetime
     messages: list[MessageResponse]

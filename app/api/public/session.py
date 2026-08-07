@@ -10,8 +10,9 @@ DB session that closes before the stream begins, avoiding
 clients still send ``Authorization`` because the frontend uses
 ``@microsoft/fetch-event-source``.
 
-DB queries live inline in the handlers; the two genuinely shared query
-helpers (``_get_or_404``, ``_load_messages``) sit at module top.
+DB queries live inline in the handlers; the genuinely shared query helpers
+(``_get_or_404``, ``_owned_mcp_server_ids``, ``_load_messages``) sit at
+module top.
 Non-trivial logic — message enqueue with its ordering invariants and
 SSE streaming — lives in :mod:`app.services.session`.
 """
@@ -520,6 +521,7 @@ async def get_session(
         status=session.status,
         tier=session.tier,
         agent_type=session.agent_type,
+        connectors=session.mcp_server_ids,
         created_at=session.created_at,
         updated_at=session.updated_at,
         messages=messages,

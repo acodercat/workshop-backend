@@ -13,12 +13,25 @@ visible from the endpoint that calls it:
 No live database, so the query is pinned by its compiled text.
 """
 
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
+
 import pytest
 from fastapi import HTTPException
-from unittest.mock import AsyncMock, MagicMock
 
 from app.api.public.session import _owned_mcp_server_ids
-from app.schemas.session import MessageCreate, SessionCreate, SessionUpdate
+from app.models.session import SessionStatus
+from app.schemas.session import (
+    AgentType,
+    MessageCreate,
+    SessionCreate,
+    SessionDetailResponse,
+    SessionResponse,
+    SessionUpdate,
+    Tier,
+)
 
 
 def _db_owning(*ids: int):
@@ -91,3 +104,26 @@ class TestTheWireCarriesItOnTheSession:
         # everything off.
         assert SessionUpdate(title="x").connectors is None
         assert SessionUpdate(connectors=[]).connectors == []
+
+    def test_both_responses_can_actually_be_built(self):
+        # Each is built a different way — ``SessionResponse`` by validating the
+        # ORM row, the detail one field by field in the handler — and the first
+        # cut got the second wrong: a ``validation_alias`` made ``connectors``
+        # unreachable by name, so every ``GET /sessions/{id}`` raised. Nothing
+        # else in the suite constructs either.
+        now = datetime.now(timezone.utc)
+        row = SimpleNamespace(
+            id=uuid4(), user_id=1, title="t", status=SessionStatus.IDLE,
+            tier=list(Tier)[0], agent_type=list(AgentType)[0],
+            mcp_server_ids=[3, 7], created_at=now, updated_at=now,
+        )
+
+        assert SessionResponse.model_validate(row).connectors == [3, 7]
+        assert (
+            SessionDetailResponse(
+                id=row.id, title=row.title, status=row.status, tier=row.tier,
+                agent_type=row.agent_type, connectors=row.mcp_server_ids,
+                created_at=now, updated_at=now, messages=[],
+            ).connectors
+            == [3, 7]
+        )
