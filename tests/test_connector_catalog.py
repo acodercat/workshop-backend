@@ -18,7 +18,7 @@ from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES, build_connector
 
 def _entry(**over) -> MCPServerCatalogEntry:
     base = dict(
-        id=7, key="notion", name="Notion", url="https://mcp.notion.com/mcp",
+        id=7, name="Notion", url="https://mcp.notion.com/mcp",
         auth_type=MCPServerAuthType.OAUTH, oauth_scope="read",
         description="Search your pages", icon_url=None,
         published=True, sort_order=0,
@@ -109,6 +109,27 @@ class TestInstantiableAuthTypes:
         }
 
 
+class TestWhatIdentifiesAnEntry:
+    """One row per server, and ``name`` is only the label on it.
+
+    ``key`` used to carry this table's single unique constraint, which was the
+    one thing it did that ``id`` and ``name`` did not. Moving it to ``url``
+    keeps the guard and drops the third identity.
+    """
+
+    def test_two_entries_cannot_offer_the_same_server(self):
+        assert MCPServerCatalogEntry.__table__.c.url.unique is True
+
+    def test_two_entries_may_share_a_display_name(self):
+        # Not an oversight: ``name`` is copied onto the user's row and shown
+        # to them, and an operator renaming one entry must not fail because
+        # another already reads that way.
+        assert not MCPServerCatalogEntry.__table__.c.name.unique
+
+    def test_nothing_is_offered_under_a_slug_any_more(self):
+        assert "key" not in MCPServerCatalogEntry.__table__.c
+
+
 class TestCatalogEntryResponse:
     @pytest.mark.parametrize(
         "field",
@@ -126,7 +147,6 @@ class TestCatalogEntryResponse:
 
     def test_exposes_what_the_directory_renders(self):
         response = ConnectorCatalogEntryResponse.model_validate(_entry())
-        assert response.key == "notion"
         assert response.name == "Notion"
         assert response.description == "Search your pages"
 

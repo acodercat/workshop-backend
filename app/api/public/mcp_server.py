@@ -578,7 +578,7 @@ async def _build_catalog_connector(
     client_secret = (
         open_secret(
             entry.oauth_client_secret_encrypted,
-            what=f"catalog entry {entry.key!r} OAuth client secret",
+            what=f"catalog entry {entry.name!r} OAuth client secret",
         )
         if entry.oauth_client_secret_encrypted is not None
         else None

@@ -106,7 +106,6 @@ class ConnectorCatalogEntryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    key: str
     name: str
     url: str
     auth_type: str

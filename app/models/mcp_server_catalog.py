@@ -42,14 +42,15 @@ class MCPServerCatalogEntry(Base):
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True,
     )
-    # Stable slug (``"notion"``) — the frontend's lookup key for a bundled asset
-    # or i18n string. Immutable in practice: changing it orphans those lookups.
-    key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     # Copied onto the user's row at add time, so it also decides the per-user
     # name uniqueness (``uq_mcp_server_user_id_name``) — which is what makes
     # adding the same official Connector twice a clean 409.
     name: Mapped[str] = mapped_column(String(64), nullable=False)
-    url: Mapped[str] = mapped_column(String, nullable=False)
+    # The entry's identity, and the only thing that has to be unique: two rows
+    # pointing at one server are the same Connector offered twice, whatever
+    # they are called. ``name`` deliberately is not — it is the display copy,
+    # and an operator renaming one entry must not collide with another.
+    url: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     auth_type: Mapped[MCPServerAuthType] = mapped_column(
         SAEnum(
             MCPServerAuthType,
@@ -110,6 +111,6 @@ class MCPServerCatalogEntry(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<MCPServerCatalogEntry(id={self.id}, key={self.key!r}, "
+            f"<MCPServerCatalogEntry(id={self.id}, name={self.name!r}, "
             f"published={self.published})>"
         )

@@ -8,20 +8,22 @@ Usage::
 
     # add an OAuth entry (most hosted MCP servers)
     uv run python -m scripts.manage_connector_catalog add \\
-        --key notion --name Notion --url https://mcp.notion.com/mcp \\
+        --name Notion --url https://mcp.notion.com/mcp \\
         --auth-type OAUTH --description "Search and edit your Notion pages"
 
     uv run python -m scripts.manage_connector_catalog list
-    uv run python -m scripts.manage_connector_catalog unpublish --key notion
-    uv run python -m scripts.manage_connector_catalog publish --key notion
+    uv run python -m scripts.manage_connector_catalog unpublish \\
+        --url https://mcp.notion.com/mcp
+    uv run python -m scripts.manage_connector_catalog publish \\
+        --url https://mcp.notion.com/mcp
 
     # attach a pre-registered OAuth app (providers without DCR/CIMD, e.g.
     # Figma). The secret is read from $CATALOG_OAUTH_CLIENT_SECRET or an
     # interactive prompt — never from argv, which lands in shell history.
     uv run python -m scripts.manage_connector_catalog set-oauth-client \
-        --key figma --client-id vFtd...
+        --url https://mcp.figma.com/mcp --client-id vFtd...
     uv run python -m scripts.manage_connector_catalog set-oauth-client \
-        --key figma --clear
+        --url https://mcp.figma.com/mcp --clear
 """
 
 import argparse
@@ -39,15 +41,19 @@ from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.services.crypto import encrypt_secret
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
 
+_URL_HELP = "the entry's MCP server URL, exactly as `list` prints it"
+
 
 async def _add(db: AsyncSession, args: argparse.Namespace) -> int:
-    existing = await _find(db, args.key)
+    existing = await _find(db, args.url)
     if existing is not None:
-        print(f"key {args.key!r} already exists (id={existing.id})", file=sys.stderr)
+        print(
+            f"the catalog already offers {args.url} (id={existing.id})",
+            file=sys.stderr,
+        )
         return 1
 
     entry = MCPServerCatalogEntry(
-        key=args.key,
         name=args.name,
         url=args.url,
         auth_type=MCPServerAuthType(args.auth_type),
@@ -59,7 +65,7 @@ async def _add(db: AsyncSession, args: argparse.Namespace) -> int:
     db.add(entry)
     await db.commit()
     await db.refresh(entry)
-    print(f"added {entry.key!r} (id={entry.id})")
+    print(f"added {entry.name!r} (id={entry.id})")
     return 0
 
 
@@ -70,21 +76,21 @@ async def _set_oauth_client(db: AsyncSession, args: argparse.Namespace) -> int:
     only *new* adds see the change: every existing Connector snapshotted the
     old app into its own row at add time.
     """
-    entry = await _find(db, args.key)
+    entry = await _find(db, args.url)
     if entry is None:
-        print(f"no catalog entry with key {args.key!r}", file=sys.stderr)
+        print(f"no catalog entry for {args.url}", file=sys.stderr)
         return 1
 
     if args.clear:
         entry.oauth_client_id = None
         entry.oauth_client_secret_encrypted = None
         await db.commit()
-        print(f"{args.key!r}: pre-registered OAuth app cleared")
+        print(f"{entry.name!r}: pre-registered OAuth app cleared")
         return 0
 
     if entry.auth_type != MCPServerAuthType.OAUTH:
         print(
-            f"{args.key!r} is {entry.auth_type.value}, not OAUTH — a"
+            f"{entry.name!r} is {entry.auth_type.value}, not OAUTH — a"
             f" pre-registered app would never be used",
             file=sys.stderr,
         )
@@ -100,20 +106,20 @@ async def _set_oauth_client(db: AsyncSession, args: argparse.Namespace) -> int:
     entry.oauth_client_secret_encrypted = encrypt_secret(secret) if secret else None
     await db.commit()
     print(
-        f"{args.key!r}: OAuth app set (client_id={args.client_id},"
+        f"{entry.name!r}: OAuth app set (client_id={args.client_id},"
         f" secret={'stored encrypted' if secret else 'none — public client'})"
     )
     return 0
 
 
-async def _set_published(db: AsyncSession, key: str, published: bool) -> int:
-    entry = await _find(db, key)
+async def _set_published(db: AsyncSession, url: str, published: bool) -> int:
+    entry = await _find(db, url)
     if entry is None:
-        print(f"no catalog entry with key {key!r}", file=sys.stderr)
+        print(f"no catalog entry for {url}", file=sys.stderr)
         return 1
     entry.published = published
     await db.commit()
-    print(f"{key!r} is now {'published' if published else 'unpublished'}")
+    print(f"{entry.name!r} is now {'published' if published else 'unpublished'}")
     return 0
 
 
@@ -131,14 +137,16 @@ async def _list(db: AsyncSession) -> int:
             f"  app={entry.oauth_client_id}" if entry.oauth_client_id else ""
         )
         print(
-            f"{entry.id:>4}  {entry.key:<20} {entry.auth_type.value:<7} "
+            f"{entry.id:>4}  {entry.name:<20} {entry.auth_type.value:<7} "
             f"{state:<12} {entry.url}{app_marker}"
         )
     return 0
 
 
-async def _find(db: AsyncSession, key: str) -> MCPServerCatalogEntry | None:
-    stmt = select(MCPServerCatalogEntry).where(MCPServerCatalogEntry.key == key)
+async def _find(db: AsyncSession, url: str) -> MCPServerCatalogEntry | None:
+    """The entry offering *url*, which is what identifies one — the catalog
+    holds at most a single row per server, and ``name`` is only its label."""
+    stmt = select(MCPServerCatalogEntry).where(MCPServerCatalogEntry.url == url)
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
@@ -149,9 +157,9 @@ async def main(args: argparse.Namespace) -> int:
         if args.command == "list":
             return await _list(db)
         if args.command == "publish":
-            return await _set_published(db, args.key, True)
+            return await _set_published(db, args.url, True)
         if args.command == "unpublish":
-            return await _set_published(db, args.key, False)
+            return await _set_published(db, args.url, False)
         if args.command == "set-oauth-client":
             return await _set_oauth_client(db, args)
     return 1  # pragma: no cover — argparse rejects unknown commands first
@@ -162,7 +170,6 @@ def _parse_args() -> argparse.Namespace:
     sub = parser.add_subparsers(dest="command", required=True)
 
     add = sub.add_parser("add", help="add a catalog entry")
-    add.add_argument("--key", required=True, help="stable slug, e.g. notion")
     add.add_argument("--name", required=True, help="display name, copied to the connector")
     add.add_argument("--url", required=True, help="remote MCP server URL (https)")
     # Only the two the add flow can complete: BEARER/HEADER would need a secret
@@ -182,7 +189,7 @@ def _parse_args() -> argparse.Namespace:
         "set-oauth-client",
         help="attach, rotate or clear an entry's pre-registered OAuth app",
     )
-    set_client.add_argument("--key", required=True)
+    set_client.add_argument("--url", required=True, help=_URL_HELP)
     group = set_client.add_mutually_exclusive_group(required=True)
     group.add_argument("--client-id", help="the app's public client id")
     group.add_argument(
@@ -195,7 +202,7 @@ def _parse_args() -> argparse.Namespace:
         ("unpublish", "hide an entry without deleting it"),
     ):
         cmd = sub.add_parser(name, help=help_text)
-        cmd.add_argument("--key", required=True)
+        cmd.add_argument("--url", required=True, help=_URL_HELP)
 
     return parser.parse_args()
 
