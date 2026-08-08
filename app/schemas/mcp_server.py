@@ -4,9 +4,10 @@ from datetime import datetime
 
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from app.models.mcp_server import MCPServerAuthType
+from app.services.mcp.url_identity import normalize_connector_url
 
 
 def _require_auth_credentials(
@@ -32,6 +33,19 @@ def _require_auth_credentials(
 MAX_TOOL_NAME_LEN = 128
 MAX_DISABLED_TOOLS = 256
 ToolName = Annotated[str, Field(min_length=1, max_length=MAX_TOOL_NAME_LEN)]
+
+# Every URL that reaches a column goes through here, so the two spellings of
+# one endpoint cannot become two Connectors — see ``url_identity``. On the
+# type rather than at the five call sites that write one, which is five
+# chances to forget.
+# The bounds sit *after* the normalizer so they judge what will be stored:
+# ``"   "`` clears ``min_length=1`` as written and is nothing once canonical,
+# and a URL only over the limit because of a ``:443`` should not be refused.
+ConnectorEndpointUrl = Annotated[
+    str,
+    AfterValidator(normalize_connector_url),
+    Field(min_length=1, max_length=2048),
+]
 
 
 class ConnectorIcon(BaseModel):
@@ -141,7 +155,7 @@ class ConnectorCreate(_ConnectorAuthFields):
 
     catalog_id: int | None = None
     name: str | None = Field(default=None, min_length=1, max_length=64)
-    url: str | None = Field(default=None, min_length=1, max_length=2048)
+    url: ConnectorEndpointUrl | None = None
     # OAuth (auth_type=OAUTH) — all optional. With no client_id we use Dynamic
     # Client Registration; provide id/secret for servers that don't support it.
     oauth_client_id: str | None = Field(default=None, max_length=512)
@@ -183,7 +197,7 @@ class ConnectorCreate(_ConnectorAuthFields):
 
 
 class ConnectionTestRequest(_ConnectorAuthFields):
-    url: str = Field(min_length=1, max_length=2048)
+    url: ConnectorEndpointUrl
 
 
 class ConnectorAuthorizationResponse(BaseModel):
@@ -214,7 +228,7 @@ class ConnectorUpdate(BaseModel):
     so validation stays coherent; omit all three to leave auth unchanged."""
 
     name: str | None = Field(default=None, min_length=1, max_length=64)
-    url: str | None = Field(default=None, min_length=1, max_length=2048)
+    url: ConnectorEndpointUrl | None = None
     auth_type: MCPServerAuthType | None = None
     credential: str | None = Field(default=None, max_length=8192)
     header_name: str | None = Field(default=None, max_length=128)

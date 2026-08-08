@@ -40,6 +40,7 @@ from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.services.crypto import encrypt_secret
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
+from app.services.mcp.url_identity import normalize_connector_url
 
 _URL_HELP = "the entry's MCP server URL, exactly as `list` prints it"
 
@@ -151,6 +152,11 @@ async def _find(db: AsyncSession, url: str) -> MCPServerCatalogEntry | None:
 
 
 async def main(args: argparse.Namespace) -> int:
+    # The same canonical spelling the API stores, so ``--url`` addresses an
+    # entry however the operator typed it and ``add`` cannot seed a second
+    # row for a server the catalog already offers.
+    if getattr(args, "url", None):
+        args.url = normalize_connector_url(args.url)
     async with AsyncSessionLocal() as db:
         if args.command == "add":
             return await _add(db, args)

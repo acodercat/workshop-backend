@@ -29,7 +29,10 @@ Create Date: 2026-08-08
 """
 from typing import Sequence, Union
 
+import sqlalchemy as sa
 from alembic import op
+
+from app.services.mcp.url_identity import normalize_connector_url
 
 
 revision: str = "a3d7f61b8e04"
@@ -38,7 +41,36 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _canonicalize(table: str) -> None:
+    """Rewrite every URL in *table* to its canonical spelling.
+
+    Imported rather than reimplemented in SQL: the app normalizes on the way
+    in, and a second definition here that drifted would leave rows the app
+    then rewrites into collisions the constraint has already accepted. One
+    definition is the whole point, and the cost is that this migration reads
+    ``url_identity`` — a pure function, no models, no session.
+    """
+    connection = op.get_bind()
+    rows = connection.execute(sa.text(f"SELECT id, url FROM {table}")).fetchall()
+    for row_id, url in rows:
+        canonical = normalize_connector_url(url)
+        if canonical != url:
+            connection.execute(
+                sa.text(f"UPDATE {table} SET url = :url WHERE id = :id"),
+                {"url": canonical, "id": row_id},
+            )
+
+
 def upgrade() -> None:
+    # Before the dedup, not after: ``…/mcp`` and ``…/mcp/`` are distinct until
+    # they are canonical, so a dedup run first would keep both and the unique
+    # index below would then reject what it just approved.
+    _canonicalize("mcp_server")
+    # The catalog's URL is already unique, but the operator CLI now addresses
+    # entries by their canonical URL — a row still holding a trailing slash
+    # would have become unreachable from it.
+    _canonicalize("mcp_server_catalog")
+
     op.execute(
         """
         DELETE FROM mcp_server AS m
