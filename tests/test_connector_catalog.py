@@ -181,7 +181,7 @@ class TestPreRegisteredClientPassThrough:
         monkeypatch.setattr(
             endpoint.catalog, "get_published_entry", AsyncMock(return_value=entry)
         )
-        monkeypatch.setattr(endpoint, "_reject_duplicate_name", AsyncMock())
+        monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
         monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
         monkeypatch.setattr(endpoint, "_register_oauth_client", _capture)
         await endpoint._build_catalog_connector(

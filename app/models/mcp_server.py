@@ -198,7 +198,12 @@ class MCPServer(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("user_id", "name", name="uq_mcp_server_user_id_name"),
+        # The server, not the label. A user may call two Connectors the same
+        # thing; they may not hold two rows for one server, which would be the
+        # same tools twice in a turn's catalog and two credentials to keep in
+        # step. Matched on the exact string — a trailing slash makes a second
+        # URL, the same way it always did for names.
+        UniqueConstraint("user_id", "url", name="uq_mcp_server_user_id_url"),
     )
 
     def __repr__(self) -> str:

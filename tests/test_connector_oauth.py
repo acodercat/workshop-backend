@@ -1007,15 +1007,16 @@ class TestBuildOAuthConnector:
     ``TypeError`` at request time while every other test still passes.
     """
 
-    async def test_a_duplicate_name_is_refused_before_registering(
+    async def test_a_second_connector_for_one_server_is_refused_before_registering(
         self, monkeypatch,
     ):
         # Dynamic registration mints a client at the provider. One minted for a
-        # row that then 409s on the name index is orphaned — never stored, so
-        # never revocable — and a user re-adding the same server a few times
-        # would leave one behind each time.
+        # row that then 409s on the index is orphaned — never stored, so never
+        # revocable — and a user re-adding the same server a few times would
+        # leave one behind each time. The index is on the URL now: the server
+        # is what a Connector is, and the name is only its label.
         from app.api.public import mcp_server as endpoint
-        from app.errors import ConnectorNameConflictError
+        from app.errors import ConnectorUrlConflictError
         from app.models.mcp_server import MCPServerAuthType
         from app.schemas.mcp_server import ConnectorCreate
 
@@ -1028,7 +1029,7 @@ class TestBuildOAuthConnector:
         db = _session()
         db.execute.return_value = MagicMock(first=MagicMock(return_value=(1,)))
 
-        with pytest.raises(ConnectorNameConflictError):
+        with pytest.raises(ConnectorUrlConflictError):
             await endpoint._build_oauth_connector(
                 db,
                 ConnectorCreate(
@@ -2524,6 +2525,9 @@ async def _patch_connector(
 
     # The endpoint is rate-limit decorated, which insists on a real request.
     monkeypatch.setattr(limiter, "enabled", False)
+    # The URL guard has its own cover in test_connector_url_uniqueness; here it
+    # would only answer from a double that knows nothing.
+    monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
 
     async def owned(*_args, **_kwargs):
         return connector

@@ -38,7 +38,7 @@ from app.errors import (
     ConnectorAuthorizationExpiredError,
     ConnectorAuthorizationSupersededError,
     ConnectorChangedDuringAuthorizationError,
-    ConnectorNameConflictError,
+    ConnectorUrlConflictError,
     ConnectorNotAuthorizedError,
     ConnectorNotOAuthError,
     ConnectorOAuthChangeUnsupportedError,
@@ -161,7 +161,7 @@ async def create_connector(
     db.add(connector)
     # ``connector.name``, not ``body.name`` — the catalog path takes its name
     # from the entry, so the body's is None there.
-    await _commit_or_conflict(db, connector.name)
+    await _commit_or_conflict(db, connector.url)
     await db.refresh(connector)
     return _to_response(connector)
 
@@ -339,6 +339,13 @@ async def update_connector(
     url_changed = body.url is not None and body.url != connector.url
     auth_changed = body.auth_type is not None
     _reject_unprovisionable(connector, body, url_changed=url_changed)
+    if url_changed:
+        # Ask before probing: pointing an existing Connector at a server the
+        # user already has is a 409, and finding that out from the index after
+        # a network round trip would report it as a failed probe instead.
+        await _reject_duplicate_url(
+            db, current_user.id, body.url, excluding=connector.id
+        )
 
     # What to probe is decided by the row *as it will be*, not as it is: an OAuth
     # Connector switching to BEARER is probed (its new auth type is not OAuth),
@@ -389,7 +396,7 @@ async def update_connector(
     if probed is not None:
         _apply_probe(connector, probed)
 
-    await _commit_or_conflict(db, connector.name)
+    await _commit_or_conflict(db, connector.url)
     await db.refresh(connector)
     return _to_response(connector)
 
@@ -571,7 +578,7 @@ async def _build_catalog_connector(
     """
     entry = await catalog.get_published_entry(db, catalog_id)
     connector = catalog.build_connector(entry, user_id)
-    await _reject_duplicate_name(db, user_id, connector.name)
+    await _reject_duplicate_url(db, user_id, connector.url)
     # Decrypted before the connection is released: ``entry`` belongs to this
     # session, and a Fernet failure should surface as the usual
     # credential-unreadable error, not as a lazy-load surprise later.
@@ -609,7 +616,7 @@ async def _build_oauth_connector(
     db: AsyncSession, body: ConnectorCreate, user_id: int,
 ) -> MCPServer:
     """Discover metadata + register/prepare the OAuth client (no tokens yet)."""
-    await _reject_duplicate_name(db, user_id, body.name)
+    await _reject_duplicate_url(db, user_id, body.url)
     await _release_connection(db)
     client, authorization = await _register_oauth_client(
         url=body.url,
@@ -1227,32 +1234,39 @@ async def _get_owned_connector(
     return connector
 
 
-async def _reject_duplicate_name(db: AsyncSession, user_id: int, name: str) -> None:
+async def _reject_duplicate_url(
+    db: AsyncSession, user_id: int, url: str, *, excluding: int | None = None
+) -> None:
     """Raise the same 409 the unique index would, without hitting the network.
 
     "Without hitting the network" is the whole point on the OAuth paths, and
     why both of them ask before they register: dynamic registration mints a
     client *at the provider*, and a client minted for a row that then collides
-    on the name index is orphaned — never stored, so never revocable, and a
-    user re-adding the same server a few times leaves one behind each time.
+    on the index is orphaned — never stored, so never revocable, and a user
+    re-adding the same server a few times leaves one behind each time.
+
+    *excluding* is the row being edited, so a PATCH that leaves the URL where
+    it already is does not collide with itself.
 
     Advisory only — a concurrent insert still lands on
-    ``uq_mcp_server_user_id_name`` in :func:`_commit_or_conflict`.
+    ``uq_mcp_server_user_id_url`` in :func:`_commit_or_conflict`.
     """
     stmt = select(MCPServer.id).where(
-        MCPServer.user_id == user_id, MCPServer.name == name,
+        MCPServer.user_id == user_id, MCPServer.url == url,
     )
+    if excluding is not None:
+        stmt = stmt.where(MCPServer.id != excluding)
     if (await db.execute(stmt)).first() is not None:
-        raise ConnectorNameConflictError(
-            f"a connector named {name!r} already exists for this user"
+        raise ConnectorUrlConflictError(
+            f"a connector for {url} already exists for this user"
         )
 
 
-async def _commit_or_conflict(db: AsyncSession, name: str) -> None:
+async def _commit_or_conflict(db: AsyncSession, url: str) -> None:
     try:
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise ConnectorNameConflictError(
-            f"a connector named {name!r} already exists for this user"
+        raise ConnectorUrlConflictError(
+            f"a connector for {url} already exists for this user"
         ) from exc

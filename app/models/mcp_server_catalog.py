@@ -42,9 +42,9 @@ class MCPServerCatalogEntry(Base):
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True,
     )
-    # Copied onto the user's row at add time, so it also decides the per-user
-    # name uniqueness (``uq_mcp_server_user_id_name``) — which is what makes
-    # adding the same official Connector twice a clean 409.
+    # Copied onto the user's row at add time, and free to repeat: what stops
+    # the same official Connector being added twice is the URL travelling with
+    # it (``uq_mcp_server_user_id_url``), not the label.
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     # The entry's identity, and the only thing that has to be unique: two rows
     # pointing at one server are the same Connector offered twice, whatever
