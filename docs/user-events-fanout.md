@@ -73,7 +73,7 @@ connection count to Redis pool pressure.
 ```
 
 **The single subscription** is owned by the app lifespan
-(`app/main.py`): at startup it builds `app.state.user_event_hub =
+(`app/public_main.py`): at startup it builds `app.state.user_event_hub =
 UserEventHub(app.state.redis)` and calls `.start()`, which launches the
 `_reader()` task that does `pubsub.subscribe(USER_EVENTS_CHANNEL)` once
 and holds one connection for the life of the process. It is torn down in

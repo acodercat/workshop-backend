@@ -14,7 +14,7 @@ asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 import pytest
 
 from app.models.admin_audit_log import AdminAuditLog
-from app.models.staff import Staff, StaffRole, StaffStatus
+from app.models.staff import Staff, StaffStatus
 from app.services.admin import AdminContext, AuditAction, audit
 
 
@@ -42,8 +42,7 @@ def _context(db: _FakeDb) -> AdminContext:
             id=7,
             username="alice",
             password_hash="x",
-            display_name="Alice",
-            role=StaffRole.OWNER,
+            name="Alice",
             status=StaffStatus.ACTIVE,
             token_version=0,
         ),

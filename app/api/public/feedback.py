@@ -1,10 +1,10 @@
 """User-feedback endpoints.
 
-Single endpoint today: ``POST /feedback`` lets an authenticated user
-submit free-text feedback (with optional pre-uploaded image
-attachments) for the admin team to review. Admin-side endpoints will
-be added with the internal review tool; for now admins query the
-``user_feedback`` table directly.
+Single endpoint: ``POST /feedback`` lets an authenticated user submit
+free-text feedback (with optional pre-uploaded image attachments). The
+review side lives on the console surface (:mod:`app.api.admin.feedback`)
+— this module only creates rows; the workflow ``status`` on them is the
+console's to manage.
 """
 
 import logging

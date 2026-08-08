@@ -20,6 +20,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     HTTPException,
+    Query,
     Request,
     status,
 )
@@ -47,6 +48,7 @@ from app.errors import (
     OAuthNotConfiguredError,
 )
 from app.models.mcp_server import MCPServer, MCPServerAuthType
+from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.mcp_server import (
@@ -59,7 +61,9 @@ from app.schemas.mcp_server import (
     ConnectorUpdate,
     OAuthCallbackRequest,
 )
+from app.services import localized_text
 from app.services.crypto import encrypt_secret, open_secret
+from app.services.localized_text import DEFAULT_LOCALE, normalize_locale
 from app.services.mcp import catalog, grant, oauth
 from app.services.mcp.probe import ProbeResult, probe
 from app.services.redis import oauth_current_state_key, oauth_state_key
@@ -111,15 +115,41 @@ async def get_client_metadata() -> dict:
 async def list_connector_catalog(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
+    locale: str = Query(default=DEFAULT_LOCALE),
 ) -> list[ConnectorCatalogEntryResponse]:
     """The official Connector catalog — templates the caller can add.
 
     User-independent (every caller sees the same published entries); the client
     joins it against ``GET /connectors`` on ``catalog_id`` to tell an entry it
     has already added from one it hasn't.
+
+    ``name`` and ``description`` are resolved for the ``locale`` query param
+    (the frontend proxy forwards the app UI language, as it does for skills):
+    an entry carrying a translation returns it, everything else the stored
+    default. The maps themselves are never exposed.
     """
-    entries = await catalog.list_published(db)
-    return [ConnectorCatalogEntryResponse.model_validate(entry) for entry in entries]
+    resolved_locale = normalize_locale(locale)
+    return [
+        _localized_catalog_response(entry, resolved_locale)
+        for entry in await catalog.list_published(db)
+    ]
+
+
+def _localized_catalog_response(
+    entry: MCPServerCatalogEntry, locale: str
+) -> ConnectorCatalogEntryResponse:
+    """One entry as the client sees it, in *locale*.
+
+    Built field-by-field rather than validated-then-patched: the response is
+    what the client renders, and assigning over a validated copy is how a
+    field quietly keeps the untranslated value when it is renamed.
+    """
+    response = ConnectorCatalogEntryResponse.model_validate(entry)
+    response.name = localized_text.resolve(entry.name, entry.name_i18n, locale)
+    response.description = localized_text.resolve_optional(
+        entry.description, entry.description_i18n, locale
+    )
+    return response
 
 
 @router.post("/connectors", status_code=status.HTTP_201_CREATED)
@@ -129,16 +159,22 @@ async def create_connector(
     body: ConnectorCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
+    locale: str = Query(default=DEFAULT_LOCALE),
 ) -> ConnectorResponse:
     """Persist a Connector, from the official catalog or a custom definition.
 
     Probes the server first, except for OAuth — which can't be probed until the
     user authorizes (see ``/connectors/{id}/authorizations``). Adding the same
-    catalog entry twice collides on the per-user name uniqueness and surfaces as
+    catalog entry twice collides on the per-user URL uniqueness and surfaces as
     the usual 409.
+
+    ``locale`` decides which of a catalog entry's names is copied onto the new
+    row — the one the user was reading. It is a snapshot from then on.
     """
     if body.catalog_id is not None:
-        connector = await _build_catalog_connector(db, body.catalog_id, current_user.id)
+        connector = await _build_catalog_connector(
+            db, body.catalog_id, current_user.id, normalize_locale(locale)
+        )
     elif body.auth_type == MCPServerAuthType.OAUTH:
         connector = await _build_oauth_connector(db, body, current_user.id)
     else:
@@ -568,7 +604,7 @@ async def _release_connection(db: AsyncSession) -> None:
 
 
 async def _build_catalog_connector(
-    db: AsyncSession, catalog_id: int, user_id: int,
+    db: AsyncSession, catalog_id: int, user_id: int, locale: str,
 ) -> MCPServer:
     """Instantiate an official catalog entry as this user's own Connector.
 
@@ -577,7 +613,7 @@ async def _build_catalog_connector(
     stored), everything else is probed so a broken entry fails at add time.
     """
     entry = await catalog.get_published_entry(db, catalog_id)
-    connector = catalog.build_connector(entry, user_id)
+    connector = catalog.build_connector(entry, user_id, locale)
     await _reject_duplicate_url(db, user_id, connector.url)
     # Decrypted before the connection is released: ``entry`` belongs to this
     # session, and a Fernet failure should surface as the usual

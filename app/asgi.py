@@ -1,6 +1,6 @@
 """Shared construction for every HTTP surface this backend serves.
 
-There are two ASGI apps — the customer API (:mod:`app.main`) and the
+There are two ASGI apps — the customer API (:mod:`app.public_main`) and the
 admin console (:mod:`app.admin_main`) — and they must agree on everything
 that is not a *deliberate* difference: the error envelope, the rate
 limiter, the middleware **order**, request-id correlation, Sentry,
@@ -11,14 +11,14 @@ copies. :func:`create_app` owns it instead, so a change to the stack
 reaches both surfaces or neither, and the per-app differences are exactly
 the arguments it takes — nothing else varies:
 
-=====================  =========================  ===============================
-                       ``app.main``               ``app.admin_main``
-=====================  =========================  ===============================
-``root_path``          ``/api/v1``                ``/admin/api/v1``
-``cors_origins``       ``cors_origins``           ``admin_cors_origins``
-``lifespan``           Redis pools + event hub    nothing to acquire
-``readiness_probes``   Redis + DB                 DB only
-=====================  =========================  ===============================
+=====================  ========================  =======================
+                       ``app.public_main``       ``app.admin_main``
+=====================  ========================  =======================
+``root_path``          ``/api/v1``               ``/admin/api/v1``
+``cors_origins``       ``cors_origins``          ``admin_cors_origins``
+``lifespan``           Redis pools + event hub   nothing to acquire
+``readiness_probes``   Redis + DB                DB only
+=====================  ========================  =======================
 
 This is the same reasoning that produced
 :func:`app.exception_handlers.install_error_handlers`, applied to the

@@ -4,12 +4,22 @@ The catalog is operator data, not code — this is how entries get in and out
 until the admin console grows a CRUD for it. Publishing state is a flag rather
 than a delete so Connectors users already added keep their ``catalog_id``.
 
+Translations are set at ``add`` time only. Editing one afterwards belongs to
+the console that is being built for exactly this, and a second way to write
+the same column is worth less than the one place it will live.
+
 Usage::
 
     # add an OAuth entry (most hosted MCP servers)
     uv run python -m scripts.manage_connector_catalog add \\
         --name Notion --url https://mcp.notion.com/mcp \\
         --auth-type OAUTH --description "Search and edit your Notion pages"
+
+    # the same entry offered in both languages the app ships
+    uv run python -m scripts.manage_connector_catalog add \\
+        --name 天眼查 --url https://mcp.tianyancha.com/mcp --auth-type OAUTH \\
+        --name-i18n "en-US=Tianyancha" \\
+        --description-i18n "en-US=Search Chinese company records"
 
     uv run python -m scripts.manage_connector_catalog list
     uv run python -m scripts.manage_connector_catalog unpublish \\
@@ -40,9 +50,28 @@ from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.services.crypto import encrypt_secret
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
+from app.services import localized_text
 from app.services.mcp.url_identity import normalize_connector_url
 
 _URL_HELP = "the entry's MCP server URL, exactly as `list` prints it"
+
+
+class _LocaleMap(argparse.Action):
+    """Collect repeated ``--x-i18n LOCALE=TEXT`` into one dict.
+
+    Repeated pairs rather than a JSON blob: two locales is what the app ships,
+    and quoting JSON inside a shell is where the typos live. Unsupported
+    locales are dropped later by ``localized_text.clean_map``, which is also
+    what the API path uses — one rule for what counts as a translation.
+    """
+
+    def __call__(self, parser, namespace, value, option_string=None):
+        locale, separator, text = value.partition("=")
+        if not separator or not text.strip():
+            parser.error(f"{option_string} wants LOCALE=TEXT, got {value!r}")
+        collected = getattr(namespace, self.dest, None) or {}
+        collected[locale] = text
+        setattr(namespace, self.dest, collected)
 
 
 async def _add(db: AsyncSession, args: argparse.Namespace) -> int:
@@ -56,6 +85,8 @@ async def _add(db: AsyncSession, args: argparse.Namespace) -> int:
 
     entry = MCPServerCatalogEntry(
         name=args.name,
+        name_i18n=localized_text.clean_map(args.name_i18n),
+        description_i18n=localized_text.clean_map(args.description_i18n),
         url=args.url,
         auth_type=MCPServerAuthType(args.auth_type),
         oauth_scope=args.oauth_scope,
@@ -138,7 +169,8 @@ async def _list(db: AsyncSession) -> int:
             f"  app={entry.oauth_client_id}" if entry.oauth_client_id else ""
         )
         print(
-            f"{entry.id:>4}  {entry.name:<20} {entry.auth_type.value:<7} "
+            f"{entry.id:>4}  {entry.name:<20}{'*' if entry.name_i18n else ' '} "
+            f"{entry.auth_type.value:<7} "
             f"{state:<12} {entry.url}{app_marker}"
         )
     return 0
@@ -186,6 +218,14 @@ def _parse_args() -> argparse.Namespace:
     )
     add.add_argument("--oauth-scope", default=None)
     add.add_argument("--description", default=None)
+    for field, example in (
+        ("name", "Tianyancha"), ("description", "Search Chinese company records"),
+    ):
+        add.add_argument(
+            f"--{field}-i18n", action=_LocaleMap, default=None, metavar="LOCALE=TEXT",
+            help=f"a translated {field}, repeatable "
+                 f'(e.g. --{field}-i18n "en-US={example}")',
+        )
     add.add_argument("--icon-url", default=None)
     add.add_argument("--sort-order", type=int, default=0)
 

@@ -108,7 +108,7 @@ cmd_start() {
     return 0
   fi
   log "starting uvicorn on :$PORT (workers=$WORKERS)"
-  nohup uv run uvicorn app.main:app \
+  nohup uv run uvicorn app.public_main:app \
     --host 0.0.0.0 \
     --port "$PORT" \
     --workers "$WORKERS" \

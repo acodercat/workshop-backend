@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import ConnectorCatalogEntryNotFoundError
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
+from app.services import localized_text
 
 #: The auth types an official entry can actually be added with. BEARER/HEADER
 #: are excluded on purpose: they need a secret that is per-user by nature, and
@@ -63,8 +64,17 @@ async def get_published_entry(
     return entry
 
 
-def build_connector(entry: MCPServerCatalogEntry, user_id: int) -> MCPServer:
+def build_connector(
+    entry: MCPServerCatalogEntry, user_id: int, locale: str
+) -> MCPServer:
     """An unsaved user-owned Connector copied from *entry*.
+
+    The name is copied in *locale* — whichever the user was reading when they
+    added it. The copy is a snapshot from then on: the row is theirs, free to
+    rename, and never re-derived from the catalog, so switching the UI
+    language later leaves it alone. Copying the canonical name instead would
+    hand an English reader a Chinese one for a Connector they added from an
+    English card.
 
     Per-user credentials are deliberately absent — OAUTH entries get theirs
     from the authorize flow. That is why only
@@ -84,7 +94,7 @@ def build_connector(entry: MCPServerCatalogEntry, user_id: int) -> MCPServer:
     return MCPServer(
         user_id=user_id,
         catalog_id=entry.id,
-        name=entry.name,
+        name=localized_text.resolve(entry.name, entry.name_i18n, locale),
         url=entry.url,
         auth_type=entry.auth_type,
         oauth_scope=entry.oauth_scope,

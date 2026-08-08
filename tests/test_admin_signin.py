@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from app.api.admin import auth as admin_auth
 from app.api.dependencies import get_db
 from app.exception_handlers import install_error_handlers
-from app.models.staff import Staff, StaffRole, StaffStatus
+from app.models.staff import Staff, StaffStatus
 from app.rate_limit import limiter
 
 
@@ -47,8 +47,7 @@ def _disabled_account() -> Staff:
         id=3,
         username="mallory",
         password_hash="x",
-        display_name="Mallory",
-        role=StaffRole.OPERATOR,
+        name="Mallory",
         status=StaffStatus.DISABLED,
         token_version=0,
     )

@@ -1,6 +1,6 @@
 """The customer API's route table, assembled in one place.
 
-:mod:`app.main` mounts exactly one router — the same shape as the
+:mod:`app.public_main` mounts exactly one router — the same shape as the
 console's :mod:`app.api.admin.router` — so both ASGI entrypoints stay
 about *process* concerns (pools, lifespan, probes) and adding a feature
 is a line here, not there.

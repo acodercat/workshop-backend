@@ -1,25 +1,24 @@
-"""Upload a skill bundle (.zip) as a platform skill (SYSTEM/OFFICIAL).
+"""Upload a skill bundle as a platform skill (SYSTEM/OFFICIAL).
 
-Reads a local .zip file, validates it (same checks as the user-facing
-``POST /api/skills`` endpoint), uploads to the skill OSS bucket, and
-inserts a platform ``skill`` row (``user_id=NULL``) with the chosen
-``origin`` (``SYSTEM`` by default, ``--origin OFFICIAL`` for opt-in
-skills).
+The console does this too (``POST /skills`` on the admin surface); both
+call :func:`app.services.skill_registration.register_platform_skill_bundle`,
+so the validation, the OSS key scheme and the replace-by-name behaviour
+are one implementation with two front doors. This script is the path
+that still works when the console is down, or when all you have is SSH.
 
-``enabled`` is derived from the origin. SYSTEM skills land enabled —
-they are agent-only and reach the worker through the same effective-
-enabled read as everything else, so disabled means invisible to the
-agent (``--disabled`` exists for staging a bundle without exposing
-it). OFFICIAL skills always land **disabled**: ``skill.enabled`` is
-the default every user who never touched the toggle falls back to
+``enabled`` follows the origin: SYSTEM skills land enabled — they are
+agent-only and reach the worker through the same effective-enabled read
+as everything else, so disabled means invisible to the agent
+(``--disabled`` stages a bundle without exposing it). OFFICIAL skills
+always land **disabled**: ``skill.enabled`` is the default every user
+who never touched the toggle falls back to
 (``COALESCE(pref.enabled, skill.enabled)``), and an enabled-by-default
-official skill would push its metadata into every user's every-turn
-LLM context. Users opt in from the skills page — or just pick the
-skill in the composer, which doesn't consult the toggle at all.
+official skill would push its metadata into every user's every-turn LLM
+context. Users opt in from the skills page — or just pick the skill in
+the composer, which doesn't consult the toggle at all.
 
-Idempotent by name: if a platform skill with the same name already
-exists, the row is updated (new bundle_key + description + origin)
-rather than duplicated.
+Idempotent by name: re-uploading a name that exists replaces that
+skill's bundle in place, keeping its id and every user's preference.
 
 Usage:
     cd backend
@@ -29,27 +28,57 @@ Usage:
 """
 
 import argparse
-import re
+import asyncio
 import sys
-import uuid
 from pathlib import Path
 
-import psycopg
-from psycopg.types.json import Jsonb
+from app.database import AsyncSessionLocal
+from app.errors import AppError
+from app.models.skill import SkillOrigin
+from app.services.skill_registration import register_platform_skill_bundle
 
-from app.services import file_storage
-from app.services.file_storage import SKILL_POLICY
-from app.services.skill_bundle import (
-    InvalidSkillBundleError,
-    normalize_bundle,
-    parse_bundle,
-)
-from config import settings
+
+async def upload_bundle(
+    bundle_path: Path, origin: SkillOrigin, disabled: bool
+) -> None:
+    data = bundle_path.read_bytes()
+    print(f"Read {len(data)} bytes from {bundle_path}")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            skill, replaced_key = await register_platform_skill_bundle(
+                db,
+                origin=origin,
+                filename=bundle_path.name,
+                data=data,
+                # ``None`` lets the origin decide (SYSTEM on, OFFICIAL
+                # off); ``--disabled`` is the one case a caller overrides.
+                enabled=False if disabled else None,
+            )
+        except AppError as exc:
+            sys.exit(f"Rejected: {exc}")
+        await db.commit()
+
+        print(f"  name: {skill.name}")
+        print(f"  display_name: {skill.display_name}")
+        print(f"  description: {skill.description}")
+        print(f"  uploaded to OSS: {skill.bundle_key}")
+        if replaced_key:
+            # Printed because the row no longer points at it: this is the
+            # only way back to the previous version.
+            print(f"  replaced bundle: {replaced_key}")
+        status = "enabled" if skill.enabled else "disabled"
+        print(f"  DB upserted (id={skill.id}, {origin.value}, {status})")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Upload a .zip as a platform skill.")
-    parser.add_argument("zip_path", type=Path, help="Path to the skill bundle .zip")
+    parser = argparse.ArgumentParser(
+        description="Upload a bundle as a platform skill."
+    )
+    parser.add_argument(
+        "bundle_path", type=Path,
+        help="Path to the skill bundle (.zip, .skill or .md)",
+    )
     parser.add_argument(
         "--origin", choices=("SYSTEM", "OFFICIAL"), default="SYSTEM",
         help="Platform origin: SYSTEM (always-on core, default) or "
@@ -63,67 +92,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    zip_path: Path = args.zip_path
-    if not zip_path.exists():
-        sys.exit(f"File not found: {zip_path}")
-    if zip_path.suffix.lower() != ".zip":
-        sys.exit(f"Expected a .zip file, got: {zip_path.name}")
+    bundle_path: Path = args.bundle_path
+    if not bundle_path.exists():
+        sys.exit(f"File not found: {bundle_path}")
 
-    data = zip_path.read_bytes()
-    # Normalize wrapper-dir zips so the bundle in OSS has ``SKILL.md``
-    # at root — same step ``register_skill`` does for user uploads.
-    # Without this the worker fails to find SKILL.md after unzip.
-    normalized = normalize_bundle(data)
-    if normalized is not None:
-        data = normalized
-    print(f"Read {len(data)} bytes from {zip_path}")
-
-    try:
-        parsed = parse_bundle(data)
-    except InvalidSkillBundleError as e:
-        sys.exit(f"Invalid skill bundle: {e}")
-
-    print(f"  name: {parsed.name}")
-    print(f"  display_name: {parsed.display_name}")
-    if parsed.display_name_i18n:
-        print(f"  display_name_i18n: {parsed.display_name_i18n}")
-    print(f"  description: {parsed.description}")
-
-    file_key = f"{args.origin.lower()}/{parsed.name}/{uuid.uuid4()}/{zip_path.name}"
-    file_storage.upload(SKILL_POLICY, file_key, data)
-    print(f"  uploaded to OSS: {file_key}")
-
-    # Upsert DB row. psycopg uses the sync ``postgresql://`` URL, so
-    # strip the SQLAlchemy ``+asyncpg`` driver suffix that the app's
-    # async session uses.
-    enabled = args.origin == "SYSTEM" and not args.disabled
-    db_uri = re.sub(r"postgresql\+\w+", "postgresql", settings.db_uri)
-    with psycopg.connect(db_uri) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO skill (user_id, origin, name, display_name,
-                                   display_name_i18n, description,
-                                   bundle_key, bundle_size, enabled)
-                VALUES (NULL, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (name) WHERE user_id IS NULL
-                DO UPDATE SET origin = EXCLUDED.origin,
-                              description = EXCLUDED.description,
-                              display_name = EXCLUDED.display_name,
-                              display_name_i18n = EXCLUDED.display_name_i18n,
-                              bundle_key = EXCLUDED.bundle_key,
-                              bundle_size = EXCLUDED.bundle_size,
-                              enabled = EXCLUDED.enabled,
-                              updated_at = now()
-                """,
-                (args.origin, parsed.name, parsed.display_name,
-                 Jsonb(parsed.display_name_i18n) if parsed.display_name_i18n else None,
-                 parsed.description, file_key, len(data), enabled),
-            )
-        conn.commit()
-
-    status = "enabled" if enabled else "disabled"
-    print(f"  DB upserted ({args.origin}, {status})")
+    asyncio.run(upload_bundle(bundle_path, SkillOrigin(args.origin), args.disabled))
     print("Done.")
 
 

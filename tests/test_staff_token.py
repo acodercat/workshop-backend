@@ -19,7 +19,7 @@ from fastapi import HTTPException
 
 from app import auth
 from app.errors import StaffAuthenticationError
-from app.models.staff import Staff, StaffRole, StaffStatus
+from app.models.staff import Staff, StaffStatus
 from config import settings
 
 
@@ -29,8 +29,7 @@ def _staff(**overrides) -> Staff:
         id=7,
         username="alice",
         password_hash="x",
-        display_name="Alice",
-        role=StaffRole.OWNER,
+        name="Alice",
         status=StaffStatus.ACTIVE,
         token_version=0,
     )

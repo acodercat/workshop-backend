@@ -5,24 +5,42 @@ importing its module and adding a line here — not editing the ASGI
 entrypoint, which should stay about *process* concerns (binding, CORS,
 lifespan) rather than growing an import list as the console does.
 
-Prefixes and tags live here rather than on the individual routes, so
-every module owns only paths *relative* to its resource
-(``""``, ``"/{staff_id}"``) and a resource can be re-mounted by changing
-one line. This differs from :mod:`app.api.public.router`, whose modules
-spell their full paths — that surface predates any need to move a
-resource, and rewriting it is not worth the churn.
-
-``auth`` is mounted bare: sign-in is not a resource under a collection,
-and ``/auth/access-tokens`` reads better than a prefix would make it.
+Every module spells its **full paths** (``/staff/{staff_id}``, never a
+bare ``""`` re-rooted by an include-time prefix) and carries its own
+tag — the same convention as :mod:`app.api.public.router`, so a route's
+URL is readable where the route is defined on both surfaces.
 """
 
 from fastapi import APIRouter
 
-from app.api.admin import audit, auth, me, staff
+from app.api.admin import (
+    audit,
+    auth,
+    connector,
+    feedback,
+    invite,
+    me,
+    message_feedback,
+    payment,
+    session,
+    skill,
+    staff,
+    stats,
+    user,
+)
 
 admin_router = APIRouter()
 
-admin_router.include_router(auth.router, tags=["auth"])
-admin_router.include_router(me.router, tags=["me"])
-admin_router.include_router(staff.router, prefix="/staff", tags=["staff"])
-admin_router.include_router(audit.router, prefix="/audit-logs", tags=["audit"])
+admin_router.include_router(auth.router)
+admin_router.include_router(me.router)
+admin_router.include_router(stats.router)
+admin_router.include_router(staff.router)
+admin_router.include_router(user.router)
+admin_router.include_router(session.router)
+admin_router.include_router(feedback.router)
+admin_router.include_router(message_feedback.router)
+admin_router.include_router(invite.router)
+admin_router.include_router(skill.router)
+admin_router.include_router(connector.router)
+admin_router.include_router(payment.router)
+admin_router.include_router(audit.router)

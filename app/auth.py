@@ -411,8 +411,9 @@ async def authenticate_and_get_staff(
     Stamps the operator as the rate-limit principal so slowapi keys
     console traffic on them rather than on the shared office egress IP.
 
-    Authorization (role gating) is a separate concern and lives in
-    :mod:`app.api.admin.dependencies`.
+    Endpoints consume this through ``StaffContext``
+    (:mod:`app.api.admin.dependencies`), which packages the operator with
+    the request metadata the audit trail records.
     """
     unauthenticated = StaffAuthenticationError("Could not validate credentials")
 

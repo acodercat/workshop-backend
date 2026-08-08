@@ -13,8 +13,8 @@ block::
         target_id=account.id,
         reason=body.reason,
     ) as draft:
-        account.role = body.role
-        draft.payload = {"role": {"from": "VIEWER", "to": "OPERATOR"}}
+        account.status = body.status
+        draft.payload = {"status": {"from": "ACTIVE", "to": "DISABLED"}}
     # the row and the change commit together, or neither does
 
 An endpoint that forgets to audit has nothing to commit its work — a far
@@ -110,10 +110,9 @@ async def audit(
     # Mirrored to the application log so the action is visible in the
     # normal stream too — useful when the console itself is what's broken.
     logger.info(
-        "admin action %s by %s (%s) on %s:%s",
+        "admin action %s by %s on %s:%s",
         action.value,
         ctx.staff.username,
-        ctx.staff.role.value,
         draft.target_type,
         draft.target_id,
     )

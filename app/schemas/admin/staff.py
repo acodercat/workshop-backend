@@ -3,7 +3,7 @@
 Two response shapes, deliberately not one:
 
 - :class:`StaffProfileResponse` — the caller looking at *themselves*.
-- :class:`StaffResponse` — an owner looking at *an account*.
+- :class:`StaffResponse` — the management view of *an account*.
 
 The management view carries ``status`` and ``created_at``; the self view
 does not, because the console renders its header from it and has no use
@@ -11,34 +11,18 @@ for either. Neither carries ``password_hash`` or ``token_version``.
 """
 
 from datetime import datetime
-from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.staff import StaffRole, StaffStatus
-from app.services.admin.staff import MIN_PASSWORD_CHARS
-
-Password = Annotated[str, Field(min_length=MIN_PASSWORD_CHARS, max_length=128)]
-"""Shared password constraint, as an ``Annotated`` alias — the idiomatic
-way to reuse a constraint across models (a shared ``Field()`` *instance*
-would lean on pydantic internals). The floor comes from the service
-module so the API, the provisioning script and the service cannot
-disagree."""
-
-Reason = Annotated[str, Field(min_length=1, max_length=500)]
-"""Required justification. Changing an operator's role or disabling their
-account is a privilege change, and the audit trail is worth little if
-half its rows explain nothing."""
+from app.models.staff import StaffStatus
+from app.schemas.admin.fields import Password, Reason
 
 
 class StaffCreate(BaseModel):
     """A new operator account.
 
-    ``role`` defaults to ``VIEWER``: least privilege unless the caller
-    says otherwise, matching the column's server default.
-
     No ``reason`` — for a create, the payload *is* the record of what was
-    done and why it was possible to describe.
+    done.
     """
 
     username: str = Field(
@@ -49,8 +33,7 @@ class StaffCreate(BaseModel):
         # confused with a display name or carry look-alike characters.
         pattern=r"^[a-z0-9][a-z0-9_.-]*$",
     )
-    display_name: str = Field(min_length=1, max_length=64)
-    role: StaffRole = StaffRole.VIEWER
+    name: str = Field(min_length=1, max_length=64)
     password: Password
 
 
@@ -62,8 +45,7 @@ class StaffUpdate(BaseModel):
     ambiguity never arises.
     """
 
-    display_name: str | None = Field(default=None, min_length=1, max_length=64)
-    role: StaffRole | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=64)
     status: StaffStatus | None = None
     reason: Reason
 
@@ -74,17 +56,15 @@ class StaffUpdate(BaseModel):
         An empty PATCH would otherwise write an audit row describing no
         change, which is noise in exactly the place noise is expensive.
         """
-        if self.display_name is None and self.role is None and self.status is None:
-            raise ValueError(
-                "Provide at least one of display_name, role or status."
-            )
+        if self.name is None and self.status is None:
+            raise ValueError("Provide at least one of name or status.")
         return self
 
 
 class StaffPasswordReset(BaseModel):
-    """An owner setting someone else's password.
+    """An operator setting someone else's password.
 
-    No ``current_password``: the owner doesn't know it, and requiring it
+    No ``current_password``: the caller doesn't know it, and requiring it
     would make the recovery case — an operator who is locked out — the
     one case this can't serve.
     """
@@ -106,19 +86,13 @@ class StaffPasswordChange(BaseModel):
 
 
 class StaffProfileResponse(BaseModel):
-    """The signed-in operator, as the console renders its own header.
-
-    The console gates its navigation on ``role``, but the server
-    re-checks the role on every request — so this field is a UI
-    convenience and never the enforcement point.
-    """
+    """The signed-in operator, as the console renders its own header."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     username: str
-    display_name: str
-    role: StaffRole
+    name: str
     last_login_at: datetime | None
 
 
@@ -129,8 +103,7 @@ class StaffResponse(BaseModel):
 
     id: int
     username: str
-    display_name: str
-    role: StaffRole
+    name: str
     status: StaffStatus
     last_login_at: datetime | None
     created_at: datetime

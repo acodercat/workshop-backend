@@ -1,26 +1,26 @@
 """Operator-account management — the console's own directory.
 
-- ``GET    /staff``                 — list accounts (any operator).
-- ``POST   /staff``                 — provision one (OWNER).
-- ``GET    /staff/{id}``            — one account (any operator).
-- ``PATCH  /staff/{id}``            — role / status / display name (OWNER).
-- ``PUT    /staff/{id}/password``   — reset someone's password (OWNER).
+- ``GET    /staff``                 — list accounts.
+- ``POST   /staff``                 — provision one.
+- ``GET    /staff/{id}``            — one account.
+- ``PATCH  /staff/{id}``            — name / status.
+- ``PUT    /staff/{id}/password``   — reset someone's password.
 
-Reads are ``VIEWER``: support staff need to know who holds which role to
-route a request, and the directory carries no secrets. Every write is
-``OWNER``, because each one changes who can do what.
+There is no role tier — every signed-in operator can read and manage the
+directory (see ``docs/admin-console.md``); accountability comes from the
+audit trail, not from gates between operators.
 
 **This module is the reference slice.** Every future console feature —
 credit adjustments, withdrawal review, invite issuance — follows its
-shape: the gate is a context alias in the signature, mutations happen
-inside :func:`~app.services.admin.audit` and never commit on their own,
-invariants live in the service layer, and plain reads stay inline.
+shape: ``StaffContext`` in the signature, mutations inside
+:func:`~app.services.admin.audit` and never committing on their own,
+invariants in the service layer, plain reads inline.
 """
 
 from fastapi import APIRouter, Query, Response, status
 from sqlalchemy import func, select
 
-from app.api.admin.dependencies import OwnerContext, ViewerContext
+from app.api.admin.dependencies import StaffContext
 from app.common.pagination import paginate
 from app.errors import StaffNotFoundError
 from app.models.staff import Staff
@@ -34,12 +34,25 @@ from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.services.admin import AdminContext, AuditAction, audit
 from app.services.admin import staff as staff_service
 
-router = APIRouter()
+router = APIRouter(tags=["staff"])
 
 
-@router.get("", response_model=PaginatedResponse[StaffResponse])
+async def _get_or_404(ctx: AdminContext, staff_id: int) -> Staff:
+    """Load an account or raise 404.
+
+    No ownership dimension to fold in, unlike the customer-facing
+    ``_get_or_404`` helpers: any signed-in operator may read any account,
+    so this is a plain lookup.
+    """
+    account = await ctx.db.get(Staff, staff_id)
+    if account is None:
+        raise StaffNotFoundError(f"No staff account with id {staff_id}.")
+    return account
+
+
+@router.get("/staff", response_model=PaginatedResponse[StaffResponse])
 async def list_staff(
-    ctx: ViewerContext,
+    ctx: StaffContext,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> PaginatedResponse[StaffResponse]:
@@ -60,8 +73,8 @@ async def list_staff(
     )
 
 
-@router.post("", response_model=StaffResponse, status_code=status.HTTP_201_CREATED)
-async def create_staff(ctx: OwnerContext, body: StaffCreate) -> StaffResponse:
+@router.post("/staff", response_model=StaffResponse, status_code=status.HTTP_201_CREATED)
+async def create_staff(ctx: StaffContext, body: StaffCreate) -> StaffResponse:
     """Provision an operator account.
 
     The target id is set **inside** the block: the account has no id
@@ -71,33 +84,32 @@ async def create_staff(ctx: OwnerContext, body: StaffCreate) -> StaffResponse:
         account = await staff_service.create(
             ctx.db,
             username=body.username,
-            display_name=body.display_name,
-            role=body.role,
+            name=body.name,
             password=body.password,
         )
         draft.target_id = account.id
-        draft.payload = {"username": account.username, "role": account.role.value}
+        draft.payload = {"username": account.username}
 
     return StaffResponse.model_validate(account)
 
 
-@router.get("/{staff_id}", response_model=StaffResponse)
-async def read_staff(ctx: ViewerContext, staff_id: int) -> StaffResponse:
+@router.get("/staff/{staff_id}", response_model=StaffResponse)
+async def read_staff(ctx: StaffContext, staff_id: int) -> StaffResponse:
     """Return one operator account."""
     return StaffResponse.model_validate(await _get_or_404(ctx, staff_id))
 
 
-@router.patch("/{staff_id}", response_model=StaffResponse)
+@router.patch("/staff/{staff_id}", response_model=StaffResponse)
 async def update_staff(
-    ctx: OwnerContext, staff_id: int, body: StaffUpdate
+    ctx: StaffContext, staff_id: int, body: StaffUpdate
 ) -> StaffResponse:
-    """Change an account's display name, role or status.
+    """Change an account's name or status.
 
     The payload records a before → after entry per field actually
-    changed, which is what makes the trail answer "when did this account
-    become an OWNER" without diffing adjacent rows.
+    changed, which is what makes the trail answer "when was this account
+    disabled" without diffing adjacent rows.
 
-    A change that would leave no active ``OWNER`` is refused by the
+    A status change that would leave no active account is refused by the
     service layer, and the whole transaction — audit row included — rolls
     back with it.
     """
@@ -108,11 +120,7 @@ async def update_staff(
     # value is that every row means something.
     changes = {
         field: {"from": str(getattr(account, field)), "to": str(value)}
-        for field, value in (
-            ("display_name", body.display_name),
-            ("role", body.role),
-            ("status", body.status),
-        )
+        for field, value in (("name", body.name), ("status", body.status))
         if value is not None and getattr(account, field) != value
     }
 
@@ -124,20 +132,16 @@ async def update_staff(
         reason=body.reason,
     ) as draft:
         await staff_service.update(
-            ctx.db,
-            account,
-            display_name=body.display_name,
-            role=body.role,
-            status=body.status,
+            ctx.db, account, name=body.name, status=body.status
         )
         draft.payload = changes
 
     return StaffResponse.model_validate(account)
 
 
-@router.put("/{staff_id}/password", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/staff/{staff_id}/password", status_code=status.HTTP_204_NO_CONTENT)
 async def reset_staff_password(
-    ctx: OwnerContext, staff_id: int, body: StaffPasswordReset
+    ctx: StaffContext, staff_id: int, body: StaffPasswordReset
 ) -> Response:
     """Set another operator's password, signing that account out everywhere.
 
@@ -157,16 +161,3 @@ async def reset_staff_password(
         await staff_service.set_password(ctx.db, account, body.password)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-async def _get_or_404(ctx: AdminContext, staff_id: int) -> Staff:
-    """Load an account or raise 404.
-
-    No ownership dimension to fold in, unlike the customer-facing
-    ``_get_or_404`` helpers: any signed-in operator may read any account,
-    so this is a plain lookup.
-    """
-    account = await ctx.db.get(Staff, staff_id)
-    if account is None:
-        raise StaffNotFoundError(f"No staff account with id {staff_id}.")
-    return account

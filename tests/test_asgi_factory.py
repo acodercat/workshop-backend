@@ -18,8 +18,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.errors import StaffAuthenticationError, StaffForbiddenError
+from fastapi import status
+
+from app.errors import AppError, StaffAuthenticationError
 from config import settings
+
+
+class _ForbiddenError(AppError):
+    """Local 403 for exercising the envelope — the factory's behavior is
+    the same for any ``AppError`` subclass, so the test needn't depend on
+    a domain error existing at this status."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "forbidden_test"
 
 # Building an app initializes Sentry if a DSN is configured; a unit-test
 # process must never report there. Cleared before the factory import path
@@ -59,7 +70,7 @@ async def boom_unauthenticated():
 
 @app.get("/boom-forbidden")
 async def boom_forbidden():
-    raise StaffForbiddenError("not with that role")
+    raise _ForbiddenError("not allowed")
 
 
 client = TestClient(app)
@@ -104,7 +115,7 @@ def test_app_error_serializes_into_the_envelope() -> None:
 
     assert response.status_code == 403
     assert response.json() == {
-        "error": {"type": "staff_forbidden", "message": "not with that role"}
+        "error": {"type": "forbidden_test", "message": "not allowed"}
     }
 
 

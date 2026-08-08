@@ -11,7 +11,11 @@ else, and nothing downstream would notice.
 
 import pytest
 
-from app.schemas.mcp_server import ConnectionTestRequest, ConnectorCreate, ConnectorUpdate
+from app.schemas.mcp_server import (
+    ConnectionTestRequest,
+    ConnectorCreate,
+    ConnectorUpdate,
+)
 from app.services.mcp.url_identity import normalize_connector_url
 
 CANONICAL = "https://mcp.notion.com/mcp"

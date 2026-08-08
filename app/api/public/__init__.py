@@ -1,4 +1,4 @@
-"""The customer API — everything :mod:`app.main` serves under ``/api/v1``.
+"""The customer API — everything :mod:`app.public_main` serves under ``/api/v1``.
 
 One module per resource, plus :mod:`~app.api.public.router` as the route
 table. Authorization is the customer token classes in :mod:`app.auth`

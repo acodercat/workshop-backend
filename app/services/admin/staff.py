@@ -3,16 +3,13 @@
 The console manages its own accounts, so unlike every other admin slice
 this one has no pre-existing domain service to delegate to; the rules
 live here. What earns a service module (rather than inline queries in the
-endpoint, the convention elsewhere) is that each mutation carries an
-invariant the endpoint has no business re-deriving:
+endpoint, the convention elsewhere) is that the mutations carry
+invariants the endpoint has no business re-deriving:
 
 - a password change signs that account out everywhere;
-- **the console never loses its last active ``OWNER``**.
-
-That second rule is why :func:`update` takes the whole partial change
-rather than exposing one setter per column: a single PATCH can demote
-*and* disable, and the invariant is about the state the transaction ends
-in, not about either field on its own.
+- **the console never loses its last ``ACTIVE`` account** — a full
+  lockout, recoverable only via ``scripts/manage_staff.py`` with
+  database credentials.
 
 Reads are not here. Listing and lookup are ordinary queries with no
 invariant to protect, so they stay inline in the endpoint — the same
@@ -25,8 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_password_hash, revoke_staff_tokens
-from app.errors import LastOwnerError, StaffUsernameTakenError
-from app.models.staff import Staff, StaffRole, StaffStatus
+from app.errors import LastActiveStaffError, StaffUsernameTakenError
+from app.models.staff import Staff, StaffStatus
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +38,7 @@ the customer-facing one. Shared with the request schemas and
 
 
 async def create(
-    db: AsyncSession,
-    *,
-    username: str,
-    display_name: str,
-    role: StaffRole,
-    password: str,
+    db: AsyncSession, *, username: str, name: str, password: str
 ) -> Staff:
     """Create an operator account and flush it, so the caller has its id.
 
@@ -62,8 +54,7 @@ async def create(
 
     account = Staff(
         username=username,
-        display_name=display_name,
-        role=role,
+        name=name,
         password_hash=await get_password_hash(password),
     )
     db.add(account)
@@ -75,29 +66,24 @@ async def update(
     db: AsyncSession,
     account: Staff,
     *,
-    display_name: str | None = None,
-    role: StaffRole | None = None,
+    name: str | None = None,
     status: StaffStatus | None = None,
 ) -> None:
-    """Apply a partial update, refusing one that would lock everyone out.
+    """Apply a partial update. ``None`` means "leave alone".
 
-    ``None`` means "leave alone" — an absent field, not a value to write.
-
-    The last-``OWNER`` check runs **after** the change is flushed, so it
-    asks the only question that matters: given everything this
-    transaction is about to commit, does an active ``OWNER`` remain? A
-    pre-flight check on each field separately would pass a PATCH that
-    demotes the last owner and disables the replacement in one call.
+    A status change is guarded **after** the flush, so the question asked
+    is the one that matters: given what this transaction is about to
+    commit, does an ACTIVE account remain? A name change can't lock
+    anyone out, so it skips the guard.
     """
-    if display_name is not None:
-        account.display_name = display_name
-    if role is not None:
-        account.role = role
+    if name is not None:
+        account.name = name
     if status is not None:
         account.status = status
 
     await db.flush()
-    await _assert_active_owner_remains(db)
+    if status is not None:
+        await _assert_active_staff_remains(db)
 
 
 async def set_password(db: AsyncSession, account: Staff, password: str) -> None:
@@ -113,23 +99,23 @@ async def set_password(db: AsyncSession, account: Staff, password: str) -> None:
     await db.flush()
 
 
-async def _assert_active_owner_remains(db: AsyncSession) -> None:
-    """Refuse a transaction that leaves no active ``OWNER``.
+async def _assert_active_staff_remains(db: AsyncSession) -> None:
+    """Refuse a transaction that leaves no ``ACTIVE`` account.
 
-    The owner rows are locked ``FOR UPDATE`` rather than merely counted,
-    so two operators demoting each other concurrently serialize instead
+    The active rows are locked ``FOR UPDATE`` rather than merely counted,
+    so two operators disabling each other concurrently serialize instead
     of both observing the other as the survivor. Cheap: the console has a
-    handful of accounts, and this runs only on a staff mutation.
+    handful of accounts, and this runs only on a status change.
     """
-    owner_ids = (
+    active_ids = (
         await db.scalars(
             select(Staff.id)
-            .where(Staff.role == StaffRole.OWNER, Staff.status == StaffStatus.ACTIVE)
+            .where(Staff.status == StaffStatus.ACTIVE)
             .with_for_update()
         )
     ).all()
-    if not owner_ids:
-        raise LastOwnerError(
-            "This change would leave the console with no active OWNER. "
-            "Promote a replacement first."
+    if not active_ids:
+        raise LastActiveStaffError(
+            "This change would leave the console with no active staff "
+            "account. Add or re-enable another account first."
         )

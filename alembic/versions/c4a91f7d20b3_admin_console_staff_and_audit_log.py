@@ -7,8 +7,9 @@ not customer identity: running the console must not require holding a
 customer account with its credit balance and sessions, and a customer row
 must never be one UPDATE away from platform-wide privileges. Credentials
 and revocation are independent too, so a staff force-logout can't disturb
-a customer session. The role ladder here is *platform*-scoped and has
-nothing to do with ``organization_member.role``, which is tenant-scoped.
+a customer session. There is no role column — every active operator has
+full console access (v1 decision, see ``docs/admin-console.md``); tiers
+would be one additive migration later.
 
 ``admin_audit_log`` is append-only, like ``credit_ledger`` and
 ``check_in`` — rows are never UPDATEd or DELETEd, so it carries only
@@ -29,7 +30,7 @@ done to this row (support), every action of a kind in a window
 (compliance). All ascending — Postgres scans a btree backwards just as
 cheaply, so "latest first" needs no DESC index.
 
-**Bootstrap:** this creates no accounts. Provision the first ``OWNER``
+**Bootstrap:** this creates no accounts. Provision the first operator
 with ``scripts/manage_staff.py`` after upgrading; until then the console
 has no way in, which is the correct default for a table that grants
 platform-wide privileges.
@@ -52,13 +53,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    staff_role = postgresql.ENUM(
-        "VIEWER", "OPERATOR", "OWNER", name="staff_role", create_type=False
-    )
     staff_status = postgresql.ENUM(
         "ACTIVE", "DISABLED", name="staff_status", create_type=False
     )
-    staff_role.create(op.get_bind(), checkfirst=True)
     staff_status.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
@@ -68,12 +65,8 @@ def upgrade() -> None:
         # these accounts are provisioned by hand.
         sa.Column("username", sa.String(length=64), nullable=False),
         sa.Column("password_hash", sa.String(length=255), nullable=False),
-        sa.Column("display_name", sa.String(length=64), nullable=False),
-        # Least privilege by default: a row inserted without an explicit
-        # role can read the console but cannot change anything.
-        sa.Column(
-            "role", staff_role, nullable=False, server_default="VIEWER",
-        ),
+        # Human name shown in the console header and on audit-log rows.
+        sa.Column("name", sa.String(length=64), nullable=False),
         sa.Column(
             "status", staff_status, nullable=False, server_default="ACTIVE",
         ),
@@ -134,11 +127,11 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        # Unnamed, like every other FK in the schema — Postgres names it
+        # ``admin_audit_log_staff_id_fkey``, matching the model's unnamed
+        # ``ForeignKey``.
         sa.ForeignKeyConstraint(
-            ["staff_id"],
-            ["staff.id"],
-            name="fk_admin_audit_log_staff_id",
-            ondelete="RESTRICT",
+            ["staff_id"], ["staff.id"], ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -167,8 +160,7 @@ def downgrade() -> None:
 
     op.drop_table("staff")
 
-    # Dropped after their last consumer, and only then — an enum type
+    # Dropped after its last consumer, and only then — an enum type
     # outliving its column would block a re-upgrade with "type already
     # exists".
     sa.Enum(name="staff_status").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="staff_role").drop(op.get_bind(), checkfirst=True)

@@ -18,3 +18,13 @@ class AuditAction(StrEnum):
     STAFF_UPDATE = "staff.update"
     STAFF_PASSWORD_RESET = "staff.password_reset"
     STAFF_PASSWORD_CHANGE = "staff.password_change"
+    USER_UPDATE = "user.update"
+    CREDIT_ADJUST = "credit.adjust"
+    FEEDBACK_UPDATE = "feedback.update"
+    SKILL_UPLOAD = "skill.upload"
+    SKILL_UPDATE = "skill.update"
+    CONNECTOR_CATALOG_CREATE = "connector_catalog.create"
+    CONNECTOR_CATALOG_UPDATE = "connector_catalog.update"
+    INVITE_CREATE = "invite.create"
+    # The console's one audited *read*: customer conversation content.
+    SESSION_VIEW = "session.view"

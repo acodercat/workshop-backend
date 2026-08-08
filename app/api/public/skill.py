@@ -30,8 +30,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
+from app.api.uploads import read_capped
 from app.auth import authenticate_and_get_user
-from app.errors import SkillBundleTooLargeError
 from app.models.skill import Skill, SkillOrigin
 from app.models.user import User
 from app.models.user_skill_preference import UserSkillPreference
@@ -51,35 +51,6 @@ from app.services.skill_registration import register_skill_bundle
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["skills"])
-
-# Chunk size for the bounded read below.
-_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
-
-
-async def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
-    """Read an ``UploadFile`` into memory, aborting past ``max_bytes``.
-
-    ``UploadFile.read()`` with no argument loads the entire (possibly
-    disk-spooled) body into one ``bytes`` — for a hostile multi-GB upload
-    that is the OOM. Reading in bounded chunks and bailing the instant the
-    running total exceeds the cap keeps peak memory at ``max_bytes`` + one
-    chunk. ``register_skill_bundle`` re-checks the same cap on the returned
-    bytes, so this is purely the early-abort guard.
-    """
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(_UPLOAD_READ_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise SkillBundleTooLargeError(
-                f"upload exceeds the {max_bytes}-byte limit"
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
-
 
 @router.post("/skills", status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/minute")
@@ -102,7 +73,7 @@ async def register_skill(
         already has.
     413 if the upload exceeds ``SKILL_POLICY.max_bytes``.
     """
-    data = await _read_capped(file, SKILL_POLICY.max_bytes)
+    data = await read_capped(file, SKILL_POLICY.max_bytes)
     skill = await register_skill_bundle(
         db,
         user_id=current_user.id,

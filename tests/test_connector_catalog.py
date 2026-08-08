@@ -12,6 +12,7 @@ from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.schemas.mcp_server import ConnectorCatalogEntryResponse
 from app.services import crypto
+from app.services.localized_text import DEFAULT_LOCALE
 from app.services.mcp import catalog
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES, build_connector
 
@@ -29,7 +30,7 @@ def _entry(**over) -> MCPServerCatalogEntry:
 
 class TestBuildConnector:
     def test_copies_the_template_and_links_back(self):
-        connector = build_connector(_entry(), user_id=42)
+        connector = build_connector(_entry(), user_id=42, locale=DEFAULT_LOCALE)
 
         assert connector.user_id == 42
         assert connector.catalog_id == 7
@@ -41,11 +42,11 @@ class TestBuildConnector:
     def test_oauth_starts_disconnected_until_authorized(self):
         # Same rule as a hand-added OAuth Connector: no tokens yet, so it must
         # not be handed to the agent.
-        assert build_connector(_entry(), user_id=1).connected is False
+        assert build_connector(_entry(), user_id=1, locale=DEFAULT_LOCALE).connected is False
 
     def test_non_oauth_starts_connected(self):
         entry = _entry(auth_type=MCPServerAuthType.NONE, oauth_scope=None)
-        assert build_connector(entry, user_id=1).connected is True
+        assert build_connector(entry, user_id=1, locale=DEFAULT_LOCALE).connected is True
 
     @pytest.mark.parametrize(
         "auth_type", [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER],
@@ -55,12 +56,12 @@ class TestBuildConnector:
         # for one, so such an entry would yield a connector that probes fine and
         # then 401s on every real tool call.
         with pytest.raises(ConnectorCatalogEntryNotFoundError):
-            build_connector(_entry(auth_type=auth_type), user_id=1)
+            build_connector(_entry(auth_type=auth_type), user_id=1, locale=DEFAULT_LOCALE)
 
     def test_carries_no_credentials(self):
         # The catalog never holds secrets — the OAuth client is registered at
         # add time and tokens arrive from the authorize flow.
-        connector = build_connector(_entry(), user_id=1)
+        connector = build_connector(_entry(), user_id=1, locale=DEFAULT_LOCALE)
         assert connector.encrypted_credential is None
         assert connector.oauth_client_encrypted is None
         assert connector.oauth_tokens_encrypted is None
@@ -185,7 +186,7 @@ class TestPreRegisteredClientPassThrough:
         monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
         monkeypatch.setattr(endpoint, "_register_oauth_client", _capture)
         await endpoint._build_catalog_connector(
-            MagicMock(), catalog_id=entry.id, user_id=42
+            MagicMock(), catalog_id=entry.id, user_id=42, locale=DEFAULT_LOCALE
         )
         return registered
 

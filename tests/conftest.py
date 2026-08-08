@@ -29,7 +29,7 @@ requires_e2e = pytest.mark.skipif(
 
 
 # Backend HTTP base URL. The backend mounts under root_path=/api/v1
-# (see app/main.py), and dev defaults to localhost:8005. Override via
+# (see app/public_main.py), and dev defaults to localhost:8005. Override via
 # env if a test environment lives elsewhere.
 BACKEND_BASE_URL = os.environ.get(
     "BACKEND_BASE_URL", "http://localhost:8005/api/v1",

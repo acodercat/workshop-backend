@@ -27,7 +27,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["auth"])
 
 
 @router.post("/auth/access-tokens", response_model=StaffTokenResponse)

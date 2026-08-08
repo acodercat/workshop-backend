@@ -6,7 +6,7 @@ is the same admin-gating posture as ``create_invite_code`` and
 ``topup_credits`` — process auth is DB credentials.
 
 Password rotation lives here too, rather than only in the console, so a
-locked-out sole ``OWNER`` is recoverable without a second account.
+fully locked-out console is recoverable without a working account.
 
 The account rules themselves are **not** duplicated here: this drives
 :mod:`app.services.admin.staff`, the same module the console's endpoints
@@ -22,17 +22,13 @@ rather than an argument, so it never lands in shell history or in the
 process list where ``ps`` would show it.
 
 Usage:
-    # First OWNER (can manage other staff accounts)
+    # Create an operator account
     STAFF_PASSWORD='...' uv run python -m scripts.manage_staff \\
-        --create --username=alice --display-name="Alice" --role=OWNER
-
-    # Day-to-day operator
-    STAFF_PASSWORD='...' uv run python -m scripts.manage_staff \\
-        --create --username=bob --display-name="Bob" --role=OPERATOR
+        --create --username=alice --name="Alice"
 
     # Rotate a password (also signs that account out everywhere)
     STAFF_PASSWORD='...' uv run python -m scripts.manage_staff \\
-        --reset-password --username=bob
+        --reset-password --username=alice
 """
 
 import argparse
@@ -45,28 +41,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.errors import StaffUsernameTakenError
-from app.models.staff import Staff, StaffRole
+from app.models.staff import Staff
 from app.services.admin import staff as staff_service
 
 
 async def _create(
-    db: AsyncSession, *, username: str, display_name: str, role: StaffRole,
-    password: str,
+    db: AsyncSession, *, username: str, name: str, password: str
 ) -> int:
     try:
         account = await staff_service.create(
-            db,
-            username=username,
-            display_name=display_name,
-            role=role,
-            password=password,
+            db, username=username, name=name, password=password
         )
     except StaffUsernameTakenError:
         print(f"Staff {username!r} already exists.", file=sys.stderr)
         return 1
 
     await db.commit()
-    print(f"OK  created staff {account.username} (role={account.role.value})")
+    print(f"OK  created staff {account.username}")
     return 0
 
 
@@ -80,7 +71,7 @@ async def _reset_password(db: AsyncSession, *, username: str, password: str) -> 
     # — the whole point of a reset after a suspected leak.
     await staff_service.set_password(db, account, password)
     await db.commit()
-    print(f"OK  reset password for {username} (role={account.role.value})")
+    print(f"OK  reset password for {username}")
     return 0
 
 
@@ -97,11 +88,7 @@ async def main(args: argparse.Namespace) -> int:
     async with AsyncSessionLocal() as db:
         if args.create:
             return await _create(
-                db,
-                username=args.username,
-                display_name=args.display_name,
-                role=StaffRole(args.role),
-                password=password,
+                db, username=args.username, name=args.name, password=password
             )
         return await _reset_password(
             db, username=args.username, password=password,
@@ -124,17 +111,12 @@ def _parse_args() -> argparse.Namespace:
         help="Login identifier for the console.",
     )
     parser.add_argument(
-        "--display-name", default=None,
+        "--name", default=None,
         help="Human name shown in the console. Required with --create.",
     )
-    parser.add_argument(
-        "--role", choices=[role.value for role in StaffRole],
-        default=StaffRole.VIEWER.value,
-        help="Platform role for --create. Defaults to VIEWER (read-only).",
-    )
     args = parser.parse_args()
-    if args.create and not args.display_name:
-        parser.error("--create requires --display-name")
+    if args.create and not args.name:
+        parser.error("--create requires --name")
     return args
 
 

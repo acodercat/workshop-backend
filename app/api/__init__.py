@@ -1,6 +1,6 @@
 """The HTTP layer: two surfaces, symmetric by construction.
 
-- :mod:`app.api.public` — the customer API, served by :mod:`app.main`
+- :mod:`app.api.public` — the customer API, served by :mod:`app.public_main`
   under ``/api/v1``.
 - :mod:`app.api.admin`  — the operations console, served by
   :mod:`app.admin_main` under ``/admin/api/v1``.

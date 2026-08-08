@@ -7,17 +7,15 @@ written exclusively by :func:`app.services.admin.audit`, alongside the
 change they describe. An endpoint that could append to this table would
 be a way to record something that never happened.
 
-``VIEWER``, so support staff can answer "what happened to this account"
-without holding the privilege to change anything. The three filter
-combinations are the three composite indexes on the table — by operator,
-by target, by action — so the common questions are index scans rather
-than a walk of the whole log.
+The three filter combinations are the three composite indexes on the
+table — by operator, by target, by action — so the common questions are
+index scans rather than a walk of the whole log.
 """
 
 from fastapi import APIRouter, Query
 from sqlalchemy import func, select
 
-from app.api.admin.dependencies import ViewerContext
+from app.api.admin.dependencies import StaffContext
 from app.common.pagination import paginate
 from app.models.admin_audit_log import AdminAuditLog
 from app.models.staff import Staff
@@ -25,12 +23,12 @@ from app.schemas.admin.audit import AuditLogResponse
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.services.admin import AuditAction
 
-router = APIRouter()
+router = APIRouter(tags=["audit"])
 
 
-@router.get("", response_model=PaginatedResponse[AuditLogResponse])
+@router.get("/audit-logs", response_model=PaginatedResponse[AuditLogResponse])
 async def list_audit_logs(
-    ctx: ViewerContext,
+    ctx: StaffContext,
     staff_id: int | None = Query(None, description="Actions by this operator"),
     action: AuditAction | None = Query(None, description="Exact action"),
     target_type: str | None = Query(None, max_length=32, description="Kind of row acted on"),

@@ -3,37 +3,35 @@
 - ``GET /me``           — who am I (the console restores its session with this).
 - ``PUT /me/password``  — rotate my own password.
 
-Separate from :mod:`app.api.admin.staff`, which is the *owner's*
-view of *other people's* accounts: these two routes are the only ones an
-operator of any role may use on themselves, and the gate on them is
-"signed in", not a rung of the ladder.
+Separate from :mod:`app.api.admin.staff`, which is the management view
+of *other people's* accounts: these two routes act on the caller
+themselves.
 """
 
 from fastapi import APIRouter, Response, status
 
-from app.api.admin.dependencies import ViewerContext
+from app.api.admin.dependencies import StaffContext
 from app.auth import verify_password
 from app.errors import IncorrectPasswordError, SamePasswordError
 from app.schemas.admin.staff import StaffPasswordChange, StaffProfileResponse
 from app.services.admin import AuditAction, audit
 from app.services.admin import staff as staff_service
 
-router = APIRouter()
+router = APIRouter(tags=["me"])
 
 
 @router.get("/me", response_model=StaffProfileResponse)
-async def read_me(ctx: ViewerContext) -> StaffProfileResponse:
+async def read_me(ctx: StaffContext) -> StaffProfileResponse:
     """Return the signed-in operator.
 
-    The console calls this on boot to restore its session and decide
-    which navigation to render. No gate beyond being signed in — the
-    dependency already resolved the account, so this costs no query.
+    The console calls this on boot to restore its session. The dependency
+    already resolved the account, so this costs no query.
     """
     return StaffProfileResponse.model_validate(ctx.staff)
 
 
 @router.put("/me/password", status_code=status.HTTP_204_NO_CONTENT)
-async def change_my_password(ctx: ViewerContext, body: StaffPasswordChange) -> Response:
+async def change_my_password(ctx: StaffContext, body: StaffPasswordChange) -> Response:
     """Rotate the caller's own password.
 
     Sudo-gated on ``current_password``, mirroring the customer-facing

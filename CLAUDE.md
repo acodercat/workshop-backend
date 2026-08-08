@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Scope
 
-Backend module of the metaseq-computer monorepo. See `../CLAUDE.md` for monorepo-level context (axon, agent-worker, frontend). This file covers backend-only concerns.
+Backend module of the axon monorepo. See `../CLAUDE.md` for monorepo-level context (axon, agent-worker, frontend). This file covers backend-only concerns.
 
 ## Commands
 
@@ -13,17 +13,17 @@ Backend module of the metaseq-computer monorepo. See `../CLAUDE.md` for monorepo
 uv sync
 
 # Dev server (API on :8005, root_path="/api/v1")
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
+uv run uvicorn app.public_main:app --host 0.0.0.0 --port 8005 --reload
 
 # Admin console — a THIRD ASGI app in its own process (root_path="/admin/api/v1").
 # Bind to a private interface: every route can change money or account state and
 # the public gateway must have no route to this port. scripts/deploy.sh does not
 # manage it yet — start it by hand.
-uv run uvicorn app.admin_main:admin_app --host 127.0.0.1 --port 8006 --reload
+uv run uvicorn app.admin_main:app --host 127.0.0.1 --port 8006 --reload
 
 # Staff accounts are provisioned out of band (no self-registration, no invite):
 STAFF_PASSWORD='...' uv run python -m scripts.manage_staff \
-  --create --username=alice --display-name="Alice" --role=OWNER
+  --create --username=alice --name="Alice"
 
 # Background process (separate from the web server; runs the credit-settle
 # sweeper + subscriber, the payment reconciler, and — when
@@ -46,7 +46,7 @@ bash scripts/deploy.sh background start|stop|restart|status|logs   # the backgro
 # the settle sweeper self-elects one active poller via a Postgres advisory lock.
 
 # HTTPS / custom port — script's defaults won't fit; use uvicorn directly:
-uv run uvicorn app.main:app --host 0.0.0.0 --port 9090 --workers 1 \
+uv run uvicorn app.public_main:app --host 0.0.0.0 --port 9090 --workers 1 \
   --ssl-certfile ./cert/<domain>.pem --ssl-keyfile ./cert/<domain>.key
 
 # Migrations
@@ -54,7 +54,7 @@ uv run alembic upgrade head
 uv run alembic revision --autogenerate -m "description"
 
 # Tests (pytest; asyncio_mode is project-level "auto" — no @pytest.mark.asyncio needed)
-uv run pytest tests/                       # ~520 offline unit tests (tests/*.py) — no DB/Redis/network
+uv run pytest tests/                       # ~586 offline unit tests (tests/*.py) — no DB/Redis/network
 uv run pytest tests/test_credit_settle_usage.py::test_name
 # tests/*.py (unit) run with no external deps; tests/e2e/ is opt-in (see below)
 
@@ -130,7 +130,7 @@ Two-phase generator: replay all existing stream entries, then block-read until a
 
 Separate from `session_stream`: a lightweight SSE feed carrying idempotent `session.status_changed` for cross-tab sidebar sync. **One Redis `SUBSCRIBE` per process** (the `UserEventHub`, started in the lifespan) fans `user_events:bus` out in-memory to each connection's bounded `asyncio.Queue` — opening `/me/events` allocates a queue, **never a Redis connection**. At-most-once (Pub/Sub) is fine because the payload is idempotent state sync; no replay, no sticky sessions, multi-node native. `USER_EVENTS_CHANNEL` is a wire contract mirrored in the worker (which `PUBLISH`es it) — deploy together. Full design: [`docs/user-events-fanout.md`](docs/user-events-fanout.md).
 
-### Redis client setup (`app/main.py` lifespan)
+### Redis client setup (`app/public_main.py` lifespan)
 
 Two pools, intentionally separate (see `_make_redis_client`):
 
@@ -143,7 +143,7 @@ Startup uses `_ping_db` / `_ping_redis` with exponential backoff (`startup_probe
 
 ### Observability (`app/observability.py`)
 
-`install_observability(app)` (called once in `app/main.py`) wires three additive, backend-optional concerns — all no-ops until their backend is configured:
+`install_observability(app)` (called once in `app/public_main.py`) wires three additive, backend-optional concerns — all no-ops until their backend is configured:
 
 - **Request-id correlation** — `RequestIDMiddleware` reuses a sane inbound `X-Request-ID` (validated against `_REQUEST_ID_RE`, else minted) and binds it into the loguru context so every log line carries `request_id`, echoing it back in the response header. Implemented as **raw ASGI, not `BaseHTTPMiddleware`**, because the latter buffers the response body and would break SSE streaming — this wrapper only touches the response-start message.
 - **Sentry** — no-op until `sentry_dsn` is set (`sentry_environment`, `sentry_traces_sample_rate` knobs).
@@ -176,17 +176,17 @@ The 6-digit-code flow is **channel-agnostic** (`app/services/auth/verification.p
 
 ### Rate limiting (`app/rate_limit.py`)
 
-slowapi, **keyed on the authenticated principal when present, else the client IP** (`_rate_limit_key`: the auth dependencies call `set_rate_limit_principal(request, kind, id)`, which FastAPI resolves before slowapi reads the key — so authenticated endpoints are immune to NAT/CGNAT-shared IPs, while pre-login endpoints still key on IP). `kind` namespaces the two id spaces — `user:{id}` for customers, `staff:{id}` for console operators — and namespacing happens in that one function, so no call site pre-formats a key and none can end up prefixed twice. **Counters stored in Redis** (`storage_uri=settings.redis_url`) so the limit is a true cluster-wide ceiling rather than per-uvicorn-worker (an in-memory store would make `5/minute` effectively `5 × workers` and reset on restart). Degrades gracefully if Redis is down — `in_memory_fallback_enabled` keeps counting locally and `swallow_errors` ensures a storage blip never 500s a request. Limits are config knobs (`rate_limit_*` in `config.py`): `login` 5/min, `message_create` 30/min, `share_unlock` 5/5min, `register_code` `3/minute;20/hour` (layered burst + hourly per OWASP OTP guidance — a `;`-separated multi-limit string slowapi enforces in full), `register` 20/hour, default 200/min. `RateLimitExceeded` is registered as an exception handler in `app/main.py`. If abuse appears, raise the limits behind authenticated identity rather than the per-IP key (NAT'd corp networks otherwise hit the cap collectively).
+slowapi, **keyed on the authenticated principal when present, else the client IP** (`_rate_limit_key`: the auth dependencies call `set_rate_limit_principal(request, kind, id)`, which FastAPI resolves before slowapi reads the key — so authenticated endpoints are immune to NAT/CGNAT-shared IPs, while pre-login endpoints still key on IP). `kind` namespaces the two id spaces — `user:{id}` for customers, `staff:{id}` for console operators — and namespacing happens in that one function, so no call site pre-formats a key and none can end up prefixed twice. **Counters stored in Redis** (`storage_uri=settings.redis_url`) so the limit is a true cluster-wide ceiling rather than per-uvicorn-worker (an in-memory store would make `5/minute` effectively `5 × workers` and reset on restart). Degrades gracefully if Redis is down — `in_memory_fallback_enabled` keeps counting locally and `swallow_errors` ensures a storage blip never 500s a request. Limits are config knobs (`rate_limit_*` in `config.py`): `login` 5/min, `message_create` 30/min, `share_unlock` 5/5min, `register_code` `3/minute;20/hour` (layered burst + hourly per OWASP OTP guidance — a `;`-separated multi-limit string slowapi enforces in full), `register` 20/hour, default 200/min. `RateLimitExceeded` is registered as an exception handler in `app/public_main.py`. If abuse appears, raise the limits behind authenticated identity rather than the per-IP key (NAT'd corp networks otherwise hit the cap collectively).
 
 ### Admin console (`app/admin_main.py`, `app/api/admin/`, `staff` + `admin_audit_log` tables)
 
-**Status: design proposal, not yet implemented.** The code is a working reference sketch of the structure; migration `c4a91f7d20b3` is deliberately **unapplied** (do not run `alembic upgrade head` past it without an explicit decision — and re-parent it if an unrelated migration is needed first), no staff account exists, and the `:8006` process is never started. See [`docs/admin-console.md`](docs/admin-console.md) for the proposal/live boundary, the load-bearing decisions, and the open questions.
+**Status: live on dev, not yet deployed.** Migration `c4a91f7d20b3` is applied, operator accounts exist, and both processes run locally (`:8006` API + `frontend-admin` on `:3400`). Production is still a manual runbook — `deploy.sh` has no admin sibling. Current surfaces: staff, users + credit adjustments, sessions, feedback triage, message ratings, invites, skills (list, upload, edit, toggle), connectors + catalog (add/edit/publish), payments, the credits/revenue/check-in dashboard, and the audit browser. The UI is bilingual (zh-CN / en-US) on next-intl, same stack and cookie as ppig; `npm run check:i18n` pins catalog parity. See [`docs/admin-console.md`](docs/admin-console.md) for each surface's routes, the load-bearing decisions, and the going-live runbook.
 
 The internal operations surface: **a separate bounded context, not a separate service**, and the split runs along two independent axes.
 
 **Code and schema are shared.** Admin endpoints import `app.models` / `app.services` / `app.database` directly and admin tables ride in the same alembic history. A second service against the same DB would guarantee model drift and — worse — would have to re-implement the funnels that hold the money invariants (`credits._internal`, `commission._internal`, `payment.orders`). So admin code is a **sub-namespace inside each existing layer**, not a vertical slice: `app/api/admin/`, `app/schemas/admin/`, `app/services/admin/`, with `staff`/`admin_audit_log` living in `app/models/` like any other table and the staff token class in `app/auth.py` beside the two it must stay exclusive with.
 
-**The runtime surface is not shared.** `app/admin_main.py:admin_app` is a third ASGI app in its own process (`root_path="/admin/api/v1"`, conventionally `:8006`) — the public API never mounts an admin route and vice versa. Both apps are built by **`app/asgi.py:create_app`**, which owns the limiter, error handlers, middleware *order*, CORS, observability and the health probes; the four arguments it takes (`root_path`, `cors_origins`, `lifespan`, `readiness_probes`) are the complete list of what differs between the two surfaces, and nothing else may. The console's differences: no Redis client on `app.state` (no SSE, no enqueue — slowapi still counts in Redis via its own `storage_uri`, so limits stay cluster-wide, which is also why readiness probes the DB only), no startup dependency probe (an internal tool is better served by a 503 on the first request than a crash-looping process), and its own CORS allowlist (`admin_cors_origins`). **Security is a deployment property**: bind to a private interface / VPN; nothing in the code enforces it.
+**The runtime surface is not shared.** `app/admin_main.py` is a third ASGI app (`app.admin_main:app`) in its own process (`root_path="/admin/api/v1"`, conventionally `:8006`) — the public API never mounts an admin route and vice versa. Both apps are built by **`app/asgi.py:create_app`**, which owns the limiter, error handlers, middleware *order*, CORS, observability and the health probes; the four arguments it takes (`root_path`, `cors_origins`, `lifespan`, `readiness_probes`) are the complete list of what differs between the two surfaces, and nothing else may. The console's differences: no Redis client on `app.state` (no SSE, no enqueue — slowapi still counts in Redis via its own `storage_uri`, so limits stay cluster-wide, which is also why readiness probes the DB only), no startup dependency probe (an internal tool is better served by a 503 on the first request than a crash-looping process), and its own CORS allowlist (`admin_cors_origins`). **Security is a deployment property**: bind to a private interface / VPN; nothing in the code enforces it.
 
 Two rules bind everything admin:
 
@@ -197,7 +197,7 @@ Two rules bind everything admin:
    async with audit(ctx, action=AuditAction.STAFF_UPDATE,
                     target_type="staff", target_id=account.id,
                     reason=body.reason) as draft:
-       await staff_service.update(ctx.db, account, role=body.role)
+       await staff_service.update(ctx.db, account, status=body.status)
        draft.payload = changes          # before → after, filled in inside
    ```
 
@@ -205,9 +205,9 @@ Two rules bind everything admin:
 
 **Vocabulary is named, storage is not**: `AuditAction` (`app/services/admin/actions.py`) is a Python StrEnum over a plain VARCHAR column — adding a member needs no migration, but a typo won't compile and the audit browser's filter has a list to offer. It carries **only what the console can do today**; land the slice, then add the member. Targets are plain `target_type` / `target_id` strings — no wrapper types.
 
-**Authn vs authz vs context**: `app.auth.authenticate_and_get_staff` answers "who is calling"; `app/api/admin/dependencies.py` answers "may they" *and* builds the `AdminContext` (db + operator + request id + caller IP) that the audit funnel needs. They are one dependency per route, exposed as three `Annotated` aliases — **`ViewerContext` / `OperatorContext` / `OwnerContext`** — so the gate is visible in the signature and there is no ungated way to obtain a context. `StaffRole` is a linear ladder (`VIEWER` < `OPERATOR` < `OWNER`, compared via `.covers()`). Insufficient role is 403 `staff_forbidden`, never 401 — the console must tell "sign in again" from "you can't do this". `staff` is a **separate table from `user`**, never an `is_staff` flag: operator identity isn't customer identity, credentials/revocation are independent, and `organization_member.role` is *tenant*-scoped and must not be conflated with these *platform*-scoped roles. Sign-in is the one endpoint that can't use the ladder (it learns who the operator is by checking the password) and calls `build_context` directly so its `staff.login` row carries the same metadata.
+**Authn and context**: `app.auth.authenticate_and_get_staff` answers "who is calling"; `app/api/admin/dependencies.py` packages the result as **`StaffContext`** (db + operator + request id + caller IP), the only way into an admin endpoint. **There are no roles** — every active operator has full console access (v1 decision, `docs/admin-console.md`); accountability comes from the audit trail, and `dependencies.py` is where a role gate would return if tiers are ever needed. `staff` is a **separate table from `user`**, never an `is_staff` flag: operator identity isn't customer identity, credentials/revocation are independent, and `organization_member.role` is *tenant*-scoped — nothing to conflate with platform staff. Sign-in is the one endpoint that can't use `StaffContext` (it learns who the operator is by checking the password) and calls `build_context` directly so its `staff.login` row carries the same metadata; a *refused* sign-in stays uniform outside (one 401, `staff_invalid_credentials`) but logs a warning naming the target and the withheld cause.
 
-**`app/api/admin/staff.py` is the reference slice** — every future console feature copies its shape (gate in the signature, mutation inside `audit()`, invariants in the service, plain reads inline). The service layer holds the rules the endpoint has no business re-deriving: a password change signs that account out everywhere, and **the console never loses its last active `OWNER`** — checked *after* the change is flushed, so one PATCH that both demotes and disables is caught, with the owner rows locked `FOR UPDATE` so concurrent demotions serialize. No self-registration, no OTP, no invite: accounts come from `scripts/manage_staff.py` (password via `STAFF_PASSWORD` env so it never hits shell history or `ps`), which drives the *same* service module rather than duplicating it, and is the recovery path for a locked-out sole `OWNER`. Script runs write no audit row — `staff_id` is `NOT NULL` and a script has no operator to attribute; they're authorized by DB credentials instead.
+**`app/api/admin/staff.py` is the reference slice** — every future console feature copies its shape (`StaffContext` in the signature, mutation inside `audit()`, invariants in the service, plain reads inline). The service layer holds the rules the endpoint has no business re-deriving: a password change signs that account out everywhere, and **the console never loses its last `ACTIVE` account** (409 `staff_last_active`) — checked *after* a status change is flushed, with the active rows locked `FOR UPDATE` so two operators disabling each other serialize. No self-registration, no OTP, no invite: accounts come from `scripts/manage_staff.py` (password via `STAFF_PASSWORD` env so it never hits shell history or `ps`), which drives the *same* service module rather than duplicating it, and is the recovery path for a fully locked-out console. Script runs write no audit row — `staff_id` is `NOT NULL` and a script has no operator to attribute; they're authorized by DB credentials instead.
 
 `app/services/admin/` imports **no FastAPI** — the HTTP layer builds `AdminContext` (pure data) and the services only read it, which is what makes the audit funnel testable without fabricating a `Request`.
 
@@ -219,7 +219,7 @@ A session owner mints a share record with a password. Recipients hit a public un
 
 ### Feedback (`app/api/public/feedback.py`, `session.py`)
 
-Two tables, two shapes. `user_feedback` is freeform product feedback (`POST /feedback` in `feedback.py`). `message_feedback` is per-assistant-message thumbs/comment with a unique `(user_id, message_id)` constraint enforced via `IntegrityError → 409` — its endpoints live in `session.py` (as `/sessions/{id}/messages/...` sub-resources), not `feedback.py`.
+Two tables, two shapes. `user_feedback` is freeform product feedback (`POST /feedback` in `feedback.py` creates; the `FeedbackStatus` triage workflow is managed on the console surface, `app/api/admin/feedback.py`). `message_feedback` is per-assistant-message thumbs/comment with a unique `(user_id, message_id)` constraint enforced via `IntegrityError → 409` — its endpoints live in `session.py` (as `/sessions/{id}/messages/...` sub-resources), not `feedback.py`.
 
 ### File storage (`app/services/file_storage.py`)
 
@@ -312,9 +312,9 @@ JSONB list of discriminated blocks. Block types: `text` (USER has `files[]`, ASS
 
 ## Conventions
 
-- **The API layer is two symmetric surface packages**: `app/api/public/` (customer API → `app.main`, `/api/v1`) and `app/api/admin/` (operations console → `app.admin_main`, `/admin/api/v1`). A surface earns a package because it is a *trust boundary* — its own token class, gate, CORS, process — not because it is a feature; a third surface would be a third sibling, never a subdirectory. Each surface holds one module per resource directly in the package (no inner `endpoints/` level — inside a named surface, everything is an endpoint module except `router.py`/`dependencies.py`, which name themselves) and a `router.py` the ASGI app mounts as its single router. Surface-agnostic request deps (`get_db`, `get_redis`…) stay at `app/api/dependencies.py`. `schemas/` and `services/` are **not** surface-split — services are shared by both surfaces (the admin rule: call the domain service, never re-implement it), so the `schemas/` root belongs to the public surface and `schemas/admin/` to the console.
+- **The API layer is two symmetric surface packages**: `app/api/public/` (customer API → `app.public_main`, `/api/v1`) and `app/api/admin/` (operations console → `app.admin_main`, `/admin/api/v1`). A surface earns a package because it is a *trust boundary* — its own token class, gate, CORS, process — not because it is a feature; a third surface would be a third sibling, never a subdirectory. Each surface holds one module per resource directly in the package (no inner `endpoints/` level — inside a named surface, everything is an endpoint module except `router.py`/`dependencies.py`, which name themselves) and a `router.py` the ASGI app mounts as its single router. Surface-agnostic request deps (`get_db`, `get_redis`…) stay at `app/api/dependencies.py`. `schemas/` and `services/` are **not** surface-split — services are shared by both surfaces (the admin rule: call the domain service, never re-implement it), so the `schemas/` root belongs to the public surface and `schemas/admin/` to the console.
 - Endpoint files keep inline DB queries; only non-trivial logic moves to `app/services/`. Session-service submodules (`enqueue`, `streaming`, `title`) are re-exported through `app.services.session.__init__` so callers write `from app.services.session import queue_user_message`. Internal helpers (`session/files.py`, `session/exceptions.py`) are not re-exported.
-- `app.main` imports `setup_logging` **before** any other app imports so loguru captures module-level loggers.
+- `app.public_main` imports `setup_logging` **before** any other app imports so loguru captures module-level loggers.
 - Pagination helper (`app/common/pagination.py`) clamps page/page_size to ≥1; list endpoints build one shared filter and apply it to both the count and row queries so totals can't drift from the page.
 - **Connector vs MCP.** Two names for two things, and they do not overlap. A *Connector* is what the user configures and manages — it names the URL surface (`/connectors/*`), every request/response schema (`ConnectorCreate`, `ConnectorResponse`), every `error_type` the frontend localizes (`connector_*`), and everything the UI says. *MCP* is the protocol and the server on the other end — it names the client, the transport, the probe, and the OAuth machinery in `app/services/mcp/`. New code picks by which of the two it is about, not by which file it sits in. Three legacy exceptions, all named after the table rather than what they serve: the `mcp_server` / `mcp_server_catalog` tables (renaming a live table is not worth it) and, with them, `app/api/public/mcp_server.py` + `app/schemas/mcp_server.py`. None is precedent — a new endpoint or schema module serving Connectors is `connector*`.
 - Exception handlers (`app/exception_handlers.py`) cover `AppError`, `IntegrityError`, `SQLAlchemyError`, `HTTPException`, `RequestValidationError`, and a catch-all `Exception`. Raise `AppError` subclasses (from `app/errors.py`) inside services rather than `HTTPException` — the handler converts them to a uniform JSON shape.

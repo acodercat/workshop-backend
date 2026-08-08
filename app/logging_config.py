@@ -45,8 +45,9 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
         log_dir: Directory to store log files
         level: Minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     """
-    # Create logs directory
-    Path(log_dir).mkdir(exist_ok=True)
+    # Create logs directory (``parents`` so a nested dir like
+    # ``logs/admin`` works on a fresh checkout).
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     # Remove default handler
     logger.remove()

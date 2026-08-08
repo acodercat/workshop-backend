@@ -13,11 +13,11 @@ Deliberately a **separate table** from ``user`` rather than an
 - The customer ``user`` table is on the hot request path; the console's
   access-control columns don't belong there.
 
-Do **not** reuse ``organization_member.role`` for this. That enum
-(``OWNER`` / ``ADMIN`` / ``MEMBER``) is a *tenant*-scoped role describing
-a user's standing inside one organization; staff roles here are
-*platform*-scoped. Conflating the two would make an org owner
-indistinguishable from a platform operator.
+There is **no role column**: every active operator has full console
+access — a deliberate v1 simplification for a small, fully-trusted
+operator team (see ``docs/admin-console.md``). If tiers are ever needed,
+a role column is one additive migration away; the audit trail records
+who did what either way.
 
 Authentication is the ``scope="staff"`` JWT class in :mod:`app.auth` — a
 third token class alongside user tokens and share-view tokens, mutually
@@ -34,46 +34,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from app.database import Base
-
-
-class StaffRole(StrEnum):
-    """Platform-scoped operator role, ordered least → most privileged.
-
-    Three levels, each with a distinct reason to exist:
-
-    - ``VIEWER``   — read-only. Support staff answering "what happened to
-      this user's balance / order" without the ability to change it.
-    - ``OPERATOR`` — day-to-day operations: credit adjustments, withdrawal
-      review, invite issuance, platform-skill management.
-    - ``OWNER``    — everything ``OPERATOR`` can do, plus managing staff
-      accounts themselves.
-
-    Finer-grained, per-resource permissions get their own table if and
-    when a real need appears; a linear ladder covers the current team and
-    keeps every call site a single :meth:`covers` check.
-    """
-
-    VIEWER = "VIEWER"
-    OPERATOR = "OPERATOR"
-    OWNER = "OWNER"
-
-    def covers(self, required: "StaffRole") -> bool:
-        """Whether this role satisfies a ``required`` minimum.
-
-        The ladder is linear, so "at least OPERATOR" is a rank
-        comparison rather than a set membership test.
-        """
-        return _ROLE_RANK[self] >= _ROLE_RANK[required]
-
-
-# Rank lookup backing :meth:`StaffRole.covers`. Kept module-private and
-# adjacent to the enum so adding a level is a two-line change that can't
-# silently leave a role unranked (a missing key raises on first use).
-_ROLE_RANK: dict[StaffRole, int] = {
-    StaffRole.VIEWER: 0,
-    StaffRole.OPERATOR: 10,
-    StaffRole.OWNER: 20,
-}
 
 
 class StaffStatus(StrEnum):
@@ -93,23 +53,11 @@ class Staff(Base):
     # Login identifier. Operator-chosen (not auto-generated like
     # ``user.username``) because staff accounts are provisioned by hand.
     # ``unique=True`` only, same as ``user.username``: the unique
-    # constraint's backing index already serves the login lookup, so an
-    # extra ``index=True`` would just create a duplicate index.
+    # constraint's backing index already serves the login lookup.
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     # Human name shown in the console header and on audit-log rows.
-    display_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    role: Mapped[StaffRole] = mapped_column(
-        SAEnum(
-            StaffRole,
-            name="staff_role",
-            values_callable=lambda enum: [member.value for member in enum],
-        ),
-        nullable=False,
-        # Least privilege by default: a row inserted without an explicit
-        # role can read the console but cannot change anything.
-        server_default=StaffRole.VIEWER.value,
-    )
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[StaffStatus] = mapped_column(
         SAEnum(
             StaffStatus,
@@ -143,5 +91,5 @@ class Staff(Base):
     def __repr__(self) -> str:
         return (
             f"<Staff(id={self.id}, username={self.username!r}, "
-            f"role={self.role.value}, status={self.status.value})>"
+            f"status={self.status.value})>"
         )

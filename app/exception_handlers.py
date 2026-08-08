@@ -169,7 +169,7 @@ async def validation_exception_handler(
             "location": list(err["loc"]),
             "message": err["msg"],
             "type": err["type"],
-            **({"context": err["ctx"]} if "ctx" in err else {}),
+            **({"context": _jsonable_ctx(err["ctx"])} if "ctx" in err else {}),
         }
         for err in exc.errors()
     ]
@@ -181,6 +181,23 @@ async def validation_exception_handler(
             details=details,
         ),
     )
+
+
+def _jsonable_ctx(ctx: dict) -> dict:
+    """Make a pydantic error ``ctx`` JSON-safe.
+
+    Constraint contexts are plain scalars (``{"ge": 1}``) and pass
+    through untouched — but a custom ``field_validator`` that raises
+    ``ValueError`` arrives as ``{"error": ValueError(...)}``, a live
+    exception object that would crash serialization and turn the 422
+    into a 500. Stringify anything that isn't already JSON-native.
+    """
+    return {
+        key: value
+        if isinstance(value, (str, int, float, bool, type(None)))
+        else str(value)
+        for key, value in ctx.items()
+    }
 
 
 async def general_exception_handler(

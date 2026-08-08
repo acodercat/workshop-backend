@@ -34,8 +34,7 @@ class AdminContext:
     is what lets them commit atomically."""
 
     staff: Staff
-    """The authenticated operator, already role-checked by the dependency
-    that built this context."""
+    """The authenticated operator."""
 
     request_id: str | None
     """Correlation id from ``RequestIDMiddleware`` — ties the audit row to

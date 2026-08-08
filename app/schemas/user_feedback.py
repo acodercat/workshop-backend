@@ -1,9 +1,8 @@
 """Wire schemas for the user-feedback feature.
 
-Endpoint surface today is owner-side only (the user submitting
-feedback). An admin-side response shape will be added when the
-internal review tool ships; for now admins read directly from the
-table.
+Owner-side only (the user submitting feedback) — the review side's
+shapes live with the console surface in
+:mod:`app.schemas.admin.feedback`.
 """
 
 from pydantic import BaseModel, Field, field_validator

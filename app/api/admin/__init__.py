@@ -21,8 +21,8 @@ Admin code follows the same layer-first layout as the rest of the app
 rather than forming a vertical slice of its own — it is a sub-namespace
 *inside* each layer:
 
-- ``app/api/admin/``      — this package: HTTP surface + role gating,
-                            sibling of :mod:`app.api.public`
+- ``app/api/admin/``      — this package: the HTTP surface, sibling of
+                            :mod:`app.api.public`
 - ``app/schemas/admin/``  — admin request/response models
 - ``app/services/admin/`` — admin-only domain logic (audit, staff)
 - ``app/auth.py``         — the ``scope="staff"`` token class, beside the
@@ -32,9 +32,11 @@ rather than forming a vertical slice of its own — it is a sub-namespace
 
 Within this package:
 
-- :mod:`~app.api.admin.dependencies` — the role ladder, and the request
-  context every action is recorded against. There is no ungated way to
-  obtain one.
+- :mod:`~app.api.admin.dependencies` — ``StaffContext``, the
+  authenticated operator plus the request context every action is
+  recorded against. There is no unauthenticated way to obtain one; there
+  are no role tiers (every active operator has full access — see
+  ``docs/admin-console.md``).
 - :mod:`~app.api.admin.router` — the route table; the ASGI app mounts
   exactly one router.
 - everything else — one module per resource (``auth``, ``me``,

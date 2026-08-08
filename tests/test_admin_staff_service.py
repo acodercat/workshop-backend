@@ -1,14 +1,12 @@
 """Operator-account invariants.
 
-The one that matters is the last-``OWNER`` guard: ``OWNER`` is the only
-role that can manage staff accounts, so a change leaving none locks
-everybody out of account management, recoverable only by someone with
-database credentials. It is checked **after** the change is flushed,
-which is what lets a single PATCH that demotes *and* disables be caught —
-the reason the service takes a whole partial update rather than one
-setter per column.
+The one that matters is the lockout guard: a status change must never
+leave the console with zero ``ACTIVE`` accounts, because recovery then
+requires database credentials and ``scripts/manage_staff.py``. It is
+checked **after** the change is flushed, so the question asked is about
+the state the transaction ends in.
 
-A fake ``AsyncSession`` stands in for the DB; the owner-count query is
+A fake ``AsyncSession`` stands in for the DB; the active-account query is
 answered by whatever the fake is primed with.
 
 asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
@@ -16,8 +14,8 @@ asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 
 import pytest
 
-from app.errors import LastOwnerError, StaffUsernameTakenError
-from app.models.staff import Staff, StaffRole, StaffStatus
+from app.errors import LastActiveStaffError, StaffUsernameTakenError
+from app.models.staff import Staff, StaffStatus
 from app.services.admin import staff as staff_service
 
 
@@ -33,15 +31,15 @@ class _FakeDb:
     """AsyncSession stand-in.
 
     ``scalar`` answers the username pre-check; ``scalars`` answers the
-    locked owner-id query, primed with the ids that would survive the
-    transaction under test.
+    locked active-account query, primed with the ids that would survive
+    the transaction under test.
     """
 
     def __init__(
-        self, *, existing_username_id: int | None = None, owner_ids: list[int] = ()
+        self, *, existing_username_id: int | None = None, active_ids: list[int] = ()
     ) -> None:
         self.existing_username_id = existing_username_id
-        self.owner_ids = list(owner_ids)
+        self.active_ids = list(active_ids)
         self.added: list = []
         self.flushes = 0
 
@@ -49,7 +47,7 @@ class _FakeDb:
         return self.existing_username_id
 
     async def scalars(self, _stmt):
-        return _Scalars(self.owner_ids)
+        return _Scalars(self.active_ids)
 
     def add(self, obj) -> None:
         self.added.append(obj)
@@ -58,15 +56,12 @@ class _FakeDb:
         self.flushes += 1
 
 
-def _account(
-    role: StaffRole = StaffRole.OWNER, status: StaffStatus = StaffStatus.ACTIVE
-) -> Staff:
+def _account(status: StaffStatus = StaffStatus.ACTIVE) -> Staff:
     return Staff(
         id=7,
         username="alice",
         password_hash="old-hash",
-        display_name="Alice",
-        role=role,
+        name="Alice",
         status=status,
         token_version=0,
     )
@@ -79,15 +74,10 @@ async def test_create_hashes_the_password_and_flushes_for_an_id() -> None:
     db = _FakeDb()
 
     account = await staff_service.create(
-        db,
-        username="bob",
-        display_name="Bob",
-        role=StaffRole.OPERATOR,
-        password="correct-horse-battery",
+        db, username="bob", name="Bob", password="correct-horse-battery"
     )
 
     assert account.password_hash != "correct-horse-battery"
-    assert account.role is StaffRole.OPERATOR
     # Flushed, so the caller's audit row can reference the generated id.
     assert db.flushes == 1
     assert db.added == [account]
@@ -98,67 +88,63 @@ async def test_create_refuses_a_taken_username() -> None:
 
     with pytest.raises(StaffUsernameTakenError):
         await staff_service.create(
-            db,
-            username="alice",
-            display_name="Alice",
-            role=StaffRole.VIEWER,
-            password="correct-horse-battery",
+            db, username="alice", name="Alice", password="correct-horse-battery"
         )
 
     assert db.added == []
 
 
-# --- update: the last-owner invariant ----------------------------------
+# --- update: the lockout guard ------------------------------------------
 
 
 async def test_update_applies_only_the_fields_given() -> None:
-    db = _FakeDb(owner_ids=[7])
+    db = _FakeDb(active_ids=[7])
     account = _account()
 
-    await staff_service.update(db, account, display_name="Alice Smith")
+    await staff_service.update(db, account, name="Alice Smith")
 
-    assert account.display_name == "Alice Smith"
+    assert account.name == "Alice Smith"
     # Absent means "leave alone", never "set to None".
-    assert account.role is StaffRole.OWNER
     assert account.status is StaffStatus.ACTIVE
 
 
-async def test_update_allows_demoting_an_owner_when_another_remains() -> None:
-    db = _FakeDb(owner_ids=[9])  # a second owner survives the change
+async def test_a_name_change_skips_the_guard() -> None:
+    # A rename can't lock anyone out, so it must not touch (or lock) the
+    # other rows at all.
+    db = _FakeDb(active_ids=[])  # guard would raise if consulted
     account = _account()
 
-    await staff_service.update(db, account, role=StaffRole.VIEWER)
+    await staff_service.update(db, account, name="Alice Smith")
 
-    assert account.role is StaffRole.VIEWER
+    assert account.name == "Alice Smith"
 
 
-async def test_update_refuses_to_demote_the_last_owner() -> None:
-    db = _FakeDb(owner_ids=[])  # nobody left
+async def test_disabling_is_allowed_while_another_active_account_remains() -> None:
+    db = _FakeDb(active_ids=[9])  # a second active account survives
     account = _account()
 
-    with pytest.raises(LastOwnerError):
-        await staff_service.update(db, account, role=StaffRole.VIEWER)
+    await staff_service.update(db, account, status=StaffStatus.DISABLED)
+
+    assert account.status is StaffStatus.DISABLED
 
 
-async def test_update_refuses_to_disable_the_last_owner() -> None:
-    db = _FakeDb(owner_ids=[])
+async def test_disabling_the_last_active_account_is_refused() -> None:
+    db = _FakeDb(active_ids=[])  # nobody left
     account = _account()
 
-    with pytest.raises(LastOwnerError):
+    with pytest.raises(LastActiveStaffError):
         await staff_service.update(db, account, status=StaffStatus.DISABLED)
 
 
 async def test_the_guard_runs_after_the_change_is_flushed() -> None:
-    # The combined case: demote the last owner *and* disable them in one
-    # PATCH. Checking either field alone before applying would pass this;
-    # asking "does an active OWNER remain" after the flush does not.
-    db = _FakeDb(owner_ids=[])
+    # The guard asks "does an ACTIVE account remain in the state this
+    # transaction commits", which requires the change to be flushed
+    # first — not a pre-flight check against the old state.
+    db = _FakeDb(active_ids=[])
     account = _account()
 
-    with pytest.raises(LastOwnerError):
-        await staff_service.update(
-            db, account, role=StaffRole.VIEWER, status=StaffStatus.DISABLED
-        )
+    with pytest.raises(LastActiveStaffError):
+        await staff_service.update(db, account, status=StaffStatus.DISABLED)
 
     assert db.flushes == 1
 
