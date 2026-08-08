@@ -36,22 +36,23 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def _already_here() -> bool:
-    """Whether this branch added these columns under its own revision.
+def _columns_present() -> bool:
+    """Whether the pair is already on the table.
 
-    ``a1c7f3e9d2b6`` on ``hkgai`` is this migration written a second time —
-    same table, same two columns, byte-identical ``upgrade()``, a different
-    id — because the feature was developed on both branches instead of on
-    master and merged down. Both are real revisions now and neither can be
-    withdrawn: alembic keys on the id, so it sees two unrelated migrations
-    and runs whichever it has not run.
+    This revision and ``a1c7f3e9d2b6`` add the same two columns: the feature was
+    written once on ``master`` and once on ``hkgai`` instead of being merged
+    down, so alembic holds two ids for one change and neither is an ancestor
+    of the other. Whichever runs first adds them; the other must find them
+    there and do nothing.
 
-    Guarding rather than re-pointing ``down_revision``: rewriting the chain
-    is the fork ``HKGAI_MERGE.md`` argues against for the payment revisions,
-    for the same reason — it has to be redone on every future sync, and it
-    fails in production. This also makes the chain replayable from an empty
-    database, which it is not today: there the two would collide the other
-    way round.
+    Order is not fixed and cannot be assumed. On the deployed database
+    ``a1c7f3e9d2b6`` was applied months before ``e2b7d4f9a1c6`` arrived, but
+    from an empty one alembic's own topological order puts ``e2b7d4f9a1c6``
+    first — so the guard has to sit on both, phrased the same way, and read
+    the schema rather than the calendar.
+
+    ``downgrade`` asks the same question for the same reason: coming back down
+    the first to run drops them and the second finds nothing.
     """
     columns = {
         c["name"] for c in inspect(op.get_bind()).get_columns("mcp_server_catalog")
@@ -60,7 +61,7 @@ def _already_here() -> bool:
 
 
 def upgrade() -> None:
-    if _already_here():
+    if _columns_present():
         return
     op.add_column(
         "mcp_server_catalog",
@@ -73,13 +74,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Nothing, on this branch — ``upgrade`` never added anything here.
-
-    Not the mirror of the guard above, because the schema cannot answer the
-    question this direction asks. Coming down, the columns are present either
-    way: whether this revision put them there or ``a1c7f3e9d2b6`` did is not
-    something ``get_columns`` can say. On ``hkgai`` it is always the latter —
-    that revision is applied long before this one arrives — so dropping them
-    here would take columns another revision owns, and leave *its* downgrade
-    failing on columns that are gone.
-    """
+    if not _columns_present():
+        return
+    op.drop_column("mcp_server_catalog", "oauth_client_secret_encrypted")
+    op.drop_column("mcp_server_catalog", "oauth_client_id")
