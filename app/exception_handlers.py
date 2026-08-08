@@ -20,6 +20,11 @@ Five handlers cover the surface:
   validation failures; emits ``error.details`` with the per-field
   breakdown.
 - :func:`general_exception_handler` — last-resort 500 catch.
+
+:func:`install_error_handlers` registers all of them on an app in one
+call. Every ASGI entrypoint in the project (the public API, the admin
+console) uses it, so the error envelope is identical across surfaces and
+adding a handler can't leave one app behind.
 """
 
 import logging
@@ -27,7 +32,7 @@ from http import HTTPStatus
 from typing import Any
 
 import sentry_sdk
-from fastapi import Request, status
+from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -68,9 +73,20 @@ def _phrase_to_type(code: int) -> str:
 
 
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+    # RFC 7235 requires ``WWW-Authenticate`` on every 401. Bearer is the
+    # only scheme any surface here speaks, so the challenge is emitted
+    # centrally rather than remembered per error class — a 401 ``AppError``
+    # (``StaffAuthenticationError``, ``StaffCredentialsError``) gets the
+    # same header the ``HTTPException``-raising auth paths already send.
+    headers = (
+        {"WWW-Authenticate": "Bearer"}
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED
+        else None
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content=_error_envelope(type_=exc.error_type, message=exc.message),
+        headers=headers,
     )
 
 
@@ -153,7 +169,7 @@ async def validation_exception_handler(
             "location": list(err["loc"]),
             "message": err["msg"],
             "type": err["type"],
-            **({"context": err["ctx"]} if "ctx" in err else {}),
+            **({"context": _jsonable_ctx(err["ctx"])} if "ctx" in err else {}),
         }
         for err in exc.errors()
     ]
@@ -165,6 +181,23 @@ async def validation_exception_handler(
             details=details,
         ),
     )
+
+
+def _jsonable_ctx(ctx: dict) -> dict:
+    """Make a pydantic error ``ctx`` JSON-safe.
+
+    Constraint contexts are plain scalars (``{"ge": 1}``) and pass
+    through untouched — but a custom ``field_validator`` that raises
+    ``ValueError`` arrives as ``{"error": ValueError(...)}``, a live
+    exception object that would crash serialization and turn the 422
+    into a 500. Stringify anything that isn't already JSON-native.
+    """
+    return {
+        key: value
+        if isinstance(value, (str, int, float, bool, type(None)))
+        else str(value)
+        for key, value in ctx.items()
+    }
 
 
 async def general_exception_handler(
@@ -180,3 +213,20 @@ async def general_exception_handler(
             message="An unexpected error occurred.",
         ),
     )
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Register every handler above on ``app``.
+
+    Order of registration does not matter — Starlette dispatches on the
+    exception class, resolving to the most specific registered base — but
+    the set does: ``Exception`` last in the list below is the catch-all,
+    and omitting any one of the others would let that path fall through
+    to a bare 500 with no envelope.
+    """
+    app.add_exception_handler(AppError, app_error_handler)
+    app.add_exception_handler(IntegrityError, integrity_error_handler)
+    app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(Exception, general_exception_handler)

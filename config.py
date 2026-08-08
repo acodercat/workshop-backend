@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 MINUTES_PER_WEEK = 60 * 24 * 7
+MINUTES_PER_WORKDAY = 60 * 8
 
 
 class Settings(BaseSettings):
@@ -98,11 +99,27 @@ class Settings(BaseSettings):
     )
     bcrypt_rounds: int = Field(default=12, description="Bcrypt work factor (10-14 typical)")
 
+    # Admin-console tokens (``scope="staff"``). A workday rather than the
+    # customer token's week: the console is the highest-privilege surface
+    # and is used from a workstation, so a stolen token's window should
+    # close by the next morning.
+    admin_access_token_expire_minutes: int = Field(
+        default=MINUTES_PER_WORKDAY,
+        description="Staff access token lifetime in minutes",
+    )
+
     # CORS — explicit allowlist; wildcard is forbidden because we use
     # ``allow_credentials=True`` (browsers reject the combination).
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3300"],
         description="Allowed origins for CORS",
+    )
+    # The admin console runs as its own app on its own port and must not
+    # inherit the customer allowlist — a customer-facing origin has no
+    # business calling admin endpoints from a browser.
+    admin_cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3400"],
+        description="Allowed origins for CORS on the admin app",
     )
 
     # Rate limits — slowapi key is the client IP. Sized for human use;
@@ -120,6 +137,13 @@ class Settings(BaseSettings):
     )
     rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
+    # Staff sign-in. Tighter than the customer limit: the operator pool is
+    # tiny and known, so a burst of attempts is far more likely to be an
+    # attack than a forgetful user.
+    rate_limit_admin_login: str = Field(
+        default="5/minute",
+        description="Per-IP admin-console login attempts",
+    )
     rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
     rate_limit_upload_url: str = Field(
         default="300/minute",

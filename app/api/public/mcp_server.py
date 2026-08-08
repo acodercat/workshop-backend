@@ -20,6 +20,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     HTTPException,
+    Query,
     Request,
     status,
 )
@@ -38,7 +39,7 @@ from app.errors import (
     ConnectorAuthorizationExpiredError,
     ConnectorAuthorizationSupersededError,
     ConnectorChangedDuringAuthorizationError,
-    ConnectorNameConflictError,
+    ConnectorUrlConflictError,
     ConnectorNotAuthorizedError,
     ConnectorNotOAuthError,
     ConnectorOAuthChangeUnsupportedError,
@@ -47,6 +48,7 @@ from app.errors import (
     OAuthNotConfiguredError,
 )
 from app.models.mcp_server import MCPServer, MCPServerAuthType
+from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.mcp_server import (
@@ -59,7 +61,9 @@ from app.schemas.mcp_server import (
     ConnectorUpdate,
     OAuthCallbackRequest,
 )
+from app.services import localized_text
 from app.services.crypto import encrypt_secret, open_secret
+from app.services.localized_text import DEFAULT_LOCALE, normalize_locale
 from app.services.mcp import catalog, grant, oauth
 from app.services.mcp.probe import ProbeResult, probe
 from app.services.redis import oauth_current_state_key, oauth_state_key
@@ -111,15 +115,41 @@ async def get_client_metadata() -> dict:
 async def list_connector_catalog(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
+    locale: str = Query(default=DEFAULT_LOCALE),
 ) -> list[ConnectorCatalogEntryResponse]:
     """The official Connector catalog — templates the caller can add.
 
     User-independent (every caller sees the same published entries); the client
     joins it against ``GET /connectors`` on ``catalog_id`` to tell an entry it
     has already added from one it hasn't.
+
+    ``name`` and ``description`` are resolved for the ``locale`` query param
+    (the frontend proxy forwards the app UI language, as it does for skills):
+    an entry carrying a translation returns it, everything else the stored
+    default. The maps themselves are never exposed.
     """
-    entries = await catalog.list_published(db)
-    return [ConnectorCatalogEntryResponse.model_validate(entry) for entry in entries]
+    resolved_locale = normalize_locale(locale)
+    return [
+        _localized_catalog_response(entry, resolved_locale)
+        for entry in await catalog.list_published(db)
+    ]
+
+
+def _localized_catalog_response(
+    entry: MCPServerCatalogEntry, locale: str
+) -> ConnectorCatalogEntryResponse:
+    """One entry as the client sees it, in *locale*.
+
+    Built field-by-field rather than validated-then-patched: the response is
+    what the client renders, and assigning over a validated copy is how a
+    field quietly keeps the untranslated value when it is renamed.
+    """
+    response = ConnectorCatalogEntryResponse.model_validate(entry)
+    response.name = localized_text.resolve(entry.name, entry.name_i18n, locale)
+    response.description = localized_text.resolve_optional(
+        entry.description, entry.description_i18n, locale
+    )
+    return response
 
 
 @router.post("/connectors", status_code=status.HTTP_201_CREATED)
@@ -129,16 +159,22 @@ async def create_connector(
     body: ConnectorCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
+    locale: str = Query(default=DEFAULT_LOCALE),
 ) -> ConnectorResponse:
     """Persist a Connector, from the official catalog or a custom definition.
 
     Probes the server first, except for OAuth — which can't be probed until the
     user authorizes (see ``/connectors/{id}/authorizations``). Adding the same
-    catalog entry twice collides on the per-user name uniqueness and surfaces as
+    catalog entry twice collides on the per-user URL uniqueness and surfaces as
     the usual 409.
+
+    ``locale`` decides which of a catalog entry's names is copied onto the new
+    row — the one the user was reading. It is a snapshot from then on.
     """
     if body.catalog_id is not None:
-        connector = await _build_catalog_connector(db, body.catalog_id, current_user.id)
+        connector = await _build_catalog_connector(
+            db, body.catalog_id, current_user.id, normalize_locale(locale)
+        )
     elif body.auth_type == MCPServerAuthType.OAUTH:
         connector = await _build_oauth_connector(db, body, current_user.id)
     else:
@@ -161,7 +197,7 @@ async def create_connector(
     db.add(connector)
     # ``connector.name``, not ``body.name`` — the catalog path takes its name
     # from the entry, so the body's is None there.
-    await _commit_or_conflict(db, connector.name)
+    await _commit_or_conflict(db, connector.url)
     await db.refresh(connector)
     return _to_response(connector)
 
@@ -339,6 +375,13 @@ async def update_connector(
     url_changed = body.url is not None and body.url != connector.url
     auth_changed = body.auth_type is not None
     _reject_unprovisionable(connector, body, url_changed=url_changed)
+    if url_changed:
+        # Ask before probing: pointing an existing Connector at a server the
+        # user already has is a 409, and finding that out from the index after
+        # a network round trip would report it as a failed probe instead.
+        await _reject_duplicate_url(
+            db, current_user.id, body.url, excluding=connector.id
+        )
 
     # What to probe is decided by the row *as it will be*, not as it is: an OAuth
     # Connector switching to BEARER is probed (its new auth type is not OAuth),
@@ -389,7 +432,7 @@ async def update_connector(
     if probed is not None:
         _apply_probe(connector, probed)
 
-    await _commit_or_conflict(db, connector.name)
+    await _commit_or_conflict(db, connector.url)
     await db.refresh(connector)
     return _to_response(connector)
 
@@ -561,7 +604,7 @@ async def _release_connection(db: AsyncSession) -> None:
 
 
 async def _build_catalog_connector(
-    db: AsyncSession, catalog_id: int, user_id: int,
+    db: AsyncSession, catalog_id: int, user_id: int, locale: str,
 ) -> MCPServer:
     """Instantiate an official catalog entry as this user's own Connector.
 
@@ -570,15 +613,15 @@ async def _build_catalog_connector(
     stored), everything else is probed so a broken entry fails at add time.
     """
     entry = await catalog.get_published_entry(db, catalog_id)
-    connector = catalog.build_connector(entry, user_id)
-    await _reject_duplicate_name(db, user_id, connector.name)
+    connector = catalog.build_connector(entry, user_id, locale)
+    await _reject_duplicate_url(db, user_id, connector.url)
     # Decrypted before the connection is released: ``entry`` belongs to this
     # session, and a Fernet failure should surface as the usual
     # credential-unreadable error, not as a lazy-load surprise later.
     client_secret = (
         open_secret(
             entry.oauth_client_secret_encrypted,
-            what=f"catalog entry {entry.key!r} OAuth client secret",
+            what=f"catalog entry {entry.name!r} OAuth client secret",
         )
         if entry.oauth_client_secret_encrypted is not None
         else None
@@ -609,7 +652,7 @@ async def _build_oauth_connector(
     db: AsyncSession, body: ConnectorCreate, user_id: int,
 ) -> MCPServer:
     """Discover metadata + register/prepare the OAuth client (no tokens yet)."""
-    await _reject_duplicate_name(db, user_id, body.name)
+    await _reject_duplicate_url(db, user_id, body.url)
     await _release_connection(db)
     client, authorization = await _register_oauth_client(
         url=body.url,
@@ -1227,32 +1270,39 @@ async def _get_owned_connector(
     return connector
 
 
-async def _reject_duplicate_name(db: AsyncSession, user_id: int, name: str) -> None:
+async def _reject_duplicate_url(
+    db: AsyncSession, user_id: int, url: str, *, excluding: int | None = None
+) -> None:
     """Raise the same 409 the unique index would, without hitting the network.
 
     "Without hitting the network" is the whole point on the OAuth paths, and
     why both of them ask before they register: dynamic registration mints a
     client *at the provider*, and a client minted for a row that then collides
-    on the name index is orphaned — never stored, so never revocable, and a
-    user re-adding the same server a few times leaves one behind each time.
+    on the index is orphaned — never stored, so never revocable, and a user
+    re-adding the same server a few times leaves one behind each time.
+
+    *excluding* is the row being edited, so a PATCH that leaves the URL where
+    it already is does not collide with itself.
 
     Advisory only — a concurrent insert still lands on
-    ``uq_mcp_server_user_id_name`` in :func:`_commit_or_conflict`.
+    ``uq_mcp_server_user_id_url`` in :func:`_commit_or_conflict`.
     """
     stmt = select(MCPServer.id).where(
-        MCPServer.user_id == user_id, MCPServer.name == name,
+        MCPServer.user_id == user_id, MCPServer.url == url,
     )
+    if excluding is not None:
+        stmt = stmt.where(MCPServer.id != excluding)
     if (await db.execute(stmt)).first() is not None:
-        raise ConnectorNameConflictError(
-            f"a connector named {name!r} already exists for this user"
+        raise ConnectorUrlConflictError(
+            f"a connector for {url} already exists for this user"
         )
 
 
-async def _commit_or_conflict(db: AsyncSession, name: str) -> None:
+async def _commit_or_conflict(db: AsyncSession, url: str) -> None:
     try:
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise ConnectorNameConflictError(
-            f"a connector named {name!r} already exists for this user"
+        raise ConnectorUrlConflictError(
+            f"a connector for {url} already exists for this user"
         ) from exc

@@ -1,11 +1,24 @@
+"""ASGI entrypoint for the public (customer) API.
+
+Peer of :mod:`app.admin_main` (the operations console) and
+:mod:`app.workers.run` (the background process) — the internet-facing
+one of the three processes this backend deploys::
+
+    uv run uvicorn app.public_main:app --host 0.0.0.0 --port 8005
+
+The HTTP stack comes from :func:`app.asgi.create_app`, shared with the
+console; what this module owns is the customer surface's genuine
+differences — the two Redis pools with their startup probes, the
+per-user event hub, and the public CORS allowlist. Routes come from
+:mod:`app.api.public.router`.
+"""
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, status
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 from redis.asyncio import BlockingConnectionPool, ConnectionPool
 from redis.asyncio.connection import parse_url
 from redis.asyncio.retry import Retry
@@ -16,56 +29,20 @@ from redis.exceptions import (
     TimeoutError as RedisTimeoutError,
 )
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.logging_config import setup_logging
 
 setup_logging(log_dir="logs", level="INFO")
 logger = logging.getLogger(__name__)
 
-from app.api.endpoints import (
-    auth,
-    check_in,
-    credits,
-    feedback,
-    mcp_server,
-    recipe,
-    session,
-    share,
-    skill,
-    user,
-)
+from app.api.public.router import public_router
+from app.asgi import create_app, probe_database
 from app.database import engine
-from app.errors import AppError
-from app.exception_handlers import (
-    app_error_handler,
-    general_exception_handler,
-    http_exception_handler,
-    integrity_error_handler,
-    sqlalchemy_exception_handler,
-    validation_exception_handler,
-)
-from app.observability import install_observability
-from app.rate_limit import limiter, rate_limit_exceeded_handler
+from app.rate_limit import limiter
 from app.services.user import UserEventHub
 from config import settings
-from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
-
-ROUTERS = [
-    auth.router,
-    check_in.router,
-    credits.router,
-    feedback.router,
-    mcp_server.router,
-    recipe.router,
-    session.router,
-    share.router,
-    skill.router,
-    user.router,
-]
 
 
 def _make_redis_client(
@@ -245,93 +222,31 @@ async def lifespan(app: FastAPI):
         logger.info("API shutdown — Redis pools closed, DB engine disposed")
 
 
-app = FastAPI(
+async def _probe_redis(app: FastAPI) -> str | None:
+    """Readiness probe for the short-op Redis pool.
+
+    Only this app has Redis on ``app.state``, so the probe lives here
+    rather than in :mod:`app.asgi` — the console has no pool to check.
+    """
+    try:
+        await app.state.redis.ping()
+    except (RedisError, ConnectionError, OSError) as exc:
+        return str(exc)
+    return None
+
+
+app = create_app(
     title="MetaSeq Agent API",
-    version="1.0",
     root_path="/api/v1",
+    cors_origins=settings.cors_origins,
     lifespan=lifespan,
+    readiness_probes={"redis": _probe_redis, "db": probe_database},
 )
 
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
-app.add_exception_handler(AppError, app_error_handler)
-app.add_exception_handler(IntegrityError, integrity_error_handler)
-app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)
-app.add_exception_handler(StarletteHTTPException, http_exception_handler)
-app.add_exception_handler(RequestValidationError, validation_exception_handler)
-app.add_exception_handler(Exception, general_exception_handler)
-
-# SlowAPIMiddleware makes ``limiter.default_limits`` an actual global
-# floor. Without it slowapi only enforces limits on endpoints carrying
-# an explicit ``@limiter.limit`` decorator — every other route is
-# completely unthrottled (the default 200/min is inert). Added BEFORE
-# CORS so CORS wraps it: a 429 response still gets its
-# ``Access-Control-Allow-Origin`` headers, otherwise the browser would
-# surface an opaque network error instead of the rate-limit JSON. (The
-# request-id middleware, added in ``install_observability`` below, then
-# wraps CORS as the outermost layer — it only tags the request, so the
-# CORS-wraps-SlowAPI guarantee is unaffected.)
-app.add_middleware(SlowAPIMiddleware)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    # So the browser can read the correlation id off a response and put
-    # it in a bug report / error toast.
-    expose_headers=["X-Request-ID"],
-)
-
-# Sentry + Prometheus /metrics + the request-id middleware. Installed
-# after CORS so the request-id layer is outermost (correlation id bound
-# before anything inner logs); CORS stays inside it, still wrapping the
-# routes so error responses keep their CORS headers.
-install_observability(app)
-
-for router in ROUTERS:
-    app.include_router(router)
+app.include_router(public_router)
 
 
 @app.get("/")
 @limiter.exempt
 async def root():
     return {"message": "Welcome to MetaSeq Agent API"}
-
-
-# Health probes are exempt: K8s liveness/readiness poll these every
-# few seconds per node — a per-IP 200/min cap would 429 the probe,
-# K8s would mark the pod unhealthy and kill it.
-@app.get("/health/live")
-@limiter.exempt
-async def health_live():
-    """Liveness probe — process is up. Always 200 unless the loop is dead."""
-    return {"status": "ok"}
-
-
-@app.get("/health/ready")
-@limiter.exempt
-async def health_ready():
-    """Readiness probe — DB and Redis both reachable.
-
-    Returns 503 when either dependency is down so K8s stops routing
-    traffic; the pod stays running (liveness still 200) so it can
-    recover when the dependency comes back without a restart cycle.
-    """
-    errors: list[str] = []
-    try:
-        await app.state.redis.ping()
-    except (RedisError, ConnectionError, OSError) as exc:
-        errors.append(f"redis: {exc}")
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-    except (SQLAlchemyError, OSError) as exc:
-        errors.append(f"db: {exc}")
-    if errors:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"status": "not ready", "errors": errors},
-        )
-    return {"status": "ok"}

@@ -4,7 +4,7 @@ Run as:
 
     uv run python -m app.workers.run
 
-The web server (``app.main:app``) no longer starts background settle
+The web server (``app.public_main:app``) no longer starts background settle
 work in its lifespan — separation of concerns. Production deploys
 both processes side-by-side (see ``scripts/deploy.sh background``);
 multi-node deploys run this on every host and rely on Postgres

@@ -59,6 +59,7 @@ from app.services.redis import (
     stream_key,
 )
 from config import settings
+from app.services.session import connectors as session_connectors
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
     FileNotInSessionError,
@@ -79,7 +80,6 @@ async def queue_user_message(
     content: str,
     files: list[FileRef],
     skills: list[str] | None = None,
-    connectors: list[int] | None = None,
     recipe_id: int | None = None,
     agent_type: AgentType | None = None,
 ) -> None:
@@ -170,10 +170,13 @@ async def queue_user_message(
         db, session.user_id, skills or [],
     )
 
-    # Snapshot the Connectors this turn picked. Credentials are NOT
-    # snapshotted — the worker resolves url + decrypted credential live by id.
+    # Snapshot what the session's standing configuration resolves to right now
+    # — not a per-turn pick any more: the switch says "from now on", and this
+    # is the subset still owned and still connected when the turn ran.
+    # Credentials are NOT snapshotted; the worker resolves url + decrypted
+    # credential live by id.
     accepted_connectors = await _resolve_mcp_servers(
-        db, session.user_id, connectors or [],
+        db, session.user_id, await session_connectors.configured_ids(db, session.id),
     )
 
     # Resolve the picked recipe server-side into a pinned snapshot — the
@@ -509,32 +512,20 @@ async def _filter_invokable_skills(
 async def _resolve_mcp_servers(
     db: AsyncSession, user_id: int | None, requested: list[int],
 ) -> list[dict[str, str | int]]:
-    """Return per-turn snapshots ``{"id", "name"}`` for the Connectors this turn picked.
+    """Snapshot ``{"id", "name"}`` for each of the session's live Connectors.
 
-    A Connector is attached only when the composer picked it — the same
-    per-turn authorization ``_filter_invokable_skills`` gives a skill.
-    Being connected makes one *pickable*; it does not attach it. The cost
-    of attaching is paid whether or not the turn uses it: the tools enter
-    the model's catalog on every step, and the worker stands each one up
-    serially under a single budget, so ambient attachment charges every
-    turn for Connectors most turns never call. Per-tool trimming stays
-    where it was (``disabled_tools``, resolved live by the worker rather
-    than snapshotted here).
+    ``requested`` is the session's configured Connector ids, whose
+    ownership was validated when it was written. Liveness cannot be: one
+    disconnected since is dropped here rather than raising, so it costs the
+    turn that Connector and not the message.
 
-    The snapshot caps the set — connecting a Connector after enqueue cannot add
-    it to a queued turn — but it does not freeze it: the worker re-reads each
-    row by id at connect time, so credentials never sit on the ``session_turn``
-    row, a rotation is picked up, and one disconnected before the claim drops
-    out. Only ``id`` is read; ``name`` rides along to keep a queued row legible
-    in psql, and the worker must not use it either — the tool namespace has to
-    come from the row actually connected to, or a Connector renamed between
-    enqueue and claim would expose its tools under a name that no longer
-    exists. (Contrast the skills snapshot, whose ``bundle_key`` *is*
-    load-bearing.)
-
-    An id that is not this user's, or not connected, is dropped rather than
-    raising — same call as ``_filter_invokable_skills``: a stale chip should
-    cost the turn that one Connector, not the message.
+    Credentials are deliberately not snapshotted — the worker re-reads each
+    row by id at connect time, so a rotation is picked up and secrets never
+    sit on the ``session_turn`` row. ``name`` only keeps a queued row
+    legible in psql; the worker must not use it either, or a Connector
+    renamed between enqueue and claim would expose its tools under a name
+    that no longer exists. (Contrast the skills snapshot, whose
+    ``bundle_key`` *is* load-bearing.)
     """
     if not requested or user_id is None:
         return []

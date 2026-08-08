@@ -4,7 +4,7 @@ This is the design doc for the per-user notification stream (`GET
 /me/events`) — the lightweight SSE feed that keeps the sidebar's
 RUNNING/COMPLETE/FAILED indicators in sync across a user's tabs and
 sessions. Code lives in `app/services/user/hub.py` (the fan-out),
-`app/services/user/events.py` (the SSE generator), `app/api/endpoints/user.py`
+`app/services/user/events.py` (the SSE generator), `app/api/public/user.py`
 (the endpoint), and the `USER_EVENTS_CHANNEL` constant in
 `app/services/redis.py`.
 
@@ -73,7 +73,7 @@ connection count to Redis pool pressure.
 ```
 
 **The single subscription** is owned by the app lifespan
-(`app/main.py`): at startup it builds `app.state.user_event_hub =
+(`app/public_main.py`): at startup it builds `app.state.user_event_hub =
 UserEventHub(app.state.redis)` and calls `.start()`, which launches the
 `_reader()` task that does `pubsub.subscribe(USER_EVENTS_CHANNEL)` once
 and holds one connection for the life of the process. It is torn down in

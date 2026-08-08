@@ -16,7 +16,7 @@ cp .env.example .env
 alembic upgrade head
 
 # Start development server
-uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
+uvicorn app.public_main:app --host 0.0.0.0 --port 8005 --reload
 ```
 
 ## Production
@@ -70,7 +70,7 @@ For ad-hoc / non-default-port runs (or when the script's defaults
 don't fit, e.g. a custom SSL setup), the bare commands still work:
 
 ```bash
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8005 --workers 4
+uv run uvicorn app.public_main:app --host 0.0.0.0 --port 8005 --workers 4
 uv run python -m app.workers.run          # standalone background process
 ```
 
@@ -304,6 +304,6 @@ presigned OSS URLs.
   chunk or tool call, `blocks` is `[]`. This is valid.
 
 
-uv run uvicorn app.main:app --host 0.0.0.0 --port 9090 --workers 1 \
+uv run uvicorn app.public_main:app --host 0.0.0.0 --port 9090 --workers 1 \
   --ssl-certfile ./cert/api.hebei.metaseq.com.cn.pem \
   --ssl-keyfile ./cert/api.hebei.metaseq.com.cn.key

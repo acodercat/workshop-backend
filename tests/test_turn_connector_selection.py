@@ -1,20 +1,17 @@
 """Which Connectors a turn carries (``enqueue._resolve_mcp_servers``).
 
-Connectors used to follow "connected = active": every connected one was
-snapshotted onto every turn, and the client had no say. They are now an
-explicit per-turn pick, the same shape ``_filter_invokable_skills`` gives
-a skill — being connected makes one *pickable*, not attached.
+The set comes from ``session.mcp_server_ids`` — configuration, validated
+for ownership when written. This resolves it against the live rows at
+enqueue and snapshots the survivors onto the turn.
 
-That flip is a default the code cannot state anywhere else, so the first
-test here is the one that matters: an empty pick attaches nothing. A
-regression to the old behaviour costs every turn the tokens of every
-Connector the user holds, on every step, whether or not it is called —
-and nothing else in the suite would notice.
+The first test is still the one that matters: an empty configuration
+attaches nothing. A regression to the old "connected = active" behaviour
+costs every turn the tokens of every Connector the user holds, on every
+step, whether or not it is called — and nothing else in the suite would
+notice.
 
 No live database (the suite runs none, and ``mcp_server`` needs JSONB and
-a Postgres enum), so the query is pinned by its compiled text: the three
-things a pick is filtered by, and the fact that a snapshot the query did
-not return is dropped rather than raised.
+a Postgres enum), so the query is pinned by its compiled text.
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -38,8 +35,7 @@ class TestNothingIsAttachedByDefault:
         assert await _resolve_mcp_servers(db, user_id=42, requested=[]) == []
 
     async def test_an_empty_pick_does_not_even_query(self):
-        # Not just an empty result — the turn asks nothing of the table. This
-        # is what makes "no pick" free rather than merely harmless.
+        # Not just an empty result — the turn asks nothing of the table.
         db = _db_returning()
 
         await _resolve_mcp_servers(db, user_id=42, requested=[])
@@ -68,9 +64,9 @@ class TestWhatAPickIsFilteredBy:
         assert "mcp_server.connected IS " in compiled
 
     async def test_an_id_the_query_rejects_is_dropped_not_raised(self):
-        # A stale chip — deleted, disconnected, or someone else's — costs the
-        # turn that one Connector. Failing the send instead would throw away a
-        # message the user typed over a row they cannot see.
+        # Configured, then deleted or disconnected: it costs the turn that one
+        # Connector. Failing the send instead would throw away a typed message
+        # over a row the user can no longer see.
         db = _db_returning((7, "Notion"))
 
         picked = await _resolve_mcp_servers(db, user_id=42, requested=[7, 99])
@@ -97,8 +93,8 @@ class TestTheSnapshotShape:
         assert picked == [{"id": 7, "name": "Notion"}]
 
     async def test_request_order_is_kept(self):
-        # Only so a queued row reads the way the user picked; the worker
-        # connects failed-last by its own rule, so nothing downstream reads it.
+        # Only so a queued row reads the way it was configured; the worker
+        # connects failed-last by its own rule.
         db = _db_returning((7, "Notion"), (3, "Linear"))
 
         picked = await _resolve_mcp_servers(db, user_id=42, requested=[3, 7])

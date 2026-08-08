@@ -648,7 +648,7 @@ Two entry points:
   `settle_open_for_user(db, user_id)` runs before the new reserve.
   Stops the user from getting a false 402 because their previous
   reservation hadn't been credited back yet.
-- `app/api/endpoints/credits.get_credits` — same, so `GET /credits`
+- `app/api/public/credits.get_credits` — same, so `GET /credits`
   always returns a fresh balance.
 
 Each visits at most a handful of OPEN reservations per call
@@ -889,7 +889,7 @@ See [`credits-future.md`](credits-future.md) for the design of each:
 | Subscriber (push, `settle:notify`) | `app/workers/settle_subscriber.py` |
 | Background process entry | `app/workers/run.py` |
 | Lazy-sweep call site (enqueue) | `app/services/session/enqueue.py::queue_user_message` |
-| Lazy-sweep call site (read) | `app/api/endpoints/credits.py` |
+| Lazy-sweep call site (read) | `app/api/public/credits.py` |
 | Welcome grant call site | `app/services/auth/register.py::register_user` |
 | Organization model | `app/models/organization.py` |
 | Rate card config | `config.py::Settings.credit_*` keys |

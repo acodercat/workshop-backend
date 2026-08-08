@@ -28,7 +28,7 @@ and read at human scroll speed, so the simplicity + a consistent
 ``PaginatedResponse`` shape across the API outweighs deep-page
 offset cost here.
 
-The endpoint :func:`~app.api.endpoints.credits.get_credits_transactions`
+The endpoint :func:`~app.api.public.credits.get_credits_transactions`
 calls into here.
 """
 

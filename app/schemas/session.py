@@ -10,6 +10,11 @@ from app.schemas.message_feedback import FeedbackResponse
 from config import settings
 
 
+# The cost is per configured Connector per turn — its tools enter the
+# model's catalog on every step.
+CONNECTORS_MAX = 20
+
+
 class SessionCreate(BaseModel):
     title: str | None = None
     # Capability tier; the backend resolves it to a model_id (the model name
@@ -19,6 +24,9 @@ class SessionCreate(BaseModel):
     agent_type: AgentType = AgentType.FULL
     # Agent thinking toggle ("deep think" in the UI); default on.
     thinking_enabled: bool = True
+    # What the session starts configured with; the ``?connector=`` deep
+    # link is the one caller that arrives with any.
+    connectors: list[int] = Field(default_factory=list, max_length=CONNECTORS_MAX)
 
 
 class SessionUpdate(BaseModel):
@@ -69,13 +77,6 @@ class MessageCreate(BaseModel):
         default_factory=list, max_length=settings.max_message_files,
     )
     skills: list[str] = Field(default_factory=list, max_length=20)
-    # Connectors picked for this turn, by id. Empty = none attached:
-    # being connected makes a Connector *pickable*, not attached, the same
-    # per-turn authorization ``skills`` uses. Bounded here rather than on how
-    # many a user may hold, because the cost is per attached Connector per
-    # turn — its tools enter the model's catalog on every step, and the
-    # worker stands them up serially under one budget.
-    connectors: list[int] = Field(default_factory=list, max_length=20)
     # Optional recipe picked from the composer. The backend resolves it
     # to a pinned snapshot on ``session_turn.recipe``; its instructions
     # ride to the worker as a system-reminder. ``None`` = no recipe.
@@ -138,6 +139,8 @@ class SessionDetailResponse(BaseModel):
     status: SessionStatus
     tier: Tier
     agent_type: AgentType
+    # What the composer renders its switches from on open.
+    connectors: list[int]
     created_at: datetime
     updated_at: datetime
     messages: list[MessageResponse]

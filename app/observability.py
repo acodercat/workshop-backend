@@ -17,11 +17,21 @@ from config import settings
 
 stdlib_logger = logging.getLogger(__name__)
 
+# The longest correlation id this backend accepts — and therefore the
+# longest it ever has to store. ``admin_audit_log.request_id`` persists
+# the id at exactly this width, and that row commits in the same
+# transaction as the mutation it describes, so an id that fit the
+# acceptor but not the column would abort the very action being audited.
+# Our own minted ids are 32 hex chars; 64 leaves room for any sane
+# gateway id. An inbound id past the cap is not truncated — it is
+# replaced, like any other value that fails the pattern.
+REQUEST_ID_MAX_LENGTH = 64
+
 # An inbound ``X-Request-ID`` is only reused if it looks like a sane
 # correlation token. Rejecting anything else (then minting our own)
 # stops a client from forging log lines or smuggling junk into the
 # echoed response header via a crafted value.
-_REQUEST_ID_RE = re.compile(r"\A[A-Za-z0-9_.-]{1,128}\Z")
+_REQUEST_ID_RE = re.compile(rf"\A[A-Za-z0-9_.-]{{1,{REQUEST_ID_MAX_LENGTH}}}\Z")
 
 
 class RequestIDMiddleware:
@@ -32,7 +42,9 @@ class RequestIDMiddleware:
     context so every log line emitted while handling the request —
     including stdlib logs routed through the intercept handler — carries
     ``request_id``, and echoes it back in the response header so a client
-    error report can be matched to server logs.
+    error report can be matched to server logs. The id is also placed on
+    the ASGI scope state (``request.state.request_id``) for code that
+    stores it rather than logs it.
 
     Implemented as raw ASGI rather than ``BaseHTTPMiddleware`` because the
     latter buffers the response body, which breaks the SSE streaming
@@ -51,6 +63,13 @@ class RequestIDMiddleware:
         inbound = dict(scope["headers"]).get(b"x-request-id")
         candidate = inbound.decode("latin-1") if inbound else ""
         request_id = candidate if _REQUEST_ID_RE.match(candidate) else uuid.uuid4().hex
+
+        # Also expose it on the ASGI scope state, which is what backs
+        # ``request.state``. The loguru contextvar above covers *logging*,
+        # but code that needs to persist the correlation id alongside a
+        # row — ``admin_audit_log.request_id`` — needs to read it as a
+        # value. Additive: nothing else inspects this key.
+        scope.setdefault("state", {})["request_id"] = request_id
 
         async def send_with_id(message):
             if message["type"] == "http.response.start":

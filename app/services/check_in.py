@@ -19,14 +19,16 @@ service contract.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from enum import StrEnum
 from typing import NamedTuple
-from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.business_time import business_today
 from app.errors import AlreadyCheckedInError, CheckInDisabledError
 from app.models.check_in import CheckIn
 from app.services import credits
@@ -57,9 +59,6 @@ class ClaimedCheckIn(NamedTuple):
     streak_day: int
 
 
-def _business_today() -> date:
-    """Today's calendar date in the configured business timezone."""
-    return datetime.now(ZoneInfo(settings.checkin_timezone)).date()
 
 
 async def _latest_check_in(db: AsyncSession, user_id: int) -> CheckIn | None:
@@ -86,7 +85,7 @@ def _current_streak(latest: CheckIn | None, today: date) -> int:
 
 async def get_check_in_status(db: AsyncSession, *, user_id: int) -> CheckInStatus:
     """Return today's check-in state for ``user_id`` (read-only)."""
-    today = _business_today()
+    today = business_today()
     latest = await _latest_check_in(db, user_id)
     total_days = await db.scalar(
         select(func.count(CheckIn.id)).where(CheckIn.user_id == user_id)
@@ -113,7 +112,7 @@ async def claim_daily_check_in(
     if settings.checkin_reward_credits <= 0:
         raise CheckInDisabledError("Daily check-in is not enabled")
 
-    today = _business_today()
+    today = business_today()
     latest = await _latest_check_in(db, user_id)
     if latest is not None and latest.check_in_date == today:
         raise AlreadyCheckedInError("Already checked in today")
@@ -149,3 +148,100 @@ async def claim_daily_check_in(
         "check-in claimed: user=%s date=%s streak=%s", user_id, today, streak_day,
     )
     return ClaimedCheckIn(reward_micro=reward_micro, streak_day=streak_day)
+
+
+class CheckInRankOrder(StrEnum):
+    """How to rank the same per-user check-in aggregate.
+
+    Two questions, one query — the same shape ``credits.analytics`` uses
+    for spend: *who checks in most* (habit) and *who checked in last*
+    (recency) differ only in ``ORDER BY``, so they cannot drift into two
+    definitions of a check-in.
+    """
+
+    COUNT = "count"
+    RECENT = "recent"
+
+
+_RANK_ORDER_BY = {
+    CheckInRankOrder.COUNT: "check_ins DESC, last_check_in_at DESC",
+    CheckInRankOrder.RECENT: "last_check_in_at DESC",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class CheckInActivity:
+    """One user's check-in habit over the window, for either ranking."""
+
+    user_id: int
+    username: str
+    name: str
+    check_ins: int
+    streak_day: int
+    last_check_in_at: datetime
+
+
+async def user_activity(
+    db: AsyncSession, *, since: datetime, limit: int, order: CheckInRankOrder,
+) -> list[CheckInActivity]:
+    """Per-user check-ins over the window, ranked by ``order``.
+
+    ``streak_day`` is read off the **latest** row rather than aggregated:
+    it is a running count the claim itself computes, so the maximum in a
+    window would report a streak the user has since broken, and a sum
+    would be meaningless. ``COUNT`` ties break on recency, so a leaderboard
+    of equal counts still puts the currently-active user first.
+    """
+    rows = (
+        await db.execute(
+            text(f"""
+            SELECT
+                c.user_id,
+                u.username,
+                u.name,
+                COUNT(*) AS check_ins,
+                MAX(c.created_at) AS last_check_in_at,
+                (ARRAY_AGG(c.streak_day ORDER BY c.check_in_date DESC))[1]
+                    AS streak_day
+            FROM check_in c
+            JOIN "user" u ON u.id = c.user_id
+            WHERE c.created_at >= :since
+            GROUP BY c.user_id, u.username, u.name
+            ORDER BY {_RANK_ORDER_BY[order]}
+            LIMIT :limit
+            """),
+            {"since": since, "limit": limit},
+        )
+    ).all()
+    return [
+        CheckInActivity(
+            user_id=row.user_id,
+            username=row.username,
+            name=row.name,
+            check_ins=int(row.check_ins),
+            streak_day=int(row.streak_day),
+            last_check_in_at=row.last_check_in_at,
+        )
+        for row in rows
+    ]
+
+
+async def count_in_window(db: AsyncSession, *, since: datetime) -> tuple[int, int]:
+    """``(check_ins, distinct users)`` claimed since ``since``.
+
+    Lives here rather than with the credit reporting because the ledger
+    does not know what a check-in is: it sees only ``CHECKIN`` grant
+    rows, which the daily reward could stop producing without the habit
+    itself changing. ``check_in`` is the record of the habit.
+    """
+    row = (
+        await db.execute(
+            select(
+                func.count().label("total"),
+                func.count(func.distinct(CheckIn.user_id)).label("users"),
+            )
+            .select_from(CheckIn)
+            .where(CheckIn.created_at >= since)
+        )
+    ).one()
+    return int(row.total), int(row.users)

@@ -6,19 +6,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from cryptography.fernet import Fernet
 
-from app.api.endpoints import mcp_server as endpoint
+from app.api.public import mcp_server as endpoint
 from app.errors import ConnectorCatalogEntryNotFoundError
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.schemas.mcp_server import ConnectorCatalogEntryResponse
 from app.services import crypto
+from app.services.localized_text import DEFAULT_LOCALE
 from app.services.mcp import catalog
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES, build_connector
 
 
 def _entry(**over) -> MCPServerCatalogEntry:
     base = dict(
-        id=7, key="notion", name="Notion", url="https://mcp.notion.com/mcp",
+        id=7, name="Notion", url="https://mcp.notion.com/mcp",
         auth_type=MCPServerAuthType.OAUTH, oauth_scope="read",
         description="Search your pages", icon_url=None,
         published=True, sort_order=0,
@@ -29,7 +30,7 @@ def _entry(**over) -> MCPServerCatalogEntry:
 
 class TestBuildConnector:
     def test_copies_the_template_and_links_back(self):
-        connector = build_connector(_entry(), user_id=42)
+        connector = build_connector(_entry(), user_id=42, locale=DEFAULT_LOCALE)
 
         assert connector.user_id == 42
         assert connector.catalog_id == 7
@@ -41,11 +42,11 @@ class TestBuildConnector:
     def test_oauth_starts_disconnected_until_authorized(self):
         # Same rule as a hand-added OAuth Connector: no tokens yet, so it must
         # not be handed to the agent.
-        assert build_connector(_entry(), user_id=1).connected is False
+        assert build_connector(_entry(), user_id=1, locale=DEFAULT_LOCALE).connected is False
 
     def test_non_oauth_starts_connected(self):
         entry = _entry(auth_type=MCPServerAuthType.NONE, oauth_scope=None)
-        assert build_connector(entry, user_id=1).connected is True
+        assert build_connector(entry, user_id=1, locale=DEFAULT_LOCALE).connected is True
 
     @pytest.mark.parametrize(
         "auth_type", [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER],
@@ -55,12 +56,12 @@ class TestBuildConnector:
         # for one, so such an entry would yield a connector that probes fine and
         # then 401s on every real tool call.
         with pytest.raises(ConnectorCatalogEntryNotFoundError):
-            build_connector(_entry(auth_type=auth_type), user_id=1)
+            build_connector(_entry(auth_type=auth_type), user_id=1, locale=DEFAULT_LOCALE)
 
     def test_carries_no_credentials(self):
         # The catalog never holds secrets — the OAuth client is registered at
         # add time and tokens arrive from the authorize flow.
-        connector = build_connector(_entry(), user_id=1)
+        connector = build_connector(_entry(), user_id=1, locale=DEFAULT_LOCALE)
         assert connector.encrypted_credential is None
         assert connector.oauth_client_encrypted is None
         assert connector.oauth_tokens_encrypted is None
@@ -109,6 +110,27 @@ class TestInstantiableAuthTypes:
         }
 
 
+class TestWhatIdentifiesAnEntry:
+    """One row per server, and ``name`` is only the label on it.
+
+    ``key`` used to carry this table's single unique constraint, which was the
+    one thing it did that ``id`` and ``name`` did not. Moving it to ``url``
+    keeps the guard and drops the third identity.
+    """
+
+    def test_two_entries_cannot_offer_the_same_server(self):
+        assert MCPServerCatalogEntry.__table__.c.url.unique is True
+
+    def test_two_entries_may_share_a_display_name(self):
+        # Not an oversight: ``name`` is copied onto the user's row and shown
+        # to them, and an operator renaming one entry must not fail because
+        # another already reads that way.
+        assert not MCPServerCatalogEntry.__table__.c.name.unique
+
+    def test_nothing_is_offered_under_a_slug_any_more(self):
+        assert "key" not in MCPServerCatalogEntry.__table__.c
+
+
 class TestCatalogEntryResponse:
     @pytest.mark.parametrize(
         "field",
@@ -126,7 +148,6 @@ class TestCatalogEntryResponse:
 
     def test_exposes_what_the_directory_renders(self):
         response = ConnectorCatalogEntryResponse.model_validate(_entry())
-        assert response.key == "notion"
         assert response.name == "Notion"
         assert response.description == "Search your pages"
 
@@ -161,11 +182,11 @@ class TestPreRegisteredClientPassThrough:
         monkeypatch.setattr(
             endpoint.catalog, "get_published_entry", AsyncMock(return_value=entry)
         )
-        monkeypatch.setattr(endpoint, "_reject_duplicate_name", AsyncMock())
+        monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
         monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
         monkeypatch.setattr(endpoint, "_register_oauth_client", _capture)
         await endpoint._build_catalog_connector(
-            MagicMock(), catalog_id=entry.id, user_id=42
+            MagicMock(), catalog_id=entry.id, user_id=42, locale=DEFAULT_LOCALE
         )
         return registered
 

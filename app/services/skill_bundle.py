@@ -7,7 +7,7 @@ the common "github download" wrapper) plus optional ``scripts/`` /
 
 This module is the **registration-time** validator: it answers
 "is this zip a legal skill bundle and what's its name + description?"
-so :mod:`app.api.endpoints.skill` can decide to write the row.
+so :mod:`app.api.public.skill` can decide to write the row.
 Asset content is **not** scanned here — the worker stages files into
 the sandbox at session start and any per-file issue surfaces there.
 

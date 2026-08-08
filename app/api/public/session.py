@@ -10,8 +10,10 @@ DB session that closes before the stream begins, avoiding
 clients still send ``Authorization`` because the frontend uses
 ``@microsoft/fetch-event-source``.
 
-DB queries live inline in the handlers; the two genuinely shared query
-helpers (``_get_or_404``, ``_load_messages``) sit at module top.
+DB queries live inline in the handlers. What sits at module top is what more
+than one handler needs (``_get_or_404``, ``_load_messages``) plus the two
+guards a single handler each needs but that are long enough to name —
+``_owned_mcp_server_ids`` and ``_owned_connector_or_404``.
 Non-trivial logic — message enqueue with its ordering invariants and
 SSE streaming — lives in :mod:`app.services.session`.
 """
@@ -44,6 +46,7 @@ from app.errors import (
     FileCountQuotaExceededError,
     FileSizeQuotaExceededError,
 )
+from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
@@ -84,6 +87,7 @@ from app.schemas.session import (
 from app.schemas.session_share import ShareCreate, ShareResponse
 from app.services import credits
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
+from app.services.session import connectors as session_connectors
 from app.services.session import (
     cancel_unclaimed_turn,
     generate_title,
@@ -136,6 +140,60 @@ async def _get_or_404(
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+async def _owned_mcp_server_ids(
+    db: AsyncSession, user_id: int, requested: list[int]
+) -> list[int]:
+    """Validate a Connector configuration, preserving the caller's order.
+
+    Rejects rather than drops: an id the caller does not own is a client
+    bug, and storing it would leave a foreign id sitting in this user's
+    row. Deduplicated because the same Connector twice is one Connector.
+
+    Ownership only — not ``connected``. Configuration records intent, and
+    a Connector disconnected later must not retroactively invalidate it;
+    enqueue re-checks liveness every turn.
+    """
+    unique_ids = list(dict.fromkeys(requested))
+    if not unique_ids:
+        return []
+    owned = set(
+        (
+            await db.execute(
+                select(MCPServer.id).where(
+                    MCPServer.id.in_(unique_ids),
+                    MCPServer.user_id == user_id,
+                )
+            )
+        ).scalars()
+    )
+    unknown = [server_id for server_id in unique_ids if server_id not in owned]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown connector ids: {unknown}",
+        )
+    return unique_ids
+
+
+async def _owned_connector_or_404(
+    db: AsyncSession, connector_id: int, user_id: int
+) -> None:
+    """404 unless *connector_id* is one of this user's Connectors.
+
+    404 rather than the 400 :func:`_owned_mcp_server_ids` raises: there the id
+    is one of several in a body the client composed, and naming it back is the
+    useful answer; here it is the path, and a 404 keeps the existence of other
+    users' Connectors unsaid — the rule :func:`_get_or_404` already follows.
+    """
+    exists = await db.execute(
+        select(MCPServer.id).where(
+            MCPServer.id == connector_id, MCPServer.user_id == user_id,
+        )
+    )
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
 
 
 async def _load_messages(
@@ -206,7 +264,12 @@ async def create_session(
         thinking_enabled=body.thinking_enabled,
         status=SessionStatus.IDLE,
     )
+    configured = await _owned_mcp_server_ids(db, current_user.id, body.connectors)
     db.add(session)
+    # The Connector rows key off ``session.id``, which a Python-side default
+    # only assigns at flush.
+    await db.flush()
+    await session_connectors.replace(db, session.id, configured)
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -481,6 +544,7 @@ async def get_session(
         status=session.status,
         tier=session.tier,
         agent_type=session.agent_type,
+        connectors=await session_connectors.configured_ids(db, session_id),
         created_at=session.created_at,
         updated_at=session.updated_at,
         messages=messages,
@@ -502,6 +566,58 @@ async def update_session(
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
+
+
+@router.put(
+    "/sessions/{session_id}/connectors/{connector_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit("30/minute")
+async def add_session_connector(
+    request: Request,
+    session_id: uuid.UUID,
+    connector_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> None:
+    """Switch one Connector on for this session. Idempotent.
+
+    One Connector per request rather than a whole set on ``PATCH /sessions``:
+    that is what the composer's switch does, and it is what keeps two tabs
+    toggling different Connectors from overwriting each other. It also keeps
+    the session's *capabilities* off the endpoint that renames it.
+    """
+    await _get_or_404(db, session_id, current_user.id)
+    await _owned_connector_or_404(db, connector_id, current_user.id)
+    await session_connectors.add(db, session_id, connector_id)
+    await db.commit()
+
+
+@router.delete(
+    "/sessions/{session_id}/connectors/{connector_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit("30/minute")
+async def remove_session_connector(
+    request: Request,
+    session_id: uuid.UUID,
+    connector_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> None:
+    """Switch one Connector off. Idempotent — a no-op when it was not on.
+
+    Owning the session is the whole authorization: the delete is scoped to
+    this session's row, so an id that is not the caller's reaches nothing.
+    Requiring the Connector to still exist — as the PUT does, because it
+    writes a reference to it — would make the one case this must handle a
+    404: a Connector deleted in another tab is already gone from here by
+    cascade, and a client that has not caught up would be told its attempt
+    to switch off something it can still see had failed.
+    """
+    await _get_or_404(db, session_id, current_user.id)
+    await session_connectors.remove(db, session_id, connector_id)
+    await db.commit()
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -585,7 +701,7 @@ async def create_message(
     try:
         await queue_user_message(
             db, redis, session, content=body.content, files=body.files,
-            skills=body.skills, connectors=body.connectors,
+            skills=body.skills,
             recipe_id=body.recipe_id,
             agent_type=body.agent_type,
         )
@@ -745,7 +861,7 @@ async def generate_session_title(
 #
 # Singleton sub-resource of the session: one share per session.
 # Public-side read access for share recipients lives in
-# :mod:`app.api.endpoints.share`; the two surfaces deliberately don't
+# :mod:`app.api.public.share`; the two surfaces deliberately don't
 # overlap on auth (user JWTs are rejected on the public path, share-
 # view tokens are rejected here).
 

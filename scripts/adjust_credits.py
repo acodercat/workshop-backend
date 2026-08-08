@@ -13,7 +13,7 @@ DB credentials.
 Usage:
     # Explicit delta (production-style; pair with a stable key)
     uv run python -m scripts.adjust_credits \\
-        --user-id=42 --credits=-500 \\
+        --user-id=115 --credits=-500 \\
         --idempotency-key=incident-2026-05-15-refund \\
         --reason="incident #1234: double-charge correction"
 

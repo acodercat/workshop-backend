@@ -217,11 +217,17 @@ class ConnectorUnreachableError(AppError):
     error_type = "connector_unreachable"
 
 
-class ConnectorNameConflictError(AppError):
-    """The user already has a Connector with this name (``uq_mcp_server_user_id_name``)."""
+class ConnectorUrlConflictError(AppError):
+    """The user already has a Connector pointing at this server
+    (``uq_mcp_server_user_id_url``).
+
+    The server is what a Connector *is*; the name is only the label the user
+    put on it. Two rows at one URL are the same Connector added twice however
+    they are named, and two rows sharing a name are not necessarily anything —
+    which is why the constraint moved here and names are now free to repeat."""
 
     status_code = status.HTTP_409_CONFLICT
-    error_type = "connector_name_conflict"
+    error_type = "connector_url_conflict"
 
 
 class ConnectorCredentialUnreadableError(AppError):
@@ -368,3 +374,100 @@ class AgentTypeDowngradeError(AppError):
 
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "agent_type_downgrade"
+
+
+class StaffAuthenticationError(AppError):
+    """The admin console could not identify the caller — absent, malformed,
+    expired, wrongly-scoped or revoked token, or a deactivated account. All
+    of those collapse into this one error on purpose: distinguishing them
+    hands an attacker a probe against the highest-privilege surface in the
+    system. The console reads it as "sign in again"."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "staff_unauthenticated"
+
+
+class StaffCredentialsError(AppError):
+    """Admin-console sign-in failed. A wrong password and a ``DISABLED``
+    account raise the *same* error: a former operator probing the console
+    should not be able to confirm their account still exists."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "staff_invalid_credentials"
+
+
+class StaffNotFoundError(AppError):
+    """No staff account with that id."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "staff_not_found"
+
+
+class StaffUsernameTakenError(AppError):
+    """A staff account with that username already exists. Usernames are the
+    console's login key, so this is a conflict rather than a validation
+    error — the caller picks another, it isn't a malformed request."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "staff_username_taken"
+
+
+class LastActiveStaffError(AppError):
+    """The change would leave the console with no ``ACTIVE`` staff account
+    — a full lockout, recoverable only by someone with database
+    credentials running ``scripts/manage_staff.py``. Add or re-enable
+    another account first."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "staff_last_active"
+
+
+class UserNotFoundError(AppError):
+    """No user account with that id (admin-console lookup)."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "user_not_found"
+
+
+class SessionNotFoundError(AppError):
+    """No session with that id (admin-console lookup — unlike the
+    customer surface, soft-deleted sessions are still found here, so
+    this fires only for ids that never existed)."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "session_not_found"
+
+
+class FeedbackNotFoundError(AppError):
+    """No feedback submission with that id (admin-console lookup)."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "feedback_not_found"
+
+
+class SkillNotFoundError(AppError):
+    """No skill with that id (admin-console lookup — unlike the
+    customer surface, the console sees every origin, so this fires only
+    for ids that never existed)."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "skill_not_found"
+
+
+class ConnectorCatalogUrlTakenError(AppError):
+    """The catalog already offers this URL. Two entries pointing at one
+    server are the same Connector offered twice, whatever they are
+    named, so ``url`` carries the table's unique constraint — this is a
+    conflict with an existing row, not a malformed request."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "connector_catalog_url_taken"
+
+
+class AdjustmentAlreadyAppliedError(AppError):
+    """A credit adjustment with this idempotency key was already applied.
+    409 so the console shows "already applied" instead of silently
+    double-granting on a retried form submission."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "adjustment_already_applied"

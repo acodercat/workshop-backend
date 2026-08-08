@@ -29,6 +29,7 @@ from sqlalchemy import (
     TIMESTAMP,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -42,14 +43,23 @@ class MCPServerCatalogEntry(Base):
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True,
     )
-    # Stable slug (``"notion"``) — the frontend's lookup key for a bundled asset
-    # or i18n string. Immutable in practice: changing it orphans those lookups.
-    key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    # Copied onto the user's row at add time, so it also decides the per-user
-    # name uniqueness (``uq_mcp_server_user_id_name``) — which is what makes
-    # adding the same official Connector twice a clean 409.
+    # Copied onto the user's row at add time, and free to repeat: what stops
+    # the same official Connector being added twice is the URL travelling with
+    # it (``uq_mcp_server_user_id_url``), not the label.
     name: Mapped[str] = mapped_column(String(64), nullable=False)
-    url: Mapped[str] = mapped_column(String, nullable=False)
+    # Optional ``{locale: name}`` overrides. NULL when the entry is offered
+    # under one name everywhere — the column above is what every locale falls
+    # back to, so nothing has to special-case an untranslated row.
+    # ``none_as_null`` so "no translations" persists as SQL NULL rather than a
+    # JSONB ``'null'`` literal, keeping ``IS NULL`` honest.
+    name_i18n: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True,
+    )
+    # The entry's identity, and the only thing that has to be unique: two rows
+    # pointing at one server are the same Connector offered twice, whatever
+    # they are called. ``name`` deliberately is not — it is the display copy,
+    # and an operator renaming one entry must not collide with another.
+    url: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     auth_type: Mapped[MCPServerAuthType] = mapped_column(
         SAEnum(
             MCPServerAuthType,
@@ -77,6 +87,9 @@ class MCPServerCatalogEntry(Base):
         String, nullable=True,
     )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_i18n: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True,
+    )
     # Operator-set so a new entry needs no frontend deploy; the card falls back
     # to its generic icon when NULL.
     icon_url: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -110,6 +123,6 @@ class MCPServerCatalogEntry(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<MCPServerCatalogEntry(id={self.id}, key={self.key!r}, "
+            f"<MCPServerCatalogEntry(id={self.id}, name={self.name!r}, "
             f"published={self.published})>"
         )

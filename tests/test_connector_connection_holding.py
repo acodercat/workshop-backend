@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from cryptography.fernet import Fernet
 
-from app.api.endpoints import mcp_server as endpoint
+from app.api.public import mcp_server as endpoint
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.schemas.mcp_server import ConnectorUpdate
 
@@ -111,6 +111,9 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
             endpoint, "_get_owned_connector", AsyncMock(return_value=connector),
         )
         monkeypatch.setattr(endpoint, "_commit_or_conflict", AsyncMock())
+        # The URL guard has its own cover in test_connector_url_uniqueness;
+        # here it would only answer from a double that knows nothing.
+        monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
         monkeypatch.setattr(endpoint, "_release_authorization", AsyncMock())
         monkeypatch.setattr(endpoint, "_decrypt_or_none", lambda ciphertext: None)
         monkeypatch.setattr(endpoint.limiter, "enabled", False)

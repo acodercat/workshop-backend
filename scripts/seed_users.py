@@ -2,7 +2,7 @@
 
 Runs against the configured ``db_uri``; idempotent — skips any
 username that already exists. Login uses the ``username`` column as
-the OAuth2 ``username`` (see :mod:`app.api.endpoints.auth`), so the
+the OAuth2 ``username`` (see :mod:`app.api.public.auth`), so the
 value here is what users type at sign-in. Seeded accounts have no
 email (legacy bypass — public registration goes through
 ``POST /users`` and the email-verification flow).
