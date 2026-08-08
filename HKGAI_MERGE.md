@@ -52,11 +52,11 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | SMS dep gone | `grep -c 'dysmsapi' pyproject.toml uv.lock` | 0 in both |
 | OAuth client name | `grep -A1 "mcp_client_name" config.py` and `grep -c _CLIENT_NAME app/services/mcp/oauth.py` | `default="HKGAI Connector"` in `config.py`, and **0** in `oauth.py`. This is the name an authorization server prints on its consent screen, so a wrong value is visible only to the user and to nothing else. It moved out of `oauth.py` precisely so the conflict lands in `config.py`, where the two branches diverge by design — master's default reads `PPIG Connector`, and taking master's side here is the mistake this row exists to catch. A `_CLIENT_NAME` constant reappearing in `oauth.py` means a merge undid the move |
 | Migration head | `uv run alembic heads` | **One head, after you resolve it.** This branch owns `b7e2d9a4c1f5`, so a sync that brought new master revisions leaves two siblings: `uv run alembic merge heads -m "sync"`, once, then one head again. Two heads at deploy time is the failure this row exists to catch |
-| Removed schema stays removed | `ls alembic/versions/b7e2d9a4c1f5_*.py` | exactly one file. It drops `payment_order` / `commission_ledger` / `withdrawal_request`, their four enum types, `user.commission_balance_fen` and `user.phone` — a merge that loses the file loses all of it. **A master revision that alters any of them will fail this branch's `upgrade`** — about one in ten historically; the fix is a local revision here, never an edit to master's file |
+| Removed schema stays removed | `ls alembic/versions/b7e2d9a4c1f5_*.py` | exactly one file. It drops `payment_order` / `commission_ledger` / `withdrawal_request`, their four enum types, `user.commission_balance_fen` and `user.phone` — a merge that loses the file loses all of it. **A master revision that alters any of them will fail this branch's `upgrade`** — about one in ten historically. A later revision cannot undo an earlier one's failure, so the guard goes **in the revision itself, on this branch** — see `e2b7d4f9a1c6` (adds the two catalog OAuth columns `a1c7f3e9d2b6` already added here, the same feature written once on each branch) and `a9c4e2f7d1b8` (aligns a `user.phone` this branch dropped). Both skip when the schema says they have nothing to do, `downgrade` included, which also makes the chain replayable from an empty database. Re-pointing `down_revision` instead is the fork this guide argues against for the payment revisions, for the same reasons |
 | No payment code | `grep -rn "services.payment\|services.commission\|dg_sdk" app/ scripts/ tests/` | empty |
-| No payment routes | `uv run python -c "from app.main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'commission' in p])"` | `[]` |
+| No payment routes | `uv run python -c "from app.public_main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'commission' in p])"` | `[]` |
 | No 汇付 dep | `grep -c 'dg-sdk' pyproject.toml uv.lock` | 0 in both |
-| App imports | `uv run python -c "import app.main"` | clean |
+| App imports | `uv run python -c "import app.public_main"` | clean. `app/main.py` was split into `public_main` + `admin_main`; **the public one is what `deploy.sh` starts and the only one this row covers.** `app.admin_main` does not import — on master either — because nine of `app/api/admin/`'s routers are still uncommitted there, so `router.py` names modules no checkout has. Inherited, not caused by a merge; it becomes this branch's problem only when master commits them |
 | Tests | `uv run pytest tests/` | green |
 
 If any probe fails, master's version leaked over a hkgai delta — fix before pushing.
@@ -89,6 +89,15 @@ the whole file is functional). Surface a genuinely-divergent one rather than gue
 
 **"credits/billing → take master's" does not extend to payment.** The credit *ledger* converges;
 the code that *sells* credits does not. See the next section.
+
+### Aggregate routers — the third thing a plain merge gets wrong
+
+`app/api/public/router.py` and `app/api/admin/router.py` arrive whole, and
+both `include_router` the payment / commission halves. hkgai has never held
+those modules, so git sees a pure addition and gives you **nothing to
+resolve** — the same silence the payment files themselves used to arrive in.
+Strip the imports and the `include_router` lines by hand after every merge
+that touches either file; `import app.public_main` is what catches a miss.
 
 ### `scripts/seed_users.py`, `scripts/deploy.sh`
 Keep hkgai's (`--ours`).
