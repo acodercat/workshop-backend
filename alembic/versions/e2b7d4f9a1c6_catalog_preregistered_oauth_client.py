@@ -53,7 +53,9 @@ def _already_here() -> bool:
     database, which it is not today: there the two would collide the other
     way round.
     """
-    columns = {c["name"] for c in inspect(op.get_bind()).get_columns("mcp_server_catalog")}
+    columns = {
+        c["name"] for c in inspect(op.get_bind()).get_columns("mcp_server_catalog")
+    }
     return "oauth_client_id" in columns
 
 
@@ -71,7 +73,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if not _already_here():
-        return
-    op.drop_column("mcp_server_catalog", "oauth_client_secret_encrypted")
-    op.drop_column("mcp_server_catalog", "oauth_client_id")
+    """Nothing, on this branch — ``upgrade`` never added anything here.
+
+    Not the mirror of the guard above, because the schema cannot answer the
+    question this direction asks. Coming down, the columns are present either
+    way: whether this revision put them there or ``a1c7f3e9d2b6`` did is not
+    something ``get_columns`` can say. On ``hkgai`` it is always the latter —
+    that revision is applied long before this one arrives — so dropping them
+    here would take columns another revision owns, and leave *its* downgrade
+    failing on columns that are gone.
+    """
