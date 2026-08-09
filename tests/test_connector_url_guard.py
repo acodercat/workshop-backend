@@ -51,11 +51,34 @@ class TestValidatePublicUrl:
 
 
 class TestEmbeddedIPv4Prefixes:
-    """The two wrappers ``is_global`` waves through, and the boundary of that.
+    """The wrappers ``is_global`` waves through, and the boundary of that.
 
     Refusing them is a different kind of refusal from the rest: the address the
     registry judges is global, and the one that gets dialled is inside it.
     """
+
+    @pytest.mark.parametrize("address,dialled", [
+        ("2002:7f00:0001::", "127.0.0.1"),
+        ("2002:0a00:0005::", "10.0.0.5"),
+        ("2002:a9fe:a9fe::", "169.254.169.254"),   # cloud metadata
+    ])
+    def test_a_6to4_wrapper_is_refused(self, address, dialled):
+        import ipaddress
+
+        # 6to4 keeps its IPv4 in bits 16–48, not the low 32, so the
+        # arithmetic the NAT64 cases rely on never finds it, and whether
+        # ``is_global`` covers for that depends on the interpreter: 3.11
+        # calls ``2002::/16`` global, 3.13 does not. The guard decodes the
+        # address itself rather than inherit the difference — which is why
+        # the decoding is asserted and not only the refusal. On 3.13 the
+        # refusal below holds either way, so it alone would not notice the
+        # decoding being taken out again.
+        address_object = ipaddress.ip_address(address)
+        assert str(address_object.sixtofour) == dialled
+        assert address_object.sixtofour in url_guard._carried_ipv4(address_object)
+
+        with pytest.raises(InvalidConnectorUrlError):
+            url_guard.validate_public_url(f"https://[{address}]/x")
 
     @pytest.mark.parametrize("address,dialled", [
         ("64:ff9b::7f00:1", "127.0.0.1"),

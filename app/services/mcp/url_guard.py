@@ -72,10 +72,10 @@ def validate_public_url(url: str) -> None:
 # looked at. On a network running NAT64/DNS64 the translator then forwards to
 # that address: ``64:ff9b::7f00:1`` is ``127.0.0.1`` and would pass.
 #
-# Only the two that ``is_global`` lets through are listed. IPv4-mapped
-# (``::ffff:0:0/96``), NAT64 local-use (``64:ff9b:1::/48``), 6to4 and Teredo all
-# already answer ``False`` — listing them would suggest this is the general
-# defence against embedded addresses rather than the two exceptions to one.
+# Only the prefixes whose IPv4 sits in the low 32 bits are listed, because
+# that is the arithmetic below. 6to4 carries its address in bits 16–48 and
+# Teredo obfuscates its own, so the stdlib decodes those — see
+# :func:`_carried_ipv4`, which is what callers ask.
 #
 # The address inside is judged, not the prefix refused. On an IPv6-only network
 # DNS64 answers for *every* IPv4-only host out of ``64:ff9b::/96``, so refusing
@@ -99,13 +99,24 @@ def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
     One case it cannot answer alone: a wrapper whose *own* address is global
     while the address that actually gets dialled sits inside it. There the
-    question is about the inner one, so that is what gets asked. See
-    :data:`_EMBEDDED_IPV4_PREFIXES`.
+    question is about the inner one, so every address this one carries is
+    asked too. See :func:`_carried_ipv4`.
     """
     if not ip.is_global:
         return False
-    embedded = _embedded_ipv4(ip)
-    return embedded is None or embedded.is_global
+    return all(carried.is_global for carried in _carried_ipv4(ip))
+
+
+def _carried_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> tuple[ipaddress.IPv4Address, ...]:
+    """Every IPv4 address *ip* carries, by any encoding the stdlib knows."""
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return ()
+    carried = [ip.ipv4_mapped, ip.sixtofour, _embedded_ipv4(ip)]
+    if ip.teredo is not None:
+        carried.extend(ip.teredo)
+    return tuple(address for address in carried if address is not None)
 
 
 def _embedded_ipv4(
