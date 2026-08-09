@@ -1,0 +1,218 @@
+"""The console's skill surface.
+
+- ``GET   /skills?origin=&q=`` — every origin, including the ``SYSTEM``
+  skills hidden from users entirely.
+- ``POST  /skills``            — upload a platform bundle (new or a new
+  version of one that exists).
+- ``PATCH /skills/{id}``       — flip a skill's platform-wide default.
+
+Upload goes through
+:func:`~app.services.skill_registration.register_platform_skill_bundle`,
+the same funnel ``scripts/upload_skill.py`` uses — validation, the OSS
+write and the compensating delete are not re-implemented here, so a
+browser upload and a script upload produce the same row and the same
+object. The script stays as the recovery path for a console that is
+down or an operator who has only SSH.
+"""
+
+import sqlalchemy as sa
+from fastapi import APIRouter, File, Form, Query, UploadFile, status
+from sqlalchemy import func, select
+
+from app.api.admin.dependencies import StaffContext
+from app.api.uploads import read_capped
+from app.common.pagination import paginate
+from app.errors import SkillNotFoundError
+from app.models.skill import Skill, SkillOrigin
+from app.models.user import User
+from app.schemas.admin.skill import PlatformSkillOrigin, SkillResponse, SkillUpdate
+from app.schemas.collection_response import PaginatedResponse, PaginationMeta
+from app.services.admin import AuditAction, audit
+from app.services.file_storage import SKILL_POLICY
+from app.services.skill_registration import register_platform_skill_bundle
+
+router = APIRouter(tags=["skills"])
+
+
+def _to_skill_response(skill: Skill, owner_username: str | None) -> SkillResponse:
+    return SkillResponse(
+        id=skill.id,
+        origin=skill.origin,
+        name=skill.name,
+        display_name=skill.display_name,
+        description=skill.description,
+        enabled=skill.enabled,
+        bundle_size=skill.bundle_size,
+        user_id=skill.user_id,
+        owner_username=owner_username,
+        created_at=skill.created_at,
+        updated_at=skill.updated_at,
+    )
+
+
+@router.get("/skills", response_model=PaginatedResponse[SkillResponse])
+async def list_skills(
+    ctx: StaffContext,
+    origin: SkillOrigin | None = Query(None),
+    q: str | None = Query(None, min_length=1, max_length=64),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> PaginatedResponse[SkillResponse]:
+    """Return one page of skills, platform origins first then newest.
+
+    Platform-first ordering because that is the working set: the
+    catalogue an operator curates, with user uploads below it. The
+    owner is LEFT-joined — platform rows have none by construction.
+    """
+    filters = []
+    if origin is not None:
+        filters.append(Skill.origin == origin)
+    if q is not None:
+        pattern = f"%{q}%"
+        filters.append(
+            sa.or_(Skill.name.ilike(pattern), Skill.display_name.ilike(pattern))
+        )
+
+    total = await ctx.db.scalar(
+        select(func.count()).select_from(Skill).where(*filters)
+    )
+    rows = (
+        await ctx.db.execute(
+            paginate(
+                select(Skill, User.username)
+                .outerjoin(User, User.id == Skill.user_id)
+                .where(*filters)
+                .order_by(
+                    # Platform rows (no owner) first, then newest.
+                    Skill.user_id.is_(None).desc(),
+                    Skill.created_at.desc(),
+                ),
+                page,
+                page_size,
+            )
+        )
+    ).all()
+
+    return PaginatedResponse(
+        items=[_to_skill_response(skill, username) for skill, username in rows],
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
+    )
+
+
+@router.post(
+    "/skills", response_model=SkillResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_skill(
+    ctx: StaffContext,
+    file: UploadFile = File(...),
+    origin: PlatformSkillOrigin = Form(...),
+) -> SkillResponse:
+    """Upload a platform skill bundle.
+
+    ``origin`` is the one thing the bundle cannot tell us and it decides
+    who sees the skill: ``SYSTEM`` is agent-only core, ``OFFICIAL`` is
+    offered to users as an opt-in. The service derives ``enabled`` from
+    it — an ``OFFICIAL`` skill lands disabled because ``skill.enabled``
+    is every user's default, and an enabled-by-default one would put its
+    metadata in every turn's LLM context.
+
+    **Uploading a name that already exists replaces that skill's bundle**
+    rather than failing: for a platform catalogue, re-uploading ``pdf``
+    is shipping a new version of ``pdf``. The row is updated in place, so
+    users' per-skill preferences survive it, and the response is 201
+    either way — a new bundle now exists either way.
+
+    **No ``reason``**, following the console's rule for creates (see
+    ``schemas/admin/staff.py``): the payload *is* the record. It names
+    the skill, its origin, the bundle and the one it displaced, which is
+    the whole deed — a required justification on top of that would only
+    teach operators to type filler.
+
+    400 if the bundle is malformed or the extension is not allowed,
+    413 if it exceeds ``SKILL_POLICY.max_bytes``.
+    """
+    data = await read_capped(file, SKILL_POLICY.max_bytes)
+
+    async with audit(
+        ctx, action=AuditAction.SKILL_UPLOAD, target_type="skill"
+    ) as draft:
+        skill, replaced_key = await register_platform_skill_bundle(
+            ctx.db,
+            origin=SkillOrigin(origin),
+            filename=file.filename or "skill.zip",
+            data=data,
+        )
+        draft.target_id = skill.id
+        draft.payload = {
+            "name": skill.name,
+            "origin": skill.origin.value,
+            "bundle_key": skill.bundle_key,
+            "bundle_size": skill.bundle_size,
+            # The version this one displaced, so a bad upload can be
+            # rolled back: the row no longer points at it, and the object
+            # is still in the bucket.
+            "replaced_bundle_key": replaced_key,
+        }
+
+    await ctx.db.refresh(skill)
+    return _to_skill_response(skill, None)
+
+
+@router.patch("/skills/{skill_id}", response_model=SkillResponse)
+async def update_skill(
+    ctx: StaffContext, skill_id: int, body: SkillUpdate
+) -> SkillResponse:
+    """Edit a skill's picker metadata, or flip its platform-wide default.
+
+    ``enabled`` is the **default**, not the effective value: a user who
+    set their own ``user_skill_preference`` keeps it, because effective
+    enabled is ``COALESCE(pref.enabled, skill.enabled)``. Disabling a
+    skill here therefore does not switch it off for everyone — the
+    console says so beside the control.
+
+    ``display_name`` / ``description`` are the same picker metadata the
+    public surface lets a user edit on their own skill and refuses on a
+    platform one; this is the surface that owns the shared row. The
+    bundle is untouched either way — content changes are a re-upload.
+    """
+    skill = await ctx.db.get(Skill, skill_id)
+    if skill is None:
+        raise SkillNotFoundError(f"No skill with id {skill_id}.")
+
+    owner_username = (
+        None
+        if skill.user_id is None
+        else await ctx.db.scalar(
+            select(User.username).where(User.id == skill.user_id)
+        )
+    )
+
+    fields = body.model_dump(exclude={"reason"}, exclude_none=True)
+    changes = {
+        field: {"from": getattr(skill, field), "to": value}
+        for field, value in fields.items()
+        if getattr(skill, field) != value
+    }
+    if not changes:
+        return _to_skill_response(skill, owner_username)
+
+    async with audit(
+        ctx,
+        action=AuditAction.SKILL_UPDATE,
+        target_type="skill",
+        target_id=skill.id,
+        reason=body.reason,
+    ) as draft:
+        for field, value in fields.items():
+            setattr(skill, field, value)
+        # An explicit rename must win over the bundle's locale map: the
+        # public list endpoint resolves ``display_name_i18n`` first, so
+        # leaving a stale map would silently shadow the new name. Same
+        # rule the public PATCH applies.
+        if "display_name" in changes:
+            skill.display_name_i18n = None
+        draft.payload = {"name": skill.name, **changes}
+
+    await ctx.db.refresh(skill)
+    return _to_skill_response(skill, owner_username)
