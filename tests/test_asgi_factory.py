@@ -73,6 +73,11 @@ async def boom_forbidden():
     raise _ForbiddenError("not allowed")
 
 
+@app.get("/boom-with-details")
+async def boom_with_details():
+    raise _ForbiddenError("not allowed", details={"limit": 32768, "size": 99})
+
+
 client = TestClient(app)
 
 
@@ -116,6 +121,21 @@ def test_app_error_serializes_into_the_envelope() -> None:
     assert response.status_code == 403
     assert response.json() == {
         "error": {"type": "forbidden_test", "message": "not allowed"}
+    }
+
+
+def test_details_ride_along_when_an_error_carries_them() -> None:
+    # The numbers a localized client interpolates. The test above pins the
+    # other half: no ``details`` key at all when there is nothing to say,
+    # so a client can treat its presence as meaningful.
+    response = client.get("/boom-with-details")
+
+    assert response.json() == {
+        "error": {
+            "type": "forbidden_test",
+            "message": "not allowed",
+            "details": {"limit": 32768, "size": 99},
+        }
     }
 
 

@@ -2,7 +2,8 @@
 
 Wire shape (Stripe-style nested envelope)::
 
-    {"error": {"type": "<snake_case_kind>", "message": "<english>"}}
+    {"error": {"type": "<snake_case_kind>", "message": "<english>",
+               "details": <optional structured payload>}}
 
 Service layer raises ``AppError`` subclasses directly; the endpoint
 layer **does not** catch them. ``app_error_handler`` in
@@ -22,16 +23,26 @@ check-in, sessions. The module lives at ``app/errors.py`` (not
 under any one domain package) precisely so any of them can add typed
 errors here without a circular dependency.
 
+How many kinds is the right number: one per distinct thing the user
+would *do next*, not one per place a check fails. Two conditions that
+send someone to the same fix belong under one type — see
+:class:`InvalidVerificationCodeError`, which folds two. Two that send
+them to different fixes must not, or the client is left writing copy
+vague enough to cover both, which is copy that helps with neither.
+
 To add a new error kind:
 
 1. Add a subclass below with ``status_code`` + ``error_type``.
 2. ``raise NewKindError("english fallback")`` from wherever the
-   condition is detected.
+   condition is detected. If the localized sentence needs a number to
+   be actionable, pass ``details`` and let the class build both from
+   the same values.
 3. Add a localized copy entry in the frontend's i18n catalog under
-   the same ``error_type`` key.
+   the same ``error_type`` key, interpolating whatever ``details``
+   carries.
 """
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from fastapi import status
 
@@ -40,18 +51,27 @@ class AppError(Exception):
     """Base for every typed application error.
 
     Subclasses set ``status_code`` and ``error_type`` as class
-    attributes; the constructor takes only the English ``message``.
-    The :class:`ClassVar` annotations make this contract explicit to
+    attributes; the constructor takes the English ``message`` and, where
+    the localized copy needs to state a number, ``details``. The
+    :class:`ClassVar` annotations make this contract explicit to
     type-checkers — these are class-level constants, not instance
     state.
+
+    ``details`` is the same envelope slot the request-validation handler
+    fills, and it exists for the same reason: some refusals are only
+    actionable with their numbers in them. A client renders its own
+    sentence from ``type`` and interpolates these — so keep the keys
+    stable, name them for what they mean rather than where they came
+    from, and put nothing in them a user should not read.
     """
 
     status_code: ClassVar[int] = status.HTTP_400_BAD_REQUEST
     error_type: ClassVar[str] = "bad_request"
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.message = message
+        self.details = details
 
 
 class EmailTakenError(AppError):
@@ -153,14 +173,81 @@ class ModelUnavailableError(AppError):
     error_type = "model_unavailable"
 
 
-class InvalidSkillBundleError(AppError):
+class SkillFileTypeError(AppError):
+    """The uploaded file is not one of the accepted extensions. Caught
+    before anything is read, so it says nothing about the contents."""
+
     status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "invalid_skill_bundle"
+    error_type = "skill_file_type"
+
+
+class SkillBundleUnreadableError(AppError):
+    """The archive, or the ``SKILL.md`` in it, could not be read at all —
+    not a zip, truncated, or text that is not UTF-8. Re-export and retry."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "skill_bundle_unreadable"
+
+
+class SkillMdMissingError(AppError):
+    """No ``SKILL.md`` where one has to be, or more than one to choose
+    from. About the shape of the archive, not the content of the file."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "skill_md_missing"
+
+
+class SkillFrontmatterInvalidError(AppError):
+    """``SKILL.md`` was read, and its frontmatter does not carry what the
+    Agent Skills spec requires — in practice, a ``name``."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "skill_frontmatter_invalid"
 
 
 class InvalidSkillNameError(AppError):
+    """``name`` is present and not a usable slug. Separate from
+    :class:`SkillFrontmatterInvalidError` because the field is there and
+    the fix is to rewrite it, not to add it."""
+
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "invalid_skill_name"
+
+
+class SkillBodyTooLargeError(AppError):
+    """``SKILL.md``'s body is over the cap.
+
+    Carries ``size`` and ``limit`` because the fix is a judgement about
+    how much to move out, and "too large" without the two numbers does
+    not support one. The body is injected into the agent's context and
+    survives compaction, which is why there is a cap at all.
+    """
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "skill_body_too_large"
+
+    def __init__(self, size: int, limit: int) -> None:
+        super().__init__(
+            f"SKILL.md body is too large ({size} bytes; max {limit}). "
+            "Keep SKILL.md an overview and move bulk content into "
+            "reference files linked from it.",
+            details={"size": size, "limit": limit},
+        )
+
+
+class InvalidSkillBundleError(AppError):
+    """A bundle refused for a reason its uploader cannot act on.
+
+    What is left after the kinds above take the actionable failures: a
+    zip bomb, an absurd compression ratio, a path that escapes its own
+    archive, a symlink. Nobody assembling a skill by hand produces one,
+    so the client says only that the file was rejected — a message
+    explaining *how* the archive is hostile is a message written for
+    whoever built it that way.
+    """
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "invalid_skill_bundle"
 
 
 class SkillNameConflictError(AppError):
