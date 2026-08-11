@@ -85,7 +85,9 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     )
     return JSONResponse(
         status_code=exc.status_code,
-        content=_error_envelope(type_=exc.error_type, message=exc.message),
+        content=_error_envelope(
+            type_=exc.error_type, message=exc.message, details=exc.details,
+        ),
         headers=headers,
     )
 

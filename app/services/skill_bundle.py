@@ -8,6 +8,12 @@ the common "github download" wrapper) plus optional ``scripts/`` /
 This module is the **registration-time** validator: it answers
 "is this zip a legal skill bundle and what's its name + description?"
 so :mod:`app.api.public.skill` can decide to write the row.
+
+Refusals raise :mod:`app.errors` types directly, as every other service
+does — and a different type per thing the uploader would do next, so the
+client can say which one without reading English out of ``message``.
+Everything an uploader cannot act on (a zip bomb, a path that escapes its
+archive) stays under the one generic ``InvalidSkillBundleError``.
 Asset content is **not** scanned here — the worker stages files into
 the sandbox at session start and any per-file issue surfaces there.
 
@@ -29,6 +35,15 @@ import zipfile
 from dataclasses import dataclass
 from typing import Any
 
+from app.errors import (
+    InvalidSkillBundleError,
+    InvalidSkillNameError,
+    SkillBodyTooLargeError,
+    SkillBundleTooLargeError,
+    SkillBundleUnreadableError,
+    SkillFrontmatterInvalidError,
+    SkillMdMissingError,
+)
 from app.services.skill_i18n import parse_display_name
 
 # Bounds the ``---`` … ``---`` frontmatter block; the body between the
@@ -73,15 +88,6 @@ _MAX_COMPRESSION_RATIO = 100
 _MAX_TOTAL_UNCOMPRESSED = 200 * 1024 * 1024     # 200 MiB — hard ceiling on declared expansion
 
 
-class InvalidSkillBundleError(ValueError):
-    """Bundle failed validation — the endpoint maps this to HTTP 400.
-
-    Message is operator-facing and end-user-presentable (the frontend
-    surfaces it in a toast), so phrase reasons concretely (e.g.
-    "SKILL.md not found in bundle") rather than as stack-trace fragments.
-    """
-
-
 @dataclass(frozen=True)
 class ParsedSkill:
     """Metadata extracted from a validated bundle's ``SKILL.md``."""
@@ -107,7 +113,7 @@ def validate_zip_structure(data: bytes) -> None:
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
-        raise InvalidSkillBundleError(f"not a valid zip file: {exc}") from exc
+        raise SkillBundleUnreadableError(f"not a valid zip file: {exc}") from exc
 
     with zf:
         _reject_unsafe_entries(zf)
@@ -124,14 +130,14 @@ def parse_bundle(data: bytes) -> ParsedSkill:
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
-        raise InvalidSkillBundleError(f"not a valid zip file: {exc}") from exc
+        raise SkillBundleUnreadableError(f"not a valid zip file: {exc}") from exc
 
     with zf:
         skill_md_path = _locate_skill_md(zf)
         try:
             raw = zf.read(skill_md_path).decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise InvalidSkillBundleError(
+            raise SkillBundleUnreadableError(
                 f"SKILL.md is not valid UTF-8: {exc}",
             ) from exc
 
@@ -140,7 +146,7 @@ def parse_bundle(data: bytes) -> ParsedSkill:
     # Per the Agent Skills spec, ``name`` is required in frontmatter.
     name = meta.get("name")
     if not name:
-        raise InvalidSkillBundleError(
+        raise SkillFrontmatterInvalidError(
             "SKILL.md frontmatter must include a 'name' field "
             "(e.g. `name: my-skill`)."
         )
@@ -217,7 +223,7 @@ def parse_skill_md(data: bytes) -> ParsedSkill:
     try:
         raw = data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise InvalidSkillBundleError(
+        raise SkillBundleUnreadableError(
             f"SKILL.md is not valid UTF-8: {exc}",
         ) from exc
 
@@ -225,7 +231,7 @@ def parse_skill_md(data: bytes) -> ParsedSkill:
 
     name = meta.get("name")
     if not name:
-        raise InvalidSkillBundleError(
+        raise SkillFrontmatterInvalidError(
             "SKILL.md frontmatter must include a 'name' field "
             "(e.g. `name: my-skill`)."
         )
@@ -262,11 +268,11 @@ def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
             continue
         file_count += 1
         if file_count > _MAX_ENTRY_COUNT:
-            raise InvalidSkillBundleError(
+            raise SkillBundleTooLargeError(
                 f"bundle has too many files (max {_MAX_ENTRY_COUNT})"
             )
         if info.file_size > _MAX_UNCOMPRESSED_PER_ENTRY:
-            raise InvalidSkillBundleError(
+            raise SkillBundleTooLargeError(
                 f"entry too large when uncompressed: {info.filename!r} "
                 f"({info.file_size} bytes)"
             )
@@ -351,7 +357,7 @@ def _locate_skill_md(zf: zipfile.ZipFile) -> str:
         if candidate in names:
             return candidate
 
-    raise InvalidSkillBundleError(
+    raise SkillMdMissingError(
         f"{_SKILL_FILENAME} not found in bundle. The zip must contain "
         f"SKILL.md either at its root or inside a single top-level directory."
     )
@@ -415,7 +421,7 @@ def _first_nonempty_line(body: str) -> str:
 
 def _validate_skill_name(name: str) -> None:
     if len(name) > _MAX_NAME_CHARS or not _SKILL_NAME_RE.fullmatch(name):
-        raise InvalidSkillBundleError(
+        raise InvalidSkillNameError(
             "invalid skill name: use 1-64 lowercase letters, numbers, "
             "and single hyphens; do not start or end with a hyphen"
         )
@@ -430,11 +436,7 @@ def _reject_oversized_body(body: str) -> None:
     """
     size = len(body.encode("utf-8"))
     if size > _MAX_BODY_BYTES:
-        raise InvalidSkillBundleError(
-            f"SKILL.md body is too large ({size} bytes; max {_MAX_BODY_BYTES}). "
-            "Keep SKILL.md an overview and move bulk content into reference "
-            "files linked from it."
-        )
+        raise SkillBodyTooLargeError(size=size, limit=_MAX_BODY_BYTES)
 
 
 def _clip(value: str, limit: int) -> str:

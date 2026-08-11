@@ -30,7 +30,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
-    InvalidSkillBundleError,
     SkillBundleTooLargeError,
     SkillNameConflictError,
     SkillQuotaExceededError,
@@ -39,7 +38,7 @@ from app.models.skill import Skill, SkillOrigin
 from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_bundle import (
-    InvalidSkillBundleError as BundleInvalidError,
+    SkillFileTypeError,
     ParsedSkill,
     normalize_bundle,
     parse_bundle,
@@ -68,8 +67,10 @@ async def register_skill_bundle(
     Raises (all :class:`~app.errors.AppError` subclasses, serialized by
     the global handler):
 
-    - ``InvalidSkillBundleError`` (400) — bad extension, malformed
-      archive, missing SKILL.md, or unsafe entries.
+    - the ``app.errors`` skill kinds (400) — one per thing the uploader
+      would do next: wrong extension, unreadable archive, no SKILL.md,
+      frontmatter without a name, body over the cap. Hostile archives stay
+      under the generic ``InvalidSkillBundleError``.
     - ``SkillBundleTooLargeError`` (413) — over ``SKILL_POLICY.max_bytes``.
     - ``SkillQuotaExceededError`` (403) — at the per-user count cap.
     - ``SkillNameConflictError`` (409) — extracted name collides with an
@@ -96,12 +97,9 @@ async def register_skill_bundle(
     # ``asyncio.to_thread`` — otherwise a single large bundle would stall
     # the event loop (and with it every SSE stream / enqueue on this
     # process) for the duration of the unpack.
-    try:
-        data, parsed = await asyncio.to_thread(
-            _validate_and_parse, data, is_zip=is_zip,
-        )
-    except BundleInvalidError as exc:
-        raise InvalidSkillBundleError(str(exc)) from exc
+    data, parsed = await asyncio.to_thread(
+        _validate_and_parse, data, is_zip=is_zip,
+    )
 
     await _enforce_user_quota(db, user_id)
 
@@ -195,8 +193,7 @@ async def register_platform_skill_bundle(
     LLM context. Pass ``enabled=False`` to stage a ``SYSTEM`` bundle
     without exposing it.
 
-    Raises ``InvalidSkillBundleError`` (400) / ``SkillBundleTooLargeError``
-    (413) exactly as the user path does.
+    Raises the same typed kinds the user path does.
     """
     if origin is SkillOrigin.CUSTOM:
         raise ValueError(
@@ -209,12 +206,9 @@ async def register_platform_skill_bundle(
         raise SkillBundleTooLargeError(
             f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
         )
-    try:
-        data, parsed = await asyncio.to_thread(
-            _validate_and_parse, data, is_zip=is_zip,
-        )
-    except BundleInvalidError as exc:
-        raise InvalidSkillBundleError(str(exc)) from exc
+    data, parsed = await asyncio.to_thread(
+        _validate_and_parse, data, is_zip=is_zip,
+    )
 
     if enabled is None:
         enabled = origin is SkillOrigin.SYSTEM
@@ -267,7 +261,7 @@ def _canonical_ext(filename: str) -> str:
     """
     ext = os.path.splitext(filename)[1].lower()
     if ext not in SKILL_POLICY.allowed_types:
-        raise InvalidSkillBundleError(
+        raise SkillFileTypeError(
             f"unsupported file extension {ext!r}; "
             f"allowed: {', '.join(sorted(SKILL_POLICY.allowed_types))}"
         )
@@ -285,9 +279,9 @@ def _validate_and_parse(data: bytes, *, is_zip: bool) -> tuple[bytes, ParsedSkil
     bytes. For a bare ``.md`` the bytes are the SKILL.md content directly.
 
     Synchronous by design (CPU-bound) — the caller runs it via
-    :func:`asyncio.to_thread`. Raises :class:`BundleInvalidError` on any
-    structural / parse failure; the caller maps that to the typed
-    ``InvalidSkillBundleError``.
+    :func:`asyncio.to_thread`. Structural and parse failures raise their
+    own ``app.errors`` kinds from :mod:`app.services.skill_bundle`, which
+    travel up untouched — there is nothing for this layer to translate.
     """
     if is_zip:
         validate_zip_structure(data)
