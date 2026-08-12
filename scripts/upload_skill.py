@@ -6,19 +6,21 @@ so the validation, the OSS key scheme and the replace-by-name behaviour
 are one implementation with two front doors. This script is the path
 that still works when the console is down, or when all you have is SSH.
 
-``enabled`` follows the origin: SYSTEM skills land enabled — they are
-agent-only and reach the worker through the same effective-enabled read
-as everything else, so disabled means invisible to the agent
-(``--disabled`` stages a bundle without exposing it). OFFICIAL skills
-always land **disabled**: ``skill.enabled`` is the default every user
-who never touched the toggle falls back to
-(``COALESCE(pref.enabled, skill.enabled)``), and an enabled-by-default
+``enabled`` follows the origin **for a skill that does not exist yet**:
+SYSTEM lands enabled — agent-only, and disabled means invisible to the
+agent (``--disabled`` stages a bundle without exposing it) — while
+OFFICIAL lands disabled, because ``skill.enabled`` is the default every
+user who never touched the toggle falls back to
+(``COALESCE(pref.enabled, skill.enabled)``) and an enabled-by-default
 official skill would push its metadata into every user's every-turn LLM
 context. Users opt in from the skills page — or just pick the skill in
 the composer, which doesn't consult the toggle at all.
 
 Idempotent by name: re-uploading a name that exists replaces that
-skill's bundle in place, keeping its id and every user's preference.
+skill's bundle in place, keeping its id, every user's preference **and
+the platform default an operator has since set** — shipping a fix is a
+content change, so it does not re-derive the flag. ``--disabled`` still
+overrides it.
 
 Usage:
     cd backend
@@ -38,9 +40,7 @@ from app.models.skill import SkillOrigin
 from app.services.skill_registration import register_platform_skill_bundle
 
 
-async def upload_bundle(
-    bundle_path: Path, origin: SkillOrigin, disabled: bool
-) -> None:
+async def upload_bundle(bundle_path: Path, origin: SkillOrigin, disabled: bool) -> None:
     data = bundle_path.read_bytes()
     print(f"Read {len(data)} bytes from {bundle_path}")
 
@@ -72,23 +72,24 @@ async def upload_bundle(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Upload a bundle as a platform skill."
-    )
+    parser = argparse.ArgumentParser(description="Upload a bundle as a platform skill.")
     parser.add_argument(
-        "bundle_path", type=Path,
+        "bundle_path",
+        type=Path,
         help="Path to the skill bundle (.zip, .skill or .md)",
     )
     parser.add_argument(
-        "--origin", choices=("SYSTEM", "OFFICIAL"), default="SYSTEM",
-        help="Platform origin: SYSTEM (always-on core, default) or "
-             "OFFICIAL (user opts in).",
+        "--origin",
+        choices=("SYSTEM", "OFFICIAL"),
+        default="SYSTEM",
+        help="Platform origin: SYSTEM (always-on core, default) or OFFICIAL (user opts in).",
     )
     parser.add_argument(
-        "--disabled", action="store_true",
+        "--disabled",
+        action="store_true",
         help="SYSTEM only: insert with enabled=false (bundle exists in DB "
-             "but stays invisible to the agent). OFFICIAL is always "
-             "disabled — the toggle default is per-user opt-in.",
+        "but stays invisible to the agent). OFFICIAL is always "
+        "disabled — the toggle default is per-user opt-in.",
     )
     args = parser.parse_args()
 

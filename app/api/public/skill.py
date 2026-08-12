@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["skills"])
 
+
 @router.post("/skills", status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/minute")
 async def register_skill(
@@ -115,10 +116,7 @@ async def list_skills(
                 UserSkillPreference.user_id == current_user.id,
             ),
         )
-        .where(
-            (Skill.user_id == current_user.id)
-            | (Skill.origin == SkillOrigin.OFFICIAL)
-        )
+        .where((Skill.user_id == current_user.id) | (Skill.origin == SkillOrigin.OFFICIAL))
         .order_by(Skill.created_at.desc())
     )
     result = await db.execute(stmt)
@@ -165,7 +163,9 @@ async def update_skill(
     # skill from the count keeps re-enabling an already-on skill a no-op.
     if body.enabled:
         await ensure_enable_capacity(
-            db, current_user.id, exclude_skill_id=skill.id,
+            db,
+            current_user.id,
+            exclude_skill_id=skill.id,
         )
 
     if skill.origin == SkillOrigin.OFFICIAL:
@@ -176,7 +176,10 @@ async def update_skill(
             )
         if body.enabled is not None:
             await _upsert_preference(
-                db, current_user.id, skill.id, body.enabled,
+                db,
+                current_user.id,
+                skill.id,
+                body.enabled,
             )
         await db.commit()
         response = SkillResponse.model_validate(skill)
@@ -193,18 +196,15 @@ async def update_skill(
         for field, value in body.model_dump(exclude_unset=True).items()
         if value is not None
     }
-    # An explicit rename must win over a bundle-shipped locale map — the
-    # list endpoint resolves ``display_name_i18n`` first, so leaving a
-    # stale map in place would silently shadow the edit.
+    # Clearing the map is not optional — see the invalidation rule in
+    # ``app.services.localized_text``.
     if "display_name" in updates:
         updates["display_name_i18n"] = None
     if updates:
-        await db.execute(
-            sql_update(Skill).where(Skill.id == skill.id).values(**updates)
-        )
+        await db.execute(sql_update(Skill).where(Skill.id == skill.id).values(**updates))
         await db.commit()
         await db.refresh(skill)
-    return skill
+    return SkillResponse.model_validate(skill)
 
 
 @router.delete("/skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -228,7 +228,9 @@ async def delete_skill(
     await db.commit()
     logger.info(
         "skill deleted: id=%s user_id=%s name=%r",
-        skill_id, current_user.id, skill_name,
+        skill_id,
+        current_user.id,
+        skill_name,
     )
 
     try:
@@ -238,7 +240,9 @@ async def delete_skill(
         # user-visible state. Leftover OSS object is cleanup-cron's job.
         logger.warning(
             "skill delete: OSS cleanup failed for %s (skill id=%s): %s",
-            bundle_key, skill_id, exc,
+            bundle_key,
+            skill_id,
+            exc,
         )
 
 
@@ -264,34 +268,44 @@ async def get_skill_download_url(
     extension = os.path.splitext(skill.bundle_key)[1] or ".zip"
     filename = f"{skill.name}{extension}"
     url, expires_in = file_storage.generate_download_url(
-        SKILL_POLICY, skill.bundle_key, filename,
+        SKILL_POLICY,
+        skill.bundle_key,
+        filename,
     )
     return DownloadUrlResponse(
-        download_url=url, file_key=skill.bundle_key, expires_in=expires_in,
+        download_url=url,
+        file_key=skill.bundle_key,
+        expires_in=expires_in,
     )
 
 
 async def _get_owned_skill(
-    db: AsyncSession, skill_id: int, user_id: int,
+    db: AsyncSession,
+    skill_id: int,
+    user_id: int,
 ) -> Skill:
     """Fetch a CUSTOM skill that belongs to ``user_id``.
 
     Used by DELETE — only the owner can drop their CUSTOM bundle.
     """
     stmt = select(Skill).where(
-        Skill.id == skill_id, Skill.user_id == user_id,
+        Skill.id == skill_id,
+        Skill.user_id == user_id,
     )
     result = await db.execute(stmt)
     skill = result.scalar_one_or_none()
     if skill is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="skill not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="skill not found",
         )
     return skill
 
 
 async def _get_visible_skill(
-    db: AsyncSession, skill_id: int, user_id: int,
+    db: AsyncSession,
+    skill_id: int,
+    user_id: int,
 ) -> Skill:
     """Fetch a skill visible to ``user_id`` (own CUSTOM or any OFFICIAL).
 
@@ -309,13 +323,17 @@ async def _get_visible_skill(
     skill = result.scalar_one_or_none()
     if skill is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="skill not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="skill not found",
         )
     return skill
 
 
 async def _upsert_preference(
-    db: AsyncSession, user_id: int, skill_id: int, enabled: bool,
+    db: AsyncSession,
+    user_id: int,
+    skill_id: int,
+    enabled: bool,
 ) -> None:
     """Idempotent ``INSERT ... ON CONFLICT`` for the override row.
 
@@ -328,7 +346,8 @@ async def _upsert_preference(
         .values(user_id=user_id, skill_id=skill_id, enabled=enabled)
         .on_conflict_do_update(
             index_elements=[
-                UserSkillPreference.user_id, UserSkillPreference.skill_id,
+                UserSkillPreference.user_id,
+                UserSkillPreference.skill_id,
             ],
             set_={"enabled": enabled, "updated_at": func.now()},
         )

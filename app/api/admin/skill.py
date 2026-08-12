@@ -69,13 +69,9 @@ async def list_skills(
         filters.append(Skill.origin == origin)
     if q is not None:
         pattern = f"%{q}%"
-        filters.append(
-            sa.or_(Skill.name.ilike(pattern), Skill.display_name.ilike(pattern))
-        )
+        filters.append(sa.or_(Skill.name.ilike(pattern), Skill.display_name.ilike(pattern)))
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(Skill).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(Skill).where(*filters))
     rows = (
         await ctx.db.execute(
             paginate(
@@ -100,7 +96,8 @@ async def list_skills(
 
 
 @router.post(
-    "/skills", response_model=SkillResponse,
+    "/skills",
+    response_model=SkillResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_skill(
@@ -112,16 +109,19 @@ async def upload_skill(
 
     ``origin`` is the one thing the bundle cannot tell us and it decides
     who sees the skill: ``SYSTEM`` is agent-only core, ``OFFICIAL`` is
-    offered to users as an opt-in. The service derives ``enabled`` from
-    it — an ``OFFICIAL`` skill lands disabled because ``skill.enabled``
-    is every user's default, and an enabled-by-default one would put its
-    metadata in every turn's LLM context.
+    offered to users as an opt-in. For a **new** skill the service
+    derives ``enabled`` from it — an ``OFFICIAL`` one lands disabled
+    because ``skill.enabled`` is every user's default, and an
+    enabled-by-default skill would put its metadata in every turn's LLM
+    context.
 
     **Uploading a name that already exists replaces that skill's bundle**
     rather than failing: for a platform catalogue, re-uploading ``pdf``
     is shipping a new version of ``pdf``. The row is updated in place, so
-    users' per-skill preferences survive it, and the response is 201
-    either way — a new bundle now exists either way.
+    both halves of effective-enabled survive it — each user's own
+    ``user_skill_preference`` *and* the platform default they fall back
+    to, which a replace deliberately does not re-derive. The response is
+    201 either way: a new bundle now exists either way.
 
     **No ``reason``**, following the console's rule for creates (see
     ``schemas/admin/staff.py``): the payload *is* the record. It names
@@ -134,9 +134,7 @@ async def upload_skill(
     """
     data = await read_capped(file, SKILL_POLICY.max_bytes)
 
-    async with audit(
-        ctx, action=AuditAction.SKILL_UPLOAD, target_type="skill"
-    ) as draft:
+    async with audit(ctx, action=AuditAction.SKILL_UPLOAD, target_type="skill") as draft:
         skill, replaced_key = await register_platform_skill_bundle(
             ctx.db,
             origin=SkillOrigin(origin),
@@ -160,9 +158,7 @@ async def upload_skill(
 
 
 @router.patch("/skills/{skill_id}", response_model=SkillResponse)
-async def update_skill(
-    ctx: StaffContext, skill_id: int, body: SkillUpdate
-) -> SkillResponse:
+async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> SkillResponse:
     """Edit a skill's picker metadata, or flip its platform-wide default.
 
     ``enabled`` is the **default**, not the effective value: a user who
@@ -183,9 +179,7 @@ async def update_skill(
     owner_username = (
         None
         if skill.user_id is None
-        else await ctx.db.scalar(
-            select(User.username).where(User.id == skill.user_id)
-        )
+        else await ctx.db.scalar(select(User.username).where(User.id == skill.user_id))
     )
 
     fields = body.model_dump(exclude={"reason"}, exclude_none=True)
@@ -206,10 +200,9 @@ async def update_skill(
     ) as draft:
         for field, value in fields.items():
             setattr(skill, field, value)
-        # An explicit rename must win over the bundle's locale map: the
-        # public list endpoint resolves ``display_name_i18n`` first, so
-        # leaving a stale map would silently shadow the new name. Same
-        # rule the public PATCH applies.
+        # Clearing the map is not optional — see the invalidation rule
+        # in ``app.services.localized_text``. The bundle re-supplies it
+        # on the next upload, so nothing is lost for good here.
         if "display_name" in changes:
             skill.display_name_i18n = None
         draft.payload = {"name": skill.name, **changes}

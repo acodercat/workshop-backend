@@ -49,13 +49,34 @@ _GRANT_ROWS = (
 )
 _CLAWBACK_ROWS = "kind = 'ADJUST' AND amount < 0"
 
+# A grant the customer actually **paid for**. The marker is the payment
+# order's back-link, not the ledger kind: ``TOPUP`` is what
+# ``apply_topup`` writes for *every* balance increase it handles — a
+# purchase, the registration welcome grant, an operator giveaway
+# (``scripts/topup_credits.py``), a commission conversion — so reading
+# ``kind = 'TOPUP'`` as "sold" books each of those as revenue, and the
+# welcome grant alone moves it by the full signup volume.
+# ``payment_order.ledger_id`` is set only on the PENDING→PAID flip, so
+# it is the one structural record that money changed hands — and it
+# stays right when a second provider lands, which keying on the ``hf:``
+# idempotency prefix would not.
+#
+# Uncorrelated ``IN`` rather than a correlated ``EXISTS`` because this
+# sits inside an aggregate ``FILTER``, where a correlated subquery
+# re-runs per row instead of being pulled up into a semi-join; this form
+# lets Postgres hash the (small) order table once. The ``IS NOT NULL``
+# guard is load-bearing, not decoration: a NULL in the subquery would
+# make the negation below evaluate to NULL for every unmatched row and
+# silently report zero free grants.
+_SOLD_ROWS = "id IN (SELECT ledger_id FROM payment_order WHERE ledger_id IS NOT NULL)"
+
 # The share of grants the platform *gave away* rather than sold. Defined
 # against ``_GRANT_ROWS`` rather than by listing kinds, so a new grant
 # kind counts as free unless it is a purchase. Without this split,
 # "granted" moves for opposite reasons — a good sales day and an
-# expensive giveaway look identical — and ``TOPUP`` is already reported
-# in ¥ by the payments summary.
-_FREE_GRANT_ROWS = f"{_GRANT_ROWS} AND kind <> 'TOPUP'"
+# expensive giveaway look identical — and the sold half is already
+# reported in ¥ by the payments summary.
+_FREE_GRANT_ROWS = f"{_GRANT_ROWS} AND NOT ({_SOLD_ROWS})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,8 +107,11 @@ class CreditsSummary:
     """Every credit added: purchases and giveaways together — the
     liability increase."""
     granted_free_micro: int
-    """The giveaway half of it (everything but ``TOPUP``). Reported
-    beside the total because the two move for opposite reasons."""
+    """The giveaway half of it — every grant with no paid order behind
+    it, so welcome grants, check-ins, referral rewards, operator top-ups
+    and commission conversions all land here. Reported beside the total
+    because the two move for opposite reasons; the remainder
+    (``granted_micro - granted_free_micro``) is what was sold."""
     clawed_back_micro: int
     active_users: int
     settled_turns: int
@@ -119,8 +143,6 @@ class UserActivity:
     settled_turns: int
     balance_micro: int
     last_spend_at: datetime
-
-
 
 
 async def summarize(db: AsyncSession, *, days: int) -> CreditsSummary:
@@ -224,9 +246,7 @@ async def user_activity(
     ]
 
 
-async def _daily_spend(
-    db: AsyncSession, *, since: datetime, days: int
-) -> list[DailySpend]:
+async def _daily_spend(db: AsyncSession, *, since: datetime, days: int) -> list[DailySpend]:
     """Per-business-day consumption, gap-filled to a contiguous series."""
     rows = (
         await db.execute(
@@ -244,14 +264,11 @@ async def _daily_spend(
 
     spend_by_day = {row.day: int(row.spend_micro) for row in rows}
     return [
-        DailySpend(day=day, spend_micro=spend_by_day.get(day, 0))
-        for day in business_days(days)
+        DailySpend(day=day, spend_micro=spend_by_day.get(day, 0)) for day in business_days(days)
     ]
 
 
-async def _spend_by_model(
-    db: AsyncSession, *, since: datetime
-) -> list[ModelSpend]:
+async def _spend_by_model(db: AsyncSession, *, since: datetime) -> list[ModelSpend]:
     """Consumption grouped by the model that ran the turn.
 
     Routed ledger row → reservation → session, because ``model_id`` lives
@@ -275,8 +292,4 @@ async def _spend_by_model(
             {"since": since},
         )
     ).all()
-    return [
-        ModelSpend(model_id=row.model_id, spend_micro=int(row.spend_micro))
-        for row in rows
-    ]
-
+    return [ModelSpend(model_id=row.model_id, spend_micro=int(row.spend_micro)) for row in rows]

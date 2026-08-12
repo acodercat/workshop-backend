@@ -11,8 +11,8 @@ asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 """
 
 import inspect
-from app.services.credits import analytics
 
+from app.services.credits import analytics
 
 # --- the spend predicate ------------------------------------------------
 
@@ -52,3 +52,34 @@ def test_grants_exclude_negative_adjustments() -> None:
 def test_grants_do_not_include_turn_kinds() -> None:
     for kind in ("RESERVE", "SETTLE", "REFUND"):
         assert kind not in analytics._GRANT_ROWS
+
+
+# --- sold vs given away -------------------------------------------------
+
+
+def test_sold_is_keyed_on_the_paid_order_not_the_ledger_kind() -> None:
+    # ``apply_topup`` writes TOPUP for the welcome grant, operator
+    # top-ups and commission conversions as well as purchases, so
+    # ``kind = 'TOPUP'`` is not a synonym for "the customer paid".
+    # ``payment_order.ledger_id`` is set only on the PENDING→PAID flip.
+    assert "payment_order" in analytics._SOLD_ROWS
+    assert "ledger_id" in analytics._SOLD_ROWS
+    assert "TOPUP" not in analytics._SOLD_ROWS
+
+
+def test_sold_subquery_excludes_nulls() -> None:
+    # ``_FREE_GRANT_ROWS`` negates this subquery, and a NULL inside a
+    # ``NOT IN`` list makes the whole predicate NULL for every unmatched
+    # row — free grants would silently report as zero.
+    assert "ledger_id IS NOT NULL" in analytics._SOLD_ROWS
+
+
+def test_free_grants_are_the_grants_with_no_paid_order() -> None:
+    # Defined by negating "sold" against the shared grant predicate, so
+    # a future grant kind counts as a giveaway unless money came in.
+    assert analytics._FREE_GRANT_ROWS == (
+        f"{analytics._GRANT_ROWS} AND NOT ({analytics._SOLD_ROWS})"
+    )
+    # The welcome grant is a TOPUP row; keying on the kind is the bug
+    # this replaced.
+    assert "kind <> 'TOPUP'" not in analytics._FREE_GRANT_ROWS

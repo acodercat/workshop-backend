@@ -27,7 +27,7 @@ from app.errors import (
     ConnectorCatalogEntryNotFoundError,
     ConnectorCatalogUrlTakenError,
 )
-from app.models.mcp_server import MCPServer
+from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.user import User
 from app.schemas.admin.connector import (
@@ -40,6 +40,11 @@ from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.services.admin import AuditAction, audit
 
 router = APIRouter(tags=["connectors"])
+
+#: Each canonical column beside the locale map that shadows it. Editing
+#: one without clearing the other is the bug this pairing exists to make
+#: hard to reintroduce — see ``update_catalog_entry``.
+_LOCALIZED_FIELDS = (("name", "name_i18n"), ("description", "description_i18n"))
 
 
 def _to_catalog_response(
@@ -63,9 +68,7 @@ def _to_catalog_response(
     )
 
 
-def _to_connector_response(
-    connector: MCPServer, owner_username: str
-) -> ConnectorResponse:
+def _to_connector_response(connector: MCPServer, owner_username: str) -> ConnectorResponse:
     return ConnectorResponse(
         id=connector.id,
         user_id=connector.user_id,
@@ -95,9 +98,7 @@ async def _enforce_unique_url(ctx: StaffContext, url: str) -> None:
     if await ctx.db.scalar(
         select(MCPServerCatalogEntry.id).where(MCPServerCatalogEntry.url == url)
     ):
-        raise ConnectorCatalogUrlTakenError(
-            f"The catalog already offers {url}."
-        )
+        raise ConnectorCatalogUrlTakenError(f"The catalog already offers {url}.")
 
 
 @router.get(
@@ -137,7 +138,9 @@ async def create_catalog_entry(
     await _enforce_unique_url(ctx, body.url)
 
     async with audit(
-        ctx, action=AuditAction.CONNECTOR_CATALOG_CREATE, target_type="connector_catalog"
+        ctx,
+        action=AuditAction.CONNECTOR_CATALOG_CREATE,
+        target_type="connector_catalog",
     ) as draft:
         entry = MCPServerCatalogEntry(
             name=body.name,
@@ -178,9 +181,7 @@ async def update_catalog_entry(
     """
     entry = await ctx.db.get(MCPServerCatalogEntry, entry_id)
     if entry is None:
-        raise ConnectorCatalogEntryNotFoundError(
-            f"No catalog entry with id {entry_id}."
-        )
+        raise ConnectorCatalogEntryNotFoundError(f"No catalog entry with id {entry_id}.")
 
     if body.url is not None and body.url != entry.url:
         await _enforce_unique_url(ctx, body.url)
@@ -203,7 +204,39 @@ async def update_catalog_entry(
     ) as draft:
         for field, value in fields.items():
             setattr(entry, field, value)
-        draft.payload = {"name": entry.name, **changes}
+
+        # A scope is meaningless without OAuth, and the update schema
+        # cannot express "clear this" — ``None`` there means "leave
+        # alone" — so the invariant is kept here rather than asked of
+        # the caller. Left behind it would reappear the day someone
+        # switches the entry back to OAUTH, and be copied onto every
+        # Connector made from it in between.
+        if entry.auth_type is not MCPServerAuthType.OAUTH and entry.oauth_scope:
+            changes["oauth_scope"] = {"from": entry.oauth_scope, "to": None}  # type: ignore[dict-item]  # a cleared value is a real "to"
+            entry.oauth_scope = None
+
+        # Clearing a locale map is not optional — see the invalidation
+        # rule in ``app.services.localized_text``. Left behind here it
+        # would be invisible: the public catalog would keep serving the
+        # old text, ``build_connector`` would copy it onto every
+        # Connector created afterwards, and this endpoint returns the
+        # canonical column, so the operator would see the edit take
+        # effect.
+        #
+        # Cleared whole rather than per-locale because the console can
+        # neither show nor edit these maps: a translation of the
+        # superseded text would be a divergence an operator has no way
+        # to discover. The discarded map goes into the audit payload,
+        # since unlike a skill's (which its bundle re-supplies) this one
+        # is hand-curated and the trail is the only copy left.
+        discarded = {}
+        for field, locale_map in _LOCALIZED_FIELDS:
+            stale = getattr(entry, locale_map)
+            if field in changes and stale is not None:
+                discarded[f"cleared_{locale_map}"] = stale
+                setattr(entry, locale_map, None)
+
+        draft.payload = {"name": entry.name, **changes, **discarded}
 
     await ctx.db.refresh(entry)
     return _to_catalog_response(entry)
@@ -230,13 +263,9 @@ async def list_connectors(
         filters.append(MCPServer.connected.is_(connected))
     if q is not None:
         pattern = f"%{q}%"
-        filters.append(
-            sa.or_(MCPServer.name.ilike(pattern), MCPServer.url.ilike(pattern))
-        )
+        filters.append(sa.or_(MCPServer.name.ilike(pattern), MCPServer.url.ilike(pattern)))
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(MCPServer).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(MCPServer).where(*filters))
     rows = (
         await ctx.db.execute(
             paginate(
@@ -251,9 +280,6 @@ async def list_connectors(
     ).all()
 
     return PaginatedResponse(
-        items=[
-            _to_connector_response(connector, username)
-            for connector, username in rows
-        ],
+        items=[_to_connector_response(connector, username) for connector, username in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

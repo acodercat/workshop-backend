@@ -285,6 +285,15 @@ clears `display_name_i18n`, exactly as the public PATCH does — the list
 endpoint resolves the locale map first, so a stale one would silently
 shadow the new name.
 
+**A replace keeps the platform default it found.** `skill.enabled` is
+what every user who never touched their own toggle reads through
+(`COALESCE(pref.enabled, skill.enabled)`), so re-deriving it from the
+origin would switch a live `OFFICIAL` skill off for all of them the
+moment an operator ships a fix — while the per-user preference rows,
+the half people think of, survive untouched. Only a *new* skill takes
+its origin's default; `scripts/replace_platform_skill_bundles.py` has
+always left the flag alone for the same reason.
+
 **Upload replaces by name rather than conflicting.** A user
 re-uploading a name they own is a mistake worth a 409; an operator
 uploading `pdf` again is shipping a new version of `pdf`, so the row is
@@ -364,6 +373,19 @@ duplicate exactly as the create path does** — a named 409
 (`connector_catalog_url_taken`), not an `IntegrityError` surfacing as a
 500. The unique constraint is still what makes it true under a race;
 the check is the readable path to it.
+
+**Editing `name` or `description` clears that field's locale map.**
+`localized_text.resolve` reads the map's default-locale entry *before*
+falling back to the canonical column, so a stale map shadows an edit for
+every locale rather than only the translated ones — the public catalog
+would keep serving the old name and `build_connector` would copy it onto
+each Connector created afterwards, while this endpoint returns the
+column and looks correct. The map is cleared whole, not per-locale,
+because the console can neither show nor edit it: a translation of the
+superseded text would be a divergence an operator cannot discover. The
+discarded map goes into the audit payload, since unlike a skill's
+(re-supplied by its bundle) this one is hand-curated and the trail is
+the only remaining copy.
 
 **`auth_type` is editable**, following the public surface, where a user may change their
 own Connector's auth; there it is edited "as a whole" with its
@@ -525,14 +547,15 @@ the only thing the guard trusts.
 A full smoke against a **throwaway database** (`metaseq_admin_smoke`,
 created → migrated → dropped; the dev DB untouched): the whole migration
 chain replays on a fresh Postgres, both processes boot against it, and
-74 checks drive every route over real HTTP **through the built console**
+76 checks drive every route over real HTTP **through the built console**
 — the browser's path, so the cookie, the route-handler proxy and the
 server-side guard are exercised, not bypassed. It grew with the
 surface: 24 checks when only the backend existed, 46 once the frontend
 drove it, 54 with message ratings, invites and check-ins, 59 with
 platform skill upload, 67 with connector add/edit and skill
 metadata editing, 70 with the check-in rankings, 72 with i18n, 73
-with the grant split, 74 once the catalog's identity moved to its URL.
+with the grant split, 74 once the catalog's identity moved to its URL, 76 with the
+localized-edit and replace-default rules.
 
 What it covers: an anonymous page redirecting to `/login`, sign-in
 (uniform 401 + no cookie on refusal, `httpOnly` on success), a real

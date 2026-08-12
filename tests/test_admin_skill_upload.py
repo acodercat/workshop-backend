@@ -11,7 +11,7 @@ parsing is real, so the fixtures are real zips.
 
 import io
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import FastAPI
@@ -25,7 +25,7 @@ from app.models.admin_audit_log import AdminAuditLog
 from app.models.skill import Skill, SkillOrigin
 from app.models.staff import Staff, StaffStatus
 
-_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _bundle(name: str = "smoke-skill") -> bytes:
@@ -70,9 +70,15 @@ class _FakeDb:
 
 def _existing_skill() -> Skill:
     skill = Skill(
-        id=5, user_id=None, origin=SkillOrigin.OFFICIAL, name="smoke-skill",
-        display_name="Old Name", description="old", enabled=True,
-        bundle_key="official/smoke-skill/OLD/smoke-skill.zip", bundle_size=10,
+        id=5,
+        user_id=None,
+        origin=SkillOrigin.OFFICIAL,
+        name="smoke-skill",
+        display_name="Old Name",
+        description="old",
+        enabled=True,
+        bundle_key="official/smoke-skill/OLD/smoke-skill.zip",
+        bundle_size=10,
     )
     skill.created_at = skill.updated_at = _NOW
     return skill
@@ -84,8 +90,12 @@ def _client(db: _FakeDb) -> TestClient:
     app.include_router(admin_skill.router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[authenticate_and_get_staff] = lambda: Staff(
-        id=7, username="alice", password_hash="x", name="Alice",
-        status=StaffStatus.ACTIVE, token_version=0,
+        id=7,
+        username="alice",
+        password_hash="x",
+        name="Alice",
+        status=StaffStatus.ACTIVE,
+        token_version=0,
     )
     return TestClient(app)
 
@@ -144,6 +154,38 @@ def test_a_system_bundle_lands_enabled() -> None:
     assert response.json()["enabled"] is True
 
 
+def test_a_replace_keeps_the_platform_default_the_operator_set() -> None:
+    """Shipping a fixed bundle is a content change, not a policy one.
+
+    ``skill.enabled`` is the default every user who never touched the
+    toggle falls back to (``COALESCE(pref.enabled, skill.enabled)``), so
+    re-deriving it from the origin would switch a live OFFICIAL skill
+    off for all of them the moment an operator uploads a fix — while
+    their own preference rows, the half people think of, survive.
+    """
+    live = _existing_skill()
+    live.enabled = True  # an operator turned it on after the first upload
+    db = _FakeDb(existing=live)
+
+    response = _post(_client(db), _bundle(), origin="OFFICIAL")
+
+    assert response.status_code == 201
+    assert live.enabled is True
+    assert response.json()["enabled"] is True
+
+
+def test_a_replace_keeps_a_default_that_is_off_too() -> None:
+    """The rule is "keep what is there", not "keep it on"."""
+    live = _existing_skill()
+    live.enabled = False
+    db = _FakeDb(existing=live)
+
+    _post(_client(db), _bundle(), origin="SYSTEM")
+
+    # SYSTEM's own rule would have enabled it; the existing row wins.
+    assert live.enabled is False
+
+
 def test_the_same_name_replaces_and_records_the_displaced_bundle() -> None:
     existing = _existing_skill()
     db = _FakeDb(existing=existing)
@@ -160,10 +202,7 @@ def test_the_same_name_replaces_and_records_the_displaced_bundle() -> None:
 
     (row,) = _audit_rows(db)
     # The only surviving pointer to the version this displaced.
-    assert (
-        row.payload["replaced_bundle_key"]
-        == "official/smoke-skill/OLD/smoke-skill.zip"
-    )
+    assert row.payload["replaced_bundle_key"] == "official/smoke-skill/OLD/smoke-skill.zip"
 
 
 def test_a_bundle_without_skill_md_is_rejected_and_writes_nothing() -> None:

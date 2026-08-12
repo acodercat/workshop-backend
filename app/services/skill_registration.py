@@ -57,7 +57,11 @@ _MAX_SKILLS_PER_USER = 100
 
 
 async def register_skill_bundle(
-    db: AsyncSession, *, user_id: int, filename: str, data: bytes,
+    db: AsyncSession,
+    *,
+    user_id: int,
+    filename: str,
+    data: bytes,
 ) -> Skill:
     """Validate, store, and register an uploaded skill bundle.
 
@@ -98,7 +102,9 @@ async def register_skill_bundle(
     # the event loop (and with it every SSE stream / enqueue on this
     # process) for the duration of the unpack.
     data, parsed = await asyncio.to_thread(
-        _validate_and_parse, data, is_zip=is_zip,
+        _validate_and_parse,
+        data,
+        is_zip=is_zip,
     )
 
     await _enforce_user_quota(db, user_id)
@@ -111,11 +117,12 @@ async def register_skill_bundle(
     #
     # The key's filename segment is **derived** — parsed name + canonical
     # extension, not the user's original filename (see ``_canonical_ext``).
-    bundle_key = (
-        f"{SKILL_POLICY.key_prefix}/{user_id}/{uuid.uuid4()}/{parsed.name}{ext}"
-    )
+    bundle_key = f"{SKILL_POLICY.key_prefix}/{user_id}/{uuid.uuid4()}/{parsed.name}{ext}"
     await asyncio.to_thread(
-        file_storage.upload, SKILL_POLICY, bundle_key, data,
+        file_storage.upload,
+        SKILL_POLICY,
+        bundle_key,
+        data,
     )
     # ``enabled=False`` is explicit: the column's ``server_default`` is
     # ``true``, so omitting it would enable the skill. Uploads land
@@ -146,7 +153,10 @@ async def register_skill_bundle(
     await db.refresh(skill)
     logger.info(
         "skill registered: id=%s user_id=%s name=%r size=%d",
-        skill.id, user_id, skill.name, skill.bundle_size,
+        skill.id,
+        user_id,
+        skill.name,
+        skill.bundle_size,
     )
     return skill
 
@@ -185,20 +195,24 @@ async def register_platform_skill_bundle(
     same staging reason. The caller records the replaced key in its
     audit payload, which is what makes an unwanted version recoverable.
 
-    ``enabled`` defaults to the origin's rule: ``SYSTEM`` lands enabled
-    (agent-only, and disabled means invisible to the agent), ``OFFICIAL``
-    lands disabled because ``skill.enabled`` is the default every user
-    who never touched the toggle falls back to — an enabled-by-default
-    official skill would push its metadata into every user's every-turn
-    LLM context. Pass ``enabled=False`` to stage a ``SYSTEM`` bundle
-    without exposing it.
+    ``enabled`` is decided three ways, in order: an explicit argument
+    wins; otherwise a **replace keeps whatever the row already has**;
+    otherwise a new skill takes its origin's rule — ``SYSTEM`` enabled
+    (agent-only, where disabled means invisible to the agent),
+    ``OFFICIAL`` disabled, because ``skill.enabled`` is the default every
+    user who never touched the toggle falls back to and an
+    enabled-by-default official skill would push its metadata into every
+    user's every-turn LLM context.
+
+    The middle rule is the one worth stating: shipping a fixed bundle is
+    a content change, so re-deriving the flag would switch a live
+    ``OFFICIAL`` skill off for everyone on the default. Pass
+    ``enabled=False`` to stage a ``SYSTEM`` bundle without exposing it.
 
     Raises the same typed kinds the user path does.
     """
     if origin is SkillOrigin.CUSTOM:
-        raise ValueError(
-            "CUSTOM skills are owned by a user; use register_skill_bundle"
-        )
+        raise ValueError("CUSTOM skills are owned by a user; use register_skill_bundle")
 
     ext = _canonical_ext(filename)
     is_zip = ext == ".zip"
@@ -207,24 +221,35 @@ async def register_platform_skill_bundle(
             f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
         )
     data, parsed = await asyncio.to_thread(
-        _validate_and_parse, data, is_zip=is_zip,
+        _validate_and_parse,
+        data,
+        is_zip=is_zip,
     )
 
+    # Looked up before the upload so the row's current state can decide
+    # ``enabled`` below — and so a failure here costs no OSS object.
+    skill = await db.scalar(select(Skill).where(Skill.user_id.is_(None), Skill.name == parsed.name))
+    replaced_key = skill.bundle_key if skill is not None else None
+
     if enabled is None:
-        enabled = origin is SkillOrigin.SYSTEM
+        # A replace is a content change, not a policy one. The row's
+        # ``enabled`` is the platform default every user who never
+        # touched the toggle falls back to (``COALESCE(pref.enabled,
+        # skill.enabled)``), so re-deriving it from the origin would
+        # switch a live OFFICIAL skill off for all of them the moment an
+        # operator ships a fix. Only a *new* skill takes the origin's
+        # default. ``scripts/replace_platform_skill_bundles.py`` has
+        # always left ``enabled`` alone for the same reason.
+        if skill is not None:
+            enabled = skill.enabled
+        else:
+            enabled = origin is SkillOrigin.SYSTEM
 
     # Keyed by origin rather than by owner (there is none) — the same
     # scheme ``scripts/upload_skill.py`` has always written, so bundles
     # from either caller are indistinguishable in the bucket.
-    bundle_key = (
-        f"{origin.value.lower()}/{parsed.name}/{uuid.uuid4()}/{parsed.name}{ext}"
-    )
+    bundle_key = f"{origin.value.lower()}/{parsed.name}/{uuid.uuid4()}/{parsed.name}{ext}"
     await asyncio.to_thread(file_storage.upload, SKILL_POLICY, bundle_key, data)
-
-    skill = await db.scalar(
-        select(Skill).where(Skill.user_id.is_(None), Skill.name == parsed.name)
-    )
-    replaced_key = skill.bundle_key if skill is not None else None
     if skill is None:
         skill = Skill(user_id=None, name=parsed.name)
         db.add(skill)
@@ -246,7 +271,11 @@ async def register_platform_skill_bundle(
     logger.info(
         "platform skill %s: id=%s origin=%s name=%r size=%d enabled=%s",
         "replaced" if replaced_key else "registered",
-        skill.id, origin.value, skill.name, skill.bundle_size, enabled,
+        skill.id,
+        origin.value,
+        skill.name,
+        skill.bundle_size,
+        enabled,
     )
     return skill, replaced_key
 
@@ -300,13 +329,10 @@ async def _enforce_user_quota(db: AsyncSession, user_id: int) -> None:
     concurrent uploads at the boundary could both succeed, leaving
     the user one over. Not worth a row lock for a soft policy limit.
     """
-    used = await db.scalar(
-        select(func.count(Skill.id)).where(Skill.user_id == user_id)
-    ) or 0
+    used = await db.scalar(select(func.count(Skill.id)).where(Skill.user_id == user_id)) or 0
     if used >= _MAX_SKILLS_PER_USER:
         raise SkillQuotaExceededError(
-            f"user already has {used} skills; "
-            f"per-user limit is {_MAX_SKILLS_PER_USER}"
+            f"user already has {used} skills; per-user limit is {_MAX_SKILLS_PER_USER}"
         )
 
 
@@ -323,5 +349,6 @@ async def _best_effort_delete_oss(bundle_key: str) -> None:
     except Exception as exc:
         logger.warning(
             "skill upload rollback: OSS cleanup failed for %s: %s",
-            bundle_key, exc,
+            bundle_key,
+            exc,
         )
