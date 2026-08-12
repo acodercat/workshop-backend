@@ -276,8 +276,12 @@ cmd_deploy() {
   # fail-hard, background best-effort (a background startup hiccup must
   # not block the web deploy).
   cmd_stop_all
+  # ``--no-dev``: production needs the app's dependencies, not the test and
+  # lint tooling. Without it a deploy also downloads ruff and mypy, which is
+  # tens of megabytes of nothing this box runs — and long enough that the
+  # start below can time out waiting for a port that is still being unpacked.
   log "uv sync"
-  uv sync --quiet
+  uv sync --no-dev --quiet
   log "alembic upgrade head"
   uv run alembic upgrade head
   cmd_start_all
