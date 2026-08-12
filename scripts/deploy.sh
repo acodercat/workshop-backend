@@ -108,7 +108,7 @@ cmd_start() {
     return 0
   fi
   log "starting uvicorn on :$PORT (workers=$WORKERS)"
-  nohup uv run uvicorn app.public_main:app \
+  nohup uv run --no-sync uvicorn app.public_main:app \
     --host 0.0.0.0 \
     --port "$PORT" \
     --workers "$WORKERS" \
@@ -168,7 +168,7 @@ cmd_background_start() {
     return 0
   fi
   log "starting background process"
-  nohup uv run python -m app.workers.run \
+  nohup uv run --no-sync python -m app.workers.run \
     >> "$BACKGROUND_LOG" 2>&1 &
   disown
 
@@ -280,10 +280,15 @@ cmd_deploy() {
   # lint tooling. Without it a deploy also downloads ruff and mypy, which is
   # tens of megabytes of nothing this box runs — and long enough that the
   # start below can time out waiting for a port that is still being unpacked.
+  #
+  # The start commands then use ``--no-sync``, not ``--no-dev``: ``uv run``
+  # syncs before executing unless told not to, and a start that installs is
+  # a start that can change what is installed. Installing is this step's
+  # job; ``start`` runs what it left.
   log "uv sync"
   uv sync --no-dev --quiet
   log "alembic upgrade head"
-  uv run alembic upgrade head
+  uv run --no-sync alembic upgrade head
   cmd_start_all
 }
 
