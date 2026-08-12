@@ -3,6 +3,7 @@ Auto-import every module in this package so all SQLAlchemy models are
 registered with `Base.metadata`. This is what Alembic autogenerate relies on —
 adding a new file under `app/models/` requires no manual edits here.
 """
+
 import importlib
 import pkgutil
 
@@ -51,6 +52,7 @@ __all__ = [
     "Session",
     "SessionContext",
     "SessionFile",
+    "SessionMCPServer",
     "SessionShare",
     "Skill",
     "SkillOrigin",

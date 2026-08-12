@@ -15,7 +15,7 @@ idempotency).
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -82,8 +82,13 @@ def _excerpt(raw: dict[str, Any]) -> dict[str, Any]:
     """Trim a provider payload to the fields worth keeping for audit —
     avoids storing bulky / sensitive blobs in ``reference``."""
     keep = (
-        "resp_code", "resp_desc", "sub_resp_code", "sub_resp_desc",
-        "hf_seq_id", "trans_stat", "trans_amt",
+        "resp_code",
+        "resp_desc",
+        "sub_resp_code",
+        "sub_resp_desc",
+        "hf_seq_id",
+        "trans_stat",
+        "trans_amt",
     )
     return {k: raw[k] for k in keep if k in raw}
 
@@ -118,7 +123,7 @@ async def create_order(
     # ``expires_at``: ``req_date`` is the calendar day, ``time_expire`` the
     # QR deadline — so Huifu stops accepting payment exactly when the order
     # expires (no "paid after local expiry" window).
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires_at = now + timedelta(seconds=settings.payment_order_ttl_seconds)
     req_date = now.astimezone(_CN_TZ).strftime("%Y%m%d")
     time_expire = expires_at.astimezone(_CN_TZ).strftime("%Y%m%d%H%M%S")
@@ -160,7 +165,10 @@ async def create_order(
 
 
 async def get_order(
-    db: AsyncSession, *, order_id: uuid.UUID, user_id: int,
+    db: AsyncSession,
+    *,
+    order_id: uuid.UUID,
+    user_id: int,
 ) -> PaymentOrder:
     """Fetch a caller-owned order, lazily expiring it if its TTL elapsed
     while still PENDING. Raises :class:`OrderNotFoundError` (folds
@@ -181,21 +189,24 @@ async def get_order(
     order = await db.scalar(
         select(PaymentOrder)
         .where(
-            PaymentOrder.id == order_id, PaymentOrder.user_id == user_id,
+            PaymentOrder.id == order_id,
+            PaymentOrder.user_id == user_id,
         )
         .with_for_update()
     )
     if order is None:
         raise OrderNotFoundError(f"Order {order_id} not found")
-    if order.status == PaymentOrderStatus.PENDING and is_expired(
-        order, datetime.now(timezone.utc)
-    ):
+    if order.status == PaymentOrderStatus.PENDING and is_expired(order, datetime.now(UTC)):
         order.status = PaymentOrderStatus.EXPIRED
     return order
 
 
 async def list_paid_orders(
-    db: AsyncSession, *, user_id: int, page: int, page_size: int,
+    db: AsyncSession,
+    *,
+    user_id: int,
+    page: int,
+    page_size: int,
 ) -> tuple[list[PaymentOrder], int]:
     """One newest-first page of the user's PAID orders + the total count —
     the recharge / billing history. Abandoned (EXPIRED) and failed orders
@@ -208,11 +219,7 @@ async def list_paid_orders(
     total = (
         await db.execute(select(func.count(PaymentOrder.id)).where(filter_clause))
     ).scalar() or 0
-    base = (
-        select(PaymentOrder)
-        .where(filter_clause)
-        .order_by(PaymentOrder.created_at.desc())
-    )
+    base = select(PaymentOrder).where(filter_clause).order_by(PaymentOrder.created_at.desc())
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return list(rows), total
 
@@ -239,7 +246,9 @@ async def handle_webhook(db: AsyncSession, event: VerifiedEvent) -> None:
     if event.amount_fen != order.amount_fen:
         logger.error(
             "huifu notify amount mismatch order=%s expected_fen=%s got_fen=%s",
-            order.id, order.amount_fen, event.amount_fen,
+            order.id,
+            order.amount_fen,
+            event.amount_fen,
         )
         order.status = PaymentOrderStatus.FAILED
         order.reference = {
@@ -258,7 +267,9 @@ async def reconcile_paid(db: AsyncSession, order: PaymentOrder, event: VerifiedE
     if event.amount_fen != order.amount_fen:
         logger.error(
             "huifu reconcile amount mismatch order=%s expected_fen=%s got_fen=%s",
-            order.id, order.amount_fen, event.amount_fen,
+            order.id,
+            order.amount_fen,
+            event.amount_fen,
         )
         order.status = PaymentOrderStatus.FAILED
         return
@@ -268,14 +279,14 @@ async def reconcile_paid(db: AsyncSession, order: PaymentOrder, event: VerifiedE
 async def _lock_order(db: AsyncSession, out_trade_no: str) -> PaymentOrder | None:
     """``SELECT ... FOR UPDATE`` an order by its provider-facing id."""
     return await db.scalar(
-        select(PaymentOrder)
-        .where(PaymentOrder.out_trade_no == out_trade_no)
-        .with_for_update()
+        select(PaymentOrder).where(PaymentOrder.out_trade_no == out_trade_no).with_for_update()
     )
 
 
 async def _grant_paid(
-    db: AsyncSession, order: PaymentOrder, event: VerifiedEvent,
+    db: AsyncSession,
+    order: PaymentOrder,
+    event: VerifiedEvent,
 ) -> None:
     """Grant the frozen credits and mark the order PAID — exactly once.
 
@@ -297,12 +308,17 @@ async def _grant_paid(
     except TopupAlreadyApplied:
         # apply_topup rolled back this tx; re-acquire the order + the
         # ledger row that the earlier call wrote, then back-link it.
-        order = await _lock_order(db, out_trade_no)
+        # Its own name, not a rebind of ``order``: this runs in a *fresh*
+        # transaction — ``apply_topup`` rolled the previous one back — so the
+        # row is re-read rather than still held, and the guard below is what
+        # says nothing was found. Reassigning would make that guard read as
+        # dead code on a parameter the caller declared non-optional.
+        relocked = await _lock_order(db, out_trade_no)
         ledger_id = await db.scalar(
             select(CreditLedger.id).where(CreditLedger.idempotency_key == key)
         )
-        if order is not None and order.status != PaymentOrderStatus.PAID:
-            _mark_paid(order, event, ledger_id)
+        if relocked is not None and relocked.status != PaymentOrderStatus.PAID:
+            _mark_paid(relocked, event, ledger_id)
         return
     _mark_paid(order, event, ledger.id)
 

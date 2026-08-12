@@ -38,9 +38,10 @@ async def list_audit_logs(
 ) -> PaginatedResponse[AuditLogResponse]:
     """Return one page of recorded operator actions, newest first.
 
-    Filters are ANDed and every one is optional. ``action`` and
-    ``target_type`` are validated against the console's vocabulary, so a
-    typo is a 422 rather than a silently empty page.
+    Filters are ANDed and every one is optional. ``action`` is validated
+    against the console's vocabulary, so a typo there is a 422 rather than a
+    silently empty page; ``target_type`` is a free string, matching the plain
+    column it filters.
 
     The count and the page are built from **one** filter list, so the
     total can never describe a different query than the rows.
@@ -51,13 +52,11 @@ async def list_audit_logs(
     if action is not None:
         filters.append(AdminAuditLog.action == action.value)
     if target_type is not None:
-        filters.append(AdminAuditLog.target_type == target_type.value)
+        filters.append(AdminAuditLog.target_type == target_type)
     if target_id is not None:
         filters.append(AdminAuditLog.target_id == target_id)
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(AdminAuditLog).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(AdminAuditLog).where(*filters))
     # Joined rather than resolved per row: the log is read as "who did
     # this", and N+1 lookups against a directory of a dozen accounts is
     # the wrong shape for a page of fifty rows.
