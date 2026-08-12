@@ -3,18 +3,44 @@
 E2E tests are opt-in via ``RUN_E2E_TESTS=1`` because they require the
 full pipeline running (backend + worker + Redis + Postgres + sandbox)
 and burn real LLM tokens. Apply :data:`requires_e2e` to gate them.
+
+This file is loaded by pytest **before** any test module imports, which
+matters: ``config`` instantiates a module-level ``settings`` singleton at
+import time and seven of its fields are mandatory. The environment
+defaults below let the suite run on a fresh checkout with no ``.env`` —
+production deploys still get a fail-loud ``ValidationError`` when any of
+them is missing. Mirrors ``agent-worker/tests/conftest.py``.
 """
 
 import os
-import secrets
-from collections.abc import AsyncIterator, Iterator
 
-import bcrypt
-import httpx
-import psycopg
-import pytest
+# Set only when absent, so a developer running against a real .env keeps
+# their own values. Obvious fakes: nothing offline reaches these, and an
+# accidental live call should fail rather than land somewhere real.
+_TEST_DEFAULTS = {
+    "db_uri": "postgresql+psycopg://test:test@localhost:5432/test",
+    # 32+ bytes: PyJWT warns below that for HMAC-SHA256, and a warning in
+    # every run is noise the next person has to learn to ignore.
+    "secret_key": "test-secret-key-not-for-production-use",
+    "redis_url": "redis://localhost:6379/0",
+    "oss_access_key_id": "test-oss-key-id",
+    "oss_access_key_secret": "test-oss-secret",
+    "llm_base_url": "https://test.llm.example.com/v1",
+    "llm_api_key": "test-llm-key",
+}
 
-from config import settings
+for _key, _value in _TEST_DEFAULTS.items():
+    os.environ.setdefault(_key, _value)
+
+import secrets  # noqa: E402
+from collections.abc import AsyncIterator, Iterator  # noqa: E402
+
+import bcrypt  # noqa: E402
+import httpx  # noqa: E402
+import psycopg  # noqa: E402
+import pytest  # noqa: E402
+
+from config import settings  # noqa: E402
 
 # Gate: skip every test marked with this unless the operator explicitly
 # opted in. Mirrors the axon module's ``RUN_INTEGRATION_TESTS`` pattern.

@@ -40,13 +40,9 @@ jobs:
       # drives the real pipeline and needs a backend, a worker, Postgres,
       # Redis and a sandbox all running.
       #
-      # ``.env.example`` is copied rather than a placeholder set being spelled
-      # out here. Seven ``Settings`` fields are required with no default, so
-      # importing ``config`` — which ``conftest`` does — fails without them;
-      # and the example file is the one place that already answers "what does
-      # this need to boot", so a new required field breaks CI where the fix is
-      # to update it, not somewhere it can drift from.
+      #
+      # No .env: ``tests/conftest.py`` seeds the mandatory settings before any
+      # test module imports, the same way the worker's does, so the suite runs
+      # on a fresh checkout with nothing configured.
       - name: Test
-        run: |
-          cp .env.example .env
-          uv run pytest tests/ -q
+        run: uv run pytest tests/ -q
