@@ -24,7 +24,8 @@ import json
 import logging
 import secrets
 import time
-from typing import Awaitable, Callable, Literal
+from collections.abc import Awaitable, Callable
+from typing import Literal
 
 import redis.asyncio as aioredis
 
@@ -41,7 +42,6 @@ from app.services.email import (
     render_register_verification,
     send_html_email,
 )
-from app.services.email.templates import Locale
 from app.services.redis import (
     email_change_key,
     email_verify_key,
@@ -97,7 +97,7 @@ def _generate_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-def _email_sender(identifier: str, render, locale: Locale) -> _SendFn:
+def _email_sender(identifier: str, render, locale: str) -> _SendFn:
     """Build a send callable that renders + emails the code."""
 
     async def send(code: str) -> None:
@@ -122,9 +122,7 @@ def _sms_sender(identifier: str) -> _SendFn:
     return send
 
 
-async def _request_code(
-    redis: aioredis.Redis, *, key: str, send: _SendFn
-) -> None:
+async def _request_code(redis: aioredis.Redis, *, key: str, send: _SendFn) -> None:
     """Generic "cooldown-check → generate → send → persist" pipeline.
 
     Send-then-persist order matters: if the provider rejects, no stale
@@ -142,9 +140,7 @@ async def _request_code(
         elapsed = now - prior["sent_at"]
         cooldown = settings.register_code_resend_cooldown_seconds
         if elapsed < cooldown:
-            raise CooldownError(
-                f"Cooldown active; retry in {cooldown - elapsed} seconds"
-            )
+            raise CooldownError(f"Cooldown active; retry in {cooldown - elapsed} seconds")
 
     code = _generate_code()
     await send(code)  # raises *SendFailedError on failure; persist only after
@@ -190,23 +186,15 @@ async def _verify_code(
     if result == _VERIFY_OK:
         return
     if result == _VERIFY_EXPIRED:
-        raise InvalidVerificationCodeError(
-            "Verification code expired or not found"
-        )
+        raise InvalidVerificationCodeError("Verification code expired or not found")
     if result == _VERIFY_LOCKED:
         logger.info("%s code locked after max attempts: %s", log_label, identifier)
-        raise TooManyVerificationAttemptsError(
-            "Too many incorrect verification attempts"
-        )
+        raise TooManyVerificationAttemptsError("Too many incorrect verification attempts")
     raise InvalidVerificationCodeError("Incorrect verification code")
 
 
 def _verify_key(channel: Channel, identifier: str) -> str:
-    return (
-        phone_verify_key(identifier)
-        if channel == "phone"
-        else email_verify_key(identifier)
-    )
+    return phone_verify_key(identifier) if channel == "phone" else email_verify_key(identifier)
 
 
 async def request_verification_code(
@@ -214,7 +202,7 @@ async def request_verification_code(
     *,
     channel: Channel,
     identifier: str,
-    locale: Locale = "zh-CN",
+    locale: str = "zh-CN",
 ) -> None:
     """Generate + send a registration/login verification code.
 
@@ -258,7 +246,7 @@ async def verify_verification_code(
 
 
 async def send_email_change_code(
-    redis: aioredis.Redis, *, user_id: int, email: str, locale: Locale = "zh-CN"
+    redis: aioredis.Redis, *, user_id: int, email: str, locale: str = "zh-CN"
 ) -> None:
     """Generate + send an email-change verification code to ``email``
     (the *new* address ``user_id`` wants to switch to). The code is
@@ -286,17 +274,13 @@ async def verify_email_change_code(
     )
 
 
-async def send_phone_change_code(
-    redis: aioredis.Redis, *, user_id: int, phone: str
-) -> None:
+async def send_phone_change_code(redis: aioredis.Redis, *, user_id: int, phone: str) -> None:
     """Generate + send a phone-change verification code (via Aliyun SMS)
     to ``phone`` (the *new* number ``user_id`` wants to switch to). The
     code is bound to the requesting user (see :func:`phone_change_key`).
     The SMS-channel sibling of :func:`send_email_change_code`; same
     failure modes as :func:`request_verification_code`'s phone channel."""
-    await _request_code(
-        redis, key=phone_change_key(user_id, phone), send=_sms_sender(phone)
-    )
+    await _request_code(redis, key=phone_change_key(user_id, phone), send=_sms_sender(phone))
     logger.info("phone_change code issued: user_id=%s phone=%s", user_id, phone)
 
 

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # ``--locked`` rather than a plain sync: it fails when uv.lock does not
+      # match pyproject.toml, which is the check that keeps "never hand-edit
+      # pyproject" (see CLAUDE.md) enforced rather than merely asked for.
+      - name: Install
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      # Scope and settings live in [tool.mypy].
+      - name: Type check
+        run: uv run mypy
+
+      # ``tests/*.py`` is the offline unit suite — no Postgres, no Redis, no
+      # network. ``tests/e2e/`` is opt-in via RUN_E2E_TESTS and stays off: it
+      # drives the real pipeline and needs a backend, a worker, Postgres,
+      # Redis and a sandbox all running.
+      #
+      # No .env is written and none is needed: config.py defaults every
+      # provider credential to an empty string precisely so a box without
+      # provider access still boots.
+      - name: Test
+        run: uv run pytest tests/ -q

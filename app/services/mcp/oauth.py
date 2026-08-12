@@ -26,10 +26,8 @@ from dataclasses import dataclass
 from urllib.parse import quote, urlencode, urlparse, urlsplit
 
 import httpx
-from pydantic import AnyUrl
 from mcp.client.auth.oauth2 import (
     PKCEParameters,
-    resource_url_from_server_url,
     build_oauth_authorization_server_metadata_discovery_urls,
     build_protected_resource_metadata_discovery_urls,
     create_client_registration_request,
@@ -40,6 +38,7 @@ from mcp.client.auth.oauth2 import (
     handle_protected_resource_response,
     handle_registration_response,
     is_valid_client_metadata_url,
+    resource_url_from_server_url,
     should_use_client_metadata_url,
 )
 from mcp.shared.auth import (
@@ -50,6 +49,7 @@ from mcp.shared.auth import (
     ProtectedResourceMetadata,
 )
 from mcp.shared.auth_utils import check_resource_allowed
+from pydantic import AnyUrl
 
 from app.errors import ConnectorOAuthError, InvalidConnectorUrlError
 from app.services.mcp.url_guard import guard_public_url, guarded_client
@@ -80,7 +80,10 @@ def new_pkce() -> PKCEParameters:
 
 
 def require_matching_issuer(
-    returned: str | None, *, recorded: str | None, advertised: bool,
+    returned: str | None,
+    *,
+    recorded: str | None,
+    advertised: bool,
 ) -> None:
     """Check who issued an authorization response, before its code is spent.
 
@@ -287,7 +290,9 @@ async def _discover(server_url: str) -> DiscoveredAuthorization:
     ) as client:
         challenge = await _read_challenge(client, server_url)
         resource = await _discover_protected_resource(
-            client, server_url, challenge.resource_metadata_url,
+            client,
+            server_url,
+            challenge.resource_metadata_url,
         )
         if resource is None:
             raise ConnectorOAuthError(
@@ -297,7 +302,9 @@ async def _discover(server_url: str) -> DiscoveredAuthorization:
                 "one, or connect it with an API key instead."
             )
         metadata, document = await _discover_authorization_server(
-            client, server_url, resource,
+            client,
+            server_url,
+            resource,
         )
 
     _require_https_endpoints(metadata)
@@ -355,7 +362,8 @@ async def _discover_authorization_server(
     ):
         try:
             response = await _send_bounded(
-                client, create_oauth_metadata_request(metadata_url),
+                client,
+                create_oauth_metadata_request(metadata_url),
             )
         except httpx.HTTPError:
             continue
@@ -365,13 +373,15 @@ async def _discover_authorization_server(
             continue
         if metadata is not None and not _issued_by(metadata, expected_issuer):
             if scoped_alias is None and _uses_scoped_registration_alias(
-                metadata, expected_issuer,
+                metadata,
+                expected_issuer,
             ):
                 scoped_alias = (metadata, response.json())
             else:
                 logger.warning(
                     "Ignoring authorization server metadata from %s: it claims issuer %s",
-                    expected_issuer, metadata.issuer,
+                    expected_issuer,
+                    metadata.issuer,
                 )
             continue
         if metadata is not None:
@@ -392,12 +402,11 @@ async def _discover_authorization_server(
         # anyone reading the log is concerned.
         logger.info(
             "Accepting OAuth issuer %s with scoped DCR registration %s",
-            scoped_alias[0].issuer, scoped_alias[0].registration_endpoint,
+            scoped_alias[0].issuer,
+            scoped_alias[0].registration_endpoint,
         )
         return scoped_alias
-    raise ConnectorOAuthError(
-        "Could not discover the MCP server's OAuth metadata."
-    )
+    raise ConnectorOAuthError("Could not discover the MCP server's OAuth metadata.")
 
 
 @dataclass(frozen=True)
@@ -432,7 +441,9 @@ async def _read_challenge(client: httpx.AsyncClient, server_url: str) -> _Challe
             response = await _send_bounded(
                 client,
                 client.build_request(
-                    "GET", server_url, headers={"Accept": "text/event-stream"},
+                    "GET",
+                    server_url,
+                    headers={"Accept": "text/event-stream"},
                 ),
             )
     except (httpx.HTTPError, TimeoutError):
@@ -466,7 +477,8 @@ def _issued_by(metadata: OAuthMetadata, expected: str) -> bool:
 
 
 def _uses_scoped_registration_alias(
-    metadata: OAuthMetadata, authorization_server: str,
+    metadata: OAuthMetadata,
+    authorization_server: str,
 ) -> bool:
     """Whether a DCR namespace is a scoped alias for a root issuer.
 
@@ -523,8 +535,9 @@ def _describes(resource: ProtectedResourceMetadata, server_url: str) -> bool:
     ):
         return True
     logger.warning(
-        "Ignoring an MCP server's resource metadata: it claims %s, which does "
-        "not cover %s", resource.resource, server_url,
+        "Ignoring an MCP server's resource metadata: it claims %s, which does not cover %s",
+        resource.resource,
+        server_url,
     )
     return False
 
@@ -548,8 +561,7 @@ def _require_https_endpoints(metadata: OAuthMetadata) -> None:
             continue
         if urlparse(str(endpoint)).scheme != "https":
             raise ConnectorOAuthError(
-                f"The authorization server's {name} is not https, "
-                f"which MCP requires."
+                f"The authorization server's {name} is not https, which MCP requires."
             )
 
 
@@ -568,7 +580,9 @@ def _require_pkce_support(metadata: OAuthMetadata) -> None:
 
 
 async def _discover_protected_resource(
-    client: httpx.AsyncClient, server_url: str, challenge_url: str | None,
+    client: httpx.AsyncClient,
+    server_url: str,
+    challenge_url: str | None,
 ):
     """The server's RFC 9728 metadata — authorization servers *and* scopes.
 
@@ -585,7 +599,8 @@ async def _discover_protected_resource(
     ):
         try:
             response = await _send_bounded(
-                client, client.build_request("GET", resource_metadata_url),
+                client,
+                client.build_request("GET", resource_metadata_url),
             )
             metadata = await handle_protected_resource_response(response)
         except Exception:
@@ -669,13 +684,11 @@ async def ensure_client(
     if should_use_client_metadata_url(metadata, client_metadata_url):
         # Checked here, not up front: a malformed URL must only fail servers
         # that would actually have used it, never the DCR path.
-        if not is_valid_client_metadata_url(client_metadata_url):
+        if client_metadata_url is None or not is_valid_client_metadata_url(client_metadata_url):
             raise ConnectorOAuthError(
                 "mcp_client_metadata_url must be an https URL with a non-root path."
             )
-        return cimd_client(
-            client_metadata_url, redirect_uri=redirect_uri, client_name=client_name
-        )
+        return cimd_client(client_metadata_url, redirect_uri=redirect_uri, client_name=client_name)
 
     return await _register_client(
         metadata, redirect_uri=redirect_uri, scope=scope, client_name=client_name
@@ -726,9 +739,10 @@ async def _register_client(
     # same conversion as every other failure — inside, it would escape as a raw
     # 500 rather than the 502 a failed registration reads as.
     try:
-        async with asyncio.timeout(_HTTP_TIMEOUT), guarded_client(
-            timeout=httpx.Timeout(_HTTP_TIMEOUT)
-        ) as client:
+        async with (
+            asyncio.timeout(_HTTP_TIMEOUT),
+            guarded_client(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as client,
+        ):
             request = create_client_registration_request(
                 metadata, client_metadata, str(metadata.issuer)
             )
@@ -764,9 +778,7 @@ def _pin_auth_method(
     """
     if client.token_endpoint_auth_method is not None:
         return client
-    return client.model_copy(
-        update={"token_endpoint_auth_method": "client_secret_basic"}
-    )
+    return client.model_copy(update={"token_endpoint_auth_method": "client_secret_basic"})
 
 
 def _preferred_auth_method(metadata: OAuthMetadata) -> str:
@@ -818,10 +830,7 @@ def _apply_client_auth(
     if method == "client_secret_basic" and client.client_id and client.client_secret:
         # Percent-encoded before base64 per RFC 6749 §2.3.1 — a secret
         # containing ':' would otherwise split into the wrong credentials.
-        credentials = (
-            f"{quote(client.client_id, safe='')}:"
-            f"{quote(client.client_secret, safe='')}"
-        )
+        credentials = f"{quote(client.client_id, safe='')}:{quote(client.client_secret, safe='')}"
         encoded = base64.b64encode(credentials.encode()).decode()
         headers = {**headers, "Authorization": f"Basic {encoded}"}
     elif method == "client_secret_post" and client.client_secret:
@@ -846,7 +855,10 @@ def build_authorization_url(
     """
     params = {
         "response_type": "code",
-        "client_id": client.client_id,
+        # Optional on the SDK model; a client this service registered always
+        # carries one. Empty is what httpx would encode a ``None`` as, and the
+        # provider answers 4xx either way.
+        "client_id": client.client_id or "",
         "redirect_uri": redirect_uri,
         "state": state,
         "code_challenge": pkce.code_challenge,
@@ -878,19 +890,18 @@ async def exchange_code(
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": redirect_uri,
-        "client_id": client.client_id,
+        # Optional on the SDK model; a client this service registered always
+        # carries one. Empty is what httpx would encode a ``None`` as, and the
+        # provider answers 4xx either way.
+        "client_id": client.client_id or "",
         "code_verifier": code_verifier,
         "resource": resource_url_from_server_url(server_url),
     }
-    data, headers = _apply_client_auth(
-        client, data, {"Accept": "application/json"}
-    )
+    data, headers = _apply_client_auth(client, data, {"Accept": "application/json"})
 
     response = await _post(str(metadata.token_endpoint), data, headers)
     if response.status_code != 200:
-        raise ConnectorOAuthError(
-            f"Token exchange failed ({response.status_code})."
-        )
+        raise ConnectorOAuthError(f"Token exchange failed ({response.status_code}).")
     try:
         return OAuthToken.model_validate(response.json())
     except Exception as exc:
@@ -928,19 +939,16 @@ async def revoke_grant(
     answer is a log line.
     """
     if metadata.revocation_endpoint is None:
-        raise ConnectorOAuthError(
-            "This authorization server advertises no revocation endpoint."
-        )
+        raise ConnectorOAuthError("This authorization server advertises no revocation endpoint.")
     data = {
         "token": tokens.refresh_token or tokens.access_token,
-        "token_type_hint": (
-            "refresh_token" if tokens.refresh_token else "access_token"
-        ),
-        "client_id": client.client_id,
+        "token_type_hint": ("refresh_token" if tokens.refresh_token else "access_token"),
+        # Optional on the SDK model; a client this service registered always
+        # carries one. Empty is what httpx would encode a ``None`` as, and the
+        # provider answers 4xx either way.
+        "client_id": client.client_id or "",
     }
-    data, headers = _apply_client_auth(
-        client, data, {"Accept": "application/json"}
-    )
+    data, headers = _apply_client_auth(client, data, {"Accept": "application/json"})
 
     response = await _post(str(metadata.revocation_endpoint), data, headers)
     # 200 is the whole of success, and it is also what a server answers for a
@@ -967,7 +975,8 @@ _MAX_RESPONSE_BYTES = 256 * 1024
 
 
 async def _send_bounded(
-    client: httpx.AsyncClient, request: httpx.Request,
+    client: httpx.AsyncClient,
+    request: httpx.Request,
 ) -> httpx.Response:
     """Send *request* and return its answer, reading at most
     :data:`_MAX_RESPONSE_BYTES` of body.
@@ -1017,7 +1026,9 @@ async def _send_bounded(
 
 
 async def _post(
-    url: str, data: dict[str, str], headers: dict[str, str],
+    url: str,
+    data: dict[str, str],
+    headers: dict[str, str],
 ) -> httpx.Response:
     """POST to one of the provider's endpoints, under a deadline over the call.
 
@@ -1031,13 +1042,14 @@ async def _post(
     """
     try:
         async with asyncio.timeout(_HTTP_TIMEOUT):
-            async with guarded_client(
-                timeout=httpx.Timeout(_HTTP_TIMEOUT)
-            ) as http_client:
+            async with guarded_client(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as http_client:
                 return await _send_bounded(
                     http_client,
                     http_client.build_request(
-                        "POST", url, data=data, headers=headers,
+                        "POST",
+                        url,
+                        data=data,
+                        headers=headers,
                     ),
                 )
     except (httpx.HTTPError, TimeoutError) as exc:

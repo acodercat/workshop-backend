@@ -35,7 +35,6 @@ from app.services.auth.verification import (
     send_email_change_code,
     verify_email_change_code,
 )
-from app.services.email.templates import Locale
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,10 @@ async def request_email_change_code(
     user: User,
     new_email: str,
     current_password: str,
-    locale: Locale = "zh-CN",
+    # ``str`` rather than ``Locale``: the renderer documents a fallback for
+    # unknown values and implements it, so the narrow type was a promise the
+    # request schema never made.
+    locale: str = "zh-CN",
 ) -> None:
     """Step 1: sudo + uniqueness check + dispatch the verification
     code to ``new_email``.
@@ -72,14 +74,15 @@ async def request_email_change_code(
     # Uniqueness pre-check. ``UNIQUE`` partial index on ``user.email``
     # would catch a race at INSERT time too, but doing it here lets
     # us return a clear reason before burning a code.
-    existing = await db.execute(
-        select(User.id).where(User.email == new_email)
-    )
+    existing = await db.execute(select(User.id).where(User.email == new_email))
     if existing.first() is not None:
         raise EmailTakenError("Email already in use")
 
     await send_email_change_code(
-        redis, user_id=user.id, email=new_email, locale=locale,
+        redis,
+        user_id=user.id,
+        email=new_email,
+        locale=locale,
     )
 
 
@@ -102,7 +105,10 @@ async def change_email(
     the next request.
     """
     await verify_email_change_code(
-        redis, user_id=user.id, email=new_email, code=code,
+        redis,
+        user_id=user.id,
+        email=new_email,
+        code=code,
     )
 
     user.email = new_email

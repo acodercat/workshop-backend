@@ -58,7 +58,6 @@ from app.services.redis import (
     publish_wake,
     stream_key,
 )
-from config import settings
 from app.services.session import connectors as session_connectors
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
@@ -68,6 +67,7 @@ from app.services.session.exceptions import (
     RecipeNotInvokableError,
     SessionGoneError,
 )
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -140,9 +140,7 @@ async def queue_user_message(
     """
     session = await _lock_session(db, session.id)
     if session.status == SessionStatus.RUNNING:
-        raise GenerationInProgressError(
-            "A completion is already in progress for this session"
-        )
+        raise GenerationInProgressError("A completion is already in progress for this session")
     _apply_agent_type_upgrade(session, agent_type)
 
     # Lazy sweep: settle any of this user's reservations from prior
@@ -167,7 +165,9 @@ async def queue_user_message(
     # which governs ambient auto-discovery, not manual selection — is
     # deliberately not consulted.
     accepted_skills = await _filter_invokable_skills(
-        db, session.user_id, skills or [],
+        db,
+        session.user_id,
+        skills or [],
     )
 
     # Snapshot what the session's standing configuration resolves to right now
@@ -176,7 +176,9 @@ async def queue_user_message(
     # Credentials are NOT snapshotted; the worker resolves url + decrypted
     # credential live by id.
     accepted_connectors = await _resolve_mcp_servers(
-        db, session.user_id, await session_connectors.configured_ids(db, session.id),
+        db,
+        session.user_id,
+        await session_connectors.configured_ids(db, session.id),
     )
 
     # Resolve the picked recipe server-side into a pinned snapshot — the
@@ -184,7 +186,9 @@ async def queue_user_message(
     # id (missing / not visible / disabled) raises rather than silently
     # dropping, since a recipe is a single explicit pick.
     recipe_snapshot = await _resolve_recipe_snapshot(
-        db, session.user_id, recipe_id,
+        db,
+        session.user_id,
+        recipe_id,
     )
 
     file_dicts = [f.model_dump() for f in files]
@@ -226,7 +230,10 @@ async def queue_user_message(
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
     newly_bound_keys = await _bind_session_files(
-        db, session_id=session.id, user_id=session.user_id, files=files,
+        db,
+        session_id=session.id,
+        user_id=session.user_id,
+        files=files,
     )
 
     # Clear the prior turn's output stream (it lingers post-``agent.stopped``
@@ -247,7 +254,8 @@ async def queue_user_message(
     except Exception:
         logger.warning(
             "publish_wake failed for session %s — worker poll fallback will catch it",
-            session.id, exc_info=True,
+            session.id,
+            exc_info=True,
         )
 
     # Clear the orphan-reaping tag on files this turn just bound (M5), so the
@@ -268,7 +276,9 @@ async def _clear_orphan_tags(file_keys: list[str]) -> None:
     results = await asyncio.gather(
         *(
             asyncio.to_thread(
-                file_storage.clear_orphan_tag, file_storage.SESSION_FILE_POLICY, key,
+                file_storage.clear_orphan_tag,
+                file_storage.SESSION_FILE_POLICY,
+                key,
             )
             for key in file_keys
         ),
@@ -279,12 +289,14 @@ async def _clear_orphan_tags(file_keys: list[str]) -> None:
             logger.error(
                 "failed to clear orphan tag on %s — it may be reaped by the "
                 "lifecycle rule; re-clear within the window",
-                key, exc_info=result,
+                key,
+                exc_info=result,
             )
 
 
 def _apply_agent_type_upgrade(
-    session: Session, requested: AgentType | None,
+    session: Session,
+    requested: AgentType | None,
 ) -> None:
     """Apply the send's one-way LITE → FULL mode upgrade, if any.
 
@@ -298,9 +310,7 @@ def _apply_agent_type_upgrade(
     if requested is None or requested == session.agent_type:
         return
     if requested is not AgentType.FULL:
-        raise AgentTypeDowngradeError(
-            "A session can only switch from LITE to FULL"
-        )
+        raise AgentTypeDowngradeError("A session can only switch from LITE to FULL")
     session.agent_type = requested
 
 
@@ -324,14 +334,16 @@ async def _enforce_concurrent_task_limit(db: AsyncSession, user_id: int) -> None
             Session.deleted_at.is_(None),
         )
     )
-    if running_count >= settings.max_concurrent_running_tasks:
+    # ``or 0``: ``COUNT`` never answers NULL, but ``scalar`` is typed as if
+    # any query might return nothing.
+    if (running_count or 0) >= settings.max_concurrent_running_tasks:
         raise ConcurrentTaskLimitError(
             f"user {user_id} already has {running_count} running task(s) "
             f"(max {settings.max_concurrent_running_tasks})"
         )
 
 
-async def _lock_session(db: AsyncSession, session_id: str) -> Session:
+async def _lock_session(db: AsyncSession, session_id: UUID) -> Session:
     """Re-fetch the live session under a row-level lock.
 
     Returns the locked row whose ``status`` is the authoritative answer
@@ -392,12 +404,11 @@ async def _bind_session_files(
         return []
 
     rows = await db.execute(
-        select(SessionFile.file_key, SessionFile.session_id)
-        .where(SessionFile.file_key.in_(unique_files.keys()))
+        select(SessionFile.file_key, SessionFile.session_id).where(
+            SessionFile.file_key.in_(unique_files.keys())
+        )
     )
-    existing = {
-        file_key: owner_session_id for file_key, owner_session_id in rows.all()
-    }
+    existing = {file_key: owner_session_id for file_key, owner_session_id in rows.all()}
 
     # Classify first (reject cross-session rebinds, skip idempotent
     # same-session ones), then insert only the genuinely new keys.
@@ -423,7 +434,8 @@ async def _bind_session_files(
     sizes = await asyncio.gather(
         *(
             asyncio.to_thread(
-                file_storage.head_size, file_storage.SESSION_FILE_POLICY,
+                file_storage.head_size,
+                file_storage.SESSION_FILE_POLICY,
                 file_ref.file_key,
             )
             for file_ref in to_insert
@@ -434,15 +446,11 @@ async def _bind_session_files(
     newly_bound: list[str] = []
     for file_ref, size in zip(to_insert, sizes):
         if isinstance(size, file_storage.FileObjectNotFoundError):
-            raise FileNotUploadedError(
-                f"file_key {file_ref.file_key!r} was not uploaded"
-            )
+            raise FileNotUploadedError(f"file_key {file_ref.file_key!r} was not uploaded")
         if isinstance(size, BaseException):
             raise size  # unexpected OSS/other error — surface as 500
         if size > file_storage.SESSION_FILE_POLICY.max_bytes:
-            raise file_storage.FileTooLargeError(
-                size, file_storage.SESSION_FILE_POLICY.max_bytes
-            )
+            raise file_storage.FileTooLargeError(size, file_storage.SESSION_FILE_POLICY.max_bytes)
         db.add(
             SessionFile(
                 session_id=session_id,
@@ -459,7 +467,9 @@ async def _bind_session_files(
 
 
 async def _filter_invokable_skills(
-    db: AsyncSession, user_id: int | None, requested: list[str],
+    db: AsyncSession,
+    user_id: int | None,
+    requested: list[str],
 ) -> list[dict[str, str | int]]:
     """Return immutable snapshots of the skills the user can invoke this turn.
 
@@ -510,7 +520,9 @@ async def _filter_invokable_skills(
 
 
 async def _resolve_mcp_servers(
-    db: AsyncSession, user_id: int | None, requested: list[int],
+    db: AsyncSession,
+    user_id: int | None,
+    requested: list[int],
 ) -> list[dict[str, str | int]]:
     """Snapshot ``{"id", "name"}`` for each of the session's live Connectors.
 
@@ -546,7 +558,9 @@ async def _resolve_mcp_servers(
 
 
 async def _resolve_recipe_snapshot(
-    db: AsyncSession, user_id: int | None, recipe_id: int | None,
+    db: AsyncSession,
+    user_id: int | None,
+    recipe_id: int | None,
 ) -> dict[str, str | int] | None:
     """Resolve a picked recipe id into a pinned per-turn snapshot.
 
@@ -572,9 +586,7 @@ async def _resolve_recipe_snapshot(
     )
     row = (await db.execute(stmt)).first()
     if row is None:
-        raise RecipeNotInvokableError(
-            f"recipe {recipe_id} is not available"
-        )
+        raise RecipeNotInvokableError(f"recipe {recipe_id} is not available")
     return {
         "id": row.id,
         "display_name": row.display_name,

@@ -16,6 +16,7 @@ per-user event hub, and the public CORS allowlist. Routes come from
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from typing import Any
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
@@ -75,7 +76,9 @@ def _make_redis_client(
     explicit ``socket_timeout`` always wins regardless of the URL.
     """
     pool_cls = BlockingConnectionPool if blocking else ConnectionPool
-    conn_kwargs = parse_url(url)
+    # ``parse_url`` answers a ``ConnectKwargs`` TypedDict, which names only the
+    # URL-derived keys; the pool options layered on below are not in it.
+    conn_kwargs: dict[str, Any] = dict(parse_url(url))
     conn_kwargs.update(
         max_connections=max_connections,
         decode_responses=True,
@@ -134,7 +137,10 @@ async def _ping_redis(
                 break
             logger.warning(
                 "Redis ping failed (attempt %s/%s): %s — retrying in %.1fs",
-                attempt, settings.startup_probe_attempts, exc, delay,
+                attempt,
+                settings.startup_probe_attempts,
+                exc,
+                delay,
             )
             await asyncio.sleep(delay)
             delay = min(delay * 2, settings.startup_probe_max_delay_seconds)
@@ -156,7 +162,10 @@ async def _ping_db(db_engine: AsyncEngine) -> None:
                 break
             logger.warning(
                 "DB ping failed (attempt %s/%s): %s — retrying in %.1fs",
-                attempt, settings.startup_probe_attempts, exc, delay,
+                attempt,
+                settings.startup_probe_attempts,
+                exc,
+                delay,
             )
             await asyncio.sleep(delay)
             delay = min(delay * 2, settings.startup_probe_max_delay_seconds)
@@ -193,8 +202,7 @@ async def lifespan(app: FastAPI):
         socket_timeout=settings.redis_streaming_socket_timeout_seconds,
     )
     logger.info(
-        "Redis connected — short-op pool=%s (blocking, timeout=%ss), "
-        "streaming pool=%s (fail-fast)",
+        "Redis connected — short-op pool=%s (blocking, timeout=%ss), streaming pool=%s (fail-fast)",
         settings.redis_pool_size,
         settings.redis_pool_timeout_seconds,
         settings.redis_streaming_pool_size,

@@ -52,9 +52,7 @@ def validate_public_url(url: str) -> None:
         raise InvalidConnectorUrlError("Connector URL has no host.")
 
     try:
-        addr_infos = socket.getaddrinfo(
-            host, parsed.port or 443, proto=socket.IPPROTO_TCP
-        )
+        addr_infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.") from exc
 
@@ -82,8 +80,8 @@ def validate_public_url(url: str) -> None:
 # the prefix outright would leave no reachable Connector at all — and it is the
 # inner address that gets dialled, so it is the one the question is about.
 _EMBEDDED_IPV4_PREFIXES = (
-    ipaddress.ip_network("64:ff9b::/96"),   # NAT64 well-known (RFC 6052 §2.1)
-    ipaddress.ip_network("::/96"),          # IPv4-compatible, deprecated (RFC 4291)
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64 well-known (RFC 6052 §2.1)
+    ipaddress.ip_network("::/96"),  # IPv4-compatible, deprecated (RFC 4291)
 )
 
 
@@ -155,9 +153,7 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
         # would carry the PKCE verifier, client secret, or refresh token in the
         # clear. MCP requires authorization-server endpoints to be HTTPS.
         if request.url.scheme != "https":
-            raise InvalidConnectorUrlError(
-                f"Refusing a non-https request to {request.url.host!r}."
-            )
+            raise InvalidConnectorUrlError(f"Refusing a non-https request to {request.url.host!r}.")
         host = request.url.host
         if not host:
             raise InvalidConnectorUrlError("Request URL has no host.")
@@ -174,12 +170,16 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
         # picking a public one out of it would be doing the attacker's sorting.
         candidates: list[str] = []
         for *_, sockaddr in infos:
-            ip = ipaddress.ip_address(sockaddr[0])
+            # Bound once. ``sockaddr[0]`` is the address for every family this
+            # can return (AF_INET / AF_INET6); the stdlib types the tuple
+            # loosely because other families put a number in that slot.
+            address = str(sockaddr[0])
+            ip = ipaddress.ip_address(address)
             if not _is_public(ip):
                 raise InvalidConnectorUrlError(
                     f"Connector URL resolves to a non-public address ({ip})."
                 )
-            candidates.append(sockaddr[0])
+            candidates.append(address)
         if not candidates:
             raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.")
 
@@ -216,6 +216,10 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
             request.url = original
         # Never with an empty ``last``: the candidate list is non-empty by the
         # check above, so the loop either returned or recorded a failure.
+        if last is None:
+            raise AssertionError(
+                "unreachable: a non-empty candidate list returns or records a failure"
+            )
         raise last
 
 

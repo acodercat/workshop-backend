@@ -49,7 +49,8 @@ Sweep eligibility (per reservation row, ``state='OPEN'``):
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 # 64-bit key for Postgres advisory lock. Bytes ``b"STLSWEEP"`` so
 # ``pg_locks`` rows are easy to spot in debugging.
-_LOCK_KEY = 0x53544c5357454550
+_LOCK_KEY = 0x53544C5357454550
 
 # Max reservations inspected per tick. A bound prevents one
 # pathological run (e.g. mass worker crash) from holding the advisory
@@ -98,7 +99,7 @@ async def run_forever(*, interval_seconds: int = 60) -> None:
         # when something is fundamentally broken without delaying
         # recovery past the point of usefulness.
         delay = (
-            min(interval_seconds * (2 ** consecutive_failures), 600)
+            min(interval_seconds * (2**consecutive_failures), 600)
             if consecutive_failures
             else interval_seconds
         )
@@ -174,7 +175,10 @@ async def _list_candidates(db: AsyncSession) -> list[tuple]:
         .order_by(CreditReservation.created_at.asc(), CreditReservation.id.asc())
         .limit(_SWEEP_BATCH)
     )
-    return list(rows.all())
+    # ``cast`` rather than ``.tuples()``: a ``Row`` is a tuple at runtime but
+    # not to a type checker, and reaching for the typed accessor would make
+    # production depend on an API this call never needed.
+    return cast("list[tuple[Any, ...]]", rows.all())
 
 
 async def _process_one(candidate: tuple) -> bool:
@@ -191,7 +195,8 @@ async def _process_one(candidate: tuple) -> bool:
             if session_id is None:
                 # Session was deleted; refund.
                 await credits.refund_reservation(
-                    db, reservation_id=reservation_id,
+                    db,
+                    reservation_id=reservation_id,
                     reason={"cause": "sweeper_session_deleted"},
                 )
                 await db.commit()
@@ -202,16 +207,14 @@ async def _process_one(candidate: tuple) -> bool:
             # turn the worker has since completed (free turn). Decide on the
             # fresh value; the settle / refund helpers below are each
             # idempotent and self-guarding against any remaining TOCTOU.
-            session_status = await db.scalar(
-                select(Session.status).where(Session.id == session_id)
-            )
+            session_status = await db.scalar(select(Session.status).where(Session.id == session_id))
             if session_status is not None and session_status not in _NON_TERMINAL:
                 # Worker finished — settle from session_turn (or refund
                 # if usage is missing, per settle_open_for_session).
                 await credits.settle_open_for_session(db, session_id)
                 await db.commit()
                 return True
-            if expires_at is not None and expires_at < datetime.now(timezone.utc):
+            if expires_at is not None and expires_at < datetime.now(UTC):
                 # Reservation OPEN past its 4h expiry on a non-terminal
                 # session: the worker is gone (crashed before its terminal
                 # write, or the fleet is down and the turn was never
@@ -223,7 +226,8 @@ async def _process_one(candidate: tuple) -> bool:
                 if not await fail_abandoned_turn(db, session_id=session_id):
                     return False
                 await credits.refund_reservation(
-                    db, reservation_id=reservation_id,
+                    db,
+                    reservation_id=reservation_id,
                     reason={"cause": "sweeper_expired_no_terminal"},
                 )
                 await db.commit()
@@ -232,6 +236,7 @@ async def _process_one(candidate: tuple) -> bool:
             return False
     except Exception:
         logger.exception(
-            "sweeper: failed to process reservation %s", reservation_id,
+            "sweeper: failed to process reservation %s",
+            reservation_id,
         )
         return False

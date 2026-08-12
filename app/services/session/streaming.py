@@ -27,14 +27,15 @@ import json
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 from enum import Enum
-from typing import AsyncIterator
+from typing import cast
 
 import redis.asyncio as aioredis
 from sqlalchemy import func, select
 
 from app.common.event_types import EventType
-from app.common.sse import event_to_sse, sse_event
+from app.common.sse import SSEMessage, StreamEvent, event_to_sse, sse_event
 from app.database import AsyncSessionLocal
 from app.models.session import Session, SessionStatus
 from app.models.session_turn import SessionTurn
@@ -103,8 +104,8 @@ def _safe_cursor(last_event_id: str | None) -> str | None:
     if _STREAM_ID_RE.match(last_event_id):
         return last_event_id
     logger.warning(
-        "stream_events: ignoring malformed Last-Event-ID %r; replaying "
-        "from stream start", last_event_id,
+        "stream_events: ignoring malformed Last-Event-ID %r; replaying from stream start",
+        last_event_id,
     )
     return None
 
@@ -126,13 +127,12 @@ async def _session_liveness(session_id: str) -> _Liveness:
     """
     try:
         async with AsyncSessionLocal() as db:
-            status = await db.scalar(
-                select(Session.status).where(Session.id == session_id)
-            )
+            status = await db.scalar(select(Session.status).where(Session.id == session_id))
     except Exception:
         logger.warning(
-            "stream_events: liveness check failed for session %s; "
-            "will retry next idle block", session_id, exc_info=True,
+            "stream_events: liveness check failed for session %s; will retry next idle block",
+            session_id,
+            exc_info=True,
         )
         return _Liveness.UNKNOWN
     if status is None or status in _TERMINAL_STATUSES:
@@ -154,21 +154,20 @@ async def _current_turn_id(session_id: str) -> str | None:
     try:
         async with AsyncSessionLocal() as db:
             turn_id = await db.scalar(
-                select(func.max(SessionTurn.id)).where(
-                    SessionTurn.session_id == session_id
-                )
+                select(func.max(SessionTurn.id)).where(SessionTurn.session_id == session_id)
             )
     except Exception:
         logger.warning(
             "stream_events: current-turn lookup failed for session %s; "
-            "turn-id filtering disabled this connection", session_id,
+            "turn-id filtering disabled this connection",
+            session_id,
             exc_info=True,
         )
         return None
     return str(turn_id) if turn_id is not None else None
 
 
-def _is_stale_entry(event: dict, current_turn_id: str | None) -> bool:
+def _is_stale_entry(event: StreamEvent, current_turn_id: str | None) -> bool:
     """True when a stream entry belongs to a turn other than the current one.
 
     A worker that lost its lease mid-turn keeps XADDing for up to a
@@ -190,7 +189,7 @@ async def stream_events(
     session_id: str,
     *,
     last_event_id: str | None = None,
-) -> AsyncIterator[dict]:
+) -> AsyncIterator[SSEMessage]:
     """Two-phase SSE generator: replay then follow.
 
     Phase 1 — replay every Redis stream entry as-is so the client's
@@ -251,7 +250,13 @@ async def stream_events(
         batch = await redis.xrange(key, min=range_start, count=_REPLAY_PAGE_SIZE)
         if not batch:
             break
-        for entry_id, event in batch:
+        for raw_id, raw_event in batch:
+            # The client is built with ``decode_responses=True``, so both
+            # arrive decoded; the stubs also describe the undecoded shape.
+            # ``StreamEvent`` by construction — the worker's emitter is the
+            # only writer of this stream, and its wire contract is that union.
+            entry_id = str(raw_id)
+            event = cast("StreamEvent", dict(raw_event or {}))
             last_id = entry_id
             if _is_stale_entry(event, current_turn_id):
                 continue  # cursor still advances; a stale terminal can't close us
@@ -330,6 +335,7 @@ async def stream_events(
             logger.error(
                 "stream_events: session %s blind for %.0fs (Redis idle + DB "
                 "unreachable); closing SSE so the client reconnects",
-                session_id, now - blind_since,
+                session_id,
+                now - blind_since,
             )
             return

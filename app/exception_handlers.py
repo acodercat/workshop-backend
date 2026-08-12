@@ -79,21 +79,22 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     # (``StaffAuthenticationError``, ``StaffCredentialsError``) gets the
     # same header the ``HTTPException``-raising auth paths already send.
     headers = (
-        {"WWW-Authenticate": "Bearer"}
-        if exc.status_code == status.HTTP_401_UNAUTHORIZED
-        else None
+        {"WWW-Authenticate": "Bearer"} if exc.status_code == status.HTTP_401_UNAUTHORIZED else None
     )
     return JSONResponse(
         status_code=exc.status_code,
         content=_error_envelope(
-            type_=exc.error_type, message=exc.message, details=exc.details,
+            type_=exc.error_type,
+            message=exc.message,
+            details=exc.details,
         ),
         headers=headers,
     )
 
 
 async def integrity_error_handler(
-    request: Request, exc: IntegrityError,
+    request: Request,
+    exc: IntegrityError,
 ) -> JSONResponse:
     logger.warning("Integrity error: %s", exc)
     return JSONResponse(
@@ -106,7 +107,8 @@ async def integrity_error_handler(
 
 
 async def sqlalchemy_exception_handler(
-    request: Request, exc: SQLAlchemyError,
+    request: Request,
+    exc: SQLAlchemyError,
 ) -> JSONResponse:
     logger.error("Database error: %s", exc, exc_info=True)
     # 5xx — a real server fault. Report to Sentry (no-op without a DSN).
@@ -121,7 +123,8 @@ async def sqlalchemy_exception_handler(
 
 
 async def http_exception_handler(
-    request: Request, exc: StarletteHTTPException,
+    request: Request,
+    exc: StarletteHTTPException,
 ) -> JSONResponse:
     """Serialize bare ``HTTPException`` into the envelope.
 
@@ -157,7 +160,8 @@ async def http_exception_handler(
 
 
 async def validation_exception_handler(
-    request: Request, exc: RequestValidationError,
+    request: Request,
+    exc: RequestValidationError,
 ) -> JSONResponse:
     """Pydantic / FastAPI request-body validation failure.
 
@@ -195,15 +199,14 @@ def _jsonable_ctx(ctx: dict) -> dict:
     into a 500. Stringify anything that isn't already JSON-native.
     """
     return {
-        key: value
-        if isinstance(value, (str, int, float, bool, type(None)))
-        else str(value)
+        key: value if isinstance(value, (str, int, float, bool, type(None))) else str(value)
         for key, value in ctx.items()
     }
 
 
 async def general_exception_handler(
-    request: Request, exc: Exception,
+    request: Request,
+    exc: Exception,
 ) -> JSONResponse:
     logger.exception("Unexpected error: %s", exc)
     # Last-resort 500 — always report (no-op without a Sentry DSN).
@@ -226,9 +229,13 @@ def install_error_handlers(app: FastAPI) -> None:
     and omitting any one of the others would let that path fall through
     to a bare 500 with no envelope.
     """
-    app.add_exception_handler(AppError, app_error_handler)
-    app.add_exception_handler(IntegrityError, integrity_error_handler)
-    app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)
-    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
-    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    # Each ``ignore`` covers the same thing: Starlette types the handler as
+    # taking ``Exception``, while every handler below narrows to the class it
+    # is registered for. Starlette dispatches on that class, so the narrowing
+    # is exactly right at runtime — it is the signature that cannot say so.
+    app.add_exception_handler(AppError, app_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(IntegrityError, integrity_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, general_exception_handler)
