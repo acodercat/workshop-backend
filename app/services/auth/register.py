@@ -16,7 +16,7 @@ full FastAPI app.
 
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 from sqlalchemy import select, text
@@ -105,9 +105,7 @@ async def register_user(
     # step. Done after the invite claim so a bad invite never consumes
     # the code; a DB failure after this rolls back the row (and the
     # claim) but not the OTP, so the user just re-requests a code.
-    await verify_verification_code(
-        redis, channel=channel, identifier=identifier, code=code
-    )
+    await verify_verification_code(redis, channel=channel, identifier=identifier, code=code)
 
     # Reserve the id up-front so the username can encode it. ``nextval``
     # bumps the sequence atomically; if the subsequent INSERT fails for
@@ -162,11 +160,13 @@ async def register_user(
     db.add(organization)
     await db.flush()  # populate organization.id
 
-    db.add(OrganizationMember(
-        organization_id=organization.id,
-        user_id=user.id,
-        role=OrganizationMemberRole.OWNER,
-    ))
+    db.add(
+        OrganizationMember(
+            organization_id=organization.id,
+            user_id=user.id,
+            role=OrganizationMemberRole.OWNER,
+        )
+    )
     user.organization_id = organization.id
 
     # The user's personal referral code + the invite redemption audit
@@ -182,7 +182,7 @@ async def register_user(
     )
 
     # A valid invite is the access grant, so log them straight in.
-    user.last_login_at = datetime.now(timezone.utc)
+    user.last_login_at = datetime.now(UTC)
     access_token = create_access_token(
         data={"sub": user.username, "token_version": user.token_version},
     )
@@ -233,8 +233,7 @@ async def register_user(
             # error-rate monitoring; nothing the user can do.
             await db.rollback()
             logger.exception(
-                "welcome grant failed for user %s — registration committed; "
-                "manual topup required",
+                "welcome grant failed for user %s — registration committed; manual topup required",
                 user_id,
             )
 
@@ -266,9 +265,9 @@ async def register_user(
             # the invitee can do, and an admin can grant it manually.
             await db.rollback()
             logger.exception(
-                "referral reward failed: referrer=%s invitee=%s — "
-                "registration committed",
-                referrer_id, user_id,
+                "referral reward failed: referrer=%s invitee=%s — registration committed",
+                referrer_id,
+                user_id,
             )
 
     await db.refresh(user)
@@ -297,7 +296,5 @@ async def _reserve_next_user_id(db: AsyncSession) -> int:
     metadata, so this stays correct even if the sequence is renamed
     in a future migration.
     """
-    result = await db.execute(
-        text("SELECT nextval(pg_get_serial_sequence('user', 'id'))")
-    )
+    result = await db.execute(text("SELECT nextval(pg_get_serial_sequence('user', 'id'))"))
     return int(result.scalar_one())

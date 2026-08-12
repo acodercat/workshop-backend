@@ -19,6 +19,7 @@ from fastapi import APIRouter, Query
 
 from app.api.admin.dependencies import StaffContext
 from app.api.admin.window import WindowDays
+from app.common.business_time import window_start
 from app.schemas.admin.stats import (
     CheckInActivityEntry,
     CheckInStatsResponse,
@@ -27,7 +28,6 @@ from app.schemas.admin.stats import (
     ModelSpendEntry,
     UserActivityEntry,
 )
-from app.common.business_time import window_start
 from app.services import check_in
 from app.services.credits import analytics
 from app.services.credits.analytics import UserActivityOrder
@@ -53,9 +53,7 @@ async def read_credits_stats(
         settled_turns=summary.settled_turns,
         outstanding_credits=credits_from_micro(summary.outstanding_micro),
         daily=[
-            DailySpendPoint(
-                day=point.day, spend_credits=credits_from_micro(point.spend_micro)
-            )
+            DailySpendPoint(day=point.day, spend_credits=credits_from_micro(point.spend_micro))
             for point in summary.daily
         ],
         by_model=[
@@ -105,9 +103,7 @@ async def _read_user_activity(
 ) -> list[UserActivityEntry]:
     """Shared body of the two rankings — same rows, same conversion,
     different ordering."""
-    rows = await analytics.user_activity(
-        ctx.db, days=days, limit=limit, order=order
-    )
+    rows = await analytics.user_activity(ctx.db, days=days, limit=limit, order=order)
     return [
         UserActivityEntry(
             user_id=row.user_id,
@@ -155,9 +151,7 @@ async def _check_in_activity(
 ) -> list[CheckInActivityEntry]:
     """Shared body of the two check-in rankings — same rows, different
     ordering, mirroring the spend pair above."""
-    rows = await check_in.user_activity(
-        ctx.db, since=window_start(days), limit=limit, order=order
-    )
+    rows = await check_in.user_activity(ctx.db, since=window_start(days), limit=limit, order=order)
     return [
         CheckInActivityEntry(
             user_id=row.user_id,
@@ -172,9 +166,7 @@ async def _check_in_activity(
 
 
 @router.get("/stats/check-ins", response_model=CheckInStatsResponse)
-async def read_check_in_stats(
-    ctx: StaffContext, days: WindowDays
-) -> CheckInStatsResponse:
+async def read_check_in_stats(ctx: StaffContext, days: WindowDays) -> CheckInStatsResponse:
     """Return check-in engagement for the window.
 
     Its own endpoint rather than a field on ``/stats/credits``: the
@@ -182,7 +174,5 @@ async def read_check_in_stats(
     non-ledger figure into the ledger's response would make that module
     answer for a table it does not own.
     """
-    check_ins, users = await check_in.count_in_window(
-        ctx.db, since=window_start(days)
-    )
+    check_ins, users = await check_in.count_in_window(ctx.db, since=window_start(days))
     return CheckInStatsResponse(days=days, check_ins=check_ins, users=users)

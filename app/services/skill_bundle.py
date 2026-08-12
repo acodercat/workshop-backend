@@ -83,14 +83,15 @@ _MAX_BODY_BYTES = 32 * 1024  # 32 KiB
 # allocation. 200 MiB is generous headroom over the 500 × 25 MiB real
 # ceiling while still bounding the repack's peak memory.
 _MAX_UNCOMPRESSED_PER_ENTRY = 25 * 1024 * 1024  # 25 MiB — Agent Skills: per file
-_MAX_ENTRY_COUNT = 500                          # Agent Skills: files per bundle
+_MAX_ENTRY_COUNT = 500  # Agent Skills: files per bundle
 _MAX_COMPRESSION_RATIO = 100
-_MAX_TOTAL_UNCOMPRESSED = 200 * 1024 * 1024     # 200 MiB — hard ceiling on declared expansion
+_MAX_TOTAL_UNCOMPRESSED = 200 * 1024 * 1024  # 200 MiB — hard ceiling on declared expansion
 
 
 @dataclass(frozen=True)
 class ParsedSkill:
     """Metadata extracted from a validated bundle's ``SKILL.md``."""
+
     name: str
     display_name: str
     display_name_i18n: dict[str, str] | None
@@ -147,8 +148,7 @@ def parse_bundle(data: bytes) -> ParsedSkill:
     name = meta.get("name")
     if not name:
         raise SkillFrontmatterInvalidError(
-            "SKILL.md frontmatter must include a 'name' field "
-            "(e.g. `name: my-skill`)."
+            "SKILL.md frontmatter must include a 'name' field (e.g. `name: my-skill`)."
         )
     _validate_skill_name(name)
     _reject_oversized_body(body)
@@ -232,8 +232,7 @@ def parse_skill_md(data: bytes) -> ParsedSkill:
     name = meta.get("name")
     if not name:
         raise SkillFrontmatterInvalidError(
-            "SKILL.md frontmatter must include a 'name' field "
-            "(e.g. `name: my-skill`)."
+            "SKILL.md frontmatter must include a 'name' field (e.g. `name: my-skill`)."
         )
     _validate_skill_name(name)
     _reject_oversized_body(body)
@@ -268,13 +267,10 @@ def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
             continue
         file_count += 1
         if file_count > _MAX_ENTRY_COUNT:
-            raise SkillBundleTooLargeError(
-                f"bundle has too many files (max {_MAX_ENTRY_COUNT})"
-            )
+            raise SkillBundleTooLargeError(f"bundle has too many files (max {_MAX_ENTRY_COUNT})")
         if info.file_size > _MAX_UNCOMPRESSED_PER_ENTRY:
             raise SkillBundleTooLargeError(
-                f"entry too large when uncompressed: {info.filename!r} "
-                f"({info.file_size} bytes)"
+                f"entry too large when uncompressed: {info.filename!r} ({info.file_size} bytes)"
             )
         total_compressed += info.compress_size
         total_uncompressed += info.file_size
@@ -288,10 +284,7 @@ def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
                 f"(> {_MAX_TOTAL_UNCOMPRESSED} bytes; refusing to decompress "
                 "a possible zip bomb)"
             )
-    if (
-        total_compressed > 0
-        and total_uncompressed / total_compressed > _MAX_COMPRESSION_RATIO
-    ):
+    if total_compressed > 0 and total_uncompressed / total_compressed > _MAX_COMPRESSION_RATIO:
         raise InvalidSkillBundleError(
             "bundle compression ratio is suspiciously high "
             "(refusing to decompress a possible zip bomb)"
@@ -379,7 +372,7 @@ def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     except yaml.YAMLError:
         raw = None
     if not isinstance(raw, dict):
-        return {}, content[match.end():]
+        return {}, content[match.end() :]
     # Everything is coerced to ``str`` (the common case: name / description,
     # which callers treat as strings) — EXCEPT the Agent Skills spec's
     # ``metadata`` block, kept structured so callers can read author-defined
@@ -392,12 +385,10 @@ def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             continue
         key = str(k)
         meta[key] = v if key == "metadata" and isinstance(v, dict) else str(v)
-    return meta, content[match.end():]
+    return meta, content[match.end() :]
 
 
-def _extract_display_name(
-    meta: dict[str, Any], name: str
-) -> tuple[str, dict[str, str] | None]:
+def _extract_display_name(meta: dict[str, Any], name: str) -> tuple[str, dict[str, str] | None]:
     """Read ``metadata.display_name`` (string or ``{locale: name}`` map) into a
     ``(default, per-locale map)`` pair.
 

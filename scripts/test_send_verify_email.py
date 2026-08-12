@@ -38,7 +38,6 @@ from Tea.exceptions import TeaException
 
 from config import settings
 
-
 _SUBJECT_ZH = "【PPIG】您的注册验证码 {code}"
 _SUBJECT_EN = "[PPIG] Verify your email — code {code}"
 
@@ -82,8 +81,7 @@ def _make_client() -> DmClient:
         )
     if not settings.aliyun_dm_account_name:
         raise RuntimeError(
-            "缺少 aliyun_dm_account_name（发信地址）—— "
-            "请填阿里云邮件推送已通过验证的发信地址"
+            "缺少 aliyun_dm_account_name（发信地址）—— 请填阿里云邮件推送已通过验证的发信地址"
         )
 
     # Aliyun DirectMail uses a unified endpoint ``dm.aliyuncs.com``

@@ -19,13 +19,13 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     Text,
     Uuid,
     text,
@@ -121,7 +121,10 @@ class SessionTurn(Base):
     )
     query: Mapped[str] = mapped_column(Text, nullable=False)
     files: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     # Per-turn skill selection. Each element is a snapshot
     # ``{"id": int, "name": str, "bundle_key": str}`` taken at enqueue
@@ -136,7 +139,10 @@ class SessionTurn(Base):
     # empty array, never NULL — readers iterate without a null-guard.
     # Contrast ``recipe`` below: an optional single value that IS NULL.
     skills: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     # Per-turn Connector selection. Each element is a snapshot
     # ``{"id": int, "name": str}`` taken at enqueue time. The ``id`` pins
@@ -148,7 +154,10 @@ class SessionTurn(Base):
     # A collection (0..N): NOT NULL DEFAULT '[]' so "no connectors" is the
     # empty array, never NULL — mirrors ``skills`` above.
     mcp_servers: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     # Per-turn recipe snapshot, or NULL. The backend resolves the picked
     # recipe id → its vetted ``instructions`` server-side (the client
@@ -219,20 +228,26 @@ class SessionTurn(Base):
     # documenting "this is a short identifier, not free-form text".
     worker_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
-        server_default=func.now(), onupdate=func.now(), nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )
     # Set to ``now()`` on the terminal write (COMPLETE / CANCELLED /
     # FAILED); NULL while PENDING / RUNNING. Anchors duration math —
     # distinct from ``updated_at``, which lease heartbeats also bump.
     terminated_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
 
     __table_args__ = (

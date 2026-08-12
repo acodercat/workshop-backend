@@ -10,7 +10,7 @@ The signed-in operator's own resources are :mod:`app.api.admin.me`.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,9 +62,7 @@ async def sign_in(
             "Console sign-in refused for %r from %s: %s",
             body.username,
             caller_ip(request),
-            "unknown account or wrong password"
-            if account is None
-            else "account disabled",
+            "unknown account or wrong password" if account is None else "account disabled",
         )
         raise StaffCredentialsError("Incorrect username or password")
 
@@ -77,7 +75,7 @@ async def sign_in(
         target_type="staff",
         target_id=account.id,
     ):
-        account.last_login_at = datetime.now(timezone.utc)
+        account.last_login_at = datetime.now(UTC)
 
     return StaffTokenResponse(
         access_token=token,

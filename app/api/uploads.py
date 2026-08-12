@@ -30,8 +30,6 @@ async def read_capped(file: UploadFile, max_bytes: int) -> bytes:
             break
         total += len(chunk)
         if total > max_bytes:
-            raise SkillBundleTooLargeError(
-                f"upload exceeds the {max_bytes}-byte limit"
-            )
+            raise SkillBundleTooLargeError(f"upload exceeds the {max_bytes}-byte limit")
         chunks.append(chunk)
     return b"".join(chunks)

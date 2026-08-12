@@ -8,7 +8,7 @@ auto-creating. The endpoint is a thin adapter over :func:`login_by_code`.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 from sqlalchemy import select
@@ -47,9 +47,7 @@ async def login_by_code(
     )
 
     id_column = User.phone if channel == "phone" else User.email
-    existing = (
-        await db.execute(select(User).where(id_column == identifier))
-    ).scalar_one_or_none()
+    existing = (await db.execute(select(User).where(id_column == identifier))).scalar_one_or_none()
     if existing is None:
         raise NotRegisteredError("No account for this identifier")
 
@@ -62,7 +60,7 @@ async def login_by_code(
         redis, channel=channel, identifier=identifier, code=code, consume=True
     )
 
-    existing.last_login_at = datetime.now(timezone.utc)
+    existing.last_login_at = datetime.now(UTC)
     access_token = create_access_token(
         data={"sub": existing.username, "token_version": existing.token_version},
     )

@@ -7,7 +7,7 @@ and burn real LLM tokens. Apply :data:`requires_e2e` to gate them.
 
 import os
 import secrets
-from typing import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import bcrypt
 import httpx
@@ -15,7 +15,6 @@ import psycopg
 import pytest
 
 from config import settings
-
 
 # Gate: skip every test marked with this unless the operator explicitly
 # opted in. Mirrors the axon module's ``RUN_INTEGRATION_TESTS`` pattern.
@@ -32,7 +31,8 @@ requires_e2e = pytest.mark.skipif(
 # (see app/public_main.py), and dev defaults to localhost:8005. Override via
 # env if a test environment lives elsewhere.
 BACKEND_BASE_URL = os.environ.get(
-    "BACKEND_BASE_URL", "http://localhost:8005/api/v1",
+    "BACKEND_BASE_URL",
+    "http://localhost:8005/api/v1",
 )
 
 
@@ -43,10 +43,8 @@ def _psycopg_uri() -> str:
     ``postgresql+asyncpg://`` driver prefix; psycopg's connect() wants
     the bare ``postgresql://`` form.
     """
-    return (
-        settings.db_uri
-        .replace("postgresql+psycopg://", "postgresql://")
-        .replace("postgresql+asyncpg://", "postgresql://")
+    return settings.db_uri.replace("postgresql+psycopg://", "postgresql://").replace(
+        "postgresql+asyncpg://", "postgresql://"
     )
 
 
@@ -121,15 +119,15 @@ def test_user() -> Iterator[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM sandbox WHERE session_id IN "
-                '(SELECT id FROM session WHERE user_id = %s)',
+                "(SELECT id FROM session WHERE user_id = %s)",
                 (user_id,),
             )
             cur.execute(
                 "DELETE FROM session_files WHERE session_id IN "
-                '(SELECT id FROM session WHERE user_id = %s)',
+                "(SELECT id FROM session WHERE user_id = %s)",
                 (user_id,),
             )
-            cur.execute('DELETE FROM session WHERE user_id = %s', (user_id,))
+            cur.execute("DELETE FROM session WHERE user_id = %s", (user_id,))
             # Clear the user→org back-link before deleting the org so
             # the RESTRICT FK on ``user.organization_id`` doesn't block.
             cur.execute(
@@ -137,7 +135,8 @@ def test_user() -> Iterator[dict]:
                 (user_id,),
             )
             cur.execute(
-                "DELETE FROM organization WHERE id = %s", (organization_id,),
+                "DELETE FROM organization WHERE id = %s",
+                (organization_id,),
             )
             cur.execute('DELETE FROM "user" WHERE id = %s', (user_id,))
         conn.commit()
@@ -152,7 +151,8 @@ async def http_client(test_user: dict) -> AsyncIterator[httpx.AsyncClient]:
     still override per-request via ``client.stream(..., timeout=...)``.
     """
     async with httpx.AsyncClient(
-        base_url=BACKEND_BASE_URL, timeout=30.0,
+        base_url=BACKEND_BASE_URL,
+        timeout=30.0,
     ) as client:
         resp = await client.post(
             "/auth/access-tokens",
@@ -161,9 +161,7 @@ async def http_client(test_user: dict) -> AsyncIterator[httpx.AsyncClient]:
                 "password": test_user["password"],
             },
         )
-        assert resp.status_code == 200, (
-            f"login failed: {resp.status_code} {resp.text}"
-        )
+        assert resp.status_code == 200, f"login failed: {resp.status_code} {resp.text}"
         token = resp.json()["access_token"]
         client.headers["Authorization"] = f"Bearer {token}"
         yield client

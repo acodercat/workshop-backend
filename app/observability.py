@@ -122,7 +122,9 @@ def install_observability(app) -> None:
         Instrumentator(
             excluded_handlers=["/metrics", "/health/live", "/health/ready"],
         ).instrument(app).expose(
-            app, endpoint="/metrics", include_in_schema=False,
+            app,
+            endpoint="/metrics",
+            include_in_schema=False,
         )
 
     app.add_middleware(RequestIDMiddleware)

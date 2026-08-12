@@ -1,8 +1,8 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
-import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db, get_redis
@@ -21,7 +21,6 @@ from app.services.auth import (
     request_verification_code,
 )
 from config import settings
-
 
 router = APIRouter()
 
@@ -52,7 +51,7 @@ async def login_for_access_token(
     # account is indistinguishable from a bad password.
     assert_user_active(user, inactive_detail="Incorrect username or password")
 
-    user.last_login_at = datetime.now(timezone.utc)
+    user.last_login_at = datetime.now(UTC)
     access_token = create_access_token(
         data={"sub": user.username, "token_version": user.token_version},
     )

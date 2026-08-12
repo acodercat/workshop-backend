@@ -10,7 +10,7 @@ commits its own per-order transaction.
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,9 +29,7 @@ async def reconcile_order(db: AsyncSession, order_id: uuid.UUID) -> bool:
     flight). Commits on a state change.
     """
     order = await db.scalar(
-        select(PaymentOrder)
-        .where(PaymentOrder.id == order_id)
-        .with_for_update()
+        select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update()
     )
     if order is None or order.status != PaymentOrderStatus.PENDING:
         return False  # already settled/expired by the webhook or a prior tick
@@ -40,7 +38,8 @@ async def reconcile_order(db: AsyncSession, order_id: uuid.UUID) -> bool:
     event = None
     try:
         event = await orders.get_provider().query_charge(
-            out_trade_no=order.out_trade_no, req_date=req_date,
+            out_trade_no=order.out_trade_no,
+            req_date=req_date,
         )
     except PaymentProviderError:
         # Query failed (e.g. order not yet known to the provider). Fall
@@ -50,7 +49,9 @@ async def reconcile_order(db: AsyncSession, order_id: uuid.UUID) -> bool:
     if event is not None:
         logger.info(
             "reconcile order=%s query: succeeded=%s amount_fen=%s",
-            order.id, event.succeeded, event.amount_fen,
+            order.id,
+            event.succeeded,
+            event.amount_fen,
         )
 
     if event is not None and event.succeeded:
@@ -63,7 +64,7 @@ async def reconcile_order(db: AsyncSession, order_id: uuid.UUID) -> bool:
         await commission.accrue_for_order(db, out_trade_no=out_trade_no)
         return True
 
-    if orders.is_expired(order, datetime.now(timezone.utc)):
+    if orders.is_expired(order, datetime.now(UTC)):
         order.status = PaymentOrderStatus.EXPIRED
         await db.commit()
         return True

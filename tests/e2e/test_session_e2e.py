@@ -28,7 +28,6 @@ from tests.e2e._helpers import (
     consume_sse_until_stopped,
 )
 
-
 # Deterministic, tool-free prompt. The default agent system prompt
 # (axon) encourages tool use; this phrasing nudges the model toward a
 # direct text reply so the assertion against assistant-content stays
@@ -77,7 +76,9 @@ async def test_full_session_lifecycle(
 
     # 3. Stream events until the terminal ``agent.stopped`` arrives.
     events = await consume_sse_until_stopped(
-        http_client, session_id, timeout=_SSE_TIMEOUT_SECONDS,
+        http_client,
+        session_id,
+        timeout=_SSE_TIMEOUT_SECONDS,
     )
     event_types = [t for t, _ in events]
 
@@ -90,18 +91,15 @@ async def test_full_session_lifecycle(
     # before any model call). ``agent.message_chunk`` is the streamed
     # text path; ``agent.message`` is the post-stream rollup; either
     # is sufficient evidence.
-    assert any(
-        t in {"agent.message_chunk", "agent.message"}
-        for t in event_types
-    ), f"no agent message events in stream: {event_types}"
+    assert any(t in {"agent.message_chunk", "agent.message"} for t in event_types), (
+        f"no agent message events in stream: {event_types}"
+    )
 
     # 5. Verify persisted DB state matches what the stream told us.
     resp = await http_client.get(f"/sessions/{session_id}")
     assert resp.status_code == 200, resp.text
     detail = resp.json()
-    assert detail["status"] == "COMPLETE", (
-        f"expected COMPLETE post-stop, got {detail['status']}"
-    )
+    assert detail["status"] == "COMPLETE", f"expected COMPLETE post-stop, got {detail['status']}"
     roles = [m["role"] for m in detail["messages"]]
     assert roles == ["USER", "ASSISTANT"], roles
 

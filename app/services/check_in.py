@@ -59,8 +59,6 @@ class ClaimedCheckIn(NamedTuple):
     streak_day: int
 
 
-
-
 async def _latest_check_in(db: AsyncSession, user_id: int) -> CheckIn | None:
     """The user's most recent check-in row (by date), or ``None``. Served
     by the ``uq_check_in_user_date`` index via a backward scan."""
@@ -87,9 +85,9 @@ async def get_check_in_status(db: AsyncSession, *, user_id: int) -> CheckInStatu
     """Return today's check-in state for ``user_id`` (read-only)."""
     today = business_today()
     latest = await _latest_check_in(db, user_id)
-    total_days = await db.scalar(
-        select(func.count(CheckIn.id)).where(CheckIn.user_id == user_id)
-    ) or 0
+    total_days = (
+        await db.scalar(select(func.count(CheckIn.id)).where(CheckIn.user_id == user_id)) or 0
+    )
     return CheckInStatus(
         enabled=settings.checkin_reward_credits > 0,
         checked_in_today=latest is not None and latest.check_in_date == today,
@@ -100,7 +98,9 @@ async def get_check_in_status(db: AsyncSession, *, user_id: int) -> CheckInStatu
 
 
 async def claim_daily_check_in(
-    db: AsyncSession, *, user_id: int,
+    db: AsyncSession,
+    *,
+    user_id: int,
 ) -> ClaimedCheckIn:
     """Claim today's check-in: grant the reward + record the ``check_in``
     row, atomic. The caller commits.
@@ -145,7 +145,10 @@ async def claim_daily_check_in(
         raise AlreadyCheckedInError("Already checked in today")
 
     logger.info(
-        "check-in claimed: user=%s date=%s streak=%s", user_id, today, streak_day,
+        "check-in claimed: user=%s date=%s streak=%s",
+        user_id,
+        today,
+        streak_day,
     )
     return ClaimedCheckIn(reward_micro=reward_micro, streak_day=streak_day)
 
@@ -182,7 +185,11 @@ class CheckInActivity:
 
 
 async def user_activity(
-    db: AsyncSession, *, since: datetime, limit: int, order: CheckInRankOrder,
+    db: AsyncSession,
+    *,
+    since: datetime,
+    limit: int,
+    order: CheckInRankOrder,
 ) -> list[CheckInActivity]:
     """Per-user check-ins over the window, ranked by ``order``.
 

@@ -28,7 +28,7 @@ Usage::
 import argparse
 import asyncio
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -46,7 +46,7 @@ async def _candidate_ids(*, out_trade_no: str | None, days: int) -> list:
     if out_trade_no:
         stmt = stmt.where(PaymentOrder.out_trade_no == out_trade_no)
     else:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         stmt = stmt.where(PaymentOrder.created_at >= cutoff)
     async with AsyncSessionLocal() as db:
         rows = await db.execute(stmt.order_by(PaymentOrder.created_at.asc()))
@@ -56,9 +56,7 @@ async def _candidate_ids(*, out_trade_no: str | None, days: int) -> list:
 async def _process_one(order_id, *, dry_run: bool) -> str:
     async with AsyncSessionLocal() as db:
         order = await db.scalar(
-            select(PaymentOrder)
-            .where(PaymentOrder.id == order_id)
-            .with_for_update()
+            select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update()
         )
         if order is None:
             return "not_found"
@@ -106,7 +104,9 @@ async def main(args: argparse.Namespace) -> int:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--out-trade-no", help="Recover a single order by its out_trade_no")
-    parser.add_argument("--days", type=int, default=1, help="Scan orders created in the last N days (default 1)")
+    parser.add_argument(
+        "--days", type=int, default=1, help="Scan orders created in the last N days (default 1)"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Query + print only; grant nothing")
     return parser.parse_args()
 

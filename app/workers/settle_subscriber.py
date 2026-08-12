@@ -116,7 +116,6 @@ async def _handle_message(payload: str | bytes) -> None:
             await db.commit()
     except Exception:
         logger.exception(
-            "settle subscriber: settle_open_for_session failed for %s "
-            "— sweeper will retry",
+            "settle subscriber: settle_open_for_session failed for %s — sweeper will retry",
             session_id,
         )

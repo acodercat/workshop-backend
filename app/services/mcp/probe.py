@@ -12,8 +12,8 @@ import logging
 from dataclasses import dataclass, field
 
 from mcp import ClientSession
-from mcp.types import Implementation, Tool
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import Implementation, Tool
 
 from app.errors import ConnectorUnreachableError
 from app.models.mcp_server import MCPServerAuthType
@@ -63,7 +63,8 @@ class ProbeResult:
 
 
 def build_auth_headers(
-    auth_type: MCPServerAuthType, credential: str | None,
+    auth_type: MCPServerAuthType,
+    credential: str | None,
 ) -> dict[str, str]:
     """Turn a Connector's auth config into HTTP headers.
 
@@ -114,8 +115,7 @@ async def _list_all_tools(session: ClientSession) -> list[dict[str, str]]:
             )
         seen_cursors.add(cursor)
     raise ConnectorUnreachableError(
-        f"The MCP server did not finish listing its tools within "
-        f"{_MAX_LIST_PAGES} pages."
+        f"The MCP server did not finish listing its tools within {_MAX_LIST_PAGES} pages."
     )
 
 
@@ -143,18 +143,23 @@ def _admit_page(tools: list[dict[str, str]], page: list[Tool]) -> bool:
             logger.warning(
                 "Dropping MCP tool %r...: its %d-character name is outside what "
                 "``disabled_tools`` accepts, so it could never be switched off",
-                tool.name[:64], len(tool.name),
+                tool.name[:64],
+                len(tool.name),
             )
             continue
-        tools.append({
-            "name": tool.name,
-            "description": (tool.description or "")[:_MAX_DESCRIPTION_CHARS],
-        })
+        tools.append(
+            {
+                "name": tool.name,
+                "description": (tool.description or "")[:_MAX_DESCRIPTION_CHARS],
+            }
+        )
     return False
 
 
 async def probe(
-    url: str, auth_type: MCPServerAuthType, credential: str | None,
+    url: str,
+    auth_type: MCPServerAuthType,
+    credential: str | None,
 ) -> ProbeResult:
     """Connect to *url*, complete the MCP handshake, and list its tools.
 
@@ -167,13 +172,13 @@ async def probe(
         async with asyncio.timeout(_PROBE_TIMEOUT):
             return await _probe(url, auth_type, credential)
     except TimeoutError as exc:
-        raise ConnectorUnreachableError(
-            "The MCP server took too long to answer."
-        ) from exc
+        raise ConnectorUnreachableError("The MCP server took too long to answer.") from exc
 
 
 async def _probe(
-    url: str, auth_type: MCPServerAuthType, credential: str | None,
+    url: str,
+    auth_type: MCPServerAuthType,
+    credential: str | None,
 ) -> ProbeResult:
     """The probe itself, run under its caller's deadline."""
     # Raises InvalidConnectorUrlError — deliberately outside the try below so it
@@ -192,14 +197,10 @@ async def _probe(
             httpx_client_factory=guarded_client,
         ) as (read_stream, write_stream, _get_session_id):
             async with ClientSession(read_stream, write_stream) as session:
-                initialize_result = await asyncio.wait_for(
-                    session.initialize(), _CONNECT_TIMEOUT
-                )
+                initialize_result = await asyncio.wait_for(session.initialize(), _CONNECT_TIMEOUT)
                 tools = await _list_all_tools(session)
     except Exception as exc:
-        raise ConnectorUnreachableError(
-            f"Could not reach the MCP server: {exc}"
-        ) from exc
+        raise ConnectorUnreachableError(f"Could not reach the MCP server: {exc}") from exc
 
     server_info = initialize_result.serverInfo
     server_name = server_info.name if server_info else url
@@ -242,12 +243,14 @@ def _usable_icons(server_info: Implementation | None) -> list[dict]:
             continue
         if not (src.startswith("https://") or src.startswith("data:image/")):
             continue
-        usable.append({
-            "src": src,
-            "mime_type": icon.mimeType,
-            "sizes": icon.sizes,
-            # Not modelled by the SDK yet, so it arrives as an extra field.
-            # Worth carrying: it is what lets the client offer a dark variant.
-            "theme": (icon.model_extra or {}).get("theme"),
-        })
+        usable.append(
+            {
+                "src": src,
+                "mime_type": icon.mimeType,
+                "sizes": icon.sizes,
+                # Not modelled by the SDK yet, so it arrives as an extra field.
+                # Worth carrying: it is what lets the client offer a dark variant.
+                "theme": (icon.model_extra or {}).get("theme"),
+            }
+        )
     return usable

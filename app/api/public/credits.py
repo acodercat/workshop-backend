@@ -32,7 +32,8 @@ router = APIRouter()
 
 
 @router.get(
-    "/credits/balance", response_model=CreditsBalanceSnapshotResponse,
+    "/credits/balance",
+    response_model=CreditsBalanceSnapshotResponse,
 )
 async def get_credits_balance(
     db: AsyncSession = Depends(get_db),
@@ -74,7 +75,10 @@ async def get_credits_transactions(
     """
     await credits.settle_open_for_user(db, current_user.id)
     rows, total = await credits.list_transactions(
-        db, user_id=current_user.id, page=page, page_size=page_size,
+        db,
+        user_id=current_user.id,
+        page=page,
+        page_size=page_size,
     )
     await db.commit()  # the sweep's writes need to land
 

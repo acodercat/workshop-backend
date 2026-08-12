@@ -26,9 +26,7 @@ from app.models.staff import Staff
 from app.services.admin import AdminContext
 
 
-def build_context(
-    request: Request, *, db: AsyncSession, staff: Staff
-) -> AdminContext:
+def build_context(request: Request, *, db: AsyncSession, staff: Staff) -> AdminContext:
     """Assemble the context for an operator already known to the caller.
 
     ``StaffContext`` below is the normal way in. This is for the one

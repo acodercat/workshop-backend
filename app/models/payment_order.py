@@ -46,13 +46,13 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     Uuid,
     text,
 )
@@ -112,7 +112,9 @@ class PaymentOrder(Base):
     # history; deleting a user with payment rows should fail loudly rather
     # than silently drop the audit trail (mirrors ``credit_ledger.user_id``).
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("user.id", ondelete="RESTRICT"), nullable=False,
+        Integer,
+        ForeignKey("user.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     provider: Mapped[PaymentProvider] = mapped_column(
         SAEnum(
@@ -149,26 +151,36 @@ class PaymentOrder(Base):
     # atomically with the PENDING→PAID flip. ``RESTRICT`` because the ledger
     # is append-only (a row is never deleted, so this never dangles).
     ledger_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("credit_ledger.id", ondelete="RESTRICT"), nullable=True,
+        BigInteger,
+        ForeignKey("credit_ledger.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     # Provider-specific debug/audit context — ``trade_type``, ``req_date``,
     # ``qr_code``, ``hf_seq_id``, async-notify excerpt. JSONB because the
     # fields vary by provider.
     reference: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     # When the QR stops being payable. Set to ``now + payment_order_ttl_seconds``
     # at create (and passed to the provider as ``time_expire``); the reconciler
     # and the lazy read-path expire PENDING orders past this.
     expires_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
+        TIMESTAMP(timezone=True),
+        nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
-        server_default=func.now(), onupdate=func.now(), nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )
 
     __table_args__ = (

@@ -53,14 +53,10 @@ async def list_transactions(
     """
     filter_clause = CommissionLedger.user_id == user_id
     total = (
-        await db.execute(
-            select(func.count(CommissionLedger.id)).where(filter_clause)
-        )
+        await db.execute(select(func.count(CommissionLedger.id)).where(filter_clause))
     ).scalar() or 0
     base = (
-        select(CommissionLedger)
-        .where(filter_clause)
-        .order_by(CommissionLedger.created_at.desc())
+        select(CommissionLedger).where(filter_clause).order_by(CommissionLedger.created_at.desc())
     )
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return [

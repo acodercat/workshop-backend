@@ -14,8 +14,7 @@ from app.api.admin.dependencies import StaffContext
 from app.auth import verify_password
 from app.errors import IncorrectPasswordError, SamePasswordError
 from app.schemas.admin.staff import StaffPasswordChange, StaffProfileResponse
-from app.services.admin import AuditAction, audit
-from app.services.admin import staff as staff_service
+from app.services.admin import AuditAction, audit, staff as staff_service
 
 router = APIRouter(tags=["me"])
 

@@ -11,7 +11,7 @@ Three numbers, all in RMB cents (分):
   convert right now.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import NamedTuple
 
 from sqlalchemy import func, select
@@ -37,7 +37,7 @@ async def _frozen_fen(db: AsyncSession, user_id: int) -> int:
         select(func.coalesce(func.sum(CommissionLedger.amount_fen), 0)).where(
             CommissionLedger.user_id == user_id,
             CommissionLedger.kind == CommissionLedgerKind.COMMISSION,
-            CommissionLedger.available_at > datetime.now(timezone.utc),
+            CommissionLedger.available_at > datetime.now(UTC),
         )
     )
     return int(frozen_fen or 0)
@@ -63,9 +63,7 @@ async def get_balance(db: AsyncSession, user_id: int) -> CommissionBalance:
     rows via the ``ix_commission_ledger_user_unmatured`` partial index.
     Raises ``ValueError`` if the user doesn't exist.
     """
-    total_fen = await db.scalar(
-        select(User.commission_balance_fen).where(User.id == user_id)
-    )
+    total_fen = await db.scalar(select(User.commission_balance_fen).where(User.id == user_id))
     if total_fen is None:
         raise ValueError(f"User {user_id} not found")
 

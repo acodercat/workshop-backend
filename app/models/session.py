@@ -3,13 +3,13 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     Boolean,
     Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     Uuid,
     text,
 )
@@ -186,9 +186,7 @@ class Session(Base):
     # ``IS NULL``. Like every timestamp column in this schema, tz-aware
     # (the legacy naive created_at/updated_at were migrated to
     # ``timestamptz`` in revision c7d2f9a4e1b8).
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True
-    )
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
     # Backs the hot ``GET /sessions`` query (filter by user_id, ORDER BY
     # updated_at DESC). Postgres does not auto-index foreign keys, so

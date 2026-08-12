@@ -123,8 +123,7 @@ class HuifuGateway:
         qr_code = data.get("qr_code")
         if not qr_code:
             raise PaymentProviderError(
-                f"Huifu create returned no qr_code "
-                f"(sub_resp_desc={data.get('sub_resp_desc')!r})"
+                f"Huifu create returned no qr_code (sub_resp_desc={data.get('sub_resp_desc')!r})"
             )
         return ChargeResult(
             out_trade_no=out_trade_no,
@@ -165,7 +164,9 @@ class HuifuGateway:
 
     async def query_charge(self, *, out_trade_no: str, req_date: str) -> VerifiedEvent:
         data = await asyncio.to_thread(
-            self._query_charge_sync, out_trade_no=out_trade_no, req_date=req_date,
+            self._query_charge_sync,
+            out_trade_no=out_trade_no,
+            req_date=req_date,
         )
         return _event_from_business_data(data)
 
@@ -209,18 +210,22 @@ def _require_accepted(result: Any, *, op: str) -> dict[str, Any]:
             body = result
         logger.error(
             "huifu %s rejected: http_status=%s body=%s",
-            op, status, (body or "")[:500],
+            op,
+            status,
+            (body or "")[:500],
         )
         raise PaymentProviderError(f"Huifu {op} failed (status={status})")
     resp_code = result.get("resp_code")
     if resp_code not in _ACCEPTED_RESP_CODES:
         logger.error(
             "huifu %s: resp_code=%s desc=%s sub=%s",
-            op, resp_code, result.get("resp_desc"), result.get("sub_resp_desc"),
+            op,
+            resp_code,
+            result.get("resp_desc"),
+            result.get("sub_resp_desc"),
         )
         raise PaymentProviderError(
-            f"Huifu {op} rejected (resp_code={resp_code!r}, "
-            f"desc={result.get('resp_desc')!r})"
+            f"Huifu {op} rejected (resp_code={resp_code!r}, desc={result.get('resp_desc')!r})"
         )
     return result
 

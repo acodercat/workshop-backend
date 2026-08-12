@@ -17,7 +17,7 @@ transaction so the user row and the redemption land atomically.
 
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import NoReturn
 
 from sqlalchemy import or_, select, update
@@ -111,9 +111,7 @@ async def create_referral_code(db: AsyncSession, *, user_id: int) -> InviteCode:
     )
 
 
-async def get_or_create_referral_code(
-    db: AsyncSession, *, user_id: int
-) -> InviteCode:
+async def get_or_create_referral_code(db: AsyncSession, *, user_id: int) -> InviteCode:
     """Return the user's personal referral code, minting one if absent.
 
     New users get a code at registration; the lazy create is a backstop
@@ -135,23 +133,17 @@ async def get_or_create_referral_code(
         return (await db.execute(stmt)).scalar_one()
 
 
-async def _classify_unredeemable(
-    db: AsyncSession, *, normalized_code: str
-) -> NoReturn:
+async def _classify_unredeemable(db: AsyncSession, *, normalized_code: str) -> NoReturn:
     """Raise the precise typed error for a code the fenced claim didn't
     match (not found / disabled / expired / exhausted). Only hit on the
     claim's failure path, so the extra SELECT costs nothing on the
     happy path."""
     invite = (
-        await db.execute(
-            select(InviteCode).where(InviteCode.code == normalized_code)
-        )
+        await db.execute(select(InviteCode).where(InviteCode.code == normalized_code))
     ).scalar_one_or_none()
     if invite is None or not invite.enabled:
         raise InvalidInviteCodeError("Invite code not found")
-    if invite.expires_at is not None and invite.expires_at <= datetime.now(
-        timezone.utc
-    ):
+    if invite.expires_at is not None and invite.expires_at <= datetime.now(UTC):
         raise InviteExpiredError("Invite code expired")
     if invite.max_uses is not None and invite.used_count >= invite.max_uses:
         raise InviteExhaustedError("Invite code exhausted")

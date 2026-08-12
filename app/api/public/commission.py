@@ -83,7 +83,10 @@ async def get_commission_transactions(
     """Return an offset-paginated page of ``current_user``'s commission
     transactions — same ``items`` + ``meta`` shape as ``GET /sessions``."""
     rows, total = await commission.list_transactions(
-        db, user_id=current_user.id, page=page, page_size=page_size,
+        db,
+        user_id=current_user.id,
+        page=page,
+        page_size=page_size,
     )
     return PaginatedResponse(
         items=[
@@ -135,7 +138,10 @@ async def get_withdrawals(
     """Return an offset-paginated page of ``current_user``'s withdrawal
     requests (newest first)."""
     rows, total = await commission.list_withdrawals(
-        db, user_id=current_user.id, page=page, page_size=page_size,
+        db,
+        user_id=current_user.id,
+        page=page,
+        page_size=page_size,
     )
     return PaginatedResponse(
         items=[_to_withdrawal_response(row) for row in rows],
@@ -154,7 +160,9 @@ async def create_conversion(
     """Convert commission into spendable credits; returns both
     post-conversion balances."""
     result = await commission.convert_to_credits(
-        db, user_id=current_user.id, amount_fen=fen_from_cny(body.amount_cny),
+        db,
+        user_id=current_user.id,
+        amount_fen=fen_from_cny(body.amount_cny),
     )
     await db.commit()
     bal = await commission.get_balance(db, current_user.id)

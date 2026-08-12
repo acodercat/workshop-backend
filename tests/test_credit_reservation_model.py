@@ -6,9 +6,7 @@ from app.models.credit_reservation import CreditReservation
 
 def test_open_session_index_is_unique() -> None:
     indexes = {
-        item.name: item
-        for item in CreditReservation.__table__.indexes
-        if isinstance(item, Index)
+        item.name: item for item in CreditReservation.__table__.indexes if isinstance(item, Index)
     }
 
     index = indexes["uq_credit_reservation_open_session"]

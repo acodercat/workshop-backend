@@ -66,11 +66,7 @@ async def _notify_topup(
     failure is logged and swallowed, never rolled back. A user with no
     email on file is topped up just the same, only not notified.
     """
-    row = (
-        await db.execute(
-            select(User.name, User.email).where(User.id == user_id)
-        )
-    ).first()
+    row = (await db.execute(select(User.name, User.email).where(User.id == user_id))).first()
     if row is None:
         print(f"  [skip]   user_id={user_id}: 用户不存在，未发信")
         return
@@ -79,7 +75,10 @@ async def _notify_topup(
         print(f"  [skip]   user_id={user_id} ({name}): 无邮箱，已充值但不发信")
         return
     subject, html_body = render_credits_topped_up(
-        name=name, credits_added=credits_added, balance=balance, locale=locale,
+        name=name,
+        credits_added=credits_added,
+        balance=balance,
+        locale=locale,
     )
     try:
         rid = await send_html_email(to=email, subject=subject, html_body=html_body)
@@ -145,27 +144,34 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--user-id", type=int, required=True, help="Target user.id")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
-        "--credits", type=int,
+        "--credits",
+        type=int,
         help="Exact whole credits to add. Must be positive.",
     )
     group.add_argument(
-        "--cny", type=float,
+        "--cny",
+        type=float,
         help="RMB the customer paid; converted at settings.credit_price_cny (¥0.1/credit).",
     )
     parser.add_argument(
-        "--idempotency-key", required=True,
+        "--idempotency-key",
+        required=True,
         help="Unique key; re-running with the same key is a safe no-op.",
     )
     parser.add_argument(
-        "--reason", required=True,
+        "--reason",
+        required=True,
         help="Short human-readable reason (audited on the ledger row).",
     )
     parser.add_argument(
-        "--locale", choices=["zh-CN", "en-US"], default="zh-CN",
+        "--locale",
+        choices=["zh-CN", "en-US"],
+        default="zh-CN",
         help="Notification email locale (default: zh-CN).",
     )
     parser.add_argument(
-        "--no-email", action="store_true",
+        "--no-email",
+        action="store_true",
         help="Skip the top-up notification email (e.g. silent backfills).",
     )
     args = parser.parse_args()

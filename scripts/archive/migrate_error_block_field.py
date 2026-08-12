@@ -34,7 +34,6 @@ import psycopg
 
 from config import settings
 
-
 SQL_FIND_DIRTY = """
 SELECT id, session_id::text, created_at, blocks
 FROM message
@@ -77,11 +76,7 @@ def migrate_blocks(blocks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
     out: list[dict[str, Any]] = []
     renamed = 0
     for block in blocks:
-        if (
-            block.get("type") == "error"
-            and "message" in block
-            and "content" not in block
-        ):
+        if block.get("type") == "error" and "message" in block and "content" not in block:
             rewritten = {k: v for k, v in block.items() if k != "message"}
             rewritten["content"] = block["message"]
             out.append(rewritten)
@@ -108,9 +103,10 @@ def main() -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--apply", action="store_true",
+        "--apply",
+        action="store_true",
         help="Actually write the migration. Without this flag the script "
-             "only previews what would change.",
+        "only previews what would change.",
     )
     args = parser.parse_args()
 
@@ -146,8 +142,9 @@ def main() -> int:
 
         if args.apply:
             conn.commit()
-            print(f"\n  Committed: {len(rows)} row(s), "
-                  f"{total_blocks_rewritten} error block(s) total.")
+            print(
+                f"\n  Committed: {len(rows)} row(s), {total_blocks_rewritten} error block(s) total."
+            )
             cur.execute(SQL_VERIFY_RESIDUAL)
             residual = cur.fetchone()[0]
             if residual == 0:
@@ -156,8 +153,10 @@ def main() -> int:
                 print(f"  Verification: {residual} old-format error block(s) STILL remain ✗")
                 return 1
         else:
-            print(f"\n  Dry-run only — would migrate {total_blocks_rewritten} error "
-                  f"block(s) across {len(rows)} message row(s).")
+            print(
+                f"\n  Dry-run only — would migrate {total_blocks_rewritten} error "
+                f"block(s) across {len(rows)} message row(s)."
+            )
             print("  Re-run with --apply to write.")
 
     return 0

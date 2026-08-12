@@ -42,10 +42,7 @@ def _today() -> str:
 
 
 def _make_client() -> SmsClient:
-    if (
-        not settings.aliyun_sms_access_key_id
-        or not settings.aliyun_sms_access_key_secret
-    ):
+    if not settings.aliyun_sms_access_key_id or not settings.aliyun_sms_access_key_secret:
         raise RuntimeError(
             "缺少 aliyun_sms_access_key_id / aliyun_sms_access_key_secret —— "
             "请在 backend/.env 或 backend/.env.local 里配置"
@@ -122,7 +119,7 @@ def _query(to: str, send_date: str, biz_id: str | None) -> None:
         status = status_label.get(str(d.send_status), str(d.send_status))
         print(f"send_status : {status}")
         print(f"  receive_date : {d.receive_date}")
-        print(f"  err_code     : {d.err_code}")   # DELIVERED=成功，其余见下方提示
+        print(f"  err_code     : {d.err_code}")  # DELIVERED=成功，其余见下方提示
         print(f"  content      : {d.content}")
         if d.err_code and d.err_code != "DELIVERED":
             _hint(d.err_code)

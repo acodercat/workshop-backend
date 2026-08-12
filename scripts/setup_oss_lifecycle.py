@@ -33,9 +33,9 @@ from oss2.models import (
 )
 
 from app.services.file_storage import (
-    SESSION_FILE_POLICY,
     _ORPHAN_TAG_KEY,
     _ORPHAN_TAG_VALUE,
+    SESSION_FILE_POLICY,
     get_bucket,
 )
 
@@ -67,11 +67,14 @@ def _existing_rules(bucket: oss2.Bucket) -> list[LifecycleRule]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--days", type=int, default=_DEFAULT_DAYS,
+        "--days",
+        type=int,
+        default=_DEFAULT_DAYS,
         help=f"Days a tagged-orphan object survives before deletion (default {_DEFAULT_DAYS}).",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Print the resulting rule set without writing it.",
     )
     args = parser.parse_args()

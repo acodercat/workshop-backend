@@ -21,14 +21,14 @@ a queued row read the way the user picked; nothing downstream depends on it, and
 the worker connects by its own rule (failed-last).
 """
 
-from datetime import datetime
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
+    TIMESTAMP,
     ForeignKey,
     Index,
     Integer,
-    TIMESTAMP,
     Uuid,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -51,7 +51,9 @@ class SessionMCPServer(Base):
         primary_key=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
     __table_args__ = (
@@ -64,6 +66,5 @@ class SessionMCPServer(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<SessionMCPServer(session_id={self.session_id}, "
-            f"mcp_server_id={self.mcp_server_id})>"
+            f"<SessionMCPServer(session_id={self.session_id}, mcp_server_id={self.mcp_server_id})>"
         )

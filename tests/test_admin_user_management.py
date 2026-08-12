@@ -8,7 +8,7 @@ the endpoint's contract with it (unit conversion, key namespacing,
 operator attribution) and the audit rows.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -47,18 +47,27 @@ class _FakeDb:
 
 def _staff() -> Staff:
     return Staff(
-        id=7, username="alice", password_hash="x", name="Alice",
-        status=StaffStatus.ACTIVE, token_version=0,
+        id=7,
+        username="alice",
+        password_hash="x",
+        name="Alice",
+        status=StaffStatus.ACTIVE,
+        token_version=0,
     )
 
 
 def _user(status: UserStatus = UserStatus.ACTIVE) -> User:
     user = User(
-        id=42, username="axon_42", name="Bob", password_hash="x",
-        email="bob@example.com", phone=None, status=status,
+        id=42,
+        username="axon_42",
+        name="Bob",
+        password_hash="x",
+        email="bob@example.com",
+        phone=None,
+        status=status,
         credit_balance=50_000_000,  # 5 credits
     )
-    user.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    user.created_at = datetime(2026, 1, 1, tzinfo=UTC)
     user.last_login_at = None
     return user
 
@@ -99,9 +108,7 @@ def test_status_change_applies_and_audits() -> None:
 def test_a_noop_status_change_writes_no_audit_row() -> None:
     db = _FakeDb(_user(UserStatus.ACTIVE))
 
-    response = _client(db).patch(
-        "/users/42", json={"status": "ACTIVE", "reason": "double-click"}
-    )
+    response = _client(db).patch("/users/42", json={"status": "ACTIVE", "reason": "double-click"})
 
     assert response.status_code == 200
     assert _audit_rows(db) == []
@@ -149,7 +156,9 @@ def test_adjustment_converts_namespaces_and_attributes(monkeypatch) -> None:
 
     assert response.status_code == 201
     assert response.json() == {
-        "ledger_id": 1234, "amount_credits": 12, "balance_credits": 17,
+        "ledger_id": 1234,
+        "amount_credits": 12,
+        "balance_credits": 17,
     }
     # The endpoint's whole job: whole credits → µ-credits, the console
     # namespace on the key, and the operator on the ledger row.

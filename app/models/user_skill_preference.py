@@ -16,11 +16,11 @@ toggle in :func:`app.api.public.skill.update_skill`.
 from datetime import datetime
 
 from sqlalchemy import (
+    TIMESTAMP,
     Boolean,
     ForeignKey,
     Index,
     Integer,
-    TIMESTAMP,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -43,11 +43,15 @@ class UserSkillPreference(Base):
     )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (

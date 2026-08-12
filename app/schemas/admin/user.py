@@ -61,7 +61,9 @@ class CreditAdjustmentCreate(BaseModel):
     """
 
     amount_credits: int = Field(
-        ..., ge=-1_000_000, le=1_000_000,
+        ...,
+        ge=-1_000_000,
+        le=1_000_000,
         description="Signed whole credits; positive grants, negative claws back.",
     )
     reason: Reason

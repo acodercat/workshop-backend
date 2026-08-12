@@ -5,7 +5,7 @@ Same harness as the other admin endpoint tests: real app, overridden
 PK lookup and the username scalar.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -18,7 +18,7 @@ from app.models.admin_audit_log import AdminAuditLog
 from app.models.staff import Staff, StaffStatus
 from app.models.user_feedback import FeedbackStatus, UserFeedback
 
-_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _FakeDb:
@@ -47,8 +47,11 @@ class _FakeDb:
 
 def _feedback(status: FeedbackStatus = FeedbackStatus.OPEN) -> UserFeedback:
     feedback = UserFeedback(
-        id=9, user_id=42, message="the export button 404s",
-        image_keys=[], status=status,
+        id=9,
+        user_id=42,
+        message="the export button 404s",
+        image_keys=[],
+        status=status,
     )
     feedback.created_at = _NOW
     feedback.updated_at = _NOW
@@ -61,8 +64,12 @@ def _client(db: _FakeDb) -> TestClient:
     app.include_router(admin_feedback.router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[authenticate_and_get_staff] = lambda: Staff(
-        id=7, username="alice", password_hash="x", name="Alice",
-        status=StaffStatus.ACTIVE, token_version=0,
+        id=7,
+        username="alice",
+        password_hash="x",
+        name="Alice",
+        status=StaffStatus.ACTIVE,
+        token_version=0,
     )
     return TestClient(app)
 
@@ -99,9 +106,7 @@ def test_a_noop_triage_writes_no_audit_row() -> None:
 
 
 def test_unknown_feedback_is_404() -> None:
-    response = _client(_FakeDb(feedback=None)).patch(
-        "/feedback/999", json={"status": "IGNORED"}
-    )
+    response = _client(_FakeDb(feedback=None)).patch("/feedback/999", json={"status": "IGNORED"})
 
     assert response.status_code == 404
     assert response.json()["error"]["type"] == "feedback_not_found"

@@ -45,13 +45,9 @@ from app.models.staff import Staff
 from app.services.admin import staff as staff_service
 
 
-async def _create(
-    db: AsyncSession, *, username: str, name: str, password: str
-) -> int:
+async def _create(db: AsyncSession, *, username: str, name: str, password: str) -> int:
     try:
-        account = await staff_service.create(
-            db, username=username, name=name, password=password
-        )
+        account = await staff_service.create(db, username=username, name=name, password=password)
     except StaffUsernameTakenError:
         print(f"Staff {username!r} already exists.", file=sys.stderr)
         return 1
@@ -87,11 +83,11 @@ async def main(args: argparse.Namespace) -> int:
 
     async with AsyncSessionLocal() as db:
         if args.create:
-            return await _create(
-                db, username=args.username, name=args.name, password=password
-            )
+            return await _create(db, username=args.username, name=args.name, password=password)
         return await _reset_password(
-            db, username=args.username, password=password,
+            db,
+            username=args.username,
+            password=password,
         )
 
 
@@ -99,19 +95,23 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument(
-        "--create", action="store_true",
+        "--create",
+        action="store_true",
         help="Create a new staff account.",
     )
     action.add_argument(
-        "--reset-password", action="store_true",
+        "--reset-password",
+        action="store_true",
         help="Rotate an existing account's password and sign it out everywhere.",
     )
     parser.add_argument(
-        "--username", required=True,
+        "--username",
+        required=True,
         help="Login identifier for the console.",
     )
     parser.add_argument(
-        "--name", default=None,
+        "--name",
+        default=None,
         help="Human name shown in the console. Required with --create.",
     )
     args = parser.parse_args()

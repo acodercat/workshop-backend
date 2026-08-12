@@ -1,6 +1,6 @@
 """Tests for ``app.services.mcp.grant`` — writing a grant onto a Connector row."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.fernet import Fernet
@@ -27,7 +27,10 @@ def _connector():
     from app.models.mcp_server import MCPServer, MCPServerAuthType
 
     return MCPServer(
-        id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
+        id=1,
+        user_id=7,
+        name="c",
+        url="https://mcp.example.com/mcp",
         auth_type=MCPServerAuthType.OAUTH,
     )
 
@@ -41,17 +44,19 @@ class TestALifetimeAlreadySpent:
         # Treating it as "unstated" would schedule the row an hour out, and
         # every turn in that hour would send a token known to be spent.
         connector = _connector()
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
 
         grant.store_tokens(
             connector,
             OAuthToken(
-                access_token="a", token_type="Bearer",
-                refresh_token="r", expires_in=expires_in,
+                access_token="a",
+                token_type="Bearer",
+                refresh_token="r",
+                expires_in=expires_in,
             ),
         )
 
-        assert connector.oauth_tokens_expires_at <= datetime.now(timezone.utc)
+        assert connector.oauth_tokens_expires_at <= datetime.now(UTC)
         # Clamped, not applied: a nonsense lifetime should read as "expired now",
         # not as a date far enough out of range to be mistaken for meaningful.
         assert connector.oauth_tokens_expires_at >= before
@@ -66,7 +71,7 @@ class TestALifetimeAlreadySpent:
             OAuthToken(access_token="a", token_type="Bearer", refresh_token="r"),
         )
 
-        assert connector.oauth_tokens_expires_at > datetime.now(timezone.utc)
+        assert connector.oauth_tokens_expires_at > datetime.now(UTC)
 
     def test_with_no_refresh_token_silence_leaves_it_unscheduled(self):
         # Nothing could act on it: renewal would find nothing to rotate with and
@@ -89,9 +94,7 @@ class TestAStaleSchedule:
         # user who re-authorizes during a five-minute backoff would otherwise
         # hand their brand-new grant the dead one's wait.
         connector = _connector()
-        connector.oauth_refresh_after = datetime.now(timezone.utc) + timedelta(
-            seconds=300
-        )
+        connector.oauth_refresh_after = datetime.now(UTC) + timedelta(seconds=300)
 
         grant.store_tokens(
             connector,
@@ -136,11 +139,13 @@ class TestGivingAGrantUp:
         grant.store_tokens(
             connector,
             OAuthToken(
-                access_token="a", token_type="Bearer",
-                refresh_token="r", expires_in=3600,
+                access_token="a",
+                token_type="Bearer",
+                refresh_token="r",
+                expires_in=3600,
             ),
         )
-        connector.oauth_refresh_after = datetime.now(timezone.utc)
+        connector.oauth_refresh_after = datetime.now(UTC)
         connector.oauth_reauthorization_required = True
 
         grant.discard(connector)
@@ -163,6 +168,4 @@ class TestGivingAGrantUp:
 
         assert connector.oauth_client_encrypted == "sealed-client"
         assert connector.oauth_scope == "files:read"
-        assert connector.oauth_metadata == {
-            "authorization_server": {"issuer": "https://as"}
-        }
+        assert connector.oauth_metadata == {"authorization_server": {"issuer": "https://as"}}

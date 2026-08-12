@@ -42,12 +42,7 @@ def test_identifier_body_requires_exactly_one() -> None:
 
 def test_phone_change_inputs_are_normalized() -> None:
     assert (
-        PhoneChangeCodeRequest(
-            new_phone="138 0013 8000", current_password="pw"
-        ).new_phone
+        PhoneChangeCodeRequest(new_phone="138 0013 8000", current_password="pw").new_phone
         == "13800138000"
     )
-    assert (
-        PhoneChangeRequest(new_phone="138-0013-8000", code="123456").new_phone
-        == "13800138000"
-    )
+    assert PhoneChangeRequest(new_phone="138-0013-8000", code="123456").new_phone == "13800138000"

@@ -54,9 +54,7 @@ async def create_recipe(
     # each pass and put the user one over. Not worth a row lock for a
     # soft policy limit. OFFICIAL rows have ``user_id IS NULL`` so they
     # don't count against a user.
-    used = await db.scalar(
-        select(func.count(Recipe.id)).where(Recipe.user_id == current_user.id)
-    )
+    used = await db.scalar(select(func.count(Recipe.id)).where(Recipe.user_id == current_user.id))
     if used is not None and used >= _MAX_RECIPES_PER_USER:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -79,7 +77,9 @@ async def create_recipe(
     await db.refresh(recipe)
     logger.info(
         "recipe created: id=%s user_id=%s name=%r",
-        recipe.id, current_user.id, recipe.name,
+        recipe.id,
+        current_user.id,
+        recipe.name,
     )
     return RecipeResponse.model_validate(recipe)
 
@@ -97,17 +97,11 @@ async def list_recipes(
     """
     stmt = (
         select(Recipe)
-        .where(
-            (Recipe.user_id == current_user.id)
-            | (Recipe.origin == RecipeOrigin.OFFICIAL)
-        )
+        .where((Recipe.user_id == current_user.id) | (Recipe.origin == RecipeOrigin.OFFICIAL))
         .order_by(Recipe.created_at.desc())
     )
     result = await db.execute(stmt)
-    return [
-        RecipeResponse.model_validate(recipe)
-        for recipe in result.scalars().all()
-    ]
+    return [RecipeResponse.model_validate(recipe) for recipe in result.scalars().all()]
 
 
 @router.patch("/recipes/{recipe_id}")
@@ -139,9 +133,7 @@ async def update_recipe(
         if value is not None
     }
     if updates:
-        await db.execute(
-            sql_update(Recipe).where(Recipe.id == recipe.id).values(**updates)
-        )
+        await db.execute(sql_update(Recipe).where(Recipe.id == recipe.id).values(**updates))
         await db.commit()
         await db.refresh(recipe)
     return RecipeResponse.model_validate(recipe)
@@ -165,12 +157,16 @@ async def delete_recipe(
     await db.commit()
     logger.info(
         "recipe deleted: id=%s user_id=%s name=%r",
-        recipe_id, current_user.id, recipe_name,
+        recipe_id,
+        current_user.id,
+        recipe_name,
     )
 
 
 async def _get_owned_recipe(
-    db: AsyncSession, recipe_id: int, user_id: int,
+    db: AsyncSession,
+    recipe_id: int,
+    user_id: int,
 ) -> Recipe:
     """Fetch a CUSTOM recipe that belongs to ``user_id``.
 
@@ -179,19 +175,23 @@ async def _get_owned_recipe(
     rather than removing a shared platform row.
     """
     stmt = select(Recipe).where(
-        Recipe.id == recipe_id, Recipe.user_id == user_id,
+        Recipe.id == recipe_id,
+        Recipe.user_id == user_id,
     )
     result = await db.execute(stmt)
     recipe = result.scalar_one_or_none()
     if recipe is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="recipe not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="recipe not found",
         )
     return recipe
 
 
 async def _get_visible_recipe(
-    db: AsyncSession, recipe_id: int, user_id: int,
+    db: AsyncSession,
+    recipe_id: int,
+    user_id: int,
 ) -> Recipe:
     """Fetch a recipe visible to ``user_id`` (own CUSTOM or any OFFICIAL).
 
@@ -207,6 +207,7 @@ async def _get_visible_recipe(
     recipe = result.scalar_one_or_none()
     if recipe is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="recipe not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="recipe not found",
         )
     return recipe

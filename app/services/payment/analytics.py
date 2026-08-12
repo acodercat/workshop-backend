@@ -77,9 +77,7 @@ async def summarize(db: AsyncSession, *, days: int) -> RevenueSummary:
     # a stuck one from last week is exactly what an operator wants to
     # see, and windowing it away would hide the oldest cases first.
     pending = (
-        await db.execute(
-            text("SELECT COUNT(*) FROM payment_order WHERE status = 'PENDING'")
-        )
+        await db.execute(text("SELECT COUNT(*) FROM payment_order WHERE status = 'PENDING'"))
     ).scalar_one()
 
     return RevenueSummary(
@@ -92,9 +90,7 @@ async def summarize(db: AsyncSession, *, days: int) -> RevenueSummary:
     )
 
 
-async def _daily_revenue(
-    db: AsyncSession, *, since: datetime, days: int
-) -> list[DailyRevenue]:
+async def _daily_revenue(db: AsyncSession, *, since: datetime, days: int) -> list[DailyRevenue]:
     """Per-business-day takings, gap-filled to a contiguous series.
 
     Bucketed on ``created_at``: an order is paid within minutes of being
@@ -118,6 +114,5 @@ async def _daily_revenue(
 
     revenue_by_day = {row.day: int(row.revenue_fen) for row in rows}
     return [
-        DailyRevenue(day=day, revenue_fen=revenue_by_day.get(day, 0))
-        for day in business_days(days)
+        DailyRevenue(day=day, revenue_fen=revenue_by_day.get(day, 0)) for day in business_days(days)
     ]

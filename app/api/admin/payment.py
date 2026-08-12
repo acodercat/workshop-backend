@@ -37,10 +37,7 @@ from app.services.payment import analytics
 router = APIRouter(tags=["payments"])
 
 
-
-def _to_order_response(
-    order: PaymentOrder, owner_username: str
-) -> PaymentOrderResponse:
+def _to_order_response(order: PaymentOrder, owner_username: str) -> PaymentOrderResponse:
     return PaymentOrderResponse(
         id=order.id,
         user_id=order.user_id,
@@ -77,9 +74,7 @@ async def read_revenue_stats(
         granted_credits=credits_from_micro(summary.granted_micro),
         pending_orders=summary.pending_orders,
         daily=[
-            DailyRevenuePoint(
-                day=point.day, revenue_cny=cny_from_fen(point.revenue_fen)
-            )
+            DailyRevenuePoint(day=point.day, revenue_cny=cny_from_fen(point.revenue_fen))
             for point in summary.daily
         ],
     )
@@ -104,9 +99,7 @@ async def list_payments(
     if user_id is not None:
         filters.append(PaymentOrder.user_id == user_id)
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(PaymentOrder).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(PaymentOrder).where(*filters))
     rows = (
         await ctx.db.execute(
             paginate(
@@ -121,8 +114,6 @@ async def list_payments(
     ).all()
 
     return PaginatedResponse(
-        items=[
-            _to_order_response(order, username) for order, username in rows
-        ],
+        items=[_to_order_response(order, username) for order, username in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

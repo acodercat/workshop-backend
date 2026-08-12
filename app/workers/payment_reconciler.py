@@ -18,7 +18,7 @@ timed-out one.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +42,8 @@ _SWEEP_BATCH = 100
 
 
 async def run_forever(
-    *, interval_seconds: int = settings.payment_reconcile_interval_seconds,
+    *,
+    interval_seconds: int = settings.payment_reconcile_interval_seconds,
 ) -> None:
     """Periodic reconcile loop. Cancel-safe via :class:`asyncio.CancelledError`."""
     consecutive_failures = 0
@@ -63,7 +64,7 @@ async def run_forever(
         # Exponential backoff capped at 10 min — same shape as the
         # settle sweeper.
         delay = (
-            min(interval_seconds * (2 ** consecutive_failures), 600)
+            min(interval_seconds * (2**consecutive_failures), 600)
             if consecutive_failures
             else interval_seconds
         )
@@ -100,9 +101,7 @@ async def _list_candidates(db: AsyncSession) -> list:
     arrived. The ``created_at`` grace (one poll interval) keeps the poller
     from racing the webhook on brand-new orders; the ``status='PENDING'``
     partial index keeps this scan tiny."""
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        seconds=settings.payment_reconcile_interval_seconds
-    )
+    cutoff = datetime.now(UTC) - timedelta(seconds=settings.payment_reconcile_interval_seconds)
     rows = await db.execute(
         select(PaymentOrder.id)
         .where(

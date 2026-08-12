@@ -1,7 +1,7 @@
 """Offline unit tests for the commission wallet's RMB-cents arithmetic —
 pure functions, no DB/network."""
 
-from app.services.commission.rates import commission_fen, cny_from_fen, fen_from_cny
+from app.services.commission.rates import cny_from_fen, commission_fen, fen_from_cny
 
 
 def test_commission_fen_is_rate_times_amount() -> None:

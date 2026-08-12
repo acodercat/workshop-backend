@@ -37,13 +37,13 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
-    TIMESTAMP,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -80,7 +80,10 @@ class AdminAuditLog(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Action parameters + before/after diff.
     payload: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     # Correlation id from ``RequestIDMiddleware`` — ties an audit row to
     # the full request trace in the logs. 64 is the middleware's own
@@ -96,7 +99,9 @@ class AdminAuditLog(Base):
     # stores nothing it has not parsed as an address.
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
     __table_args__ = (

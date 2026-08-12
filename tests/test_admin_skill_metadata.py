@@ -6,7 +6,7 @@ row". The console owns that row, so it is the surface that can — and it
 has to carry the same locale-map rule the public PATCH does.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -19,7 +19,7 @@ from app.models.admin_audit_log import AdminAuditLog
 from app.models.skill import Skill, SkillOrigin
 from app.models.staff import Staff, StaffStatus
 
-_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _FakeDb:
@@ -47,10 +47,16 @@ class _FakeDb:
 def _skill(**over) -> Skill:
     skill = Skill(
         **{
-            "id": 5, "user_id": None, "origin": SkillOrigin.OFFICIAL,
-            "name": "pdf", "display_name": "PDF", "description": "reads pdfs",
-            "enabled": False, "bundle_key": "official/pdf/x/pdf.zip",
-            "bundle_size": 10, "display_name_i18n": {"zh": "PDF 工具"},
+            "id": 5,
+            "user_id": None,
+            "origin": SkillOrigin.OFFICIAL,
+            "name": "pdf",
+            "display_name": "PDF",
+            "description": "reads pdfs",
+            "enabled": False,
+            "bundle_key": "official/pdf/x/pdf.zip",
+            "bundle_size": 10,
+            "display_name_i18n": {"zh": "PDF 工具"},
             **over,
         }
     )
@@ -64,8 +70,12 @@ def _client(db: _FakeDb) -> TestClient:
     app.include_router(admin_skill.router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[authenticate_and_get_staff] = lambda: Staff(
-        id=7, username="alice", password_hash="x", name="Alice",
-        status=StaffStatus.ACTIVE, token_version=0,
+        id=7,
+        username="alice",
+        password_hash="x",
+        name="Alice",
+        status=StaffStatus.ACTIVE,
+        token_version=0,
     )
     return TestClient(app)
 
@@ -94,9 +104,7 @@ def test_editing_only_the_description_leaves_the_locale_map() -> None:
     skill = _skill()
     db = _FakeDb(skill)
 
-    _client(db).patch(
-        "/skills/5", json={"description": "reads and writes pdfs", "reason": "r"}
-    )
+    _client(db).patch("/skills/5", json={"description": "reads and writes pdfs", "reason": "r"})
 
     assert skill.description == "reads and writes pdfs"
     assert skill.display_name_i18n == {"zh": "PDF 工具"}

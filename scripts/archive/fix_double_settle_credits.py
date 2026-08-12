@@ -83,7 +83,9 @@ async def main(args: argparse.Namespace) -> int:
     total = sum(int(r.correction_micro) for r in plan)
     print(f"affected users: {len(plan)}   net correction: {_fmt(total)} credits")
     for r in plan:
-        print(f"  user {r.user_id:>5}: {r.n_res:>3} res   {_fmt(int(r.correction_micro)):>13} credits")
+        print(
+            f"  user {r.user_id:>5}: {r.n_res:>3} res   {_fmt(int(r.correction_micro)):>13} credits"
+        )
 
     if not args.apply:
         print("\nDRY-RUN — re-run with --apply to write the ADJUST rows.")
@@ -103,7 +105,9 @@ async def main(args: argparse.Namespace) -> int:
                 )
                 await db.commit()
                 applied += 1
-                print(f"  OK    user {r.user_id:>5}: {_fmt(int(r.correction_micro))} credits (ledger {entry.id})")
+                print(
+                    f"  OK    user {r.user_id:>5}: {_fmt(int(r.correction_micro))} credits (ledger {entry.id})"
+                )
             except AdjustmentAlreadyApplied:
                 skipped += 1
                 print(f"  SKIP  user {r.user_id:>5}: already corrected ({key})")
@@ -115,7 +119,8 @@ async def main(args: argparse.Namespace) -> int:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
-        "--apply", action="store_true",
+        "--apply",
+        action="store_true",
         help="Write the ADJUST rows. Omit for a dry-run.",
     )
     return parser.parse_args()

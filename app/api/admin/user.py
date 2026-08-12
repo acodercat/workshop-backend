@@ -63,8 +63,9 @@ def _to_user_response(user: User) -> UserResponse:
 @router.get("/users", response_model=PaginatedResponse[UserResponse])
 async def list_users(
     ctx: StaffContext,
-    q: str | None = Query(None, min_length=1, max_length=64,
-                          description="Matches username, email or phone"),
+    q: str | None = Query(
+        None, min_length=1, max_length=64, description="Matches username, email or phone"
+    ),
     status_: UserStatus | None = Query(None, alias="status"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -78,17 +79,17 @@ async def list_users(
     filters = []
     if q is not None:
         pattern = f"%{q}%"
-        filters.append(sa.or_(
-            User.username.ilike(pattern),
-            User.email.ilike(pattern),
-            User.phone.ilike(pattern),
-        ))
+        filters.append(
+            sa.or_(
+                User.username.ilike(pattern),
+                User.email.ilike(pattern),
+                User.phone.ilike(pattern),
+            )
+        )
     if status_ is not None:
         filters.append(User.status == status_)
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(User).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(User).where(*filters))
     rows = (
         await ctx.db.scalars(
             paginate(
@@ -119,9 +120,7 @@ async def read_user(ctx: StaffContext, user_id: int) -> UserDetailResponse:
 
 
 @router.patch("/users/{user_id}", response_model=UserResponse)
-async def update_user(
-    ctx: StaffContext, user_id: int, body: UserUpdate
-) -> UserResponse:
+async def update_user(ctx: StaffContext, user_id: int, body: UserUpdate) -> UserResponse:
     """Change a user's account status (ACTIVE / DISABLED / SUSPENDED).
 
     Takes effect on the user's next request — status is checked per
@@ -168,7 +167,10 @@ async def list_user_credit_transactions(
     not settle on the user's behalf."""
     user = await _get_or_404(ctx, user_id)
     rows, total = await credits.list_transactions(
-        ctx.db, user_id=user.id, page=page, page_size=page_size,
+        ctx.db,
+        user_id=user.id,
+        page=page,
+        page_size=page_size,
     )
     return PaginatedResponse(
         items=[
@@ -235,9 +237,7 @@ async def create_credit_adjustment(
     )
 
 
-@router.get(
-    "/users/{user_id}/sessions", response_model=PaginatedResponse[SessionResponse]
-)
+@router.get("/users/{user_id}/sessions", response_model=PaginatedResponse[SessionResponse])
 async def list_user_sessions(
     ctx: StaffContext,
     user_id: int,
@@ -250,15 +250,11 @@ async def list_user_sessions(
     them."""
     user = await _get_or_404(ctx, user_id)
     filter_clause = Session.user_id == user.id
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(Session).where(filter_clause)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(Session).where(filter_clause))
     rows = (
         await ctx.db.scalars(
             paginate(
-                select(Session)
-                .where(filter_clause)
-                .order_by(Session.updated_at.desc()),
+                select(Session).where(filter_clause).order_by(Session.updated_at.desc()),
                 page,
                 page_size,
             )

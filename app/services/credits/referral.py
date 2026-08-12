@@ -52,7 +52,8 @@ async def apply_referral_reward(
         await db.rollback()
         logger.info(
             "referral reward duplicate idempotency_key=%s referrer=%s (treated as success)",
-            idempotency_key, referrer_user_id,
+            idempotency_key,
+            referrer_user_id,
         )
         raise ReferralRewardAlreadyApplied(
             f"Referral reward with idempotency_key={idempotency_key!r} already applied"

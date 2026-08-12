@@ -36,13 +36,13 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
     Index,
     String,
-    TIMESTAMP,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -115,19 +115,27 @@ class CommissionLedger(Base):
     # A ``COMMISSION`` row counts toward the withdrawable balance only
     # once ``now >= available_at``.
     available_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     reference: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     # NULL on internal-only kinds; required (UNIQUE) on ``COMMISSION`` /
     # ``CLAWBACK`` / ``ADJUST`` so accrual + operator corrections retry
     # safely under the provider's at-least-once delivery.
     idempotency_key: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, unique=True,
+        String(64),
+        nullable=True,
+        unique=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
     __table_args__ = (

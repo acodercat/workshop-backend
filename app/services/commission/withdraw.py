@@ -18,7 +18,7 @@ caller (endpoint / script) owns the transaction, matching the
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,9 +63,7 @@ async def request_withdrawal(
 
     withdrawable_fen = await lock_withdrawable_fen(db, user_id)
     if amount_fen > withdrawable_fen:
-        raise InsufficientCommissionError(
-            "Withdrawal exceeds the withdrawable commission balance"
-        )
+        raise InsufficientCommissionError("Withdrawal exceeds the withdrawable commission balance")
 
     # The request id is generated client-side (rather than letting the
     # column default fill it at flush) so the ledger row's back-reference
@@ -97,13 +95,12 @@ async def request_withdrawal(
 
 
 async def _lock_request(
-    db: AsyncSession, withdrawal_id: uuid.UUID,
+    db: AsyncSession,
+    withdrawal_id: uuid.UUID,
 ) -> WithdrawalRequest:
     """``SELECT ... FOR UPDATE`` a withdrawal request; 404 if absent."""
     request = await db.scalar(
-        select(WithdrawalRequest)
-        .where(WithdrawalRequest.id == withdrawal_id)
-        .with_for_update()
+        select(WithdrawalRequest).where(WithdrawalRequest.id == withdrawal_id).with_for_update()
     )
     if request is None:
         raise WithdrawalNotFoundError(f"Withdrawal {withdrawal_id} not found")
@@ -111,7 +108,10 @@ async def _lock_request(
 
 
 async def mark_paid(
-    db: AsyncSession, *, withdrawal_id: uuid.UUID, payout_ref: str,
+    db: AsyncSession,
+    *,
+    withdrawal_id: uuid.UUID,
+    payout_ref: str,
 ) -> WithdrawalRequest:
     """Operator: mark a PENDING withdrawal PAID with its transfer
     reference. No ledger change — the funds were debited at request
@@ -124,13 +124,16 @@ async def mark_paid(
         )
     request.status = WithdrawalStatus.PAID
     request.payout_ref = payout_ref
-    request.resolved_at = datetime.now(timezone.utc)
+    request.resolved_at = datetime.now(UTC)
     logger.info("withdrawal paid: id=%s payout_ref=%s", withdrawal_id, payout_ref)
     return request
 
 
 async def reject(
-    db: AsyncSession, *, withdrawal_id: uuid.UUID, reason: str,
+    db: AsyncSession,
+    *,
+    withdrawal_id: uuid.UUID,
+    reason: str,
 ) -> WithdrawalRequest:
     """Operator: reject a PENDING withdrawal, returning the funds via a
     ``WITHDRAW_REFUND`` row. Raises ``ValueError`` if it's not PENDING.
@@ -150,13 +153,17 @@ async def reject(
     )
     request.status = WithdrawalStatus.REJECTED
     request.reject_reason = reason
-    request.resolved_at = datetime.now(timezone.utc)
+    request.resolved_at = datetime.now(UTC)
     logger.info("withdrawal rejected: id=%s reason=%s", withdrawal_id, reason)
     return request
 
 
 async def list_withdrawals(
-    db: AsyncSession, *, user_id: int, page: int, page_size: int,
+    db: AsyncSession,
+    *,
+    user_id: int,
+    page: int,
+    page_size: int,
 ) -> tuple[list[WithdrawalRequest], int]:
     """One newest-first page of ``user_id``'s withdrawal requests + the
     total count. Offset pagination via :func:`app.common.pagination.paginate`,
@@ -164,14 +171,10 @@ async def list_withdrawals(
     """
     filter_clause = WithdrawalRequest.user_id == user_id
     total = (
-        await db.execute(
-            select(func.count(WithdrawalRequest.id)).where(filter_clause)
-        )
+        await db.execute(select(func.count(WithdrawalRequest.id)).where(filter_clause))
     ).scalar() or 0
     base = (
-        select(WithdrawalRequest)
-        .where(filter_clause)
-        .order_by(WithdrawalRequest.created_at.desc())
+        select(WithdrawalRequest).where(filter_clause).order_by(WithdrawalRequest.created_at.desc())
     )
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return list(rows), total
@@ -180,11 +183,15 @@ async def list_withdrawals(
 async def list_pending(db: AsyncSession, *, limit: int) -> list[WithdrawalRequest]:
     """Oldest-first PENDING withdrawals for the operator batch tool."""
     rows = (
-        await db.execute(
-            select(WithdrawalRequest)
-            .where(WithdrawalRequest.status == WithdrawalStatus.PENDING)
-            .order_by(WithdrawalRequest.created_at.asc())
-            .limit(limit)
+        (
+            await db.execute(
+                select(WithdrawalRequest)
+                .where(WithdrawalRequest.status == WithdrawalStatus.PENDING)
+                .order_by(WithdrawalRequest.created_at.asc())
+                .limit(limit)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return list(rows)

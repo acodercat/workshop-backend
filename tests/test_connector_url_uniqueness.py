@@ -74,9 +74,7 @@ class TestTheGuard:
 
 class TestWhatTheTableEnforces:
     def test_one_row_per_user_per_server(self):
-        names = {
-            constraint.name for constraint in MCPServer.__table__.constraints
-        }
+        names = {constraint.name for constraint in MCPServer.__table__.constraints}
         assert "uq_mcp_server_user_id_url" in names
 
     def test_a_user_may_name_two_connectors_the_same(self):

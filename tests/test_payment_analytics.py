@@ -47,9 +47,7 @@ def test_every_money_query_interpolates_the_shared_predicate() -> None:
 def test_pending_count_is_not_windowed() -> None:
     # A stuck order from last week is exactly the one worth surfacing, so
     # its query must carry no ``created_at`` bound.
-    assert "created_at" not in _pending_query(
-        inspect.getsource(analytics.summarize)
-    )
+    assert "created_at" not in _pending_query(inspect.getsource(analytics.summarize))
 
 
 def _pending_query(code: str) -> str:

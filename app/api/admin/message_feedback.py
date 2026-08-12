@@ -54,11 +54,7 @@ def _excerpt(blocks: list[dict]) -> str:
     for block in blocks or []:
         if block.get("type") == "text" and block.get("content"):
             content = str(block["content"]).strip()
-            return (
-                content[:_EXCERPT_CHARS] + "…"
-                if len(content) > _EXCERPT_CHARS
-                else content
-            )
+            return content[:_EXCERPT_CHARS] + "…" if len(content) > _EXCERPT_CHARS else content
     return "(no text in this reply)"
 
 
@@ -85,9 +81,7 @@ async def list_message_feedback(
     if rating is not None:
         filters.append(MessageFeedback.rating == rating)
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(MessageFeedback).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(MessageFeedback).where(*filters))
     rows = (
         await ctx.db.execute(
             paginate(
@@ -133,12 +127,8 @@ async def read_message_feedback_stats(
     totals = (
         await ctx.db.execute(
             select(
-                func.count()
-                .filter(MessageFeedback.rating == FeedbackRating.UP)
-                .label("up"),
-                func.count()
-                .filter(MessageFeedback.rating == FeedbackRating.DOWN)
-                .label("down"),
+                func.count().filter(MessageFeedback.rating == FeedbackRating.UP).label("up"),
+                func.count().filter(MessageFeedback.rating == FeedbackRating.DOWN).label("down"),
             )
             .select_from(MessageFeedback)
             .where(MessageFeedback.created_at >= window_start(days))

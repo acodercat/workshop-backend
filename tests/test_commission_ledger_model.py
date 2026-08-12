@@ -8,7 +8,12 @@ from app.models.withdrawal_request import WithdrawalStatus
 def test_ledger_kind_values_are_uppercase() -> None:
     values = [m.value for m in CommissionLedgerKind]
     assert values == [
-        "COMMISSION", "WITHDRAW", "WITHDRAW_REFUND", "CONVERT", "CLAWBACK", "ADJUST",
+        "COMMISSION",
+        "WITHDRAW",
+        "WITHDRAW_REFUND",
+        "CONVERT",
+        "CLAWBACK",
+        "ADJUST",
     ]
     assert all(v == v.upper() for v in values)
 
@@ -19,10 +24,14 @@ def test_withdrawal_status_values() -> None:
 
 def test_ledger_row_carries_signed_fen() -> None:
     earn = CommissionLedger(
-        user_id=1, amount_fen=1000, kind=CommissionLedgerKind.COMMISSION,
+        user_id=1,
+        amount_fen=1000,
+        kind=CommissionLedgerKind.COMMISSION,
     )
     debit = CommissionLedger(
-        user_id=1, amount_fen=-1000, kind=CommissionLedgerKind.WITHDRAW,
+        user_id=1,
+        amount_fen=-1000,
+        kind=CommissionLedgerKind.WITHDRAW,
     )
     assert earn.amount_fen == 1000
     assert debit.amount_fen == -1000

@@ -19,6 +19,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -28,7 +29,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    TIMESTAMP,
     UniqueConstraint,
     text,
 )
@@ -49,7 +49,9 @@ class Skill(Base):
     __tablename__ = "skill"
 
     id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True,
+        Integer,
+        primary_key=True,
+        autoincrement=True,
     )
     user_id: Mapped[int | None] = mapped_column(
         Integer,
@@ -78,20 +80,27 @@ class Skill(Base):
     # "no map" state) instead of a JSONB ``'null'`` literal, keeping
     # ``IS NULL`` filters honest.
     display_name_i18n: Mapped[dict[str, str] | None] = mapped_column(
-        JSONB(none_as_null=True), nullable=True,
+        JSONB(none_as_null=True),
+        nullable=True,
     )
     description: Mapped[str] = mapped_column(Text, nullable=False)
     bundle_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     bundle_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true"),
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
@@ -102,7 +111,8 @@ class Skill(Base):
         # SQL). This partial index enforces name uniqueness across the
         # whole platform-owned set.
         Index(
-            "uq_skill_platform_name", "name",
+            "uq_skill_platform_name",
+            "name",
             unique=True,
             postgresql_where=text("user_id IS NULL"),
         ),

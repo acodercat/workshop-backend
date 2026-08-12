@@ -19,7 +19,7 @@ replica, not just the node that ran the previous turn.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, String, TIMESTAMP, Uuid, text
+from sqlalchemy import TIMESTAMP, ForeignKey, String, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -44,7 +44,10 @@ class SessionContext(Base):
     # axon ``Message`` dicts (``Message.to_dict``). Rewritten whole each
     # turn; compaction bounds the size.
     messages: Mapped[list[dict]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     # The session's current todo checklist (``TodoItem`` dicts). Durable owner
     # of the list: ``todo_write`` is compactable in axon, so its calls can be
@@ -52,12 +55,19 @@ class SessionContext(Base):
     # compaction. The worker rewrites it each turn from ``Agent.todos`` and
     # seeds the next run via ``Agent.run(todos=...)``.
     todos: Mapped[list[dict]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
-        server_default=func.now(), onupdate=func.now(), nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )

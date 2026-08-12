@@ -21,9 +21,7 @@ DEFAULT_DAYS = 30
 
 
 def _resolve_window(
-    days: int = Query(
-        DEFAULT_DAYS, description=f"Trailing window in days: {ALLOWED_DAYS}"
-    ),
+    days: int = Query(DEFAULT_DAYS, description=f"Trailing window in days: {ALLOWED_DAYS}"),
 ) -> int:
     """Clamp a requested window to the offered set.
 

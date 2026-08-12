@@ -7,7 +7,7 @@ surface (``GET /commissions/*``, withdrawal / convert requests) speaks
 discipline in :mod:`app.services.credits.rates`.
 """
 
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 
 def fen_from_cny(amount_cny: float | str) -> int:

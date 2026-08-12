@@ -36,9 +36,7 @@ from app.services.auth import invite as invite_service
 router = APIRouter(tags=["invites"])
 
 
-def _to_code_response(
-    code: InviteCode, owner_username: str | None
-) -> InviteCodeResponse:
+def _to_code_response(code: InviteCode, owner_username: str | None) -> InviteCodeResponse:
     return InviteCodeResponse(
         id=code.id,
         code=code.code,
@@ -73,13 +71,9 @@ async def list_invite_codes(
         filters.append(InviteCode.origin == origin)
     if q is not None:
         pattern = f"%{q}%"
-        filters.append(
-            sa.or_(InviteCode.code.ilike(pattern), InviteCode.note.ilike(pattern))
-        )
+        filters.append(sa.or_(InviteCode.code.ilike(pattern), InviteCode.note.ilike(pattern)))
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(InviteCode).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(InviteCode).where(*filters))
     rows = (
         await ctx.db.execute(
             paginate(
@@ -104,9 +98,7 @@ async def list_invite_codes(
     response_model=InviteCodeResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_invite_code(
-    ctx: StaffContext, body: InviteCodeCreate
-) -> InviteCodeResponse:
+async def create_invite_code(ctx: StaffContext, body: InviteCodeCreate) -> InviteCodeResponse:
     """Issue a ``SYSTEM`` invite code.
 
     The generated code lands in the audit payload: an invite is an
@@ -156,18 +148,14 @@ async def list_invite_redemptions(
     if referrer_user_id is not None:
         filters.append(InviteRedemption.referrer_user_id == referrer_user_id)
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(InviteRedemption).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(InviteRedemption).where(*filters))
     rows = (
         await ctx.db.execute(
             paginate(
                 select(InviteRedemption, InviteCode, invitee.username, referrer.username)
                 .join(InviteCode, InviteCode.id == InviteRedemption.invite_code_id)
                 .join(invitee, invitee.id == InviteRedemption.invitee_user_id)
-                .outerjoin(
-                    referrer, referrer.id == InviteRedemption.referrer_user_id
-                )
+                .outerjoin(referrer, referrer.id == InviteRedemption.referrer_user_id)
                 .where(*filters)
                 .order_by(InviteRedemption.created_at.desc()),
                 page,

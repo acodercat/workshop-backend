@@ -4,7 +4,7 @@ no-referrer / not-paid no-ops. The DB session and the ledger primitive
 are monkeypatched; the funnel SQL is covered elsewhere."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,8 +17,12 @@ from config import settings
 
 def _order(status=PaymentOrderStatus.PAID, amount_fen=10000) -> PaymentOrder:
     order = PaymentOrder(
-        user_id=7, out_trade_no="hf1", amount_fen=amount_fen,
-        credit_micro=0, status=status, reference={},
+        user_id=7,
+        out_trade_no="hf1",
+        amount_fen=amount_fen,
+        credit_micro=0,
+        status=status,
+        reference={},
     )
     order.id = uuid.uuid4()
     return order
@@ -59,7 +63,7 @@ async def test_accrues_rate_of_paid_amount(monkeypatch, enabled) -> None:
     assert kwargs["invitee_user_id"] == 7
     assert kwargs["amount_fen"] == 1000  # 10% of 10000
     assert kwargs["out_trade_no"] == "hf1"
-    assert kwargs["available_at"] > datetime.now(timezone.utc)
+    assert kwargs["available_at"] > datetime.now(UTC)
     db.commit.assert_awaited_once()
 
 
@@ -90,7 +94,11 @@ async def test_not_paid_skips(monkeypatch, enabled) -> None:
 async def test_apply_commission_rejects_non_positive() -> None:
     with pytest.raises(ValueError):
         await apply_commission(
-            MagicMock(), referrer_user_id=1, invitee_user_id=2,
-            payment_order_id=uuid.uuid4(), out_trade_no="hf1",
-            amount_fen=0, available_at=datetime.now(timezone.utc),
+            MagicMock(),
+            referrer_user_id=1,
+            invitee_user_id=2,
+            payment_order_id=uuid.uuid4(),
+            out_trade_no="hf1",
+            amount_fen=0,
+            available_at=datetime.now(UTC),
         )

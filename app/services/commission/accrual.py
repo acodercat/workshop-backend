@@ -21,7 +21,7 @@ is the primitive and ``register.py`` is the best-effort caller:
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -91,7 +91,8 @@ async def apply_commission(
         await db.rollback()
         logger.info(
             "commission duplicate out_trade_no=%s referrer=%s (treated as success)",
-            out_trade_no, referrer_user_id,
+            out_trade_no,
+            referrer_user_id,
         )
         raise CommissionAlreadyApplied(
             f"Commission for out_trade_no={out_trade_no!r} already applied"
@@ -138,9 +139,7 @@ async def accrue_for_order(db: AsyncSession, *, out_trade_no: str) -> None:
         if amount_fen <= 0:
             return
 
-        available_at = datetime.now(timezone.utc) + timedelta(
-            days=settings.commission_hold_days
-        )
+        available_at = datetime.now(UTC) + timedelta(days=settings.commission_hold_days)
         await apply_commission(
             db,
             referrer_user_id=referrer_user_id,
@@ -153,7 +152,10 @@ async def accrue_for_order(db: AsyncSession, *, out_trade_no: str) -> None:
         await db.commit()
         logger.info(
             "commission accrued: referrer=%s invitee=%s out_trade_no=%s amount_fen=%s",
-            referrer_user_id, order.user_id, out_trade_no, amount_fen,
+            referrer_user_id,
+            order.user_id,
+            out_trade_no,
+            amount_fen,
         )
     except CommissionAlreadyApplied:
         pass  # a prior delivery / reconcile already accrued — no-op

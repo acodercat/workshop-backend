@@ -13,7 +13,7 @@ visible from the endpoint that calls it:
 No live database, so the query is pinned by its compiled text.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -22,7 +22,6 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.public.session import _owned_connector_or_404, _owned_mcp_server_ids
-from app.services.session import connectors as session_connectors
 from app.models.session import SessionStatus
 from app.models.session_mcp_server import SessionMCPServer
 from app.schemas.session import (
@@ -34,6 +33,7 @@ from app.schemas.session import (
     SessionUpdate,
     Tier,
 )
+from app.services.session import connectors as session_connectors
 
 
 def _db_owning(*ids: int):
@@ -116,23 +116,31 @@ class TestTheWireCarriesItOnTheSession:
         # and the handler passes it explicitly — nothing else in the suite
         # constructs either, and the first cut of this shipped a detail response
         # that could not be built at all.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         row = SimpleNamespace(
-            id=uuid4(), user_id=1, title="t", status=SessionStatus.IDLE,
-            tier=list(Tier)[0], agent_type=list(AgentType)[0],
-            created_at=now, updated_at=now,
+            id=uuid4(),
+            user_id=1,
+            title="t",
+            status=SessionStatus.IDLE,
+            tier=list(Tier)[0],
+            agent_type=list(AgentType)[0],
+            created_at=now,
+            updated_at=now,
         )
 
         assert "connectors" not in SessionResponse.model_fields
         SessionResponse.model_validate(row)
-        assert (
-            SessionDetailResponse(
-                id=row.id, title=row.title, status=row.status, tier=row.tier,
-                agent_type=row.agent_type, connectors=[3, 7],
-                created_at=now, updated_at=now, messages=[],
-            ).connectors
-            == [3, 7]
-        )
+        assert SessionDetailResponse(
+            id=row.id,
+            title=row.title,
+            status=row.status,
+            tier=row.tier,
+            agent_type=row.agent_type,
+            connectors=[3, 7],
+            created_at=now,
+            updated_at=now,
+            messages=[],
+        ).connectors == [3, 7]
 
 
 class TestWhyItIsATableAndNotAnArray:
@@ -157,7 +165,8 @@ class TestWhyItIsATableAndNotAnArray:
         # Deduplication happens in ``_owned_mcp_server_ids`` too; this is the
         # backstop that does not depend on remembering to call it.
         assert [c.name for c in SessionMCPServer.__table__.primary_key] == [
-            "session_id", "mcp_server_id",
+            "session_id",
+            "mcp_server_id",
         ]
 
     def test_the_cascade_from_mcp_server_has_an_index(self):

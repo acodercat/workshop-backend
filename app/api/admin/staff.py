@@ -31,8 +31,7 @@ from app.schemas.admin.staff import (
     StaffUpdate,
 )
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.services.admin import AdminContext, AuditAction, audit
-from app.services.admin import staff as staff_service
+from app.services.admin import AdminContext, AuditAction, audit, staff as staff_service
 
 router = APIRouter(tags=["staff"])
 
@@ -63,9 +62,7 @@ async def list_staff(
     """
     total = await ctx.db.scalar(select(func.count()).select_from(Staff))
     rows = (
-        await ctx.db.scalars(
-            paginate(select(Staff).order_by(Staff.username), page, page_size)
-        )
+        await ctx.db.scalars(paginate(select(Staff).order_by(Staff.username), page, page_size))
     ).all()
     return PaginatedResponse(
         items=[StaffResponse.model_validate(row) for row in rows],
@@ -100,9 +97,7 @@ async def read_staff(ctx: StaffContext, staff_id: int) -> StaffResponse:
 
 
 @router.patch("/staff/{staff_id}", response_model=StaffResponse)
-async def update_staff(
-    ctx: StaffContext, staff_id: int, body: StaffUpdate
-) -> StaffResponse:
+async def update_staff(ctx: StaffContext, staff_id: int, body: StaffUpdate) -> StaffResponse:
     """Change an account's name or status.
 
     The payload records a before → after entry per field actually
@@ -131,9 +126,7 @@ async def update_staff(
         target_id=account.id,
         reason=body.reason,
     ) as draft:
-        await staff_service.update(
-            ctx.db, account, name=body.name, status=body.status
-        )
+        await staff_service.update(ctx.db, account, name=body.name, status=body.status)
         draft.payload = changes
 
     return StaffResponse.model_validate(account)

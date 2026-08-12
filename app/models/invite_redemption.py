@@ -21,10 +21,10 @@ ops step.
 from datetime import datetime
 
 from sqlalchemy import (
+    TIMESTAMP,
     ForeignKey,
     Index,
     Integer,
-    TIMESTAMP,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -37,7 +37,9 @@ class InviteRedemption(Base):
     __tablename__ = "invite_redemption"
 
     id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True,
+        Integer,
+        primary_key=True,
+        autoincrement=True,
     )
     invite_code_id: Mapped[int] = mapped_column(
         Integer,
@@ -57,12 +59,15 @@ class InviteRedemption(Base):
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
     __table_args__ = (
         UniqueConstraint(
-            "invitee_user_id", name="uq_invite_redemption_invitee",
+            "invitee_user_id",
+            name="uq_invite_redemption_invitee",
         ),
         # FK read-path indexes (Postgres doesn't auto-index FK columns):
         # per-code redemption count, and the referrer's "my invitees"

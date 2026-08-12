@@ -88,7 +88,10 @@ async def change_phone(
     forces every active session, including this one, to re-login.
     """
     await verify_phone_change_code(
-        redis, user_id=user.id, phone=new_phone, code=code,
+        redis,
+        user_id=user.id,
+        phone=new_phone,
+        code=code,
     )
 
     user.phone = new_phone
@@ -99,9 +102,7 @@ async def change_phone(
         # Race: someone else claimed this number between the uniqueness
         # pre-check (step 1) and now. Surface as ``phone_taken``.
         await db.rollback()
-        logger.info(
-            "phone_change race: user_id=%s new_phone=%s", user.id, new_phone
-        )
+        logger.info("phone_change race: user_id=%s new_phone=%s", user.id, new_phone)
         raise PhoneTakenError("Phone already in use") from exc
 
     await db.refresh(user)

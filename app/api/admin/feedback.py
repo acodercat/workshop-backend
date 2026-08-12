@@ -23,9 +23,7 @@ from app.services.admin import AuditAction, audit
 router = APIRouter(tags=["feedback"])
 
 
-def _to_feedback_response(
-    feedback: UserFeedback, username: str | None
-) -> FeedbackResponse:
+def _to_feedback_response(feedback: UserFeedback, username: str | None) -> FeedbackResponse:
     return FeedbackResponse(
         id=feedback.id,
         user_id=feedback.user_id,
@@ -60,9 +58,7 @@ async def list_feedback(
     if user_id is not None:
         filters.append(UserFeedback.user_id == user_id)
 
-    total = await ctx.db.scalar(
-        select(func.count()).select_from(UserFeedback).where(*filters)
-    )
+    total = await ctx.db.scalar(select(func.count()).select_from(UserFeedback).where(*filters))
     rows = (
         await ctx.db.execute(
             paginate(
@@ -77,9 +73,7 @@ async def list_feedback(
     ).all()
 
     return PaginatedResponse(
-        items=[
-            _to_feedback_response(entry, username) for entry, username in rows
-        ],
+        items=[_to_feedback_response(entry, username) for entry, username in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 
@@ -102,9 +96,7 @@ async def update_feedback(
     username = (
         None
         if feedback.user_id is None
-        else await ctx.db.scalar(
-            select(User.username).where(User.id == feedback.user_id)
-        )
+        else await ctx.db.scalar(select(User.username).where(User.id == feedback.user_id))
     )
 
     if feedback.status == body.status:

@@ -4,7 +4,7 @@ monkeypatched (the credit-funnel + SQL are tested elsewhere); these tests
 pin the routing + guard logic."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -41,8 +41,11 @@ def _order(status=PaymentOrderStatus.PENDING, amount_fen=10000) -> PaymentOrder:
 
 def _paid_event(amount_fen=10000) -> VerifiedEvent:
     return VerifiedEvent(
-        out_trade_no="hf1", provider_txn_id="H9", amount_fen=amount_fen,
-        succeeded=True, raw={"sub_resp_code": "00000000"},
+        out_trade_no="hf1",
+        provider_txn_id="H9",
+        amount_fen=amount_fen,
+        succeeded=True,
+        raw={"sub_resp_code": "00000000"},
     )
 
 
@@ -103,7 +106,9 @@ async def test_handle_webhook_duplicate_topup_backlinks_existing(monkeypatch) ->
     order = _order()
     monkeypatch.setattr(orders, "_lock_order", AsyncMock(return_value=order))
     monkeypatch.setattr(
-        orders, "apply_topup", AsyncMock(side_effect=TopupAlreadyApplied("dup")),
+        orders,
+        "apply_topup",
+        AsyncMock(side_effect=TopupAlreadyApplied("dup")),
     )
     db = MagicMock()
     db.scalar = AsyncMock(return_value=77)  # the existing ledger row id
@@ -118,8 +123,11 @@ async def test_create_order_freezes_grant_and_calls_provider(monkeypatch) -> Non
     fake_provider = MagicMock()
     fake_provider.create_charge = AsyncMock(
         return_value=ChargeResult(
-            out_trade_no="x", qr_code="https://qr", trade_type="A_NATIVE",
-            provider_txn_id="H1", raw={},
+            out_trade_no="x",
+            qr_code="https://qr",
+            trade_type="A_NATIVE",
+            provider_txn_id="H1",
+            raw={},
         )
     )
     monkeypatch.setattr(orders, "_provider", fake_provider)
@@ -128,7 +136,10 @@ async def test_create_order_freezes_grant_and_calls_provider(monkeypatch) -> Non
     db.flush = AsyncMock()
 
     order = await orders.create_order(
-        db, user_id=1, amount_cny=100, channel="ALIPAY",
+        db,
+        user_id=1,
+        amount_cny=100,
+        channel="ALIPAY",
     )
 
     assert order.amount_fen == 10000
@@ -145,13 +156,16 @@ async def test_create_order_freezes_grant_and_calls_provider(monkeypatch) -> Non
 async def test_create_order_rejects_amount_below_minimum() -> None:
     with pytest.raises(PaymentAmountRangeError):
         await orders.create_order(
-            MagicMock(), user_id=1, amount_cny=0.5, channel="ALIPAY",
+            MagicMock(),
+            user_id=1,
+            amount_cny=0.5,
+            channel="ALIPAY",
         )
 
 
 def _reapable_expires_at() -> datetime:
     """An ``expires_at`` safely past ``expires_at + grace`` — reapable now."""
-    return datetime.now(timezone.utc) - timedelta(
+    return datetime.now(UTC) - timedelta(
         seconds=orders._EXPIRE_GRACE_SECONDS + 5,
     )
 
@@ -160,7 +174,7 @@ async def test_get_order_takes_row_lock() -> None:
     # The lazy-expiry read must lock the row so a poll can't clobber a
     # PAID the webhook committed in the gap (see get_order docstring).
     order = _order()
-    order.expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    order.expires_at = datetime.now(UTC) + timedelta(minutes=5)
     captured: dict = {}
 
     async def _scalar(stmt):
@@ -208,7 +222,7 @@ async def test_get_order_missing_raises_not_found() -> None:
 
 
 def test_is_expired_respects_grace() -> None:
-    now = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
     order = _order()
     # Just past expires_at but within the grace → not yet reapable, so the
     # reconciler keeps querying and can still catch a late-settling payment.

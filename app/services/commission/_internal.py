@@ -43,9 +43,7 @@ async def lock_user_commission_balance(db: AsyncSession, user_id: int) -> int:
     ``FOR UPDATE`` enforces.
     """
     result = await db.execute(
-        select(User.commission_balance_fen)
-        .where(User.id == user_id)
-        .with_for_update()
+        select(User.commission_balance_fen).where(User.id == user_id).with_for_update()
     )
     balance = result.scalar_one_or_none()
     if balance is None:
@@ -102,6 +100,9 @@ async def insert_ledger_and_bump_balance(
 
     logger.info(
         "commission ledger: user=%s kind=%s amount_fen=%s ref=%s",
-        user_id, kind.value, amount_fen, reference,
+        user_id,
+        kind.value,
+        amount_fen,
+        reference,
     )
     return entry

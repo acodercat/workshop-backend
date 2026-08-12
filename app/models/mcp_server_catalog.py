@@ -20,13 +20,13 @@ no deploy.
 from datetime import datetime
 
 from sqlalchemy import (
+    TIMESTAMP,
     Boolean,
     Enum as SAEnum,
     Index,
     Integer,
     String,
     Text,
-    TIMESTAMP,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -41,7 +41,9 @@ class MCPServerCatalogEntry(Base):
     __tablename__ = "mcp_server_catalog"
 
     id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True,
+        Integer,
+        primary_key=True,
+        autoincrement=True,
     )
     # Copied onto the user's row at add time, and free to repeat: what stops
     # the same official Connector being added twice is the URL travelling with
@@ -53,7 +55,8 @@ class MCPServerCatalogEntry(Base):
     # ``none_as_null`` so "no translations" persists as SQL NULL rather than a
     # JSONB ``'null'`` literal, keeping ``IS NULL`` honest.
     name_i18n: Mapped[dict[str, str] | None] = mapped_column(
-        JSONB(none_as_null=True), nullable=True,
+        JSONB(none_as_null=True),
+        nullable=True,
     )
     # The entry's identity, and the only thing that has to be unique: two rows
     # pointing at one server are the same Connector offered twice, whatever
@@ -84,11 +87,13 @@ class MCPServerCatalogEntry(Base):
     # app, at which point re-adding from the catalog picks up the new one.
     oauth_client_id: Mapped[str | None] = mapped_column(String, nullable=True)
     oauth_client_secret_encrypted: Mapped[str | None] = mapped_column(
-        String, nullable=True,
+        String,
+        nullable=True,
     )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_i18n: Mapped[dict[str, str] | None] = mapped_column(
-        JSONB(none_as_null=True), nullable=True,
+        JSONB(none_as_null=True),
+        nullable=True,
     )
     # Operator-set so a new entry needs no frontend deploy; the card falls back
     # to its generic icon when NULL.
@@ -99,17 +104,25 @@ class MCPServerCatalogEntry(Base):
     # Unpublishing hides the entry without deleting it, so the FK from rows
     # already instantiated stays intact.
     published: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true"),
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
     )
     sort_order: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
@@ -123,6 +136,5 @@ class MCPServerCatalogEntry(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<MCPServerCatalogEntry(id={self.id}, name={self.name!r}, "
-            f"published={self.published})>"
+            f"<MCPServerCatalogEntry(id={self.id}, name={self.name!r}, published={self.published})>"
         )

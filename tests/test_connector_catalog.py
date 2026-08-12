@@ -19,10 +19,15 @@ from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES, build_connector
 
 def _entry(**over) -> MCPServerCatalogEntry:
     base = dict(
-        id=7, name="Notion", url="https://mcp.notion.com/mcp",
-        auth_type=MCPServerAuthType.OAUTH, oauth_scope="read",
-        description="Search your pages", icon_url=None,
-        published=True, sort_order=0,
+        id=7,
+        name="Notion",
+        url="https://mcp.notion.com/mcp",
+        auth_type=MCPServerAuthType.OAUTH,
+        oauth_scope="read",
+        description="Search your pages",
+        icon_url=None,
+        published=True,
+        sort_order=0,
     )
     base.update(over)
     return MCPServerCatalogEntry(**base)
@@ -49,7 +54,8 @@ class TestBuildConnector:
         assert build_connector(entry, user_id=1, locale=DEFAULT_LOCALE).connected is True
 
     @pytest.mark.parametrize(
-        "auth_type", [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER],
+        "auth_type",
+        [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER],
     )
     def test_rejects_auth_types_needing_a_per_user_secret(self, auth_type):
         # The catalog holds no credential and the add flow has nowhere to ask
@@ -93,9 +99,7 @@ class TestUnpublishedEntriesAreUnreachable:
     async def test_an_id_kept_from_an_earlier_listing_stops_working(self):
         # Without this predicate an unpublished entry stays addable by anyone
         # who wrote its id down, which is the whole thing unpublishing prevents.
-        sql = await self._statement(
-            lambda db: catalog.get_published_entry(db, 7)
-        )
+        sql = await self._statement(lambda db: catalog.get_published_entry(db, 7))
 
         assert "mcp_server_catalog.published IS true" in sql
         assert "mcp_server_catalog.id = " in sql
@@ -106,7 +110,8 @@ class TestInstantiableAuthTypes:
         # The operator CLI's --auth-type choices are derived from this set, so
         # widening it must be a deliberate edit, not a side effect.
         assert INSTANTIABLE_AUTH_TYPES == {
-            MCPServerAuthType.NONE, MCPServerAuthType.OAUTH,
+            MCPServerAuthType.NONE,
+            MCPServerAuthType.OAUTH,
         }
 
 
@@ -179,9 +184,7 @@ class TestPreRegisteredClientPassThrough:
             registered.update(kwargs)
             return "sealed-client", {"issuer": "https://as.example.com"}
 
-        monkeypatch.setattr(
-            endpoint.catalog, "get_published_entry", AsyncMock(return_value=entry)
-        )
+        monkeypatch.setattr(endpoint.catalog, "get_published_entry", AsyncMock(return_value=entry))
         monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
         monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
         monkeypatch.setattr(endpoint, "_register_oauth_client", _capture)
@@ -190,9 +193,7 @@ class TestPreRegisteredClientPassThrough:
         )
         return registered
 
-    async def test_the_entrys_app_reaches_registration_decrypted(
-        self, monkeypatch, fernet_key
-    ):
+    async def test_the_entrys_app_reaches_registration_decrypted(self, monkeypatch, fernet_key):
         entry = _entry(
             oauth_client_id="app-id",
             oauth_client_secret_encrypted=crypto.encrypt_secret("app-secret"),

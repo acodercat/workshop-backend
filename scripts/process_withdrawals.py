@@ -86,19 +86,29 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument(
-        "--list", action="store_true", help="List PENDING withdrawals.",
+        "--list",
+        action="store_true",
+        help="List PENDING withdrawals.",
     )
     action.add_argument(
-        "--pay", type=uuid.UUID, metavar="ID", help="Mark a withdrawal PAID.",
+        "--pay",
+        type=uuid.UUID,
+        metavar="ID",
+        help="Mark a withdrawal PAID.",
     )
     action.add_argument(
-        "--reject", type=uuid.UUID, metavar="ID", help="Reject a withdrawal.",
+        "--reject",
+        type=uuid.UUID,
+        metavar="ID",
+        help="Reject a withdrawal.",
     )
     parser.add_argument(
-        "--ref", help="Payout transfer reference (required with --pay).",
+        "--ref",
+        help="Payout transfer reference (required with --pay).",
     )
     parser.add_argument(
-        "--reason", help="Rejection reason (required with --reject).",
+        "--reason",
+        help="Rejection reason (required with --reject).",
     )
     args = parser.parse_args()
     if args.pay is not None and not args.ref:

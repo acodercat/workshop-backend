@@ -51,10 +51,7 @@ class SmsSendError(Exception):
 
 
 def _make_client() -> SmsClient:
-    if (
-        not settings.aliyun_sms_access_key_id
-        or not settings.aliyun_sms_access_key_secret
-    ):
+    if not settings.aliyun_sms_access_key_id or not settings.aliyun_sms_access_key_secret:
         raise SmsSendError(
             "Aliyun SMS credentials missing — set "
             "``aliyun_sms_access_key_id`` and ``aliyun_sms_access_key_secret``"
@@ -98,7 +95,10 @@ async def send_verification_sms(*, phone: str, code: str) -> str:
         request_id = exc.data.get("RequestId") if exc.data else None
         logger.warning(
             "Aliyun SMS send failed: code=%s message=%s request_id=%s phone=%s",
-            exc.code, exc.message, request_id, phone,
+            exc.code,
+            exc.message,
+            request_id,
+            phone,
         )
         raise SmsSendError(
             message=exc.message or "Aliyun SMS rejected the send",
@@ -115,7 +115,10 @@ async def send_verification_sms(*, phone: str, code: str) -> str:
     if body.code != _SUCCESS_CODE:
         logger.warning(
             "Aliyun SMS rejected: code=%s message=%s request_id=%s phone=%s",
-            body.code, body.message, body.request_id, phone,
+            body.code,
+            body.message,
+            body.request_id,
+            phone,
         )
         raise SmsSendError(
             message=body.message or "Aliyun SMS rejected the send",

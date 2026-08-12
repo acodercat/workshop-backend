@@ -72,9 +72,16 @@ def _unresolved(source: str) -> set[str]:
     bindings.visit(tree)
     # Module-level names the interpreter supplies; ``__path__`` exists only in
     # a package's ``__init__``, which is where the auto-import walk reads it.
-    known = bindings.names | set(dir(builtins)) | {
-        "__file__", "__name__", "__doc__", "__path__",
-    }
+    known = (
+        bindings.names
+        | set(dir(builtins))
+        | {
+            "__file__",
+            "__name__",
+            "__doc__",
+            "__path__",
+        }
+    )
     read = {
         node.id
         for node in ast.walk(tree)

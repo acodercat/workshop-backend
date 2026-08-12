@@ -27,9 +27,7 @@ class UnsupportedFileTypeError(ValueError):
     def __init__(self, ext: str, allowed: list[str]) -> None:
         self.ext = ext
         self.allowed = allowed
-        super().__init__(
-            f"Unsupported file extension {ext!r}. Allowed: {', '.join(allowed)}"
-        )
+        super().__init__(f"Unsupported file extension {ext!r}. Allowed: {', '.join(allowed)}")
 
 
 class FileTooLargeError(ValueError):
@@ -38,9 +36,7 @@ class FileTooLargeError(ValueError):
     def __init__(self, size_bytes: int, max_bytes: int) -> None:
         self.size_bytes = size_bytes
         self.max_bytes = max_bytes
-        super().__init__(
-            f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap"
-        )
+        super().__init__(f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap")
 
 
 class FileObjectNotFoundError(ValueError):
@@ -91,10 +87,11 @@ ORPHAN_TAGGING_HEADER = f"{_ORPHAN_TAG_KEY}={_ORPHAN_TAG_VALUE}"
 @dataclass(frozen=True)
 class UploadPolicy:
     """Per-asset-type config scoping all OSS operations."""
+
     bucket_name: str
     key_prefix: str
     max_bytes: int
-    allowed_types: dict[str, str]   # extension → content-type
+    allowed_types: dict[str, str]  # extension → content-type
 
 
 # Session file uploads (any whitelisted type, 100 MiB cap). The OSS
@@ -296,7 +293,9 @@ def delete(policy: UploadPolicy, file_key: str) -> None:
 
 
 def generate_download_url(
-    policy: UploadPolicy, file_key: str, filename: str,
+    policy: UploadPolicy,
+    file_key: str,
+    filename: str,
 ) -> tuple[str, int]:
     """Presigned GET URL with Content-Disposition for browser save-as.
 
@@ -350,9 +349,7 @@ def generate_inline_url(policy: UploadPolicy, file_key: str) -> tuple[str, int]:
     ext = os.path.splitext(file_key)[1].lower()
     if ext in _INLINE_FORBIDDEN_EXTENSIONS:
         raise InlinePreviewNotAllowedError(ext)
-    url = get_bucket(
-        policy.bucket_name, cname_domain=settings.oss_document_domain
-    ).sign_url(
+    url = get_bucket(policy.bucket_name, cname_domain=settings.oss_document_domain).sign_url(
         "GET",
         file_key,
         expires=_DOWNLOAD_URL_TTL_SECONDS,

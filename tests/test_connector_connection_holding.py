@@ -13,7 +13,7 @@ would strand it when the probe that follows fails.
 """
 
 import inspect
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,8 +23,7 @@ from app.api.public import mcp_server as endpoint
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.schemas.mcp_server import ConnectorUpdate
 
-
-_EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _session() -> AsyncMock:
@@ -59,15 +58,18 @@ class TestEveryOutboundCallIsPrecededByARelease:
     """Source-level, and deliberately so: the property is "no *future* handler
     forgets", which no behavioural test of today's handlers can express."""
 
-    @pytest.mark.parametrize("function,call", [
-        ("create_connector", "await probe("),
-        ("_build_catalog_connector", "await _register_oauth_client("),
-        ("_build_oauth_connector", "await _register_oauth_client("),
-        ("create_connector_authorization", "await oauth.discover_authorization("),
-        ("oauth_callback", "await oauth.discover_authorization("),
-        ("create_connector_tool_listing", "await probe("),
-        ("update_connector", "await probe("),
-    ])
+    @pytest.mark.parametrize(
+        "function,call",
+        [
+            ("create_connector", "await probe("),
+            ("_build_catalog_connector", "await _register_oauth_client("),
+            ("_build_oauth_connector", "await _register_oauth_client("),
+            ("create_connector_authorization", "await oauth.discover_authorization("),
+            ("oauth_callback", "await oauth.discover_authorization("),
+            ("create_connector_tool_listing", "await probe("),
+            ("update_connector", "await probe("),
+        ],
+    )
     def test_the_release_comes_first(self, function, call):
         source = inspect.getsource(getattr(endpoint, function))
         assert "_release_connection(db)" in source, f"{function} holds its connection"
@@ -95,12 +97,19 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
 
     def _connector(self, **over):
         base = dict(
-            id=1, user_id=7, name="c", url="https://mcp.example.com/mcp",
-            auth_type=MCPServerAuthType.OAUTH, connected=True,
-            oauth_tokens_encrypted="sealed", disabled_tools=[],
+            id=1,
+            user_id=7,
+            name="c",
+            url="https://mcp.example.com/mcp",
+            auth_type=MCPServerAuthType.OAUTH,
+            connected=True,
+            oauth_tokens_encrypted="sealed",
+            disabled_tools=[],
             # Columns the response model requires and only a DB default fills.
-            oauth_reauthorization_required=False, last_connect_failed=False,
-            created_at=_EPOCH, updated_at=_EPOCH,
+            oauth_reauthorization_required=False,
+            last_connect_failed=False,
+            created_at=_EPOCH,
+            updated_at=_EPOCH,
         )
         base.update(over)
         return MCPServer(**base)
@@ -108,7 +117,9 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
     async def _patch(self, monkeypatch, connector, body, probe):
         monkeypatch.setattr(endpoint, "probe", probe)
         monkeypatch.setattr(
-            endpoint, "_get_owned_connector", AsyncMock(return_value=connector),
+            endpoint,
+            "_get_owned_connector",
+            AsyncMock(return_value=connector),
         )
         monkeypatch.setattr(endpoint, "_commit_or_conflict", AsyncMock())
         # The URL guard has its own cover in test_connector_url_uniqueness;
@@ -118,9 +129,13 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
         monkeypatch.setattr(endpoint, "_decrypt_or_none", lambda ciphertext: None)
         monkeypatch.setattr(endpoint.limiter, "enabled", False)
         return await endpoint.update_connector(
-            request=MagicMock(), connector_id=1, body=body,
-            background_tasks=MagicMock(), db=_session(),
-            redis=AsyncMock(), current_user=MagicMock(id=7),
+            request=MagicMock(),
+            connector_id=1,
+            body=body,
+            background_tasks=MagicMock(),
+            db=_session(),
+            redis=AsyncMock(),
+            current_user=MagicMock(id=7),
         )
 
     async def test_leaving_oauth_for_bearer_is_probed(self, monkeypatch):
@@ -134,7 +149,8 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
             return endpoint.ProbeResult(server_name="s", tools=[], icons=[])
 
         await self._patch(
-            monkeypatch, self._connector(),
+            monkeypatch,
+            self._connector(),
             ConnectorUpdate(auth_type=MCPServerAuthType.BEARER, credential="tok"),
             probe,
         )
@@ -153,7 +169,8 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
 
         with pytest.raises(RuntimeError):
             await self._patch(
-                monkeypatch, connector,
+                monkeypatch,
+                connector,
                 ConnectorUpdate(name="after", url="https://other.example.com/mcp"),
                 probe,
             )

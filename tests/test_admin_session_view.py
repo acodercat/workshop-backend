@@ -6,7 +6,7 @@ and its owner, and a session that never existed leaves no row at all.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -21,7 +21,7 @@ from app.models.session import AgentType, Session, SessionStatus, Tier
 from app.models.staff import Staff, StaffStatus
 
 _SESSION_ID = uuid.UUID("00000000-0000-0000-0000-00000000abcd")
-_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _Scalars:
@@ -54,9 +54,13 @@ class _FakeDb:
 
 def _session() -> Session:
     session = Session(
-        id=_SESSION_ID, user_id=42, title="trip planning",
-        status=SessionStatus.COMPLETE, tier=Tier.STANDARD,
-        agent_type=AgentType.FULL, model_id="m",
+        id=_SESSION_ID,
+        user_id=42,
+        title="trip planning",
+        status=SessionStatus.COMPLETE,
+        tier=Tier.STANDARD,
+        agent_type=AgentType.FULL,
+        model_id="m",
     )
     session.created_at = _NOW
     session.updated_at = _NOW
@@ -66,7 +70,9 @@ def _session() -> Session:
 
 def _message() -> Message:
     message = Message(
-        id=1, session_id=_SESSION_ID, role=MessageRole.USER,
+        id=1,
+        session_id=_SESSION_ID,
+        role=MessageRole.USER,
         blocks=[{"type": "text", "text": "hi"}],
     )
     message.created_at = _NOW
@@ -79,8 +85,12 @@ def _client(db: _FakeDb) -> TestClient:
     app.include_router(admin_session.router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[authenticate_and_get_staff] = lambda: Staff(
-        id=7, username="alice", password_hash="x", name="Alice",
-        status=StaffStatus.ACTIVE, token_version=0,
+        id=7,
+        username="alice",
+        password_hash="x",
+        name="Alice",
+        status=StaffStatus.ACTIVE,
+        token_version=0,
     )
     return TestClient(app)
 

@@ -68,7 +68,10 @@ async def create_payment_order(
     """
     _ensure_enabled()
     order = await payment.create_order(
-        db, user_id=current_user.id, amount_cny=body.amount_cny, channel=body.channel,
+        db,
+        user_id=current_user.id,
+        amount_cny=body.amount_cny,
+        channel=body.channel,
     )
     await db.commit()
     return CreateOrderResponse(
@@ -82,7 +85,8 @@ async def create_payment_order(
 
 
 @router.get(
-    "/payments/orders", response_model=PaginatedResponse[PaymentOrderEntry],
+    "/payments/orders",
+    response_model=PaginatedResponse[PaymentOrderEntry],
 )
 async def list_payment_orders(
     db: AsyncSession = Depends(get_db),
@@ -96,7 +100,10 @@ async def list_payment_orders(
     available even if new top-ups are turned off.
     """
     rows, total = await payment.list_paid_orders(
-        db, user_id=current_user.id, page=page, page_size=page_size,
+        db,
+        user_id=current_user.id,
+        page=page,
+        page_size=page_size,
     )
     return PaginatedResponse(
         items=[
@@ -144,7 +151,8 @@ async def huifu_webhook(
 
     logger.info(
         "huifu webhook received: out_trade_no=%s succeeded=%s",
-        event.out_trade_no, event.succeeded,
+        event.out_trade_no,
+        event.succeeded,
     )
     try:
         await payment.handle_webhook(db, event)

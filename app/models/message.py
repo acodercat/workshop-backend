@@ -4,10 +4,10 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Enum as SAEnum,
     ForeignKey,
-    TIMESTAMP,
     Uuid,
     text,
 )
@@ -31,7 +31,9 @@ class Message(Base):
     # Integer ceiling was a full-table-rewrite time bomb (widened while
     # small in migration ``d5b1f7c3a9e2``).
     id: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True,
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
     )
     session_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
@@ -52,10 +54,15 @@ class Message(Base):
         nullable=False,
     )
     blocks: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
     def __repr__(self) -> str:

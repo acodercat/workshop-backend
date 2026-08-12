@@ -25,13 +25,13 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     Uuid,
     text,
 )
@@ -69,7 +69,9 @@ class WithdrawalRequest(Base):
     # history; deleting a user with payout rows should fail loudly rather
     # than silently drop the audit trail (mirrors ``payment_order.user_id``).
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("user.id", ondelete="RESTRICT"), nullable=False,
+        Integer,
+        ForeignKey("user.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     # Amount requested, in RMB cents (整数分). Integer money — no float.
     amount_fen: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -102,16 +104,21 @@ class WithdrawalRequest(Base):
     # Why a request was rejected, filled when rejected. NULL otherwise.
     reject_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
-        server_default=func.now(), onupdate=func.now(), nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )
     # When the request reached a terminal state (PAID / REJECTED). NULL
     # while PENDING.
     resolved_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
 
     __table_args__ = (

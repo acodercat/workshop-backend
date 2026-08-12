@@ -36,14 +36,16 @@ class TestOpeningASecretThatWillNotOpen:
 
     def test_a_rotated_key_is_a_named_failure(self, monkeypatch):
         monkeypatch.setattr(
-            crypto.settings, "mcp_credential_encryption_key",
+            crypto.settings,
+            "mcp_credential_encryption_key",
             Fernet.generate_key().decode(),
         )
         crypto._cipher.cache_clear()
         sealed = crypto.encrypt_secret("s3cr3t-token")
 
         monkeypatch.setattr(
-            crypto.settings, "mcp_credential_encryption_key",
+            crypto.settings,
+            "mcp_credential_encryption_key",
             Fernet.generate_key().decode(),
         )
         crypto._cipher.cache_clear()

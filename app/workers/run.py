@@ -53,8 +53,8 @@ from app.logging_config import setup_logging
 from app.workers import (
     budget_enforcer,
     payment_reconciler,
-    settle_sweeper,
     settle_subscriber,
+    settle_sweeper,
 )
 from config import settings
 
@@ -101,8 +101,7 @@ async def _run() -> None:
 def main() -> None:
     setup_logging(log_dir="logs", level="INFO")
     logger.info(
-        "background process starting (settle sweeper + subscriber + reconciler"
-        "%s)",
+        "background process starting (settle sweeper + subscriber + reconciler%s)",
         " + budget enforcer" if settings.budget_enforcer_enabled else "",
     )
     try:

@@ -55,13 +55,14 @@ async def main() -> None:
     bucket = _preview_bucket()
     async with AsyncSessionLocal() as db:
         slugs = (
-            await db.execute(
-                text(
-                    "SELECT slug FROM session_site "
-                    "WHERE title IS NULL ORDER BY created_at"
+            (
+                await db.execute(
+                    text("SELECT slug FROM session_site WHERE title IS NULL ORDER BY created_at")
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         print(f"{len(slugs)} rows with NULL title")
 
         updates: list[tuple[str, str]] = []
@@ -89,10 +90,7 @@ async def main() -> None:
             return
         for slug, title in updates:
             await db.execute(
-                text(
-                    "UPDATE session_site SET title = :t "
-                    "WHERE slug = :s AND title IS NULL"
-                ),
+                text("UPDATE session_site SET title = :t WHERE slug = :s AND title IS NULL"),
                 {"t": title, "s": slug},
             )
         await db.commit()

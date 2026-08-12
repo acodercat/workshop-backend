@@ -7,7 +7,7 @@ to the definition of a business day and not to any one consumer.
 asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.common import business_time
@@ -33,7 +33,7 @@ def test_window_starts_at_a_business_day_boundary() -> None:
     local = start.astimezone(_tz())
 
     assert (local.hour, local.minute, local.second) == (0, 0, 0)
-    assert start.tzinfo is timezone.utc
+    assert start.tzinfo is UTC
 
 
 def test_window_spans_whole_days_including_today() -> None:
@@ -62,10 +62,7 @@ def test_business_days_is_the_contiguous_axis_of_the_window() -> None:
     assert days == sorted(days), "oldest first"
     assert days[-1] == business_time.business_today()
     # Contiguous: a chart gap must mean a quiet day, never a missing one.
-    assert all(
-        later - earlier == timedelta(days=1)
-        for earlier, later in zip(days, days[1:])
-    )
+    assert all(later - earlier == timedelta(days=1) for earlier, later in zip(days, days[1:]))
 
 
 def test_the_axis_matches_the_window_it_is_drawn_for() -> None:

@@ -48,9 +48,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
+from app.services import localized_text
 from app.services.crypto import encrypt_secret
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
-from app.services import localized_text
 from app.services.mcp.url_identity import normalize_connector_url
 
 _URL_HELP = "the entry's MCP server URL, exactly as `list` prints it"
@@ -157,7 +157,8 @@ async def _set_published(db: AsyncSession, url: str, published: bool) -> int:
 
 async def _list(db: AsyncSession) -> int:
     stmt = select(MCPServerCatalogEntry).order_by(
-        MCPServerCatalogEntry.sort_order, MCPServerCatalogEntry.id,
+        MCPServerCatalogEntry.sort_order,
+        MCPServerCatalogEntry.id,
     )
     entries = list((await db.execute(stmt)).scalars())
     if not entries:
@@ -165,9 +166,7 @@ async def _list(db: AsyncSession) -> int:
         return 0
     for entry in entries:
         state = "published" if entry.published else "unpublished"
-        app_marker = (
-            f"  app={entry.oauth_client_id}" if entry.oauth_client_id else ""
-        )
+        app_marker = f"  app={entry.oauth_client_id}" if entry.oauth_client_id else ""
         print(
             f"{entry.id:>4}  {entry.name:<20}{'*' if entry.name_i18n else ' '} "
             f"{entry.auth_type.value:<7} "
@@ -213,18 +212,22 @@ def _parse_args() -> argparse.Namespace:
     # Only the two the add flow can complete: BEARER/HEADER would need a secret
     # per user that the catalog cannot hold (see catalog.INSTANTIABLE_AUTH_TYPES).
     add.add_argument(
-        "--auth-type", default=MCPServerAuthType.NONE.value,
+        "--auth-type",
+        default=MCPServerAuthType.NONE.value,
         choices=sorted(m.value for m in INSTANTIABLE_AUTH_TYPES),
     )
     add.add_argument("--oauth-scope", default=None)
     add.add_argument("--description", default=None)
     for field, example in (
-        ("name", "Tianyancha"), ("description", "Search Chinese company records"),
+        ("name", "Tianyancha"),
+        ("description", "Search Chinese company records"),
     ):
         add.add_argument(
-            f"--{field}-i18n", action=_LocaleMap, default=None, metavar="LOCALE=TEXT",
-            help=f"a translated {field}, repeatable "
-                 f'(e.g. --{field}-i18n "en-US={example}")',
+            f"--{field}-i18n",
+            action=_LocaleMap,
+            default=None,
+            metavar="LOCALE=TEXT",
+            help=f'a translated {field}, repeatable (e.g. --{field}-i18n "en-US={example}")',
         )
     add.add_argument("--icon-url", default=None)
     add.add_argument("--sort-order", type=int, default=0)
@@ -239,7 +242,8 @@ def _parse_args() -> argparse.Namespace:
     group = set_client.add_mutually_exclusive_group(required=True)
     group.add_argument("--client-id", help="the app's public client id")
     group.add_argument(
-        "--clear", action="store_true",
+        "--clear",
+        action="store_true",
         help="remove the app; adds fall back to DCR/CIMD",
     )
 

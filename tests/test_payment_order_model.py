@@ -13,7 +13,10 @@ def test_enum_values_are_uppercase_member_names() -> None:
     # The Postgres enum stores the member *values*; values_callable in the
     # model relies on these being the UPPERCASE labels.
     assert [m.value for m in PaymentOrderStatus] == [
-        "PENDING", "PAID", "EXPIRED", "FAILED",
+        "PENDING",
+        "PAID",
+        "EXPIRED",
+        "FAILED",
     ]
     assert [m.value for m in PaymentProvider] == ["HUIFU"]
 

@@ -55,9 +55,7 @@ def _client_ip(request: Request) -> str:
     return get_remote_address(request)
 
 
-def set_rate_limit_principal(
-    request: Request, kind: Literal["user", "staff"], id_: object
-) -> None:
+def set_rate_limit_principal(request: Request, kind: Literal["user", "staff"], id_: object) -> None:
     """Record the authenticated identity slowapi should key on.
 
     Called by the authentication dependencies in :mod:`app.auth` once a
@@ -99,9 +97,7 @@ limiter = Limiter(
 )
 
 
-async def rate_limit_exceeded_handler(
-    request: Request, exc: RateLimitExceeded
-) -> JSONResponse:
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
     """Emit the project's nested ``{error: {type, message}}`` envelope
     on 429 — keeps slowapi-driven rate limits indistinguishable from
     application-driven errors at the wire level."""

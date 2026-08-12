@@ -11,7 +11,7 @@ deployed and renaming a live config key is not worth the churn; what
 matters is that this module is the only place it is read.
 """
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from config import settings
@@ -35,10 +35,8 @@ def window_start(days: int) -> datetime:
     168 hours, which would cut the earliest day in half and make the
     first bar of a chart lie.
     """
-    local_midnight = datetime.now(business_tz()).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    return (local_midnight - timedelta(days=days - 1)).astimezone(timezone.utc)
+    local_midnight = datetime.now(business_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (local_midnight - timedelta(days=days - 1)).astimezone(UTC)
 
 
 def business_days(days: int) -> list[date]:

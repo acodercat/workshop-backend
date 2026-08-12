@@ -48,7 +48,10 @@ class ConvertResult(NamedTuple):
 
 
 async def convert_to_credits(
-    db: AsyncSession, *, user_id: int, amount_fen: int,
+    db: AsyncSession,
+    *,
+    user_id: int,
+    amount_fen: int,
 ) -> ConvertResult:
     """Convert ``amount_fen`` of withdrawable commission into credits.
 
@@ -74,15 +77,11 @@ async def convert_to_credits(
     granted_credits = amount_fen // fen_per_credit
     spent_fen = granted_credits * fen_per_credit
     if granted_credits <= 0:
-        raise CommissionAmountRangeError(
-            "Conversion amount is too small to buy a whole credit"
-        )
+        raise CommissionAmountRangeError("Conversion amount is too small to buy a whole credit")
 
     withdrawable_fen = await lock_withdrawable_fen(db, user_id)
     if amount_fen > withdrawable_fen:
-        raise InsufficientCommissionError(
-            "Conversion exceeds the withdrawable commission balance"
-        )
+        raise InsufficientCommissionError("Conversion exceeds the withdrawable commission balance")
 
     # Debit commission first so the CONVERT row's id back-links the paired
     # credit TOPUP, and the topup's idempotency key is derived from it.
@@ -103,6 +102,8 @@ async def convert_to_credits(
     entry.reference = {**entry.reference, "credit_ledger_id": ledger.id}
     logger.info(
         "commission converted: user=%s spent_fen=%s granted_credits=%s",
-        user_id, spent_fen, granted_credits,
+        user_id,
+        spent_fen,
+        granted_credits,
     )
     return ConvertResult(spent_fen=spent_fen, granted_credits=granted_credits)

@@ -22,12 +22,12 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
     Index,
-    TIMESTAMP,
     Uuid,
     text,
 )
@@ -55,13 +55,16 @@ class CreditReservation(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        ForeignKey("user.id", ondelete="RESTRICT"), nullable=False,
+        ForeignKey("user.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     # ``SET NULL`` rather than ``CASCADE`` — if a session is deleted,
     # keep the reservation history for audit; it just loses the
     # session-back link.
     session_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("session.id", ondelete="SET NULL"), nullable=True,
+        Uuid,
+        ForeignKey("session.id", ondelete="SET NULL"),
+        nullable=True,
     )
     # NOT NULL: every reservation is created for a specific turn by
     # ``reserve_for_turn``. No FK on the column — ``session_turn``
@@ -88,13 +91,17 @@ class CreditReservation(Base):
     # type silently strips tz on write and yields naive on read, which
     # breaks any Python-side comparison against ``datetime.now(utc)``).
     expires_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
+        TIMESTAMP(timezone=True),
+        nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     settled_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
 
     __table_args__ = (
@@ -115,9 +122,7 @@ class CreditReservation(Base):
             "uq_credit_reservation_open_session",
             "session_id",
             unique=True,
-            postgresql_where=text(
-                "state = 'OPEN' AND session_id IS NOT NULL"
-            ),
+            postgresql_where=text("state = 'OPEN' AND session_id IS NOT NULL"),
         ),
         # ``settled_at`` coherence with ``state`` — both terminal
         # transitions stamp ``settled_at = now()``. Text matches the live

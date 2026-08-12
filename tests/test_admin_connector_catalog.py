@@ -75,9 +75,9 @@ _CANONICAL = "https://mcp.notion.com/mcp"
 @pytest.mark.parametrize(
     "typed",
     [
-        "https://mcp.notion.com/mcp/",       # trailing slash
-        "https://MCP.Notion.com/mcp",        # host case
-        "https://mcp.notion.com:443/mcp",    # the default port
+        "https://mcp.notion.com/mcp/",  # trailing slash
+        "https://MCP.Notion.com/mcp",  # host case
+        "https://mcp.notion.com:443/mcp",  # the default port
         "https://mcp.notion.com/mcp#setup",  # a fragment, never sent
         "  https://mcp.notion.com/mcp  ",
     ],
@@ -113,15 +113,10 @@ def test_the_address_check_is_left_to_connect_time() -> None:
 @pytest.mark.parametrize("auth_type", sorted(INSTANTIABLE_AUTH_TYPES))
 def test_an_instantiable_auth_type_is_accepted(auth_type) -> None:
     assert _create(auth_type=auth_type).auth_type is auth_type
-    assert (
-        ConnectorCatalogEntryUpdate(auth_type=auth_type, reason="fix").auth_type
-        is auth_type
-    )
+    assert ConnectorCatalogEntryUpdate(auth_type=auth_type, reason="fix").auth_type is auth_type
 
 
-@pytest.mark.parametrize(
-    "auth_type", [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER]
-)
+@pytest.mark.parametrize("auth_type", [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER])
 def test_an_auth_type_no_user_could_add_is_refused(auth_type) -> None:
     """``build_connector`` refuses these — they need a per-user secret the
     catalog cannot hold — so an entry declaring one is unusable the moment

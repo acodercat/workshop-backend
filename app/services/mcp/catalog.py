@@ -23,9 +23,7 @@ from app.services import localized_text
 #: are excluded on purpose: they need a secret that is per-user by nature, and
 #: the catalog holds none — see :func:`build_connector`. Operator tooling should
 #: offer only these.
-INSTANTIABLE_AUTH_TYPES = frozenset(
-    {MCPServerAuthType.NONE, MCPServerAuthType.OAUTH}
-)
+INSTANTIABLE_AUTH_TYPES = frozenset({MCPServerAuthType.NONE, MCPServerAuthType.OAUTH})
 
 
 async def list_published(db: AsyncSession) -> list[MCPServerCatalogEntry]:
@@ -44,7 +42,8 @@ async def list_published(db: AsyncSession) -> list[MCPServerCatalogEntry]:
 
 
 async def get_published_entry(
-    db: AsyncSession, catalog_id: int,
+    db: AsyncSession,
+    catalog_id: int,
 ) -> MCPServerCatalogEntry:
     """One entry the caller is allowed to add.
 
@@ -58,15 +57,11 @@ async def get_published_entry(
     result = await db.execute(stmt)
     entry = result.scalar_one_or_none()
     if entry is None:
-        raise ConnectorCatalogEntryNotFoundError(
-            f"catalog entry {catalog_id} is not available"
-        )
+        raise ConnectorCatalogEntryNotFoundError(f"catalog entry {catalog_id} is not available")
     return entry
 
 
-def build_connector(
-    entry: MCPServerCatalogEntry, user_id: int, locale: str
-) -> MCPServer:
+def build_connector(entry: MCPServerCatalogEntry, user_id: int, locale: str) -> MCPServer:
     """An unsaved user-owned Connector copied from *entry*.
 
     The name is copied in *locale* — whichever the user was reading when they

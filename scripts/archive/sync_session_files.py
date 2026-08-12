@@ -31,7 +31,6 @@ import psycopg
 
 from config import settings
 
-
 # Walk every message's JSONB ``blocks`` column, flatten nested ``files``
 # arrays, INSERT one row per (session_id, file_key). LATERAL ties the
 # unnesting to each message row so the join doesn't explode; COALESCE

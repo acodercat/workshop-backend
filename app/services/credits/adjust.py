@@ -60,7 +60,8 @@ async def apply_adjust(
         await db.rollback()
         logger.info(
             "adjust duplicate idempotency_key=%s user_id=%s",
-            idempotency_key, user_id,
+            idempotency_key,
+            user_id,
         )
         raise AdjustmentAlreadyApplied(
             f"Adjustment with idempotency_key={idempotency_key!r} already applied"

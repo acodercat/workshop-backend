@@ -33,9 +33,7 @@ router = APIRouter(tags=["sessions"])
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
-async def read_session(
-    ctx: StaffContext, session_id: uuid.UUID
-) -> SessionDetailResponse:
+async def read_session(ctx: StaffContext, session_id: uuid.UUID) -> SessionDetailResponse:
     """Return one session with its full message history, soft-deleted or
     not — a PK lookup with no ``deleted_at`` filter, because "what was in
     the session they deleted" is a question support actually gets.
@@ -50,9 +48,7 @@ async def read_session(
 
     messages = (
         await ctx.db.scalars(
-            select(Message)
-            .where(Message.session_id == session.id)
-            .order_by(Message.id)
+            select(Message).where(Message.session_id == session.id).order_by(Message.id)
         )
     ).all()
 

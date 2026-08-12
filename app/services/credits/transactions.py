@@ -139,9 +139,7 @@ _ROWS_CTE = """
     )
 """
 
-_TRANSACTIONS_COUNT_SQL = text(
-    _ROWS_CTE + " SELECT count(*) AS total FROM all_rows"
-)
+_TRANSACTIONS_COUNT_SQL = text(_ROWS_CTE + " SELECT count(*) AS total FROM all_rows")
 
 _TRANSACTIONS_PAGE_SQL = text(
     _ROWS_CTE
@@ -174,13 +172,13 @@ async def list_transactions(
     safe_page_size = max(page_size, 1)
     offset = (safe_page - 1) * safe_page_size
 
-    total = (
-        await db.execute(_TRANSACTIONS_COUNT_SQL, {"user_id": user_id})
-    ).scalar() or 0
-    rows = (await db.execute(
-        _TRANSACTIONS_PAGE_SQL,
-        {"user_id": user_id, "offset": offset, "limit": safe_page_size},
-    )).all()
+    total = (await db.execute(_TRANSACTIONS_COUNT_SQL, {"user_id": user_id})).scalar() or 0
+    rows = (
+        await db.execute(
+            _TRANSACTIONS_PAGE_SQL,
+            {"user_id": user_id, "offset": offset, "limit": safe_page_size},
+        )
+    ).all()
     return [
         TransactionRow(
             kind=TransactionKind(row.kind),

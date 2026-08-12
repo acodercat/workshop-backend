@@ -25,7 +25,10 @@ MAX_ENABLED_SKILLS = 20
 
 
 async def count_enabled_skills(
-    db: AsyncSession, user_id: int, *, exclude_skill_id: int | None = None,
+    db: AsyncSession,
+    user_id: int,
+    *,
+    exclude_skill_id: int | None = None,
 ) -> int:
     """Count the user's effective-enabled skills (CUSTOM + OFFICIAL).
 
@@ -45,8 +48,7 @@ async def count_enabled_skills(
             ),
         )
         .where(
-            (Skill.user_id == user_id)
-            | (Skill.origin == SkillOrigin.OFFICIAL),
+            (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.OFFICIAL),
             func.coalesce(UserSkillPreference.enabled, Skill.enabled),
         )
     )
@@ -56,7 +58,10 @@ async def count_enabled_skills(
 
 
 async def ensure_enable_capacity(
-    db: AsyncSession, user_id: int, *, exclude_skill_id: int | None = None,
+    db: AsyncSession,
+    user_id: int,
+    *,
+    exclude_skill_id: int | None = None,
 ) -> None:
     """Raise :class:`SkillEnableQuotaExceededError` if enabling one more
     skill would push the user past :data:`MAX_ENABLED_SKILLS`.
@@ -66,10 +71,11 @@ async def ensure_enable_capacity(
     context-budget limit (same posture as the upload quota check).
     """
     used = await count_enabled_skills(
-        db, user_id, exclude_skill_id=exclude_skill_id,
+        db,
+        user_id,
+        exclude_skill_id=exclude_skill_id,
     )
     if used >= MAX_ENABLED_SKILLS:
         raise SkillEnableQuotaExceededError(
-            f"user already has {used} skills enabled; "
-            f"limit is {MAX_ENABLED_SKILLS}"
+            f"user already has {used} skills enabled; limit is {MAX_ENABLED_SKILLS}"
         )
