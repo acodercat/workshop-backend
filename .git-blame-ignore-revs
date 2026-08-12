@@ -1,0 +1,13 @@
+# Commits git blame should look through, not at.
+#
+# Whole-tree formatting touches every line without changing any behaviour, so
+# blaming one of these leads to a tool rather than to whoever wrote the code.
+# GitHub reads this file automatically; locally, enable it once with
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Add a line per mechanical commit: the full 40-character SHA, then a comment
+# naming what it did.
+
+# ruff format over the tree
+40c366a7f07ee11e29b2ff693893ceffe7816ac7
