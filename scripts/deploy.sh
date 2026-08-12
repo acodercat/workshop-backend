@@ -276,6 +276,10 @@ cmd_deploy() {
   # fail-hard, background best-effort (a background startup hiccup must
   # not block the web deploy).
   cmd_stop_all
+  # ``--locked`` asserts uv.lock matches pyproject.toml rather than quietly
+  # re-resolving on a production box — a lockfile somebody forgot to commit
+  # should fail the deploy, not become whatever resolves today.
+  #
   # ``--no-dev``: production needs the app's dependencies, not the test and
   # lint tooling. Without it a deploy also downloads ruff and mypy, which is
   # tens of megabytes of nothing this box runs — and long enough that the
@@ -286,7 +290,7 @@ cmd_deploy() {
   # a start that can change what is installed. Installing is this step's
   # job; ``start`` runs what it left.
   log "uv sync"
-  uv sync --no-dev --quiet
+  uv sync --locked --no-dev --quiet
   log "alembic upgrade head"
   uv run --no-sync alembic upgrade head
   cmd_start_all
