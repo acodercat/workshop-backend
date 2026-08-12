@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
     SkillBundleTooLargeError,
+    SkillFileTypeError,
     SkillNameConflictError,
     SkillQuotaExceededError,
 )
@@ -38,7 +39,6 @@ from app.models.skill import Skill, SkillOrigin
 from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_bundle import (
-    SkillFileTypeError,
     ParsedSkill,
     normalize_bundle,
     parse_bundle,
