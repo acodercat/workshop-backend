@@ -13,10 +13,24 @@ them is missing. Mirrors ``agent-worker/tests/conftest.py``.
 """
 
 import os
+from pathlib import Path
 
-# Set only when absent, so a developer running against a real .env keeps
-# their own values. Obvious fakes: nothing offline reaches these, and an
-# accidental live call should fail rather than land somewhere real.
+from dotenv import dotenv_values
+
+# Obvious fakes: nothing offline reaches these, and an accidental live call
+# should fail rather than land somewhere real. They exist so the suite runs on
+# a fresh checkout with no ``.env`` at all.
+#
+# ``setdefault`` is **not** enough to leave a real ``.env`` alone, which is the
+# trap here: a dotenv value is not in ``os.environ``, and pydantic-settings
+# ranks environment variables *above* the dotenv file. Seeding unconditionally
+# therefore overrides the developer's configured values rather than filling in
+# for them — and the ``test_user`` fixture below derives its libpq DSN from
+# ``settings.db_uri``, so ``RUN_E2E_TESTS=1`` would provision and tear down
+# against ``localhost/test`` instead of the database that is actually
+# configured. So the seed prefers the configured value where there is one:
+# ``os.environ`` ends up complete either way, and it never disagrees with
+# ``.env``.
 _TEST_DEFAULTS = {
     "db_uri": "postgresql+psycopg://test:test@localhost:5432/test",
     # 32+ bytes: PyJWT warns below that for HMAC-SHA256, and a warning in
@@ -29,8 +43,14 @@ _TEST_DEFAULTS = {
     "llm_api_key": "test-llm-key",
 }
 
+# ``Settings`` reads ``env_file=".env"`` relative to the process's working
+# directory; this resolves it the same way regardless of where pytest was
+# invoked from.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+_CONFIGURED = dotenv_values(_ENV_FILE) if _ENV_FILE.exists() else {}
+
 for _key, _value in _TEST_DEFAULTS.items():
-    os.environ.setdefault(_key, _value)
+    os.environ.setdefault(_key, _CONFIGURED.get(_key) or _value)
 
 import secrets  # noqa: E402
 from collections.abc import AsyncIterator, Iterator  # noqa: E402

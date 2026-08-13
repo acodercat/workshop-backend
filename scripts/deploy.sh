@@ -70,9 +70,10 @@ BACKGROUND_LOG="$LOG_DIR/background.log"
 BACKGROUND_PATTERN='app\.workers\.run'
 
 # Health-check budget: total seconds we wait for the new uvicorn to
-# bind the port. Covers ``uv`` re-resolving the lockfile + uvicorn's
-# own startup. Polled at 1s — fine-grained enough for a manual deploy,
-# integer-only so we don't depend on ``bc``.
+# bind the port. Covers uvicorn's own startup and nothing else — the
+# start commands run ``uv run --no-sync``, so no resolution or install
+# happens inside this window. Polled at 1s — fine-grained enough for a
+# manual deploy, integer-only so we don't depend on ``bc``.
 HEALTH_TIMEOUT_SECONDS=10
 
 # Graceful-shutdown budget: seconds we wait for SIGTERM'd workers to
@@ -275,10 +276,20 @@ cmd_deploy() {
   # through the same combined helpers the top-level commands use — web
   # fail-hard, background best-effort (a background startup hiccup must
   # not block the web deploy).
+  # Pre-flight the lockfile *before* anything stops. ``--locked`` below turns
+  # a stale uv.lock into a hard failure, and under ``set -e`` that failure
+  # after ``cmd_stop_all`` would leave both services down with no path back
+  # up — an outage from the one deploy error that is purely a bookkeeping
+  # mistake and costs nothing to catch early. ``uv lock --check`` reads and
+  # asserts; it installs nothing, so it is safe to run against a live box.
+  log "checking uv.lock"
+  uv lock --check
   cmd_stop_all
   # ``--locked`` asserts uv.lock matches pyproject.toml rather than quietly
   # re-resolving on a production box — a lockfile somebody forgot to commit
-  # should fail the deploy, not become whatever resolves today.
+  # should fail the deploy, not become whatever resolves today. It is checked
+  # twice on purpose: once above where a failure is free, and again here as
+  # the flag that governs the install itself.
   #
   # ``--no-dev``: production needs the app's dependencies, not the test and
   # lint tooling. Without it a deploy also downloads ruff and mypy, which is

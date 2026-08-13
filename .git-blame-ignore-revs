@@ -11,3 +11,6 @@
 
 # ruff format over the tree
 40c366a7f07ee11e29b2ff693893ceffe7816ac7
+
+# ruff format over scripts/seed_users.py, which the sweep above excluded
+7c28d637b161fececb7a1beb0fc17b7d84124b0e
