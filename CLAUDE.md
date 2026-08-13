@@ -56,7 +56,7 @@ uv run alembic revision --autogenerate -m "description"
 # Tests (pytest; asyncio_mode is project-level "auto" — no @pytest.mark.asyncio needed)
 uv run pytest tests/                       # ~660 offline unit tests (tests/*.py) — no DB/Redis/network
 # Checks — the same three CI runs, in the same order
-uv run ruff check .                           # lint (F, E9, I, UP)
+uv run ruff check .                           # lint (F, E7, E9, I, UP)
 uv run ruff format --check .                  # formatting
 uv run mypy                                   # types (scope in [tool.mypy])
 uv run pytest tests/test_credit_settle_usage.py::test_name
