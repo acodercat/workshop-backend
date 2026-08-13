@@ -78,7 +78,11 @@ line-length = 100
 # it says anything useful — after which it drops to ~21, most of them ``B904``
 # (``raise ... from`` inside ``except``), which is worth having. Add it in its
 # own commit.
-select = ["F", "E9", "I", "UP"]
+# ``E7`` reports nothing today across all three repos — it is here for the
+# next line somebody writes, not this tree. It covers the pycodestyle checks
+# that are bugs rather than layout: a bare ``except:``, ``== None``, ``l`` as
+# a name. Free to carry, which is the whole argument for it.
+select = ["F", "E7", "E9", "I", "UP"]
 
 # PEP 695 (``type X = ...`` and ``def f[T]()``) is a language-style decision,
 # not the mechanical modernization the rest of ``UP`` is — and enabling ``UP``
