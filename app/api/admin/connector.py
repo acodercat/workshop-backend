@@ -81,7 +81,6 @@ def _to_connector_response(connector: MCPServer, owner_username: str) -> Connect
         oauth_reauthorization_required=connector.oauth_reauthorization_required,
         tool_count=connector.tool_count,
         disabled_tool_count=len(connector.disabled_tools or []),
-        resources_enabled=connector.resources_enabled,
         catalog_id=connector.catalog_id,
         created_at=connector.created_at,
         updated_at=connector.updated_at,

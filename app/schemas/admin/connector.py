@@ -176,9 +176,6 @@ class ConnectorResponse(BaseModel):
     oauth_reauthorization_required: bool
     tool_count: int
     disabled_tool_count: int
-    # Beside the tool counts because it answers the same class of question:
-    # whether the agent may read what this server holds at a URI.
-    resources_enabled: bool
     catalog_id: int | None
     created_at: datetime
     updated_at: datetime

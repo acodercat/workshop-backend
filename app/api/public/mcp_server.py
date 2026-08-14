@@ -440,6 +440,18 @@ async def update_connector(
         # OAuth rows are refused by ``_reject_unprovisionable``, and no other
         # auth type skips it.
         connector.url = changed_url
+        # The grant was made about a *server*, and the URL is which server this
+        # is — the same identity an OAuth token is bound to, which is why
+        # repointing an OAuth row is refused outright above. The other auth
+        # types may move, so the grant does not move with them: carrying it
+        # across would hand a server the user has not considered read access to
+        # everything it holds, on a decision they made about a different one.
+        #
+        # Unlike ``disabled_tools``, which carries over safely because it only
+        # ever withholds. A PATCH that repoints *and* enables in one request
+        # ends up off; nothing the UI does produces that, and off is the
+        # direction to be wrong in.
+        connector.resources_enabled = False
     if changed_auth is not None:
         await _apply_auth_change(
             redis,
