@@ -1157,6 +1157,24 @@ async def _client_for_authorization(
             f"{unusable}; create a new OAuth connector"
         )
     logger.info("Connector %s: %s; registering again", connector.id, unusable)
+    if _authorization_server_changed(connector, discovered):
+        # The grant on this row was issued by the server the row is about to
+        # stop naming, and it holds a refresh token. Left standing, the row
+        # carries one authorization server's long-lived credential beside
+        # another's token endpoint — and the window is real, because this
+        # commits before the browser leg: a turn renewing in between reads both
+        # from the same row and presents the old refresh token to the new
+        # server. Abandoning the flow leaves that standing indefinitely.
+        #
+        # :func:`grant.store_tokens` already refuses to carry a refresh token
+        # across a re-authorization made against a different authorization
+        # server. This is the same rule one step earlier, applied to the grant
+        # being superseded rather than the one replacing it.
+        #
+        # Only on positive evidence. A row with no issuer recorded says nothing
+        # about whether the server moved, and every Connector predating that
+        # column would otherwise lose a working grant on its next reconnect.
+        grant.discard(connector)
     connector.oauth_client_encrypted = encrypt_secret(
         (
             await oauth.ensure_client(
@@ -1195,16 +1213,36 @@ def _why_the_stored_client_is_unusable(
     """
     if _secret_expired(client):
         return "this connector's client registration expired"
-    registered_issuer = (
-        (connector.oauth_metadata or {}).get("authorization_server", {}).get("issuer")
-    )
-    if not registered_issuer:
+    if not _registered_issuer(connector):
         if not client.client_secret:
             return None
         return "this connector predates authorization-server binding"
-    if str(discovered.metadata.issuer) != registered_issuer:
+    if _authorization_server_changed(connector, discovered):
         return "this connector's authorization server changed"
     return None
+
+
+def _registered_issuer(connector: MCPServer) -> str | None:
+    """The authorization server this row's client and grant both came from.
+
+    They are obtained in one flow against one server and committed together, so
+    a single record dates both — which is what lets a caller ask whether either
+    still belongs where the row now points.
+    """
+    return (connector.oauth_metadata or {}).get("authorization_server", {}).get("issuer")
+
+
+def _authorization_server_changed(
+    connector: MCPServer,
+    discovered: oauth.DiscoveredAuthorization,
+) -> bool:
+    """Whether the MCP server now names a different authorization server.
+
+    ``False`` when the row records none: an absent issuer is evidence of
+    nothing, and callers act on this only where positive evidence is required.
+    """
+    registered_issuer = _registered_issuer(connector)
+    return bool(registered_issuer) and str(discovered.metadata.issuer) != registered_issuer
 
 
 def _issued_by_an_authorization_server(client: OAuthClientInformationFull) -> bool:
