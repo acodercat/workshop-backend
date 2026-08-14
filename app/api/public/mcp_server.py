@@ -420,6 +420,12 @@ async def update_connector(
         # Not validated against the live tool list: that would cost a network
         # round-trip on every PATCH, and an unmatched name is inert anyway.
         connector.disabled_tools = body.disabled_tools
+    if body.resources_enabled is not None:
+        # Not gated on the server having any resources, for the same reason: the
+        # answer needs a round-trip, it can change without this row changing, and
+        # a server with none simply lists none. Enabling access to nothing is
+        # harmless; refusing it on a stale cache is not.
+        connector.resources_enabled = body.resources_enabled
     if url_changed:
         # Guarded by the probe above, which every surviving URL change reaches:
         # OAuth rows are refused by ``_reject_unprovisionable``, and no other
@@ -926,6 +932,12 @@ def _apply_probe(connector: MCPServer, result: ProbeResult) -> None:
     Five paths probe a Connector (create, catalog add, OAuth callback, auth
     change, explicit re-list). Adding a probe-derived field to only some of them
     is a silent staleness bug, so they all go through here.
+
+    Only probe-derived fields, though — the sentence above is about *learning*,
+    not about the row. ``disabled_tools`` and ``resources_enabled`` are what the
+    user decided, and a probe is in no position to revise either: writing them
+    here would let re-listing a server's tools quietly re-grant access somebody
+    had switched off.
     """
     connector.tool_count = len(result.tools)
     connector.tools_preview = result.tools

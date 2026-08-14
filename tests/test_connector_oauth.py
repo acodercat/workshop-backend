@@ -1341,7 +1341,8 @@ class TestResponseMapping:
             oauth_reauthorization_required=True, last_connect_failed=True,
             # NOT NULL columns: a loaded row always has these, but SQLAlchemy
             # applies its Python-side defaults at flush, not at construction.
-            tool_count=0, disabled_tools=[], created_at=now, updated_at=now,
+            tool_count=0, disabled_tools=[], resources_enabled=False,
+            created_at=now, updated_at=now,
             advertised_icons=[{"src": "https://cdn.example.com/notion.png"}],
         )
         response = _to_response(connector)
@@ -2568,6 +2569,7 @@ def _stored_connector(**over):
         oauth_metadata={"authorization_server": _AUTHORIZATION_SERVER},
         oauth_tokens_expires_at=_NOW,
         disabled_tools=[], advertised_icons=[], tool_count=0, connected=True,
+        resources_enabled=False,
         oauth_reauthorization_required=False, last_connect_failed=False,
         created_at=_NOW, updated_at=_NOW,
     )

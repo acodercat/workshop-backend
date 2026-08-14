@@ -87,6 +87,11 @@ class ConnectorResponse(BaseModel):
     # Bare server-side names the user switched off. Same name as the column on
     # purpose, like ``oauth_reauthorization_required`` below.
     disabled_tools: list[ToolName] = Field(default_factory=list)
+    # Whether the agent may browse and read what this server holds at a URI.
+    # Separate from ``disabled_tools`` because that switches off tools the
+    # *server* publishes, and resource access is not one of those. Same naming
+    # rule as the flags below.
+    resources_enabled: bool = False
     # Whether the agent currently gets this Connector's tools. Disconnecting
     # keeps the credentials, so reconnecting is one click; deleting discards them.
     connected: bool
@@ -239,6 +244,10 @@ class ConnectorUpdate(BaseModel):
     disabled_tools: list[ToolName] | None = Field(
         default=None, max_length=MAX_DISABLED_TOOLS,
     )
+    # Only ever set from here. Creating a Connector cannot: ``ConnectorCreate``
+    # does not declare it, so turning resource access on is always a second,
+    # deliberate act rather than something a create body could carry in.
+    resources_enabled: bool | None = None
 
     @model_validator(mode="after")
     def _auth_fields_consistent(self) -> "ConnectorUpdate":
