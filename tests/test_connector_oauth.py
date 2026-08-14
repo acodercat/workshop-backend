@@ -1935,6 +1935,9 @@ class TestOAuthCallbackHealth:
 
 
 _NOW = datetime(2026, 7, 29, tzinfo=UTC)
+# A deadline far enough out that no test cares about the value — what
+# matters is that it is *set*, so clearing it is visible.
+_LATER = datetime(2099, 1, 1, tzinfo=UTC)
 
 
 class TestIssuerIdentification:
@@ -2470,6 +2473,59 @@ class TestAnAuthorizationServerThatChanged:
             )
             is None
         )
+
+    async def test_a_migrated_issuer_drops_the_grant_the_old_server_issued(self, monkeypatch):
+        # The refresh token on this row was issued by the server the row is
+        # about to stop naming. Kept, it would sit beside the *new* server's
+        # token endpoint — and this commits before the browser leg, so a turn
+        # renewing in between reads both from the same row and posts one
+        # server's long-lived credential to the other.
+        from app.api.public import mcp_server as endpoint
+
+        monkeypatch.setattr(
+            endpoint.oauth,
+            "ensure_client",
+            AsyncMock(return_value=_dcr_client("fresh")),
+        )
+        monkeypatch.setattr(endpoint.settings, "mcp_oauth_redirect_uri", "https://app/cb")
+        connector = self._connector("https://as-a.example.com/")
+        connector.oauth_client_encrypted = _sealed(_dcr_client("old", secret="old"))
+        connector.oauth_tokens_encrypted = "sealed-grant-from-as-a"
+        connector.oauth_tokens_expires_at = _LATER
+        connector.oauth_refresh_after = _LATER
+
+        await self._client_for(connector, self._discovered("https://as-evil.example.com"))
+
+        assert connector.oauth_tokens_encrypted is None
+        assert connector.oauth_tokens_expires_at is None
+        # The schedule described the grant that just went; a new one must not
+        # inherit a dead one's backoff.
+        assert connector.oauth_refresh_after is None
+
+    async def test_an_expired_registration_keeps_the_grant(self, monkeypatch):
+        # The other reason to re-register. The authorization server has not
+        # moved, so the grant still belongs where the row points, and dropping
+        # it would cost a working Connector for nothing.
+        from app.api.public import mcp_server as endpoint
+
+        monkeypatch.setattr(
+            endpoint.oauth,
+            "ensure_client",
+            AsyncMock(return_value=_dcr_client("fresh")),
+        )
+        monkeypatch.setattr(endpoint.settings, "mcp_oauth_redirect_uri", "https://app/cb")
+        connector = self._connector("https://as-a.example.com/")
+        expired = _dcr_client("old", secret="old")
+        expired.client_secret_expires_at = 1
+        connector.oauth_client_encrypted = _sealed(expired)
+        connector.oauth_tokens_encrypted = "sealed-grant-from-as-a"
+        connector.oauth_tokens_expires_at = _LATER
+
+        await self._client_for(connector, self._discovered("https://as-a.example.com"))
+
+        endpoint.oauth.ensure_client.assert_awaited()
+        assert connector.oauth_tokens_encrypted == "sealed-grant-from-as-a"
+        assert connector.oauth_tokens_expires_at == _LATER
 
     async def test_a_manual_client_is_refused_rather_than_replaced(self, monkeypatch):
         # It is the operator's own OAuth app; there is no second one to make.
