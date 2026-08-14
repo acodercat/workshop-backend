@@ -67,9 +67,18 @@ async def _patch(monkeypatch, connector: MCPServer, body: ConnectorUpdate) -> No
     """Run ``update_connector`` against *connector* with only I/O stubbed."""
     from app.api.public import mcp_server as endpoint
     from app.rate_limit import limiter
+    from app.services.mcp.probe import ProbeResult
 
     monkeypatch.setattr(limiter, "enabled", False)
     monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
+    # A URL change probes the row as it will be, which resolves a hostname and
+    # opens a connection. Neither is what any test here is about.
+    monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
+    monkeypatch.setattr(
+        endpoint,
+        "probe",
+        AsyncMock(return_value=ProbeResult(server_name="s", tools=[])),
+    )
     monkeypatch.setattr(
         endpoint, "_get_owned_connector", AsyncMock(return_value=connector),
     )
@@ -139,6 +148,35 @@ class TestTheUserTurnsItOn:
         await _patch(monkeypatch, connector, ConnectorUpdate(name="renamed"))
 
         assert (connector.name, connector.resources_enabled) == ("renamed", True)
+
+
+class TestRepointingTheConnectorRevokesIt:
+    """The grant is about a server, and the URL is which server this is."""
+
+    async def test_a_url_change_switches_it_off(self, monkeypatch):
+        # Carrying it across would hand a server the user has never considered
+        # read access to everything it holds, on a decision they made about a
+        # different one. Only non-OAuth rows reach here — repointing an OAuth
+        # Connector is refused outright, because its token is bound to the URL.
+        connector = _connector(resources_enabled=True)
+
+        await _patch(
+            monkeypatch,
+            connector,
+            ConnectorUpdate(url="https://elsewhere.example.com/mcp"),
+        )
+
+        assert connector.url == "https://elsewhere.example.com/mcp"
+        assert connector.resources_enabled is False
+
+    async def test_a_patch_that_changes_nothing_else_leaves_it_on(self, monkeypatch):
+        # The reset is the URL's doing, not every PATCH's — otherwise renaming a
+        # Connector would quietly revoke access nobody asked to revoke.
+        connector = _connector(resources_enabled=True)
+
+        await _patch(monkeypatch, connector, ConnectorUpdate(name="renamed"))
+
+        assert connector.resources_enabled is True
 
 
 class TestNothingElseWritesIt:
