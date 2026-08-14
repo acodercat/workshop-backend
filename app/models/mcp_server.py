@@ -162,6 +162,26 @@ class MCPServer(Base):
         server_default=text("'[]'::jsonb"),
         default=list,
     )
+    # Whether the agent may browse and read what this server holds at a URI —
+    # the MCP ``resources`` half. Its own switch because ``disabled_tools``
+    # cannot reach it: that matches bare *server-side* tool names, and resource
+    # access is three tools the host synthesizes under a prefix deliberately
+    # outside the server's namespace. Without this, connecting a Connector
+    # grants read access to everything it holds and the page offers no say.
+    #
+    # One flag for all three: they name each other in their instructions, so a
+    # partial set points at siblings that do not exist.
+    #
+    # Off by default, and off for every row that predates it — an upgrade must
+    # not widen anyone's data access without them asking. Written only by the
+    # user, which is why ``_apply_probe`` does not touch it. The worker reads it
+    # per turn, so a flip takes effect from the next turn, like
+    # ``disabled_tools``.
+    resources_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
     # Whether the user currently has this Connector connected — i.e. whether its
     # tools are handed to the agent each turn. For OAuth it moves with the grant
     # rather than beside it: disconnecting gives the tokens up (and revokes them

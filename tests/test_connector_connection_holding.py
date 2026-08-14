@@ -108,6 +108,7 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
             # Columns the response model requires and only a DB default fills.
             oauth_reauthorization_required=False,
             last_connect_failed=False,
+            resources_enabled=False,
             created_at=_EPOCH,
             updated_at=_EPOCH,
         )

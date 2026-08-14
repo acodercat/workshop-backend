@@ -1422,6 +1422,7 @@ class TestResponseMapping:
             # applies its Python-side defaults at flush, not at construction.
             tool_count=0,
             disabled_tools=[],
+            resources_enabled=False,
             created_at=now,
             updated_at=now,
             advertised_icons=[{"src": "https://cdn.example.com/notion.png"}],
@@ -2756,6 +2757,7 @@ def _stored_connector(**over):
         disabled_tools=[],
         advertised_icons=[],
         tool_count=0,
+        resources_enabled=False,
         connected=True,
         oauth_reauthorization_required=False,
         last_connect_failed=False,
