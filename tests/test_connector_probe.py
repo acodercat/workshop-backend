@@ -32,12 +32,12 @@ class _FakeSession:
     async def __aexit__(self, *exc):
         return False
 
-    async def initialize(self):
-        # ``icons`` mirrors the real ``Implementation``; leaving it off would
-        # only prove the code tolerates a fake that can't occur.
-        return SimpleNamespace(
-            serverInfo=SimpleNamespace(name="Demo Server", icons=None)
-        )
+    # ``icons`` mirrors the real ``Implementation``; leaving it off would only
+    # prove the code tolerates a fake that can't occur.
+    server_info = SimpleNamespace(name="Demo Server", icons=None)
+    # Every fake here serves tools, so every one advertises them: ``probe``
+    # skips the listing entirely for a server that does not.
+    server_capabilities = SimpleNamespace(tools=SimpleNamespace())
 
     async def list_tools(self, cursor=None):
         return SimpleNamespace(
@@ -45,7 +45,7 @@ class _FakeSession:
                 SimpleNamespace(name="search", description="Search things"),
                 SimpleNamespace(name="create", description=None),
             ],
-            nextCursor=None,
+            next_cursor=None,
         )
 
 
@@ -56,13 +56,10 @@ class TestProbe:
 
         monkeypatch.setattr(probe_mod, "guard_public_url", _guard_ok)
 
-        @asynccontextmanager
-        async def fake_shc(*args, **kwargs):
-            yield ("r", "w", lambda: None)
-
-        monkeypatch.setattr(probe_mod, "streamablehttp_client", fake_shc)
+        monkeypatch.setattr(probe_mod, "guarded_client", _fake_http_client)
+        monkeypatch.setattr(probe_mod, "streamable_http_client", _fake_transport)
         monkeypatch.setattr(
-            probe_mod, "ClientSession", lambda read, write: _FakeSession()
+            probe_mod, "Client", lambda *args, **kwargs: _FakeSession()
         )
 
         result = await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
@@ -72,6 +69,62 @@ class TestProbe:
             {"name": "search", "description": "Search things"},
             {"name": "create", "description": ""},
         ]
+
+    async def test_it_negotiates_the_protocol_rather_than_assuming_one(
+        self, monkeypatch,
+    ):
+        # The reason this backend is on the 2.x SDK at all. ``mode="auto"``
+        # probes ``server/discover`` and falls back to ``initialize``; pinned
+        # to ``initialize`` it would refuse every server that speaks only the
+        # 2026-07-28 stateless protocol — which is the class of server that
+        # could not be added before, and the failure would look like an
+        # unreachable host rather than a protocol mismatch.
+        #
+        # Asserted on the argument because the behaviour behind it needs a real
+        # stateless server to observe, and there is none in a unit test.
+        captured: dict = {}
+
+        async def _guard_ok(url):
+            return None
+
+        def _capture(*args, **kwargs):
+            captured.update(kwargs)
+            return _FakeSession()
+
+        monkeypatch.setattr(probe_mod, "guard_public_url", _guard_ok)
+        monkeypatch.setattr(probe_mod, "guarded_client", _fake_http_client)
+        monkeypatch.setattr(probe_mod, "streamable_http_client", _fake_transport)
+        monkeypatch.setattr(probe_mod, "Client", _capture)
+
+        await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
+
+        assert captured["mode"] == "auto"
+        # A probe answers "what is there now"; a cached page-one would make the
+        # re-list button a no-op against a server that had changed.
+        assert captured["cache"] is None
+
+    async def test_a_server_without_tools_lists_none_rather_than_failing(
+        self, monkeypatch,
+    ):
+        # Asking a server that never advertised the capability earns
+        # ``-32601``, which this module reports as the server being
+        # unreachable — sending the user to debug a connection that is working.
+        class _Toolless(_FakeSession):
+            server_capabilities = SimpleNamespace(tools=None)
+
+            async def list_tools(self, cursor=None):
+                raise AssertionError(
+                    "asked a server that never advertised tools"
+                )
+
+        _install(monkeypatch, _Toolless())
+
+        result = await probe(
+            "https://mcp.example.com/x", MCPServerAuthType.NONE, None
+        )
+
+        assert result.tools == []
+        assert result.server_name == "Demo Server"
 
     async def test_ssrf_failure_propagates_not_wrapped(self, monkeypatch):
         # A bad URL must surface as InvalidConnectorUrlError, not be collapsed
@@ -90,7 +143,8 @@ class TestProbe:
             raise RuntimeError("connection refused")
             yield  # pragma: no cover
 
-        monkeypatch.setattr(probe_mod, "streamablehttp_client", boom)
+        monkeypatch.setattr(probe_mod, "guarded_client", _fake_http_client)
+        monkeypatch.setattr(probe_mod, "streamable_http_client", boom)
         with pytest.raises(ConnectorUnreachableError):
             await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
 
@@ -132,7 +186,7 @@ class TestServerIcons:
         [icon] = _usable_icons(
             self._server_info({
                 "src": "https://cdn.example.com/i.png",
-                "mimeType": "image/png",
+                "mime_type": "image/png",
                 "sizes": ["48x48"],
                 # Not modelled by the SDK, so it arrives as an extra field —
                 # dropping it would take dark-mode support with it.
@@ -220,17 +274,15 @@ class TestProbePagination:
         async def __aexit__(self, *exc):
             return False
 
-        async def initialize(self):
-            return SimpleNamespace(
-                serverInfo=SimpleNamespace(name="Paged", icons=None)
-            )
+        server_info = SimpleNamespace(name="Paged", icons=None)
+        server_capabilities = SimpleNamespace(tools=SimpleNamespace())
 
         async def list_tools(self, cursor=None):
             self.cursors_seen.append(cursor)
             names, next_cursor = self._pages[len(self.cursors_seen) - 1]
             return SimpleNamespace(
                 tools=[SimpleNamespace(name=n, description="") for n in names],
-                nextCursor=next_cursor,
+                next_cursor=next_cursor,
             )
 
     async def test_every_page_is_collected(self, monkeypatch):
@@ -279,7 +331,7 @@ class TestStoredListingIsSwitchable:
 
         async def list_tools(self, cursor=None):
             self.cursors_seen.append(cursor)
-            return SimpleNamespace(tools=self._tools, nextCursor=None)
+            return SimpleNamespace(tools=self._tools, next_cursor=None)
 
     async def _probe(self, monkeypatch, tools):
         from app.models.mcp_server import MCPServerAuthType
@@ -335,15 +387,30 @@ class TestStoredListingIsSwitchable:
         ]
 
 
+@asynccontextmanager
+async def _fake_transport(*args, **kwargs):
+    """Two streams, which is all ``Client`` asks a transport to yield."""
+    yield ("r", "w")
+
+
+@asynccontextmanager
+async def _fake_http_client(*args, **kwargs):
+    """The guarded client ``probe`` now builds and owns itself."""
+    yield SimpleNamespace()
+
+
 def _install(monkeypatch, session):
-    """Point ``probe`` at *session*, bypassing the guard and the transport."""
+    """Point ``probe`` at *session*, bypassing the guard and the transport.
+
+    Three names where 1.x needed two: the SDK stopped taking a client factory,
+    so ``probe`` builds the guarded client itself and hands the finished one
+    over — and that client is entered here too, or the ``async with`` around it
+    would have nothing to enter.
+    """
     async def _guard_ok(url):
         return None
 
-    @asynccontextmanager
-    async def fake_shc(*args, **kwargs):
-        yield ("r", "w", lambda: None)
-
     monkeypatch.setattr(probe_mod, "guard_public_url", _guard_ok)
-    monkeypatch.setattr(probe_mod, "streamablehttp_client", fake_shc)
-    monkeypatch.setattr(probe_mod, "ClientSession", lambda read, write: session)
+    monkeypatch.setattr(probe_mod, "guarded_client", _fake_http_client)
+    monkeypatch.setattr(probe_mod, "streamable_http_client", _fake_transport)
+    monkeypatch.setattr(probe_mod, "Client", lambda *args, **kwargs: session)

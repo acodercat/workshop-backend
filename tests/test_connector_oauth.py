@@ -7,7 +7,12 @@ import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
+# ``httpx2 as httpx`` deliberately: this file drives the SSRF transport, which
+# is httpx2's since the SDK bump. Aliased rather than renamed at ~30 call sites
+# so no line can be missed — a half-converted file would pass green, since the
+# two libraries are duck-compatible across everything asserted here and pytest
+# files are outside mypy's scope.
+import httpx2 as httpx
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 from mcp.shared.auth import (
@@ -612,9 +617,36 @@ class TestDiscoverAuthorization:
         assert len(attempts) == 1
 
     async def test_the_issuer_is_recorded_as_published(self, monkeypatch):
-        # Not as pydantic renders it: ``AnyUrl`` gives a bare origin a trailing
-        # slash, and RFC 9207 forbids normalising either side before
-        # comparison — so recording the parsed value would reject every
+        # Not as pydantic renders it, and RFC 9207 forbids normalising either
+        # side before comparison — so recording the parsed value would reject
+        # every provider whose published issuer differs from it.
+        #
+        # Host case is the case that still differs. Through mcp 1.x a bare
+        # origin also gained a trailing slash, which is what this test used to
+        # demonstrate; 2.x preserves the slash and the path, and normalises the
+        # host and the default port only.
+        mixed = dict(self._AS_METADATA, issuer="https://AS.example.com")
+        _serve(
+            monkeypatch,
+            self._handler(
+                resource={
+                    "resource": "https://mcp.example.com/mcp",
+                    "authorization_servers": ["https://AS.example.com"],
+                },
+                authorization=mixed,
+            ),
+            allow_any_url=True,
+        )
+
+        discovered = await discover_authorization("https://mcp.example.com/mcp")
+
+        assert str(discovered.metadata.issuer) == "https://as.example.com"
+        assert discovered.issuer_as_published == "https://AS.example.com"
+
+    async def test_a_bare_origin_no_longer_diverges(self, monkeypatch):
+        # The case above used to be this one. Pinned because the discovery
+        # comparison now relies on it: both sides are parsed by the same SDK
+        # model, so a slash appearing on one of them again would break every
         # provider whose issuer is a bare origin.
         bare = dict(self._AS_METADATA, issuer="https://as.example.com")
         _serve(
@@ -631,7 +663,7 @@ class TestDiscoverAuthorization:
 
         discovered = await discover_authorization("https://mcp.example.com/mcp")
 
-        assert str(discovered.metadata.issuer) == "https://as.example.com/"
+        assert str(discovered.metadata.issuer) == "https://as.example.com"
         assert discovered.issuer_as_published == "https://as.example.com"
 
     async def test_the_iss_support_flag_survives_parsing(self, monkeypatch):
@@ -746,7 +778,8 @@ class TestDiscoverAuthorization:
 
         discovered = await discover_authorization("https://mcp.example.com/mcp")
 
-        assert str(discovered.metadata.issuer) == "https://as.example.com/"
+        # As published — mcp 1.x rendered this bare origin with a slash.
+        assert str(discovered.metadata.issuer) == "https://as.example.com"
 
     async def test_refuses_a_scoped_alias_with_registration_outside_its_namespace(
         self, monkeypatch,

@@ -1265,9 +1265,27 @@ def _authorization_server_changed(
 
     ``False`` when the row records none: an absent issuer is evidence of
     nothing, and callers act on this only where positive evidence is required.
+
+    A trailing slash is not a different server, and saying so is load-bearing
+    rather than tidy. Rows written under mcp 1.x hold the issuer as *that* SDK
+    rendered it, which gave a bare origin a slash; 2.x records what the
+    document published. Compared exactly, every OAuth Connector whose issuer is
+    a bare origin would read as repointed the first time it was re-examined
+    after the upgrade — and be stripped of the client registration this
+    function guards.
+
+    Deliberately not the comparison ``require_matching_issuer`` makes. That one
+    answers "did this authorization *response* come from the server we started
+    with", where RFC 9207 forbids normalising anything. This one answers "is
+    the row's grant still about the server the document names", and two
+    spellings of one origin are one server.
     """
     registered_issuer = _registered_issuer(connector)
-    return bool(registered_issuer) and str(discovered.metadata.issuer) != registered_issuer
+    if not registered_issuer:
+        return False
+    return (
+        str(discovered.metadata.issuer).rstrip("/") != registered_issuer.rstrip("/")
+    )
 
 
 def _issued_by_an_authorization_server(client: OAuthClientInformationFull) -> bool:
