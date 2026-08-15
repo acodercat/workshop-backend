@@ -226,10 +226,11 @@ def guarded_client(
 ) -> httpx2.AsyncClient:
     """An SSRF-hardened httpx2 client for outbound Connector/OAuth requests.
 
-    The signature matches the MCP SDK's ``httpx_client_factory``
-    (``(headers, timeout, auth) -> AsyncClient``) so it can be passed straight to
-    ``streamablehttp_client``; it is equally usable directly. DNS-pinned via
-    :class:`_PinnedResolveTransport` and ``follow_redirects=False``.
+    Keeps the ``(headers, timeout, auth) -> AsyncClient`` shape the SDK's
+    ``httpx_client_factory`` had, though 2.x no longer takes a factory — it
+    takes the finished client, so every caller now builds one here and passes
+    the result. DNS-pinned via :class:`_PinnedResolveTransport` and
+    ``follow_redirects=False``.
     """
     return httpx2.AsyncClient(
         headers=headers,
