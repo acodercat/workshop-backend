@@ -23,14 +23,20 @@ from app.services.mcp.url_guard import guard_public_url, guarded_client
 
 logger = logging.getLogger(__name__)
 
+# Per JSON-RPC request: the handshake — which ``mode="auto"`` may spend twice —
+# and each ``tools/list`` page get this much each.
 _CONNECT_TIMEOUT = 20.0
-_LIST_TIMEOUT = 20.0
+# Per read on the wire. The successor of two v1 knobs — the transport's
+# ``sse_read_timeout`` and a deadline shared across list pages — folded into
+# the one httpx2 client everything now rides on.
+_READ_TIMEOUT = 20.0
 
-# Ceiling on a whole probe, which the two above do not add up to. They bound the
-# handshake and the listing; the DNS pre-flight has no bound of its own, and the
-# SDK sends a session-terminating DELETE on the way *out* of its context — a
-# server answering that one byte at a time keeps resetting httpx's per-read
-# clock while an API request and its database session are held open.
+# Ceiling on a whole probe, which the two above do not add up to: they bound
+# each request and each read, not how many of either a server can demand. The
+# DNS pre-flight has no bound of its own, and the SDK sends a
+# session-terminating DELETE on the way *out* of its context — a server
+# answering that one byte at a time keeps resetting httpx2's per-read clock
+# while an API request and its database session are held open.
 _PROBE_TIMEOUT = 60.0
 # Backstop against a server that paginates ``tools/list`` forever; real
 # catalogues are far smaller (mirrors axon's ``_MAX_LIST_PAGES``).
@@ -87,18 +93,16 @@ async def _list_all_tools(session: Client) -> list[dict[str, str]]:
 
     One page is not the catalog: the worker paginates, so stopping at page one
     would cache a subset the user can neither see nor switch off while the
-    agent still gets the rest. Bounded by one deadline across all pages and by
-    a page cap, so a server that paginates forever can't stall an add.
+    agent still gets the rest. A page cap stops a server that paginates
+    forever; each page's request is bounded by ``Client(read_timeout_seconds)``
+    and the whole probe by ``_PROBE_TIMEOUT``. Nothing is shared across pages —
+    a single deadline used to be, and page ten inherited whatever page one had
+    left.
 
     Bounded by what the user can act on, too — this listing exists to be
     rendered and switched off, so an entry outside ``disabled_tools``' own
     limits would be dead weight in the column. That is a different question
     from axon's caps on the same catalog, which bound what the *model* is sent.
-
-    No deadline of its own: ``Client(read_timeout_seconds=…)`` bounds every
-    JSON-RPC request, this one included, and the whole probe still sits under
-    ``_PROBE_TIMEOUT``. A single deadline shared across pages used to do it,
-    which meant page ten inherited whatever page one had left.
     """
     tools: list[dict[str, str]] = []
     seen_cursors: set[str] = set()
@@ -195,10 +199,10 @@ async def _probe(
         # fail that teardown against every server that honours termination.
         async with guarded_client(
             headers=headers,
-            # One object where v1 took two arguments: the transport has no
-            # ``sse_read_timeout`` of its own any more, so the connect bound and
-            # the longer stream-read bound travel together here.
-            timeout=httpx2.Timeout(_CONNECT_TIMEOUT, read=_LIST_TIMEOUT),
+            # One object where v1 took two arguments: the transport no longer
+            # has an ``sse_read_timeout`` of its own, so the connect bound and
+            # the stream-read bound travel together here.
+            timeout=httpx2.Timeout(_CONNECT_TIMEOUT, read=_READ_TIMEOUT),
         ) as http_client:
             # The transport is handed over unentered: ``Client`` takes an async
             # context manager yielding the stream pair and enters it itself.
