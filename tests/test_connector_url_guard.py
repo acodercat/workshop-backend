@@ -1,6 +1,11 @@
 """SSRF guard for user-supplied Connector URLs."""
 
-import httpx
+# ``httpx2 as httpx`` deliberately: this file drives the SSRF transport, which
+# is httpx2's since the SDK bump. Aliased rather than renamed at ~30 call sites
+# so no line can be missed — a half-converted file would pass green, since the
+# two libraries are duck-compatible across everything asserted here and pytest
+# files are outside mypy's scope.
+import httpx2 as httpx
 import pytest
 
 from app.errors import InvalidConnectorUrlError

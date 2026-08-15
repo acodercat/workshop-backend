@@ -10,12 +10,12 @@ Two layers of defense:
 
 - :func:`validate_public_url` / :func:`guard_public_url` — a pre-flight check
   (https scheme + resolved IPs are public) that yields a clean 400 on a bad URL.
-- :func:`guarded_client` — an httpx client whose transport resolves each request
+- :func:`guarded_client` — an httpx2 client whose transport resolves each request
   host **once**, rejects non-public IPs, and **pins** the connection to that IP,
   so a second DNS lookup can't rebind to an internal address between check and
   connect (the TOCTOU window a pre-flight check alone leaves open). It also never
-  follows redirects, so a public URL can't 3xx-bounce onto an internal one. Pass
-  it as the MCP SDK's ``httpx_client_factory`` (probe) or use it directly (OAuth).
+  follows redirects, so a public URL can't 3xx-bounce onto an internal one. Build
+  one and hand it to the MCP SDK (probe) or send through it directly (OAuth).
 """
 
 import asyncio
@@ -23,7 +23,7 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 
 from app.errors import InvalidConnectorUrlError
 
@@ -129,8 +129,8 @@ def _embedded_ipv4(
     return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
 
 
-class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
-    """httpx transport that resolves each request host once, rejects non-public
+class _PinnedResolveTransport(httpx2.AsyncHTTPTransport):
+    """httpx2 transport that resolves each request host once, rejects non-public
     resolved IPs, and pins the connection to that exact IP.
 
     Pinning closes the DNS-rebinding TOCTOU: the address we validate is the
@@ -142,11 +142,18 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
     request origin, which now holds the IP — so a client reused across
     *hostnames* that share an IP could reuse a TLS connection whose
     certificate was verified for the other name. Give each client one
-    hostname, or send ``Connection: close`` where several must share one
-    (as OAuth discovery does).
+    hostname, or send ``Connection: close`` where several must share one.
+
+    OAuth discovery sets that header on its client, but the mitigation does not
+    reach every request it makes: the authorization-server metadata GET is built
+    by the SDK (``create_oauth_metadata_request``) and sent as-is, never through
+    ``client.build_request``, so it carries no client-level headers. Discovery is
+    also the one client here that crosses hostnames. Left as it is — both hosts
+    are the same untrusted server's to name — but the header is not the guarantee
+    it reads as.
     """
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         # Scheme is enforced here, not only at the pre-flight check: the
         # endpoints a server advertises in its metadata — token, registration,
         # authorization — never pass through that check, and a plaintext one
@@ -185,7 +192,7 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
 
         # Connect to a validated IP, but keep TLS SNI + cert verification on the
         # real hostname (httpcore reads ``sni_hostname``). The ``Host`` header is
-        # already the original authority — httpx set it before the transport ran.
+        # already the original authority — httpx2 set it before the transport ran.
         request.extensions["sni_hostname"] = host
 
         # Tried in turn. An ordinary client does that, and replacing the host
@@ -199,18 +206,18 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
         # request is sent, so retrying is safe even for the token exchange; a
         # read failure could mean the server already acted on it, and is raised.
         # Restored afterwards, always. The request object outlives this call: an
-        # ``httpx.Auth`` flow re-yields *the same* one to retry a 401, and a
+        # ``httpx2.Auth`` flow re-yields *the same* one to retry a 401, and a
         # second pass over a URL left holding the pinned literal would read its
         # host as the address — pinning the SNI to an IP no certificate names,
         # and collapsing the candidate list to the one address already tried.
         original = request.url
-        last: httpx.TransportError | None = None
+        last: httpx2.TransportError | None = None
         try:
             for address in candidates:
                 request.url = original.copy_with(host=address)
                 try:
                     return await super().handle_async_request(request)
-                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                except (httpx2.ConnectError, httpx2.ConnectTimeout) as exc:
                     last = exc
         finally:
             request.url = original
@@ -225,19 +232,20 @@ class _PinnedResolveTransport(httpx.AsyncHTTPTransport):
 
 def guarded_client(
     headers: dict[str, str] | None = None,
-    timeout: httpx.Timeout | None = None,
-    auth: httpx.Auth | None = None,
-) -> httpx.AsyncClient:
-    """An SSRF-hardened httpx client for outbound Connector/OAuth requests.
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
+) -> httpx2.AsyncClient:
+    """An SSRF-hardened httpx2 client for outbound Connector/OAuth requests.
 
-    The signature matches the MCP SDK's ``httpx_client_factory``
-    (``(headers, timeout, auth) -> AsyncClient``) so it can be passed straight to
-    ``streamablehttp_client``; it is equally usable directly. DNS-pinned via
-    :class:`_PinnedResolveTransport` and ``follow_redirects=False``.
+    Keeps the ``(headers, timeout, auth) -> AsyncClient`` shape the SDK's
+    ``httpx_client_factory`` had, though 2.x no longer takes a factory — it
+    takes the finished client, so every caller now builds one here and passes
+    the result. DNS-pinned via :class:`_PinnedResolveTransport` and
+    ``follow_redirects=False``.
     """
-    return httpx.AsyncClient(
+    return httpx2.AsyncClient(
         headers=headers,
-        timeout=timeout if timeout is not None else httpx.Timeout(_DEFAULT_TIMEOUT),
+        timeout=timeout if timeout is not None else httpx2.Timeout(_DEFAULT_TIMEOUT),
         auth=auth,
         follow_redirects=False,
         transport=_PinnedResolveTransport(),

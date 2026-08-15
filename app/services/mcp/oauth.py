@@ -25,7 +25,7 @@ import secrets
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode, urlparse, urlsplit
 
-import httpx
+import httpx2
 from mcp.client.auth.oauth2 import (
     PKCEParameters,
     build_oauth_authorization_server_metadata_discovery_urls,
@@ -49,7 +49,6 @@ from mcp.shared.auth import (
     ProtectedResourceMetadata,
 )
 from mcp.shared.auth_utils import check_resource_allowed
-from pydantic import AnyUrl
 
 from app.errors import ConnectorOAuthError, InvalidConnectorUrlError
 from app.services.mcp.url_guard import guard_public_url, guarded_client
@@ -57,7 +56,7 @@ from app.services.mcp.url_guard import guard_public_url, guarded_client
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 20.0
-# Ceiling on a whole discovery, not on each of its requests. ``httpx.Timeout``
+# Ceiling on a whole discovery, not on each of its requests. ``httpx2.Timeout``
 # bounds a read; a server answering a byte every nineteen seconds resets that
 # clock forever, and this runs on an interactive endpoint holding a request and
 # a database session. One discovery is at most six requests (the 401 challenge,
@@ -123,6 +122,12 @@ def require_matching_issuer(
     A ``recorded`` of ``None`` only happens for a pending authorization started
     before this check existed; it fails closed, costing that user one more
     click on Connect within the state's ten-minute life.
+
+    Not replaceable by the SDK's ``validate_authorization_response_iss``, which
+    arrived in 2.x and looks like exactly this function. It compares against
+    ``str(oauth_metadata.issuer)``, which is a pydantic URL rather than the
+    published string — the comparison the paragraph above rules out, and the
+    reason ``issuer_as_published`` is carried separately at all.
     """
     if advertised and returned is None:
         raise ConnectorOAuthError(
@@ -162,15 +167,25 @@ class DiscoveredAuthorization:
     #: ``scope`` from the server's 401 challenge, when it issued one.
     challenge_scope: str | None = None
     #: ``issuer`` exactly as the document published it. RFC 9207 forbids
-    #: normalising either side before comparison, and :attr:`metadata`'s went
-    #: through pydantic's ``AnyUrl``, which canonicalises — a bare origin gains
-    #: a trailing slash. Comparing against that would reject every provider
-    #: whose issuer is a bare origin.
+    #: normalising either side before comparison, and :attr:`metadata`'s is a
+    #: pydantic URL, so it is not the published string.
+    #:
+    #: Narrower than it once was: through 1.x that type also added a trailing
+    #: slash to a bare origin, which would have rejected every provider whose
+    #: issuer is one. 2.x preserves the slash and the path — but still folds the
+    #: host to lower case and elides a default ``:443``, either of which is
+    #: enough to fail a byte-for-byte comparison against what the provider
+    #: returns.
     issuer_as_published: str | None = None
     #: Whether the server advertises RFC 9207 ``iss`` on authorization
-    #: responses. Not modelled by the SDK, so it is read from the document.
-    #: Both fields go when the SDK reaches 2.x, which models this one and stops
-    #: canonicalising the other.
+    #: responses. The SDK models this since 2.x, so it could now be read off
+    #: :attr:`metadata` — kept as its own field because it maps one-to-one onto
+    #: the ``iss_advertised`` key in the pending-authorization state, and the
+    #: two are worth being able to rename together.
+    #:
+    #: The sibling above narrows in 2.x but does not go: that type still
+    #: normalises host case and the default port, so the published string is
+    #: still not recoverable from :attr:`metadata`.
     iss_parameter_supported: bool = False
 
     @property
@@ -259,7 +274,7 @@ async def discover_authorization(server_url: str) -> DiscoveredAuthorization:
     without a separate check at each call site.
 
     Bounded as a whole rather than per request: a server that answers slowly
-    enough never trips ``httpx``'s per-read timeout, and this runs while a
+    enough never trips ``httpx2``'s per-read timeout, and this runs while a
     request and its database session are held open.
 
     """
@@ -286,7 +301,7 @@ async def _discover(server_url: str) -> DiscoveredAuthorization:
     # declining reuse costs one handshake per host and buys that check back.
     async with guarded_client(
         headers={"Connection": "close"},
-        timeout=httpx.Timeout(_HTTP_TIMEOUT),
+        timeout=httpx2.Timeout(_HTTP_TIMEOUT),
     ) as client:
         challenge = await _read_challenge(client, server_url)
         resource = await _discover_protected_resource(
@@ -321,7 +336,7 @@ async def _discover(server_url: str) -> DiscoveredAuthorization:
 
 
 async def _discover_authorization_server(
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     server_url: str,
     resource: ProtectedResourceMetadata,
 ) -> tuple[OAuthMetadata, dict]:
@@ -346,11 +361,16 @@ async def _discover_authorization_server(
     """
     authorization_server = str(resource.authorization_servers[0])
     # Whose document we are asking for, and therefore whose ``issuer`` the
-    # answer must claim (RFC 8414 §3.3). Put through ``AnyUrl`` because the
-    # compared ``issuer`` comes back through it too and it canonicalises (a
-    # bare origin gains a trailing slash, a path does not). Matching
-    # serialisations is what lets the comparison itself stay exact.
-    expected_issuer = str(AnyUrl(authorization_server))
+    # answer must claim (RFC 8414 §3.3), compared as published on both sides.
+    #
+    # This used to go through ``AnyUrl`` to *match* a canonicalisation the SDK
+    # applied to the value coming back — a bare origin gained a trailing slash
+    # there, so the expected side had to gain one too or nothing would ever
+    # compare equal. Since 2.x the SDK preserves what the document published,
+    # so canonicalising here is what would break it: the two sides would differ
+    # by exactly that slash. The RFC wants the published strings compared
+    # byte for byte, and now that is what reaches this.
+    expected_issuer = authorization_server
     # A scoped alias, if one turns up, is held back rather than taken: the
     # candidates are tried in the SDK's order, and a later one may still claim
     # the issuer exactly. Preferring the exact match means a provider that
@@ -365,7 +385,7 @@ async def _discover_authorization_server(
                 client,
                 create_oauth_metadata_request(metadata_url),
             )
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             continue
         try:
             keep_trying, metadata = await handle_auth_metadata_response(response)
@@ -417,7 +437,7 @@ class _Challenge:
     scope: str | None = None
 
 
-async def _read_challenge(client: httpx.AsyncClient, server_url: str) -> _Challenge:
+async def _read_challenge(client: httpx2.AsyncClient, server_url: str) -> _Challenge:
     """Ask the MCP server unauthenticated and read its 401 challenge.
 
     MCP requires clients to support both discovery routes, and this is the one
@@ -428,7 +448,7 @@ async def _read_challenge(client: httpx.AsyncClient, server_url: str) -> _Challe
 
     A bare ``GET`` is the SSE-open shape. A server that takes it as an
     invitation rather than refusing it answers with a stream instead of a 401 —
-    and httpx bounds each *read*, not the request, so its heartbeats would reset
+    and httpx2 bounds each *read*, not the request, so its heartbeats would reset
     that clock indefinitely and hang the authorize endpoint on a request slot
     and a database session. Hence a deadline over the whole call.
 
@@ -446,7 +466,7 @@ async def _read_challenge(client: httpx.AsyncClient, server_url: str) -> _Challe
                     headers={"Accept": "text/event-stream"},
                 ),
             )
-    except (httpx.HTTPError, TimeoutError):
+    except (httpx2.HTTPError, TimeoutError):
         return _Challenge()
     if response.status_code != 401:
         return _Challenge()
@@ -580,7 +600,7 @@ def _require_pkce_support(metadata: OAuthMetadata) -> None:
 
 
 async def _discover_protected_resource(
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     server_url: str,
     challenge_url: str | None,
 ):
@@ -741,7 +761,7 @@ async def _register_client(
     try:
         async with (
             asyncio.timeout(_HTTP_TIMEOUT),
-            guarded_client(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as client,
+            guarded_client(timeout=httpx2.Timeout(_HTTP_TIMEOUT)) as client,
         ):
             request = create_client_registration_request(
                 metadata, client_metadata, str(metadata.issuer)
@@ -856,7 +876,7 @@ def build_authorization_url(
     params = {
         "response_type": "code",
         # Optional on the SDK model; a client this service registered always
-        # carries one. Empty is what httpx would encode a ``None`` as, and the
+        # carries one. Empty is what httpx2 would encode a ``None`` as, and the
         # provider answers 4xx either way.
         "client_id": client.client_id or "",
         "redirect_uri": redirect_uri,
@@ -891,7 +911,7 @@ async def exchange_code(
         "code": code,
         "redirect_uri": redirect_uri,
         # Optional on the SDK model; a client this service registered always
-        # carries one. Empty is what httpx would encode a ``None`` as, and the
+        # carries one. Empty is what httpx2 would encode a ``None`` as, and the
         # provider answers 4xx either way.
         "client_id": client.client_id or "",
         "code_verifier": code_verifier,
@@ -944,7 +964,7 @@ async def revoke_grant(
         "token": tokens.refresh_token or tokens.access_token,
         "token_type_hint": ("refresh_token" if tokens.refresh_token else "access_token"),
         # Optional on the SDK model; a client this service registered always
-        # carries one. Empty is what httpx would encode a ``None`` as, and the
+        # carries one. Empty is what httpx2 would encode a ``None`` as, and the
         # provider answers 4xx either way.
         "client_id": client.client_id or "",
     }
@@ -963,7 +983,7 @@ async def revoke_grant(
 # and grants — a few kilobytes at most — so this is two orders of magnitude of
 # slack and still refuses the case a time bound cannot: an endpoint answering
 # 200 with gigabytes as fast as the socket allows arrives well inside
-# ``_HTTP_TIMEOUT``, and ``httpx`` buffers the body whole before there is a
+# ``_HTTP_TIMEOUT``, and ``httpx2`` buffers the body whole before there is a
 # response object to measure. Every URL here is user- or server-supplied, so
 # "a real provider would not do that" is not an argument available.
 #
@@ -975,13 +995,13 @@ _MAX_RESPONSE_BYTES = 256 * 1024
 
 
 async def _send_bounded(
-    client: httpx.AsyncClient,
-    request: httpx.Request,
-) -> httpx.Response:
+    client: httpx2.AsyncClient,
+    request: httpx2.Request,
+) -> httpx2.Response:
     """Send *request* and return its answer, reading at most
     :data:`_MAX_RESPONSE_BYTES` of body.
 
-    A real :class:`httpx.Response` comes back rather than some reduced shape,
+    A real :class:`httpx2.Response` comes back rather than some reduced shape,
     because most callers hand it straight to an MCP SDK handler that expects
     one. The only difference from ``client.send`` is that the body cannot be
     larger than the cap — so every call site keeps its own reading of status,
@@ -1017,7 +1037,7 @@ async def _send_bounded(
             chunks.append(chunk)
     finally:
         await response.aclose()
-    return httpx.Response(
+    return httpx2.Response(
         response.status_code,
         headers=response.headers,
         content=b"".join(chunks),
@@ -1029,10 +1049,10 @@ async def _post(
     url: str,
     data: dict[str, str],
     headers: dict[str, str],
-) -> httpx.Response:
+) -> httpx2.Response:
     """POST to one of the provider's endpoints, under a deadline over the call.
 
-    ``httpx.Timeout`` bounds each *read*, not the request — the same trap
+    ``httpx2.Timeout`` bounds each *read*, not the request — the same trap
     :func:`_read_challenge` documents. An endpoint that answers a byte every
     nineteen seconds keeps resetting that clock, and these calls are made inside
     a request the user is waiting on.
@@ -1042,7 +1062,7 @@ async def _post(
     """
     try:
         async with asyncio.timeout(_HTTP_TIMEOUT):
-            async with guarded_client(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as http_client:
+            async with guarded_client(timeout=httpx2.Timeout(_HTTP_TIMEOUT)) as http_client:
                 return await _send_bounded(
                     http_client,
                     http_client.build_request(
@@ -1052,5 +1072,5 @@ async def _post(
                         headers=headers,
                     ),
                 )
-    except (httpx.HTTPError, TimeoutError) as exc:
+    except (httpx2.HTTPError, TimeoutError) as exc:
         raise ConnectorOAuthError(f"OAuth endpoint unreachable: {exc}") from exc

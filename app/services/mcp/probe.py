@@ -11,8 +11,9 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+import httpx2
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Implementation, Tool
 
 from app.errors import ConnectorUnreachableError
@@ -81,7 +82,7 @@ def build_auth_headers(
     return {}
 
 
-async def _list_all_tools(session: ClientSession) -> list[dict[str, str]]:
+async def _list_all_tools(session: Client) -> list[dict[str, str]]:
     """Every tool the server exposes, following ``tools/list`` pagination.
 
     One page is not the catalog: the worker paginates, so stopping at page one
@@ -93,19 +94,20 @@ async def _list_all_tools(session: ClientSession) -> list[dict[str, str]]:
     rendered and switched off, so an entry outside ``disabled_tools``' own
     limits would be dead weight in the column. That is a different question
     from axon's caps on the same catalog, which bound what the *model* is sent.
+
+    No deadline of its own: ``Client(read_timeout_seconds=…)`` bounds every
+    JSON-RPC request, this one included, and the whole probe still sits under
+    ``_PROBE_TIMEOUT``. A single deadline shared across pages used to do it,
+    which meant page ten inherited whatever page one had left.
     """
-    deadline = asyncio.get_running_loop().time() + _LIST_TIMEOUT
     tools: list[dict[str, str]] = []
     seen_cursors: set[str] = set()
     cursor: str | None = None
     for _ in range(_MAX_LIST_PAGES):
-        page = await asyncio.wait_for(
-            session.list_tools(cursor=cursor),
-            deadline - asyncio.get_running_loop().time(),
-        )
+        page = await session.list_tools(cursor=cursor)
         if _admit_page(tools, page.tools):
             return tools
-        cursor = page.nextCursor
+        cursor = page.next_cursor
         if not cursor:
             return tools
         if cursor in seen_cursors:
@@ -187,22 +189,51 @@ async def _probe(
     headers = build_auth_headers(auth_type, credential)
 
     try:
-        async with streamablehttp_client(
-            url,
+        # The client is entered *outside* the transport, and the order is not
+        # cosmetic: the SDK does not close what it did not open, and it sends a
+        # session-terminating DELETE on its way out. Closing ours first would
+        # fail that teardown against every server that honours termination.
+        async with guarded_client(
             headers=headers,
-            timeout=_CONNECT_TIMEOUT,
-            sse_read_timeout=_LIST_TIMEOUT,
-            # DNS-pin + no-redirect client, so the handshake can't be rebound or
-            # 3xx-bounced to an internal host after the pre-flight guard above.
-            httpx_client_factory=guarded_client,
-        ) as (read_stream, write_stream, _get_session_id):
-            async with ClientSession(read_stream, write_stream) as session:
-                initialize_result = await asyncio.wait_for(session.initialize(), _CONNECT_TIMEOUT)
-                tools = await _list_all_tools(session)
+            # One object where v1 took two arguments: the transport has no
+            # ``sse_read_timeout`` of its own any more, so the connect bound and
+            # the longer stream-read bound travel together here.
+            timeout=httpx2.Timeout(_CONNECT_TIMEOUT, read=_LIST_TIMEOUT),
+        ) as http_client:
+            # The transport is handed over unentered: ``Client`` takes an async
+            # context manager yielding the stream pair and enters it itself.
+            async with Client(
+                streamable_http_client(url, http_client=http_client),
+                # Probes ``server/discover`` and falls back to ``initialize``,
+                # which is the point of the SDK bump: a server speaking only the
+                # 2026-07-28 stateless protocol refuses ``initialize`` outright,
+                # and used to be unaddable for it.
+                mode="auto",
+                # Bounds each JSON-RPC request rather than the whole handshake —
+                # ``mode="auto"`` may send two, and one shared deadline around
+                # both would halve what each gets.
+                read_timeout_seconds=_CONNECT_TIMEOUT,
+                # A probe exists to answer "what is there *now*". Each one builds
+                # its own client, so the SDK's per-client cache could never serve
+                # a stale answer anyway — but off is one less thing between the
+                # user's refresh button and the server.
+                cache=None,
+            ) as session:
+                # Asking a server that never advertised ``tools`` produces
+                # ``-32601``, which this function would report as the server
+                # being unreachable rather than as the absence it is.
+                tools = (
+                    await _list_all_tools(session)
+                    if session.server_capabilities.tools is not None
+                    else []
+                )
+                server_info = session.server_info
     except Exception as exc:
         raise ConnectorUnreachableError(f"Could not reach the MCP server: {exc}") from exc
 
-    server_info = initialize_result.serverInfo
+    # ``None`` where v1 always had a value: a 2026-era server stamps its identity
+    # optionally, so an anonymous one is named after its URL and shows no
+    # artwork. Its tools still arrive, and the name is the user's to edit.
     server_name = server_info.name if server_info else url
     return ProbeResult(
         server_name=server_name,
@@ -231,6 +262,13 @@ def _usable_icons(server_info: Implementation | None) -> list[dict]:
     would rather clients required same-origin, but hosting icons on a CDN is
     both common and encouraged for reachability, so the cost is taken instead
     and the fetch carries no credentials or referrer (see ``ConnectorIcon``).
+
+    One thing this function can no longer soften: ``theme`` is now typed
+    ``Literal["light", "dark"]``, and it is validated when the *handshake*
+    result is parsed — long before anything here runs. A server advertising
+    ``theme: "auto"`` therefore fails to connect at all rather than losing one
+    icon. SEP-973 defines only those two values, so such a server is out of
+    spec; under the 1.x models it was merely carried through as an extra.
     """
     if server_info is None:
         return []
@@ -246,11 +284,12 @@ def _usable_icons(server_info: Implementation | None) -> list[dict]:
         usable.append(
             {
                 "src": src,
-                "mime_type": icon.mimeType,
+                "mime_type": icon.mime_type,
                 "sizes": icon.sizes,
-                # Not modelled by the SDK yet, so it arrives as an extra field.
-                # Worth carrying: it is what lets the client offer a dark variant.
-                "theme": (icon.model_extra or {}).get("theme"),
+                # Modelled by the SDK since 2.x, where it used to arrive as an
+                # extra field read off ``model_extra``. Worth carrying: it is
+                # what lets the client offer a dark variant.
+                "theme": icon.theme,
             }
         )
     return usable

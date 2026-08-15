@@ -63,7 +63,7 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
     logging.basicConfig(handlers=[InterceptHandler()], level=logging.DEBUG, force=True)
 
     # Also intercept uvicorn and other libraries
-    for name in ["uvicorn", "uvicorn.error", "uvicorn.access", "sqlalchemy", "httpx"]:
+    for name in ["uvicorn", "uvicorn.error", "uvicorn.access", "sqlalchemy", "httpx", "httpx2"]:
         named = logging.getLogger(name)
         named.handlers = [InterceptHandler()]
         # Or every one of their records is emitted twice: once through the
