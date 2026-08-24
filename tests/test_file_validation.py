@@ -142,6 +142,50 @@ def test_generate_inline_url_signs_against_custom_domain_when_set(monkeypatch):
     assert bucket.sign_url.call_args.kwargs["params"] == {"response-content-disposition": "inline"}
 
 
+def test_generate_upload_url_accepts_any_extension():
+    # Uploads are no longer gated on extension. An unknown one still mints a
+    # URL; it just carries the inert generic Content-Type, which is what
+    # later keeps a browser from rendering it.
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://oss/upload"
+
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        response = file_storage.generate_upload_url(
+            "notes.sqlite3", 1, file_storage.SESSION_FILE_POLICY
+        )
+
+    assert response.content_type == "application/octet-stream"
+    assert response.file_key.endswith("/notes.sqlite3")
+
+
+def test_generate_upload_url_keeps_known_content_type():
+    # The table is still consulted where it has an answer — the signed
+    # Content-Type becomes the stored one, and ``.html`` rendering in the
+    # preview iframe depends on it being ``text/html``.
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://oss/upload"
+
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        response = file_storage.generate_upload_url(
+            "report.pdf", 1, file_storage.SESSION_FILE_POLICY
+        )
+
+    assert response.content_type == "application/pdf"
+
+
+def test_generate_inline_url_refuses_unvetted_extension():
+    # The inline gate is an allow-list precisely because uploads are open:
+    # anything nobody vetted downloads instead of rendering as active
+    # content on the document origin. A deny-list would need to predict
+    # every scriptable type a browser might execute.
+    with patch("app.services.file_storage.get_bucket") as get_bucket:
+        with pytest.raises(file_storage.InlinePreviewNotAllowedError):
+            file_storage.generate_inline_url(
+                file_storage.SESSION_FILE_POLICY, "session-files/x/page.xhtml"
+            )
+    get_bucket.assert_not_called()
+
+
 def test_generate_inline_url_refuses_svg():
     # An SVG served inline on the OSS document origin is stored XSS (SVG can
     # carry <script>). The single-chokepoint minter must refuse it before

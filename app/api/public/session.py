@@ -82,7 +82,6 @@ from app.services.file_storage import (
     SESSION_FILE_POLICY,
     FileTooLargeError,
     InlinePreviewNotAllowedError,
-    UnsupportedFileTypeError,
 )
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import (
@@ -321,7 +320,7 @@ async def create_session_upload_url(
             body.size_bytes,
             SESSION_FILE_POLICY,
         )
-    except (InvalidFilenameError, UnsupportedFileTypeError) as exc:
+    except InvalidFilenameError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except FileTooLargeError as exc:
         raise HTTPException(
