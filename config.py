@@ -384,7 +384,7 @@ class Settings(BaseSettings):
         description="Max attachments per single user message",
     )
     max_file_bytes: int = Field(
-        default=600 * 1024 * 1024,
+        default=200 * 1024 * 1024,
         description="Per-file upload size cap (bytes)",
     )
     max_session_files_bytes_per_user: int = Field(
