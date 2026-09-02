@@ -156,9 +156,11 @@ class _ConnectorAuthFields(BaseModel):
 class ConnectorCreate(_ConnectorAuthFields):
     """A Connector is created from exactly one of two sources.
 
-    - **Catalog**: ``catalog_id`` alone — every other field is copied from the
-      official entry, so sending one alongside is rejected rather than silently
-      ignored (same footgun :class:`ConnectorUpdate` guards).
+    - **Catalog**: ``catalog_id``, plus ``credential`` when the entry's auth
+      needs the user's own token (the endpoint enforces that against the
+      entry). Every other field is copied from the official entry, so sending
+      one alongside is rejected rather than silently ignored (same footgun
+      :class:`ConnectorUpdate` guards).
     - **Custom**: ``name`` + ``url`` (+ the auth fields above).
     """
 
@@ -186,7 +188,6 @@ class ConnectorCreate(_ConnectorAuthFields):
             for field, value in (
                 ("name", self.name),
                 ("url", self.url),
-                ("credential", self.credential),
                 ("header_name", self.header_name),
                 ("oauth_client_id", self.oauth_client_id),
                 ("oauth_client_secret", self.oauth_client_secret),

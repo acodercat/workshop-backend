@@ -14,7 +14,12 @@ from app.schemas.mcp_server import ConnectorCatalogEntryResponse
 from app.services import crypto
 from app.services.localized_text import DEFAULT_LOCALE
 from app.services.mcp import catalog
-from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES, build_connector
+from app.errors import ConnectorCatalogCredentialError
+from app.services.mcp.catalog import (
+    CREDENTIAL_AUTH_TYPES,
+    INSTANTIABLE_AUTH_TYPES,
+    build_connector,
+)
 
 
 def _entry(**over) -> MCPServerCatalogEntry:
@@ -48,15 +53,42 @@ class TestBuildConnector:
         entry = _entry(auth_type=MCPServerAuthType.NONE, oauth_scope=None)
         assert build_connector(entry, user_id=1, locale=DEFAULT_LOCALE).connected is True
 
-    @pytest.mark.parametrize(
-        "auth_type", [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER],
-    )
-    def test_rejects_auth_types_needing_a_per_user_secret(self, auth_type):
-        # The catalog holds no credential and the add flow has nowhere to ask
-        # for one, so such an entry would yield a connector that probes fine and
-        # then 401s on every real tool call.
+    def test_rejects_header_auth(self):
+        # HEADER needs a template-level header name the catalog has no column
+        # for, so it cannot be offered at all.
         with pytest.raises(ConnectorCatalogEntryNotFoundError):
-            build_connector(_entry(auth_type=auth_type), user_id=1, locale=DEFAULT_LOCALE)
+            build_connector(
+                _entry(auth_type=MCPServerAuthType.HEADER), user_id=1, locale=DEFAULT_LOCALE
+            )
+
+    def test_bearer_requires_the_users_credential(self):
+        # A BEARER entry without the user's token would probe fine and then
+        # 401 on every real tool call, so it fails at add time instead.
+        with pytest.raises(ConnectorCatalogCredentialError):
+            build_connector(
+                _entry(auth_type=MCPServerAuthType.BEARER, oauth_scope=None),
+                user_id=1, locale=DEFAULT_LOCALE,
+            )
+
+    def test_bearer_carries_the_users_credential_and_starts_connected(self):
+        connector = build_connector(
+            _entry(auth_type=MCPServerAuthType.BEARER, oauth_scope=None),
+            user_id=1, locale=DEFAULT_LOCALE, encrypted_credential="ciphertext",
+        )
+        assert connector.encrypted_credential == "ciphertext"
+        assert connector.connected is True
+
+    @pytest.mark.parametrize(
+        "auth_type", [MCPServerAuthType.NONE, MCPServerAuthType.OAUTH],
+    )
+    def test_credential_free_entries_refuse_a_credential(self, auth_type):
+        # Sent to an entry that takes none it is rejected, not silently dropped —
+        # the same footgun the create schema guards for the other fields.
+        with pytest.raises(ConnectorCatalogCredentialError):
+            build_connector(
+                _entry(auth_type=auth_type), user_id=1, locale=DEFAULT_LOCALE,
+                encrypted_credential="ciphertext",
+            )
 
     def test_carries_no_credentials(self):
         # The catalog never holds secrets — the OAuth client is registered at
@@ -102,12 +134,16 @@ class TestUnpublishedEntriesAreUnreachable:
 
 
 class TestInstantiableAuthTypes:
-    def test_only_the_credential_free_ones(self):
+    def test_what_the_catalog_can_offer(self):
         # The operator CLI's --auth-type choices are derived from this set, so
         # widening it must be a deliberate edit, not a side effect.
         assert INSTANTIABLE_AUTH_TYPES == {
-            MCPServerAuthType.NONE, MCPServerAuthType.OAUTH,
+            MCPServerAuthType.NONE, MCPServerAuthType.OAUTH, MCPServerAuthType.BEARER,
         }
+
+    def test_which_of_those_take_the_users_credential(self):
+        assert CREDENTIAL_AUTH_TYPES == {MCPServerAuthType.BEARER}
+        assert CREDENTIAL_AUTH_TYPES <= INSTANTIABLE_AUTH_TYPES
 
 
 class TestWhatIdentifiesAnEntry:

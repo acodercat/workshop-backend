@@ -334,6 +334,15 @@ class ConnectorNotOAuthError(AppError):
     error_type = "connector_not_oauth"
 
 
+class ConnectorCatalogCredentialError(AppError):
+    """A catalog entry's credential requirement was not met: a BEARER entry
+    was added without the user's token, or a credential was sent to an entry
+    that takes none. 400: the request does not fit the entry."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_catalog_credential"
+
+
 class ConnectorNotAuthorizedError(AppError):
     """Asked to connect an OAuth Connector that holds no grant. 400: connecting
     is the wrong verb for it — authorizing is what it still needs."""

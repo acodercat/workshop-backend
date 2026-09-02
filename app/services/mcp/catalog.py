@@ -14,18 +14,23 @@ stay untouched.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors import ConnectorCatalogEntryNotFoundError
+from app.errors import (
+    ConnectorCatalogCredentialError,
+    ConnectorCatalogEntryNotFoundError,
+)
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.services import localized_text
 
-#: The auth types an official entry can actually be added with. BEARER/HEADER
-#: are excluded on purpose: they need a secret that is per-user by nature, and
-#: the catalog holds none — see :func:`build_connector`. Operator tooling should
-#: offer only these.
+#: The auth types an official entry can be added with. HEADER is excluded: its
+#: header *name* is template-level and the catalog has no column for it.
 INSTANTIABLE_AUTH_TYPES = frozenset(
-    {MCPServerAuthType.NONE, MCPServerAuthType.OAUTH}
+    {MCPServerAuthType.NONE, MCPServerAuthType.OAUTH, MCPServerAuthType.BEARER}
 )
+
+#: The instantiable types whose entry needs a secret the *user* supplies at add
+#: time. The catalog itself still holds none — see :func:`build_connector`.
+CREDENTIAL_AUTH_TYPES = frozenset({MCPServerAuthType.BEARER})
 
 
 async def list_published(db: AsyncSession) -> list[MCPServerCatalogEntry]:
@@ -65,7 +70,11 @@ async def get_published_entry(
 
 
 def build_connector(
-    entry: MCPServerCatalogEntry, user_id: int, locale: str
+    entry: MCPServerCatalogEntry,
+    user_id: int,
+    locale: str,
+    *,
+    encrypted_credential: str | None = None,
 ) -> MCPServer:
     """An unsaved user-owned Connector copied from *entry*.
 
@@ -76,20 +85,30 @@ def build_connector(
     hand an English reader a Chinese one for a Connector they added from an
     English card.
 
-    Per-user credentials are deliberately absent — OAUTH entries get theirs
-    from the authorize flow. That is why only
-    :data:`INSTANTIABLE_AUTH_TYPES` can be offered: BEARER/HEADER need a
-    per-user secret nobody here can supply, so the Connector would probe fine
-    and then 401 on every real tool call. What an entry *may* carry is the
-    platform's own pre-registered OAuth app (``oauth_client_id`` + encrypted
-    secret, for providers without DCR/CIMD) — that is one app shared by every
-    user, not a credential, and the add endpoint applies it at client
-    registration rather than copying it here.
+    The catalog never holds a per-user secret. OAUTH entries get theirs from
+    the authorize flow; a :data:`CREDENTIAL_AUTH_TYPES` entry (BEARER) gets
+    the user's own token here, as *encrypted_credential* supplied by the add
+    request — required for such an entry and refused for any other, so a
+    mismatch fails at add time rather than 401ing on every tool call. What an
+    entry *may* carry is the platform's own pre-registered OAuth app
+    (``oauth_client_id`` + encrypted secret, for providers without DCR/CIMD) —
+    one app shared by every user, not a credential, applied by the add
+    endpoint at client registration rather than copied here.
     """
     if entry.auth_type not in INSTANTIABLE_AUTH_TYPES:
         raise ConnectorCatalogEntryNotFoundError(
             f"catalog entry {entry.id} declares {entry.auth_type.value} auth, "
-            f"which cannot be added without a per-user credential"
+            f"which the catalog cannot offer"
+        )
+    takes_credential = entry.auth_type in CREDENTIAL_AUTH_TYPES
+    if takes_credential and encrypted_credential is None:
+        raise ConnectorCatalogCredentialError(
+            f"catalog entry {entry.id} requires your {entry.auth_type.value} "
+            f"credential to be added"
+        )
+    if not takes_credential and encrypted_credential is not None:
+        raise ConnectorCatalogCredentialError(
+            f"catalog entry {entry.id} takes no credential"
         )
     return MCPServer(
         user_id=user_id,
@@ -98,6 +117,7 @@ def build_connector(
         url=entry.url,
         auth_type=entry.auth_type,
         oauth_scope=entry.oauth_scope,
+        encrypted_credential=encrypted_credential,
         # OAUTH starts inactive until authorized — same rule as a hand-added
         # OAuth Connector.
         connected=entry.auth_type != MCPServerAuthType.OAUTH,

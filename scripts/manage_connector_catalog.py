@@ -210,8 +210,9 @@ def _parse_args() -> argparse.Namespace:
     add = sub.add_parser("add", help="add a catalog entry")
     add.add_argument("--name", required=True, help="display name, copied to the connector")
     add.add_argument("--url", required=True, help="remote MCP server URL (https)")
-    # Only the two the add flow can complete: BEARER/HEADER would need a secret
-    # per user that the catalog cannot hold (see catalog.INSTANTIABLE_AUTH_TYPES).
+    # Only what the add flow can complete. A BEARER entry asks the user for
+    # their token at add time; HEADER would also need a template-level header
+    # name the catalog has no column for (see catalog.INSTANTIABLE_AUTH_TYPES).
     add.add_argument(
         "--auth-type", default=MCPServerAuthType.NONE.value,
         choices=sorted(m.value for m in INSTANTIABLE_AUTH_TYPES),

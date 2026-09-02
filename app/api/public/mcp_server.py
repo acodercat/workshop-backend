@@ -173,7 +173,13 @@ async def create_connector(
     """
     if body.catalog_id is not None:
         connector = await _build_catalog_connector(
-            db, body.catalog_id, current_user.id, normalize_locale(locale)
+            db,
+            body.catalog_id,
+            current_user.id,
+            normalize_locale(locale),
+            # Blank counts as absent, as the custom path treats it, so an empty
+            # token fails as "credential required" rather than at the probe.
+            credential=body.credential or None,
         )
     elif body.auth_type == MCPServerAuthType.OAUTH:
         connector = await _build_oauth_connector(db, body, current_user.id)
@@ -623,16 +629,31 @@ async def _release_connection(db: AsyncSession) -> None:
 
 
 async def _build_catalog_connector(
-    db: AsyncSession, catalog_id: int, user_id: int, locale: str,
+    db: AsyncSession,
+    catalog_id: int,
+    user_id: int,
+    locale: str,
+    *,
+    credential: str | None = None,
 ) -> MCPServer:
     """Instantiate an official catalog entry as this user's own Connector.
 
     Same two paths as a hand-added Connector, just with the fields copied from
     the entry: OAuth registers its client now (``/authorizations`` needs one
     stored), everything else is probed so a broken entry fails at add time.
+    *credential* is the user's own token for a BEARER entry — encrypted onto
+    the row and used for that probe; ``build_connector`` rejects a mismatch
+    between it and what the entry takes.
     """
     entry = await catalog.get_published_entry(db, catalog_id)
-    connector = catalog.build_connector(entry, user_id, locale)
+    connector = catalog.build_connector(
+        entry,
+        user_id,
+        locale,
+        encrypted_credential=(
+            encrypt_secret(credential) if credential is not None else None
+        ),
+    )
     await _reject_duplicate_url(db, user_id, connector.url)
     # Decrypted before the connection is released: ``entry`` belongs to this
     # session, and a Fernet failure should surface as the usual
@@ -662,7 +683,11 @@ async def _build_catalog_connector(
             )
         )
     else:
-        result = await probe(connector.url, connector.auth_type, None)
+        result = await probe(
+            connector.url,
+            connector.auth_type,
+            _credential_plaintext(connector.auth_type, credential, None),
+        )
         _apply_probe(connector, result)
     return connector
 
