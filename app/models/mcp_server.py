@@ -132,6 +132,11 @@ class MCPServer(Base):
     tools_preview: Mapped[list[dict[str, str]] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True,
     )
+    # ``serverInfo.description`` (MCP) captured at the last probe: the server's
+    # own human-readable description. What the UI shows for a custom Connector,
+    # which has no curated catalog copy to fall back to. NULL when the server
+    # advertised none.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Every usable icon the server advertised in ``serverInfo.icons`` (SEP-973)
     # at the last probe, in the order it offered them. A list because the client
     # picks by pixel density and colour scheme — a decision only the browser can
