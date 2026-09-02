@@ -79,6 +79,10 @@ class ConnectorResponse(BaseModel):
     auth_type: str
     tool_count: int
     tools_preview: list[dict[str, str]] | None
+    # The server's own ``serverInfo.description`` (MCP) from the last probe. What
+    # the client shows for a custom Connector; it prefers a catalog entry's
+    # curated description when there is one. None when the server advertised none.
+    description: str | None = None
     # The icons the server advertises for itself (SEP-973), all of them, in the
     # order offered. Distinct from the catalog entry's curated ``icon_url``,
     # which the client prefers when there is one; these are what the server says

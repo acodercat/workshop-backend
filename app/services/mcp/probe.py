@@ -67,6 +67,11 @@ class ProbeResult:
     # neither is knowable here. The browser chooses — see ``ConnectorIcon`` on
     # the client — so this side sanitizes and passes on.
     icons: list[dict] = field(default_factory=list)
+    # ``serverInfo.description`` (MCP): "a human-readable description of what this
+    # implementation does". What the UI shows for a custom Connector, which has no
+    # curated catalog copy. Not ``instructions`` — that is LLM guidance, not a
+    # display string. ``None`` when the server advertised none.
+    description: str | None = None
 
 
 def build_auth_headers(
@@ -239,10 +244,15 @@ async def _probe(
     # optionally, so an anonymous one is named after its URL and shows no
     # artwork. Its tools still arrive, and the name is the user's to edit.
     server_name = server_info.name if server_info else url
+    # ``description`` is optional in ``Implementation``; read it defensively so a
+    # server (or SDK shape) without one is not an error.
+    raw_description = getattr(server_info, "description", None)
+    description = (raw_description or "").strip()[:_MAX_DESCRIPTION_CHARS] or None
     return ProbeResult(
         server_name=server_name,
         tools=tools,
         icons=_usable_icons(server_info),
+        description=description,
     )
 
 
