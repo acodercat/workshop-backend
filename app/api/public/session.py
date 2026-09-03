@@ -40,6 +40,7 @@ from app.auth import (
 from app.common.file_kind import FILE_KINDS, file_kind_case
 from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
+from app.common.search import ilike_contains
 from app.database import AsyncSessionLocal
 from app.errors import (
     FileCountQuotaExceededError,
@@ -272,13 +273,26 @@ async def create_session(
 async def list_sessions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> PaginatedResponse[SessionResponse]:
-    filter_clause = sa.and_(
+    """List the caller's non-deleted sessions, most recently updated first.
+
+    ``search`` is an optional substring match on the session title,
+    applied server-side (like ``GET /sessions/files``) so the client can
+    search the caller's whole history rather than whichever pages it
+    happens to have loaded. A session with no title never matches — SQL
+    ``NULL ILIKE`` is NULL — which is the wanted answer: an untitled row
+    has nothing to match against.
+    """
+    conditions = [
         Session.user_id == current_user.id,
         Session.deleted_at.is_(None),
-    )
+    ]
+    if search:
+        conditions.append(ilike_contains(Session.title, search))
+    filter_clause = sa.and_(*conditions)
     base = select(Session).where(filter_clause).order_by(Session.updated_at.desc())
     total = (await db.execute(select(func.count(Session.id)).where(filter_clause))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
@@ -381,14 +395,10 @@ async def list_files(
     if kind != "all":
         conditions.append(kind_expr == kind)
     if search:
-        # Escape LIKE wildcards so a literal "_" / "%" in the query (common
-        # in filenames) matches literally rather than as a wildcard.
-        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped}%"
         conditions.append(
             sa.or_(
-                SessionFile.filename.ilike(pattern, escape="\\"),
-                Session.title.ilike(pattern, escape="\\"),
+                ilike_contains(SessionFile.filename, search),
+                ilike_contains(Session.title, search),
             )
         )
     filter_clause = sa.and_(*conditions)
@@ -462,14 +472,10 @@ async def list_sites(
         Session.deleted_at.is_(None),
     ]
     if search:
-        # Escape LIKE wildcards so a literal "_" / "%" in the query matches
-        # literally rather than as a wildcard (mirrors ``list_files``).
-        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped}%"
         conditions.append(
             sa.or_(
-                SessionSite.title.ilike(pattern, escape="\\"),
-                Session.title.ilike(pattern, escape="\\"),
+                ilike_contains(SessionSite.title, search),
+                ilike_contains(Session.title, search),
             )
         )
     filter_clause = sa.and_(*conditions)
