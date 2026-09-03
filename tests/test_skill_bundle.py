@@ -7,6 +7,7 @@ zips. Covers each rejection path explicitly so a future relaxation
 surfaces as a behavior change in a named test.
 """
 
+import codecs
 import io
 import zipfile
 
@@ -24,6 +25,7 @@ from app.errors import (
 from app.services.skill_bundle import (
     _MAX_BODY_BYTES,
     parse_bundle,
+    parse_skill_md,
     validate_zip_structure,
 )
 
@@ -276,6 +278,34 @@ class TestEncodingRejections:
             parse_bundle(buf.getvalue())
 
 
+# ── frontmatter detection ───────────────────────────────────────────────────
+
+
+class TestFrontmatterDetection:
+    def test_bom_before_fence_is_tolerated_in_bundle(self):
+        # Windows editors write a UTF-8 BOM by default; it must not push the
+        # opening ``---`` off position 0 and turn the frontmatter into body.
+        md = _skill_md({"name": "bom-skill", "description": "d"}, "body")
+        data = _zip({"SKILL.md": codecs.BOM_UTF8 + md.encode("utf-8")})
+        assert parse_bundle(data).name == "bom-skill"
+
+    def test_bom_before_fence_is_tolerated_in_bare_md(self):
+        md = _skill_md({"name": "bom-skill", "description": "d"}, "body")
+        assert parse_skill_md(codecs.BOM_UTF8 + md.encode("utf-8")).name == "bom-skill"
+
+    def test_missing_fence_reports_no_frontmatter(self):
+        # A file with no ``---`` block at all must say so, rather than claim
+        # the ``name`` field is absent from a frontmatter that was never seen.
+        with pytest.raises(SkillFrontmatterInvalidError, match="no YAML frontmatter"):
+            parse_bundle(_zip({"SKILL.md": "# just a body"}))
+
+    def test_fence_with_empty_name_reports_missing_name(self):
+        # The mirror of the case above: the fence IS there, so blaming its
+        # absence would send the author to the wrong line.
+        with pytest.raises(SkillFrontmatterInvalidError, match="'name' field"):
+            parse_bundle(_zip({"SKILL.md": "---\nname:\n---\nbody"}))
+
+
 # ── body size cap ───────────────────────────────────────────────────────────
 
 
@@ -321,9 +351,9 @@ class TestBodySizeCap:
         with pytest.raises(SkillBodyTooLargeError):
             parse_bundle(data)
 
-    def test_missing_name_reported_before_oversized_body(self):
+    def test_frontmatter_error_reported_before_oversized_body(self):
         # A huge file with no frontmatter should hear the actionable
-        # structural error ("missing name"), not "too large".
+        # structural error ("no frontmatter"), not "too large".
         data = _zip({"SKILL.md": "x" * (_MAX_BODY_BYTES + 1)})
         with pytest.raises(SkillFrontmatterInvalidError):
             parse_bundle(data)

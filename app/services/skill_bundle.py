@@ -133,39 +133,8 @@ def parse_bundle(data: bytes) -> ParsedSkill:
         raise SkillBundleUnreadableError(f"not a valid zip file: {exc}") from exc
 
     with zf:
-        skill_md_path = _locate_skill_md(zf)
-        try:
-            raw = zf.read(skill_md_path).decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise SkillBundleUnreadableError(
-                f"SKILL.md is not valid UTF-8: {exc}",
-            ) from exc
-
-    meta, body = _split_frontmatter(raw)
-
-    # Per the Agent Skills spec, ``name`` is required in frontmatter.
-    name = meta.get("name")
-    if not name:
-        raise SkillFrontmatterInvalidError(
-            "SKILL.md frontmatter must include a 'name' field "
-            "(e.g. `name: my-skill`)."
-        )
-    _validate_skill_name(name)
-    _reject_oversized_body(body)
-    # ``description`` falls back to the first non-empty body line if
-    # omitted from frontmatter — stricter enforcement isn't worth the
-    # UX cost since many real SKILL.md files rely on body-as-description.
-    description = _clip(
-        meta.get("description") or _first_nonempty_line(body) or name,
-        _MAX_DESCRIPTION_CHARS,
-    )
-    display_name, display_name_i18n = _extract_display_name(meta, name)
-    return ParsedSkill(
-        name=name,
-        display_name=display_name,
-        display_name_i18n=display_name_i18n,
-        description=description,
-    )
+        raw = _decode_skill_md(zf.read(_locate_skill_md(zf)))
+    return _parse_skill_md_text(raw)
 
 
 def normalize_bundle(data: bytes) -> bytes | None:
@@ -217,37 +186,10 @@ def normalize_bundle(data: bytes) -> bytes | None:
 def parse_skill_md(data: bytes) -> ParsedSkill:
     """Validate ``data`` as a bare SKILL.md file and return its metadata.
 
-    Same validation as the zip path (name required + format check) but
-    without any archive handling — the bytes ARE the SKILL.md content.
+    Same validation as the zip path but without any archive handling — the
+    bytes ARE the SKILL.md content.
     """
-    try:
-        raw = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise SkillBundleUnreadableError(
-            f"SKILL.md is not valid UTF-8: {exc}",
-        ) from exc
-
-    meta, body = _split_frontmatter(raw)
-
-    name = meta.get("name")
-    if not name:
-        raise SkillFrontmatterInvalidError(
-            "SKILL.md frontmatter must include a 'name' field "
-            "(e.g. `name: my-skill`)."
-        )
-    _validate_skill_name(name)
-    _reject_oversized_body(body)
-    description = _clip(
-        meta.get("description") or _first_nonempty_line(body) or name,
-        _MAX_DESCRIPTION_CHARS,
-    )
-    display_name, display_name_i18n = _extract_display_name(meta, name)
-    return ParsedSkill(
-        name=name,
-        display_name=display_name,
-        display_name_i18n=display_name_i18n,
-        description=description,
-    )
+    return _parse_skill_md_text(_decode_skill_md(data))
 
 
 def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
@@ -363,17 +305,69 @@ def _locate_skill_md(zf: zipfile.ZipFile) -> str:
     )
 
 
-def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
+def _decode_skill_md(data: bytes) -> str:
+    """Decode SKILL.md bytes, dropping a leading UTF-8 BOM.
+
+    ``utf-8-sig`` is ``utf-8`` plus BOM stripping. Windows editors emit the
+    BOM by default; left in place it sits before the opening ``---``, the
+    fence no longer matches at position 0, and the whole frontmatter block
+    reads as body.
+    """
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise SkillBundleUnreadableError(f"SKILL.md is not valid UTF-8: {exc}") from exc
+
+
+def _parse_skill_md_text(raw: str) -> ParsedSkill:
+    """Validate decoded SKILL.md text and extract its metadata."""
+    meta, body = _split_frontmatter(raw)
+    if meta is None:
+        raise SkillFrontmatterInvalidError(
+            "SKILL.md has no YAML frontmatter: start the file with a line "
+            "containing only `---`, then the fields (`name: my-skill`), "
+            "then a closing `---`."
+        )
+
+    # Per the Agent Skills spec, ``name`` is required in frontmatter.
+    name = meta.get("name")
+    if not name:
+        raise SkillFrontmatterInvalidError(
+            "SKILL.md frontmatter must include a 'name' field (e.g. `name: my-skill`)."
+        )
+    _validate_skill_name(name)
+    _reject_oversized_body(body)
+    # ``description`` falls back to the first non-empty body line if
+    # omitted from frontmatter — stricter enforcement isn't worth the
+    # UX cost since many real SKILL.md files rely on body-as-description.
+    description = _clip(
+        meta.get("description") or _first_nonempty_line(body) or name,
+        _MAX_DESCRIPTION_CHARS,
+    )
+    display_name, display_name_i18n = _extract_display_name(meta, name)
+    return ParsedSkill(
+        name=name,
+        display_name=display_name,
+        display_name_i18n=display_name_i18n,
+        description=description,
+    )
+
+
+def _split_frontmatter(content: str) -> tuple[dict[str, Any] | None, str]:
     """Parse YAML frontmatter between ``---`` fences.
 
     Uses ``yaml.safe_load`` to handle multiline scalars (``>-``, ``|``,
     etc.) that real-world SKILL.md files use for long descriptions.
+
+    Returns ``None`` for the fields when there is no fence at all, versus an
+    empty dict when a fence is there but holds nothing usable — the caller
+    reports a different error for each, so they must not collapse.
     """
     import yaml
 
     match = _FRONTMATTER_RE.match(content)
     if not match:
-        return {}, content
+        return None, content
     try:
         raw = yaml.safe_load(match.group(1))
     except yaml.YAMLError:
