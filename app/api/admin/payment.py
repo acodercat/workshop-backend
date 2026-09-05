@@ -37,11 +37,14 @@ from app.services.payment import analytics
 router = APIRouter(tags=["payments"])
 
 
-def _to_order_response(order: PaymentOrder, owner_username: str) -> PaymentOrderResponse:
+def _to_order_response(
+    order: PaymentOrder, owner_username: str, owner_name: str
+) -> PaymentOrderResponse:
     return PaymentOrderResponse(
         id=order.id,
         user_id=order.user_id,
         owner_username=owner_username,
+        owner_name=owner_name,
         provider=order.provider.value,
         out_trade_no=order.out_trade_no,
         provider_txn_id=order.provider_txn_id,
@@ -103,7 +106,7 @@ async def list_payments(
     rows = (
         await ctx.db.execute(
             paginate(
-                select(PaymentOrder, User.username)
+                select(PaymentOrder, User.username, User.name)
                 .join(User, User.id == PaymentOrder.user_id)
                 .where(*filters)
                 .order_by(PaymentOrder.created_at.desc()),
@@ -114,6 +117,6 @@ async def list_payments(
     ).all()
 
     return PaginatedResponse(
-        items=[_to_order_response(order, username) for order, username in rows],
+        items=[_to_order_response(order, username, name) for order, username, name in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

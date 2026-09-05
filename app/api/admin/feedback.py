@@ -18,16 +18,20 @@ from app.models.user import User
 from app.models.user_feedback import FeedbackStatus, UserFeedback
 from app.schemas.admin.feedback import FeedbackResponse, FeedbackUpdate
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
+from app.services import user as user_service
 from app.services.admin import AuditAction, audit
 
 router = APIRouter(tags=["feedback"])
 
 
-def _to_feedback_response(feedback: UserFeedback, username: str | None) -> FeedbackResponse:
+def _to_feedback_response(
+    feedback: UserFeedback, username: str | None, name: str | None
+) -> FeedbackResponse:
     return FeedbackResponse(
         id=feedback.id,
         user_id=feedback.user_id,
         owner_username=username,
+        owner_name=name,
         message=feedback.message,
         image_keys=feedback.image_keys,
         status=feedback.status,
@@ -62,7 +66,7 @@ async def list_feedback(
     rows = (
         await ctx.db.execute(
             paginate(
-                select(UserFeedback, User.username)
+                select(UserFeedback, User.username, User.name)
                 .outerjoin(User, User.id == UserFeedback.user_id)
                 .where(*filters)
                 .order_by(UserFeedback.created_at.desc(), UserFeedback.id.desc()),
@@ -73,7 +77,7 @@ async def list_feedback(
     ).all()
 
     return PaginatedResponse(
-        items=[_to_feedback_response(entry, username) for entry, username in rows],
+        items=[_to_feedback_response(entry, username, name) for entry, username, name in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 
@@ -92,15 +96,13 @@ async def update_feedback(
         raise FeedbackNotFoundError(f"No feedback with id {feedback_id}.")
 
     # Fetched explicitly rather than via the lazy relationship — an
-    # async lazy load outside a query context would raise.
-    username = (
-        None
-        if feedback.user_id is None
-        else await ctx.db.scalar(select(User.username).where(User.id == feedback.user_id))
-    )
+    # async lazy load outside a query context would raise. Both name
+    # columns in one row, so the single-row path and the list agree on
+    # what an identity is.
+    username, name = await user_service.owner_identity(ctx.db, feedback.user_id)
 
     if feedback.status == body.status:
-        return _to_feedback_response(feedback, username)
+        return _to_feedback_response(feedback, username, name)
 
     before = feedback.status
     async with audit(
@@ -117,4 +119,4 @@ async def update_feedback(
     # async lazy load outside a query context (same pattern as the public
     # commission endpoint's post-commit refresh).
     await ctx.db.refresh(feedback)
-    return _to_feedback_response(feedback, username)
+    return _to_feedback_response(feedback, username, name)

@@ -6,6 +6,7 @@ PK lookup and the username scalar.
 """
 
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -21,8 +22,24 @@ from app.models.user_feedback import FeedbackStatus, UserFeedback
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
+class _OwnerRow(NamedTuple):
+    """Shaped like the ``Row`` ``_owner_identity`` reads by label — the
+    two name columns the console renders as one identity."""
+
+    username: str
+    name: str
+
+
+class _OwnerResult:
+    def __init__(self, row: _OwnerRow) -> None:
+        self._row = row
+
+    def one_or_none(self) -> _OwnerRow:
+        return self._row
+
+
 class _FakeDb:
-    """``get`` serves the PK lookup, ``scalar`` the username join."""
+    """``get`` serves the PK lookup, ``execute`` the owner identity."""
 
     def __init__(self, feedback: UserFeedback | None) -> None:
         self.feedback = feedback
@@ -32,8 +49,8 @@ class _FakeDb:
     async def get(self, _model, _pk):
         return self.feedback
 
-    async def scalar(self, _stmt):
-        return "axon_42"
+    async def execute(self, _stmt):
+        return _OwnerResult(_OwnerRow("axon_42", "王小明"))
 
     def add(self, obj) -> None:
         self.added.append(obj)

@@ -71,11 +71,14 @@ def _to_catalog_response(
     )
 
 
-def _to_connector_response(connector: MCPServer, owner_username: str) -> ConnectorResponse:
+def _to_connector_response(
+    connector: MCPServer, owner_username: str, owner_name: str
+) -> ConnectorResponse:
     return ConnectorResponse(
         id=connector.id,
         user_id=connector.user_id,
         owner_username=owner_username,
+        owner_name=owner_name,
         name=connector.name,
         url=connector.url,
         auth_type=connector.auth_type,
@@ -305,7 +308,7 @@ async def list_connectors(
     rows = (
         await ctx.db.execute(
             paginate(
-                select(MCPServer, User.username)
+                select(MCPServer, User.username, User.name)
                 .join(User, User.id == MCPServer.user_id)
                 .where(*filters)
                 .order_by(MCPServer.created_at.desc()),
@@ -316,6 +319,8 @@ async def list_connectors(
     ).all()
 
     return PaginatedResponse(
-        items=[_to_connector_response(connector, username) for connector, username in rows],
+        items=[
+            _to_connector_response(connector, username, name) for connector, username, name in rows
+        ],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

@@ -15,10 +15,12 @@ from app.models.user_feedback import FeedbackStatus
 class FeedbackResponse(BaseModel):
     """One feedback submission, as the review queue renders it.
 
-    ``owner_username`` is joined in so the queue answers "who sent this"
-    without a second lookup; both it and ``user_id`` are ``None`` for
-    rows whose author was deleted (the FK is ``SET NULL`` so the
-    feedback outlives the account).
+    ``owner_username`` and ``owner_name`` are joined in so the queue
+    answers "who sent this" without a second lookup, and answers it the
+    way every other console table does — a login with the display name
+    under it. All three owner fields are ``None`` for rows whose author
+    was deleted (the FK is ``SET NULL`` so the feedback outlives the
+    account).
 
     ``image_keys`` are the raw OSS keys — minting presigned view URLs
     is the console UI's follow-up, not this endpoint's concern.
@@ -27,6 +29,7 @@ class FeedbackResponse(BaseModel):
     id: int
     user_id: int | None
     owner_username: str | None
+    owner_name: str | None
     message: str
     image_keys: list[str]
     status: FeedbackStatus

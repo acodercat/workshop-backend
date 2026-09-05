@@ -24,9 +24,11 @@ there is no such thing as an operator uploading one.
 class SkillResponse(BaseModel):
     """One skill as the console lists it.
 
-    ``owner_username`` is joined in for `CUSTOM` rows and ``None`` for
-    the platform origins, which have no owner by construction (the
-    ``ck_skill_origin_user_id_consistent`` check enforces that).
+    ``owner_username`` and ``owner_name`` are joined in for `CUSTOM`
+    rows — the identity pair every console table renders together — and
+    are ``None`` for the platform origins, which have no owner by
+    construction (the ``ck_skill_origin_user_id_consistent`` check
+    enforces that).
 
     ``enabled`` here is the **platform default**, not what any given
     user experiences: ``user_skill_preference`` overrides it per user,
@@ -46,6 +48,7 @@ class SkillResponse(BaseModel):
     category_id: int | None
     user_id: int | None
     owner_username: str | None
+    owner_name: str | None
     created_at: datetime
     updated_at: datetime
 

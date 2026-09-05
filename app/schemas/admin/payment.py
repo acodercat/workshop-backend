@@ -49,7 +49,11 @@ class PaymentOrderResponse(BaseModel):
 
     id: UUID
     user_id: int
+    # The identity every console table renders together: a login with
+    # the person's display name under it, both off the join the page
+    # already makes.
     owner_username: str
+    owner_name: str
     provider: str
     out_trade_no: str
     provider_txn_id: str | None

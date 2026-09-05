@@ -28,6 +28,7 @@ from app.models.skill_category import SkillCategory
 from app.models.user import User
 from app.schemas.admin.skill import PlatformSkillOrigin, SkillResponse, SkillUpdate
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
+from app.services import user as user_service
 from app.services.admin import AuditAction, audit
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_registration import register_platform_skill_bundle
@@ -35,7 +36,9 @@ from app.services.skill_registration import register_platform_skill_bundle
 router = APIRouter(tags=["skills"])
 
 
-def _to_skill_response(skill: Skill, owner_username: str | None) -> SkillResponse:
+def _to_skill_response(
+    skill: Skill, owner_username: str | None, owner_name: str | None
+) -> SkillResponse:
     return SkillResponse(
         id=skill.id,
         origin=skill.origin,
@@ -47,6 +50,7 @@ def _to_skill_response(skill: Skill, owner_username: str | None) -> SkillRespons
         category_id=skill.category_id,
         user_id=skill.user_id,
         owner_username=owner_username,
+        owner_name=owner_name,
         created_at=skill.created_at,
         updated_at=skill.updated_at,
     )
@@ -77,7 +81,7 @@ async def list_skills(
     rows = (
         await ctx.db.execute(
             paginate(
-                select(Skill, User.username)
+                select(Skill, User.username, User.name)
                 .outerjoin(User, User.id == Skill.user_id)
                 .where(*filters)
                 .order_by(
@@ -92,7 +96,7 @@ async def list_skills(
     ).all()
 
     return PaginatedResponse(
-        items=[_to_skill_response(skill, username) for skill, username in rows],
+        items=[_to_skill_response(skill, username, name) for skill, username, name in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 
@@ -152,8 +156,9 @@ async def upload_skill(
             "replaced_bundle_key": replaced_key,
         }
 
+    # A platform upload has no owner, so neither name column applies.
     await ctx.db.refresh(skill)
-    return _to_skill_response(skill, None)
+    return _to_skill_response(skill, None, None)
 
 
 @router.patch("/skills/{skill_id}", response_model=SkillResponse)
@@ -175,11 +180,7 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
     if skill is None:
         raise SkillNotFoundError(f"No skill with id {skill_id}.")
 
-    owner_username = (
-        None
-        if skill.user_id is None
-        else await ctx.db.scalar(select(User.username).where(User.id == skill.user_id))
-    )
+    owner_username, owner_name = await user_service.owner_identity(ctx.db, skill.user_id)
 
     fields = body.model_dump(exclude_none=True)
     # Put back the one field whose explicit ``null`` is an instruction
@@ -200,7 +201,7 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
         if getattr(skill, field) != value
     }
     if not changes:
-        return _to_skill_response(skill, owner_username)
+        return _to_skill_response(skill, owner_username, owner_name)
 
     async with audit(
         ctx,
@@ -218,4 +219,4 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
         draft.payload = {"name": skill.name, **changes}
 
     await ctx.db.refresh(skill)
-    return _to_skill_response(skill, owner_username)
+    return _to_skill_response(skill, owner_username, owner_name)

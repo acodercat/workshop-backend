@@ -195,7 +195,11 @@ class ConnectorResponse(BaseModel):
 
     id: int
     user_id: int
+    # The identity every console table renders together: a login with
+    # the person's display name under it, both off the join the page
+    # already makes.
     owner_username: str
+    owner_name: str
     name: str
     url: str
     auth_type: MCPServerAuthType
