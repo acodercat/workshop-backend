@@ -24,9 +24,11 @@ from sqlalchemy import func, select
 from app.api.admin.dependencies import StaffContext
 from app.common.pagination import paginate
 from app.errors import (
+    CategoryNotFoundError,
     ConnectorCatalogEntryNotFoundError,
     ConnectorCatalogUrlTakenError,
 )
+from app.models.connector_category import ConnectorCategory
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.user import User
@@ -63,6 +65,7 @@ def _to_catalog_response(
         has_preregistered_client=entry.oauth_client_id is not None,
         published=entry.published,
         sort_order=entry.sort_order,
+        category_id=entry.category_id,
         created_at=entry.created_at,
         updated_at=entry.updated_at,
     )
@@ -101,6 +104,20 @@ async def _enforce_unique_url(ctx: StaffContext, url: str) -> None:
         raise ConnectorCatalogUrlTakenError(f"The catalog already offers {url}.")
 
 
+async def _enforce_category_exists(ctx: StaffContext, category_id: int | None) -> None:
+    """Refuse a category the taxonomy does not hold.
+
+    Checked here for the reason :func:`_enforce_unique_url` is: the
+    foreign key makes it true, this makes it readable. It also keeps an
+    ``IntegrityError`` out of ``audit()``, where it would abort the
+    transaction and lose the audit row along with the write.
+
+    ``None`` is the uncategorised state, not a missing row, and passes.
+    """
+    if category_id is not None and await ctx.db.get(ConnectorCategory, category_id) is None:
+        raise CategoryNotFoundError(f"No connector category with id {category_id}.")
+
+
 @router.get(
     "/connector-catalog",
     response_model=list[ConnectorCatalogEntryResponse],
@@ -136,6 +153,7 @@ async def create_catalog_entry(
     icon render before users see it — publishing is the separate PATCH.
     """
     await _enforce_unique_url(ctx, body.url)
+    await _enforce_category_exists(ctx, body.category_id)
 
     async with audit(
         ctx,
@@ -151,6 +169,7 @@ async def create_catalog_entry(
             oauth_scope=body.oauth_scope,
             published=body.published,
             sort_order=body.sort_order,
+            category_id=body.category_id,
         )
         ctx.db.add(entry)
         await ctx.db.flush()
@@ -186,9 +205,17 @@ async def update_catalog_entry(
     if body.url is not None and body.url != entry.url:
         await _enforce_unique_url(ctx, body.url)
 
-    fields = body.model_dump(exclude={"reason"}, exclude_none=True)
+    fields = body.model_dump(exclude_none=True)
+    # Put back the one field whose explicit ``null`` is an instruction
+    # rather than a default — see
+    # ``ConnectorCatalogEntryUpdate.category_id``.
+    if "category_id" in body.model_fields_set:
+        fields["category_id"] = body.category_id
+
+    await _enforce_category_exists(ctx, fields.get("category_id"))
+
     changes = {
-        field: {"from": str(getattr(entry, field)), "to": str(value)}
+        field: {"from": getattr(entry, field), "to": value}
         for field, value in fields.items()
         if getattr(entry, field) != value
     }
@@ -200,8 +227,13 @@ async def update_catalog_entry(
         action=AuditAction.CONNECTOR_CATALOG_UPDATE,
         target_type="connector_catalog",
         target_id=entry.id,
-        reason=body.reason,
     ) as draft:
+        # Captured before the write loop: the scope-clearing branch below
+        # records what the entry is losing, and by the time it runs
+        # ``setattr`` has already replaced ``entry.oauth_scope`` with
+        # whatever this request carried.
+        previous_scope = entry.oauth_scope
+
         for field, value in fields.items():
             setattr(entry, field, value)
 
@@ -212,7 +244,7 @@ async def update_catalog_entry(
         # switches the entry back to OAUTH, and be copied onto every
         # Connector made from it in between.
         if entry.auth_type is not MCPServerAuthType.OAUTH and entry.oauth_scope:
-            changes["oauth_scope"] = {"from": entry.oauth_scope, "to": None}  # type: ignore[dict-item]  # a cleared value is a real "to"
+            changes["oauth_scope"] = {"from": previous_scope, "to": None}
             entry.oauth_scope = None
 
         # Clearing a locale map is not optional — see the invalidation
@@ -236,7 +268,11 @@ async def update_catalog_entry(
                 discarded[f"cleared_{locale_map}"] = stale
                 setattr(entry, locale_map, None)
 
-        draft.payload = {"name": entry.name, **changes, **discarded}
+        # ``entry_name`` rather than ``name``: unlike a skill's, this
+        # name is editable, so under one key the label and the
+        # before → after entry would overwrite each other and the key
+        # would hold a string on some rows and a diff on others.
+        draft.payload = {"entry_name": entry.name, **changes, **discarded}
 
     await ctx.db.refresh(entry)
     return _to_catalog_response(entry)

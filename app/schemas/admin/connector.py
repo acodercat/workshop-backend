@@ -16,10 +16,9 @@ the legacy ``mcp_server`` / ``mcp_server_catalog``.
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import AfterValidator, BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from app.models.mcp_server import MCPServerAuthType
-from app.schemas.admin.fields import Reason
 from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
 from app.services.mcp.url_identity import normalize_connector_url
 
@@ -80,6 +79,9 @@ class ConnectorCatalogEntryResponse(BaseModel):
     has_preregistered_client: bool
     published: bool
     sort_order: int
+    # The tab this entry browses under on the connectors page, or
+    # ``None`` while it is uncategorised.
+    category_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -126,6 +128,11 @@ class ConnectorCatalogEntryCreate(BaseModel):
     oauth_scope: str | None = Field(default=None, max_length=512)
     published: bool = False
     sort_order: int = 0
+    # Optional, and omitting it files the entry as uncategorised — the
+    # same state the column carries for every entry created before the
+    # taxonomy existed. Here so the console's add form does not have to
+    # save an entry and then immediately edit it to put it on a tab.
+    category_id: int | None = None
 
     _check_auth_type = field_validator("auth_type")(_must_be_instantiable)
 
@@ -137,7 +144,8 @@ class ConnectorCatalogEntryUpdate(BaseModel):
     ``description`` / ``icon_url`` cannot be emptied through this
     surface. Distinguishing the two needs a sentinel, and nobody has
     wanted to blank one yet; add it the day someone does rather than
-    carrying the ambiguity now.
+    carrying the ambiguity now. ``category_id`` is the one exception,
+    and says why below.
     """
 
     name: str | None = Field(default=None, min_length=1, max_length=64)
@@ -152,9 +160,29 @@ class ConnectorCatalogEntryUpdate(BaseModel):
     oauth_scope: str | None = Field(default=None, max_length=512)
     published: bool | None = None
     sort_order: int | None = None
-    reason: Reason
+    # The exception to the rule above: an explicit ``null`` clears the
+    # category. Retiring one, or correcting an entry filed under the
+    # wrong one, are ordinary operator moves, and unlike a description
+    # there is a real "no category" state to return an entry to.
+    # ``update_catalog_entry`` reads ``model_fields_set`` to tell an
+    # explicit ``null`` from an absent field.
+    category_id: int | None = None
 
     _check_auth_type = field_validator("auth_type")(_must_be_instantiable)
+
+    @model_validator(mode="after")
+    def _at_least_one_change(self) -> "ConnectorCatalogEntryUpdate":
+        """Refuse a request that asks for nothing.
+
+        Same guard, same phrasing as :class:`~app.schemas.admin.skill.SkillUpdate`
+        — keyed on ``model_fields_set`` so ``{"category_id": null}`` reads as
+        the clearing it is, which is also what ``update_catalog_entry`` keys
+        its own explicit-``null`` handling on, so the two cannot disagree
+        about what counts as a change.
+        """
+        if not self.model_fields_set:
+            raise ValueError("Provide at least one field to change.")
+        return self
 
 
 class ConnectorResponse(BaseModel):

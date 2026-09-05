@@ -22,6 +22,10 @@ class SkillResponse(BaseModel):
     description: str
     bundle_size: int
     enabled: bool
+    # The tab this skill browses under; ``None`` is uncategorised, and so
+    # is an id the client cannot resolve. The id alone, never the name —
+    # ``list_skill_categories`` explains why.
+    category_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -37,3 +41,20 @@ class SkillUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = Field(default=None, min_length=1, max_length=1024)
     enabled: bool | None = None
+
+
+class SkillCategoryResponse(BaseModel):
+    """One tab on the skills page, already localized.
+
+    Its own class rather than one shared with the Connector catalog's:
+    the two taxonomies are separate tables, and a generated client
+    should not be able to hand an id from one to an endpoint expecting
+    the other.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    #: Resolved for the request locale. ``name_i18n`` never leaves the
+    #: backend — the client renders this string as-is.
+    name: str

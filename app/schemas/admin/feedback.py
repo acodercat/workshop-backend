@@ -10,7 +10,6 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from app.models.user_feedback import FeedbackStatus
-from app.schemas.admin.fields import Reason
 
 
 class FeedbackResponse(BaseModel):
@@ -38,11 +37,8 @@ class FeedbackResponse(BaseModel):
 class FeedbackUpdate(BaseModel):
     """Move a submission through the triage workflow.
 
-    ``reason`` is optional — the deliberate contrast with the user and
-    staff PATCHes: marking feedback RESOLVED or IGNORED is benign triage
-    whose meaning is the status itself, and demanding a justification per
-    click would only teach operators to type noise.
+    ``status`` is the whole request: marking feedback RESOLVED or
+    IGNORED is benign triage whose meaning is the status itself.
     """
 
     status: FeedbackStatus
-    reason: Reason | None = None

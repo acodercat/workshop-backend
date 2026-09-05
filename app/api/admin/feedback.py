@@ -108,7 +108,6 @@ async def update_feedback(
         action=AuditAction.FEEDBACK_UPDATE,
         target_type="feedback",
         target_id=feedback.id,
-        reason=body.reason,
     ) as draft:
         feedback.status = body.status
         draft.payload = {"status": {"from": before.value, "to": body.status.value}}

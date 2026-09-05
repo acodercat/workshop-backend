@@ -124,7 +124,6 @@ async def update_staff(ctx: StaffContext, staff_id: int, body: StaffUpdate) -> S
         action=AuditAction.STAFF_UPDATE,
         target_type="staff",
         target_id=account.id,
-        reason=body.reason,
     ) as draft:
         await staff_service.update(ctx.db, account, name=body.name, status=body.status)
         draft.payload = changes
@@ -149,7 +148,6 @@ async def reset_staff_password(
         action=AuditAction.STAFF_PASSWORD_RESET,
         target_type="staff",
         target_id=account.id,
-        reason=body.reason,
     ):
         await staff_service.set_password(ctx.db, account, body.password)
 

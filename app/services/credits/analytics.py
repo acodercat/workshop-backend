@@ -25,9 +25,11 @@ whenever it straddles midnight. Counting negative SETTLE rows also makes
 the same rule the daily check-in already uses.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -244,6 +246,38 @@ async def user_activity(
         )
         for row in rows
     ]
+
+
+async def session_spend(db: AsyncSession, session_ids: Sequence[UUID]) -> dict[UUID, int]:
+    """What each of the given sessions actually consumed, in µ-credits.
+
+    Routed ledger row → reservation → session, the same hop
+    :func:`_spend_by_model` makes: a ledger row names a reservation, and
+    only the reservation names the session.
+
+    Counts negative ``SETTLE`` rows like every other figure here, so a
+    turn still running contributes nothing — its ``RESERVE`` is an
+    estimate, and reporting estimates beside actuals in one column is how
+    a list stops meaning anything.
+
+    A session with nothing settled is **absent** rather than zero; the
+    caller renders a page and supplies its own default.
+    """
+    if not session_ids:
+        return {}
+    rows = (
+        await db.execute(
+            text(f"""
+            SELECT r.session_id AS session_id, SUM(-l.amount) AS spend_micro
+            FROM credit_ledger l
+            JOIN credit_reservation r ON r.id = l.reservation_id
+            WHERE {_SPEND_ROWS} AND r.session_id = ANY(:session_ids)
+            GROUP BY r.session_id
+            """),
+            {"session_ids": list(session_ids)},
+        )
+    ).all()
+    return {row.session_id: int(row.spend_micro) for row in rows}
 
 
 async def _daily_spend(db: AsyncSession, *, since: datetime, days: int) -> list[DailySpend]:

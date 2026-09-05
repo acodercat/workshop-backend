@@ -27,8 +27,16 @@ def _resolve_window(
 
     An unsupported value falls back rather than 422s — this is an
     internal tool, and a stale bookmark should show the default view
-    instead of an error. Every response echoes the window actually used,
-    so the caller is never misled about what it got.
+    instead of an error.
+
+    The responses shaped as an object echo the window actually used, so a
+    stale ``?days=45`` is visible rather than silent. The ones that are
+    not do not: the four leaderboards answer with a bare list and the
+    ratings queue with a ``PaginatedResponse``, and reshaping any of them
+    purely to carry ``days`` back would cost an envelope for a field only
+    this fallback makes interesting. Worth knowing when reading one of
+    them: a bookmarked window that is not in ``ALLOWED_DAYS`` shows 30
+    days without saying so.
     """
     return days if days in ALLOWED_DAYS else DEFAULT_DAYS
 

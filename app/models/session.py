@@ -188,19 +188,29 @@ class Session(Base):
     # ``timestamptz`` in revision c7d2f9a4e1b8).
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
-    # Backs the hot ``GET /sessions`` query (filter by user_id, ORDER BY
-    # updated_at DESC). Postgres does not auto-index foreign keys, so
-    # without this both the page query and its count fall back to seq
-    # scans. Partial on ``deleted_at IS NULL`` — the only consumer is
-    # the active-sessions list, which always filters out soft-deleted
-    # rows. Migrations ``b74c1e2f9a30`` (original) and the soft-delete
-    # rev (partial swap) build it CONCURRENTLY in prod.
     __table_args__ = (
+        # Backs the public ``GET /sessions`` (a user's own list: filter
+        # by user_id, ORDER BY updated_at DESC). Postgres does not
+        # auto-index foreign keys, so without this both the page query
+        # and its count fall back to seq scans. Partial on ``deleted_at
+        # IS NULL`` — that list always hides soft-deleted rows.
+        # Migrations ``b74c1e2f9a30`` (original) and the soft-delete rev
+        # (partial swap) build it CONCURRENTLY in prod.
         Index(
             "ix_session_user_id_updated_at",
             "user_id",
             text("updated_at DESC"),
             postgresql_where=text("deleted_at IS NULL"),
+        ),
+        # Backs the console's platform-wide list (ORDER BY updated_at
+        # DESC, id DESC, no user filter, soft-deleted included) — which
+        # the partial index above cannot serve on either count. Not
+        # partial for the same reason: support is asked about exactly
+        # the sessions a user deleted. Migration ``f4c8a2b91d63``.
+        Index(
+            "ix_session_updated_at",
+            text("updated_at DESC"),
+            text("id DESC"),
         ),
     )
 

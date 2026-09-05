@@ -78,7 +78,7 @@ def _audit_rows(db: _FakeDb) -> list[AdminAuditLog]:
     return [obj for obj in db.added if isinstance(obj, AdminAuditLog)]
 
 
-def test_triage_applies_and_audits_without_requiring_a_reason() -> None:
+def test_triage_applies_and_audits() -> None:
     db = _FakeDb(_feedback())
 
     response = _client(db).patch("/feedback/9", json={"status": "RESOLVED"})
@@ -90,7 +90,6 @@ def test_triage_applies_and_audits_without_requiring_a_reason() -> None:
     (row,) = _audit_rows(db)
     assert row.action == "feedback.update"
     assert (row.target_type, row.target_id) == ("feedback", "9")
-    assert row.reason is None  # benign triage: optional by design
     assert row.payload == {"status": {"from": "OPEN", "to": "RESOLVED"}}
     assert db.commits == 1
 

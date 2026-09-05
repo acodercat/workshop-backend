@@ -10,14 +10,15 @@ platform's quality signal.
 
 Read-only: a rating is the user's opinion, and there is nothing for an
 operator to change about it. The action it prompts happens elsewhere —
-open the session, fix the skill, adjust the prompt.
+fix the skill, adjust the prompt.
 
-**Not audited, and that is a judgement call.** The excerpt is a slice of
-customer conversation content, which is what makes ``session.view``
-audited. It stays unaudited because the queue is a list the operator
-scans in bulk rather than one conversation they chose to open, and
-auditing every scroll would bury the signal that matters. Opening the
-session from here *is* audited, as it should be.
+**The excerpt is the only customer conversation content the console can
+show, and it is deliberately the smallest possible slice**: the one reply
+being judged, quoted as evidence. There is no way to open the session it
+came from — that endpoint was removed rather than audited — so this is
+where the privacy line sits, and it is worth keeping it here. Not
+audited: the queue is a list the operator scans in bulk, and auditing
+every scroll would bury the signal that matters.
 """
 
 from fastapi import APIRouter, Query

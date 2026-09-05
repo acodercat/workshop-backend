@@ -91,16 +91,13 @@ def _audit_rows(db: _FakeDb) -> list[AdminAuditLog]:
 def test_status_change_applies_and_audits() -> None:
     db = _FakeDb(_user())
 
-    response = _client(db).patch(
-        "/users/42", json={"status": "DISABLED", "reason": "abuse ticket #12"}
-    )
+    response = _client(db).patch("/users/42", json={"status": "DISABLED"})
 
     assert response.status_code == 200
     assert response.json()["status"] == "DISABLED"
     (row,) = _audit_rows(db)
     assert row.action == "user.update"
     assert (row.target_type, row.target_id) == ("user", "42")
-    assert row.reason == "abuse ticket #12"
     assert row.payload == {"status": {"from": "ACTIVE", "to": "DISABLED"}}
     assert db.commits == 1
 
@@ -108,7 +105,7 @@ def test_status_change_applies_and_audits() -> None:
 def test_a_noop_status_change_writes_no_audit_row() -> None:
     db = _FakeDb(_user(UserStatus.ACTIVE))
 
-    response = _client(db).patch("/users/42", json={"status": "ACTIVE", "reason": "double-click"})
+    response = _client(db).patch("/users/42", json={"status": "ACTIVE"})
 
     assert response.status_code == 200
     assert _audit_rows(db) == []
@@ -116,9 +113,7 @@ def test_a_noop_status_change_writes_no_audit_row() -> None:
 
 
 def test_unknown_user_is_404() -> None:
-    response = _client(_FakeDb(user=None)).patch(
-        "/users/999", json={"status": "DISABLED", "reason": "x"}
-    )
+    response = _client(_FakeDb(user=None)).patch("/users/999", json={"status": "DISABLED"})
 
     assert response.status_code == 404
     assert response.json()["error"]["type"] == "user_not_found"
@@ -149,7 +144,6 @@ def test_adjustment_converts_namespaces_and_attributes(monkeypatch) -> None:
         "/users/42/credits/adjustments",
         json={
             "amount_credits": 12,
-            "reason": "settle dispute #9",
             "idempotency_key": "3f2e1d0c-form",
         },
     )
@@ -165,6 +159,10 @@ def test_adjustment_converts_namespaces_and_attributes(monkeypatch) -> None:
     assert calls["amount_micro"] == 120_000_000
     assert calls["idempotency_key"] == "admin:3f2e1d0c-form"
     assert calls["admin_id"] == 7
+    # The console no longer asks for a justification, but ``apply_adjust``
+    # still takes one (the CLI passes a real ``--reason``), so the endpoint
+    # names itself rather than forwarding an empty string.
+    assert calls["reason"] == "admin console adjustment"
     (row,) = _audit_rows(db)
     assert row.action == "credit.adjust"
     assert row.payload == {"amount_credits": 12, "ledger_id": 1234}
@@ -180,7 +178,7 @@ def test_duplicate_idempotency_key_is_409_with_no_audit_row(monkeypatch) -> None
 
     response = _client(db).post(
         "/users/42/credits/adjustments",
-        json={"amount_credits": 12, "reason": "retry", "idempotency_key": "same-key-1"},
+        json={"amount_credits": 12, "idempotency_key": "same-key-1"},
     )
 
     assert response.status_code == 409
@@ -193,7 +191,7 @@ def test_duplicate_idempotency_key_is_409_with_no_audit_row(monkeypatch) -> None
 def test_zero_amount_is_rejected_at_validation() -> None:
     response = _client(_FakeDb(_user())).post(
         "/users/42/credits/adjustments",
-        json={"amount_credits": 0, "reason": "x", "idempotency_key": "some-key-1"},
+        json={"amount_credits": 0, "idempotency_key": "some-key-1"},
     )
 
     assert response.status_code == 422

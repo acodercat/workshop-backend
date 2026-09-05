@@ -28,7 +28,6 @@ class AuditLogResponse(BaseModel):
     action: str
     target_type: str | None
     target_id: str | None
-    reason: str | None
     payload: dict[str, Any]
     request_id: str | None
     ip_address: str | None

@@ -102,7 +102,6 @@ async def test_stamps_operator_action_and_request_metadata() -> None:
         action=AuditAction.STAFF_PASSWORD_RESET,
         target_type="staff",
         target_id=42,
-        reason="offboarding",
     ):
         pass
 
@@ -110,7 +109,6 @@ async def test_stamps_operator_action_and_request_metadata() -> None:
     assert row.staff_id == 7
     assert row.action == "staff.password_reset"
     assert row.target_type == "staff"
-    assert row.reason == "offboarding"
     assert row.request_id == "req-123"
     assert row.ip_address == "203.0.113.5"
 
@@ -180,3 +178,14 @@ async def test_credential_shaped_keys_never_reach_the_trail() -> None:
     assert payload["username"] == "bob"
     redacted = {key for key, value in payload.items() if value == "[redacted]"}
     assert redacted == set(payload) - {"username"}
+
+
+def test_the_trail_carries_no_operator_justification() -> None:
+    """The console stopped asking for a typed reason and the column went
+    with it — ``payload``'s before → after diff is the record now.
+
+    A tombstone rather than a behaviour test: re-adding the column is the
+    one way this could come back silently, and it would come back with no
+    writer.
+    """
+    assert "reason" not in AdminAuditLog.__table__.columns

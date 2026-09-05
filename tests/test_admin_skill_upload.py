@@ -225,14 +225,3 @@ def test_a_custom_origin_is_not_accepted() -> None:
 
     assert response.status_code == 422
     assert db.added == [] and db.commits == 0
-
-
-def test_the_audit_row_carries_no_reason() -> None:
-    """A create records itself: the payload is the account of the deed,
-    so the console does not ask for a typed justification."""
-    db = _FakeDb()
-
-    _post(_client(db), _bundle())
-
-    (row,) = _audit_rows(db)
-    assert row.reason is None

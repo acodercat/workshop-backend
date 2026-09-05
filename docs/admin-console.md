@@ -72,10 +72,11 @@ after first deploy.
 
 Every slice below is built on the staff-management reference shape
 (`StaffContext` in the signature, mutations inside `audit()`, reads
-inline), and **none added a service module**: every write calls a
-funnel that already exists. That is the property to preserve when
-adding the next one — a surface that needs a new place to write from is
-the signal to put the rule in `app/services/`, not in the endpoint.
+inline), and **none added a service module**: every write either calls a
+funnel that already exists or assigns an invariant-free column inline.
+That is the property to preserve when adding the next one — a write that
+has a rule to keep is the signal to put that rule in `app/services/`,
+not in the endpoint.
 
 Most of these surfaces are read-only, which is also deliberate: the
 console's job is usually to *see* state the platform already manages
@@ -88,7 +89,7 @@ automated path does.
 |---|---|---|
 | `GET /users?q=&status=` | Paginated directory. One `q` ILIKE-matched against username / email / phone (at ~100 users no index needed). Row: id, username, name, email, phone, status, balance_credits, created_at. | — |
 | `GET /users/{id}` | Profile + credit balance + session count. | — |
-| `PATCH /users/{id}` | `{status, reason}` — ACTIVE ↔ DISABLED. Takes effect on the user's next request (status is checked per request; no token bump needed). | `user.update` |
+| `PATCH /users/{id}` | `{status}` — ACTIVE ↔ DISABLED. Takes effect on the user's next request (status is checked per request; no token bump needed). | `user.update` |
 
 Not included: editing email/phone (the sudo-gated self-serve flows own
 those), password resets (OTP owns recovery), user deletion,
@@ -99,7 +100,7 @@ impersonation, user creation (invite flow owns it).
 | Route | What | Audit |
 |---|---|---|
 | `GET /users/{id}/credits/transactions` | Paginated ledger via `credits.list_transactions` — kind, signed amount in credits, created_at, reference. | — |
-| `POST /users/{id}/credits/adjustments` | `{amount_credits (signed, non-zero), reason, idempotency_key}` → `credits.apply_adjust(admin_id=staff.id)`. The console frontend mints the idempotency key per form submission, so a network retry can't double-apply; a duplicate key returns 409. | `credit.adjust` |
+| `POST /users/{id}/credits/adjustments` | `{amount_credits (signed, non-zero), idempotency_key}` → `credits.apply_adjust(admin_id=staff.id)`. The console frontend mints the idempotency key per form submission, so a network retry can't double-apply; a duplicate key returns 409. | `credit.adjust` |
 
 No topup endpoint: a signed adjust covers manual grants and clawbacks,
 and real topups come from the payment webhook. Money on the wire is
@@ -108,17 +109,44 @@ storage stays µ-credits — same convention as the customer endpoints.
 The console's idempotency keys are namespaced `admin:` in the ledger so
 they can never collide with payment-webhook keys (`hf:…`).
 
-### Sessions (`app/api/admin/session.py` — `/sessions/{id}`; the user-scoped list lives with the user resource)
+### Sessions (two lists, no detail)
 
 | Route | What | Audit |
 |---|---|---|
-| `GET /users/{id}/sessions` | Paginated list **including soft-deleted** (`deleted_at` visible — unlike the customer list, support needs to see what was deleted). Row: id, title, status, agent_type, tier, created_at, updated_at, deleted_at. | — |
-| `GET /sessions/{id}` | Meta + the rendered `blocks` — the conversation, read-only. | `session.view` |
+| `GET /sessions` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. Same row plus `user_id` / `owner_username`, both nullable because `session.user_id` is. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. | — |
+| `GET /users/{id}/sessions` | The same rows for one user, `ORDER BY updated_at DESC`. Paginated **including soft-deleted** (`deleted_at` visible — unlike the customer list, support needs to see what was deleted). Row: id, title, status, agent_type, `model_id`, `turn_count`, `total_tokens`, `spent_credits`, created_at, updated_at, deleted_at. | — |
 
-`session.view` is the **only audited read** in the console: it is
-customer conversation content, the most privacy-sensitive thing the
-console can show, so "who looked at whose conversation" must be
-answerable. The audit block simply wraps no mutation.
+`session.tier` is deliberately **not** on either row. It is the capability
+the customer picked; `model_id` is what
+`settings.session_tier_models[tier]` resolved it to, which is what ran and
+what the spend was billed against. A console that exists to explain cost
+carries the second one.
+
+The two differ by the owner column and the sort tiebreak, and nothing
+else — same page size, same soft-delete policy, same usage columns — so
+an operator who learns one reads the other. Both stitch their rows the
+same way: the page query, then one grouped `session_turn` aggregate
+(`services.session.stats.per_session_usage`) and one grouped ledger
+aggregate (`credits.analytics.session_spend`) over the page's ids. Two
+queries per page, never two per row, and each asked of the module that
+owns the table it reads — a single wide join across sessions, turns and
+the ledger would have to live somewhere, and no module owns all three.
+
+**Neither list can open a session, and there is no endpoint that would
+let it.** A conversation is the most private thing the platform holds,
+and no question this surface exists to answer needs one — so rather than
+auditing the read, the read was removed. `GET /sessions/{id}` and the
+`session.view` action are both gone; the console now has no audited read
+because it has no content read at all.
+
+What replaced it is usage on the list row. `turn_count` counts
+`session_turn` rows; `total_tokens` sums their measured
+`input_tokens + output_tokens`; `spent_credits` comes from
+`credits.analytics.session_spend`, which counts negative `SETTLE` rows
+like every other money figure — so a turn still running adds a turn and
+no credits, because its `RESERVE` is an estimate and estimates do not
+belong in a column of actuals. Together they answer "was this session
+expensive, and why" without anyone reading a word the user wrote.
 
 **No cancel, no delete** in v1. Cancel would need a Redis client in the
 console process (deliberately absent) and stuck turns are already
@@ -136,7 +164,7 @@ module.
 | Route | What | Audit |
 |---|---|---|
 | `GET /feedback?status=&user_id=` | The queue, newest first — `?status=OPEN` rides `ix_user_feedback_status_created`, built for exactly this. `username` LEFT-joined (a deleted author's feedback still belongs in the queue). | — |
-| `PATCH /feedback/{id}` | Triage: `OPEN` → `RESOLVED` / `IGNORED` (or back). `reason` is **optional** — benign triage's meaning is the status itself; requiring justification per click teaches operators to type noise. | `feedback.update` |
+| `PATCH /feedback/{id}` | Triage: `OPEN` → `RESOLVED` / `IGNORED` (or back). The status is the whole request — benign triage's meaning is the status itself. | `feedback.update` |
 
 No delete — `IGNORED` is the dismissal and the record stays.
 `image_keys` are returned raw; minting presigned view URLs is the
@@ -165,9 +193,10 @@ replies, and the tile says so — the denominator is a tiny self-selected
 sample and reading it as a quality score would be wrong.
 
 The excerpt is cut in SQL from `message.blocks`, so the list does not
-carry whole transcripts across the wire; the full conversation is one
-click away in the session view, which is the surface that already
-audits a read.
+carry whole transcripts across the wire — and there is nowhere to go for
+the rest of one. This slice is the whole of what the console can see of a
+conversation, which is why it is worth keeping it to the single reply
+being judged.
 
 ### Invites (`app/api/admin/invite.py` — `/invite-codes`, `/invite-redemptions`)
 
@@ -177,7 +206,7 @@ Replaces reaching for `scripts/create_invite_code.py` over SSH.
 | Route | What | Audit |
 |---|---|---|
 | `GET /invite-codes?origin=&q=` | Codes, newest first; `REFERRAL` rows carry their owner. `used_count` / `max_uses` is the whole state. | — |
-| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000, `reason` **required**) | `invite.create` |
+| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000) | `invite.create` |
 | `GET /invite-redemptions` | Who redeemed what, invitee and referrer both resolved through aliased joins | — |
 
 **Only `SYSTEM` codes are mintable here.** A `REFERRAL` code is a
@@ -187,12 +216,11 @@ out someone else's referral credit. The endpoint calls the same
 `invite_service.create_invite_code` the script does — the console is a
 second caller of one code path, never a second implementation of it.
 
-`reason` is required here though a skill upload asks for none, and the
-difference is what the payload can say for itself: a bundle names the
-skill it ships, while an invite code's payload is a random string and a
-use count — "why does this code exist, and who asked for it" is not
-recoverable from it. No delete and no edit — exhausting a code is setting
-`max_uses`, and the redemption history is an audit record.
+The audit payload here is a random string and a use count, less than a
+bundle upload's can say for itself — but the redemption history fills
+that in, naming every account the code let through. No delete and no
+edit: exhausting a code is setting `max_uses`, and that history is
+itself the record.
 
 ### Dashboard (`app/api/admin/stats.py`, `app/services/credits/analytics.py`)
 
@@ -267,7 +295,7 @@ millions, add `ix_credit_ledger_created_at` then.
 |---|---|---|
 | `GET /skills?origin=&q=` | Every origin, including the `SYSTEM` skills hidden from users. Platform rows first, then newest; owner LEFT-joined (platform rows have none by construction). | — |
 | `POST /skills` | Upload a platform bundle — multipart, `{origin}` | `skill.upload` |
-| `PATCH /skills/{id}` | `{display_name, description, enabled, reason}` — picker metadata and the **platform default** | `skill.update` |
+| `PATCH /skills/{id}` | `{display_name, description, enabled, category_id}` — picker metadata, the **platform default**, and the tab it browses under | `skill.update` |
 
 The toggle's subtlety is surfaced in the UI, not just here: `enabled`
 is the default, and `user_skill_preference` overrides it per user
@@ -309,14 +337,12 @@ sees the skill, so it is the **only** field the form asks for.
 every-user-default rule above), which is why the form explains the
 choice rather than offering a toggle.
 
-**No `reason`**, matching staff-create and connector-catalog-create:
-for a create the payload *is* the record, and here it names the skill,
-its origin, the bundle and the one it displaced. Requiring a typed
-justification on top of a self-describing deed is the same mistake as
-requiring one per feedback triage click — it produces filler, not
-accountability. The console asks for a reason where the same action can
-be right or wrong depending on intent (`credit.adjust`, `user.update`),
-not where the row already explains itself.
+**The console asks for no typed justification, anywhere.** The audit
+payload *is* the record — here it names the skill, its origin, the
+bundle and the one it displaced; elsewhere it carries the before → after
+diff. Asking an operator to also type why produces filler rather than
+accountability, and `admin_audit_log` has no `reason` column to put it in
+(dropped in `b6d2f8a04c17`).
 
 **One funnel, two front doors.**
 `skill_registration.register_platform_skill_bundle` is what both the
@@ -335,13 +361,13 @@ is down or an operator has only SSH; bulk re-packaging remains
 | Route | What | Audit |
 |---|---|---|
 | `GET /connector-catalog` | Whole catalog in display order, unpublished included. Unpaginated — paging a hand-sorted shortlist would hide the thing being sorted. | — |
-| `POST /connector-catalog` | New entry, created **unpublished** so the URL/icon can be checked first | `connector_catalog.create` |
-| `PATCH /connector-catalog/{id}` | Edit / publish / reorder. Editing `url` can 409 — it is the entry's identity. | `connector_catalog.update` |
+| `POST /connector-catalog` | New entry, created **unpublished** so the URL/icon can be checked first. Takes an optional `category_id` so the add form can file it on a tab in one step; the id is checked against the taxonomy before the insert, so a bad one is a named 404 rather than an `IntegrityError` that would abort the audit transaction. | `connector_catalog.create` |
+| `PATCH /connector-catalog/{id}` | Edit / publish / reorder, and file under a category. Editing `url` can 409 — it is the entry's identity. | `connector_catalog.update` |
 | `GET /connectors?user_id=&q=&connected=` | Users' own Connectors, **read-only**. `?connected=false` is the support view. | — |
 
 Adding an MCP server to the platform catalog is a console action, not a
-script one — the add form sends the entry's whole field set (key, name,
-url, auth type, description, icon, OAuth scope, sort order), so an
+script one — the add form sends the entry's whole field set (name, url,
+auth type, description, icon, OAuth scope, sort order), so an
 operator never has to finish a half-made entry from a shell. It lands
 as a **draft**: publishing is the separate PATCH, which is what makes
 "check the URL and icon first" a real step rather than advice.
@@ -358,8 +384,12 @@ This replaced a `key` column — a third name for a row that already had
 operator-facing handle, and it was, but the only thing it uniquely did
 was carry the constraint that belongs on `url`.
 
-**Add and edit are one form**, since they are the same field set under
-the same rules and two of them would drift. Editing sends a **partial**
+**Add and edit are one form**, since they are near enough the same field
+set under the same rules that two of them would drift. `category_id` is
+on both, so the add form can file an entry on a tab without saving it
+and immediately reopening it; the two differ only in that an explicit
+`null` on the edit schema *clears* the category, where on create there
+is nothing to clear. Editing sends a **partial**
 patch — only the fields that actually changed — so the audit row's
 before → after payload is the real edit rather than every field
 rewritten with its own value. A blank optional field and an absent one
@@ -427,6 +457,77 @@ handle no secrets at all. `tests/test_admin_connector_secrets.py` pins
 this against the ORM's real column list, so a *new* secret column fails
 the test until someone decides it's safe.
 
+### Categories (`app/api/admin/category.py`)
+
+| Route | What | Audit |
+|---|---|---|
+| `GET /skill-categories` | Whole taxonomy in display order, unpublished included. Unpaginated, for the reason `list_catalog` is. | — |
+| `POST /skill-categories` | New category, created **published** | `skill_category.create` |
+| `PATCH /skill-categories/{id}` | Rename, retranslate, publish/unpublish, reorder | `skill_category.update` |
+| `GET`/`POST`/`PATCH /connector-categories` | The same three, against the connectors taxonomy | `connector_category.create` / `.update` |
+
+A category is a tab on the skills or connectors page — the strip that
+follows the pinned 「个人」 one. Only the operator-curated half is
+grouped: a user's own CUSTOM uploads and their own Connectors live
+behind that pinned tab and are not the platform's to classify.
+
+**Two tables, `skill_category` and `connector_category`.** The
+vocabularies do not overlap — a skill is a capability, a Connector is an
+outside system — and one shared table would need a scope column every
+query had to remember to filter on, where forgetting is silent and shows
+up as the other catalog's tabs in an operator's picker. Two tables put
+that guarantee in the foreign key. Both route groups live in **one
+module** because they are one screen and one shape; what differs is
+carried in a `_Taxonomy` record so each verb's body is written once.
+
+**Created published, where a catalog entry is created unpublished.** An
+entry is staged so an operator can check its URL resolves and its icon
+renders; a category is a name, with nothing to check. The default also
+matches the column's `server_default`.
+
+**No DELETE**, matching the catalog: unpublish hides a tab without
+touching the rows pointing at it. Deleting is in fact safe — both
+foreign keys are `ON DELETE SET NULL` — but it would quietly turn N
+entries uncategorised with nothing left to say which they were.
+
+**This console edits its own locale maps**, unlike the Connector
+catalog's, which are hidden and discarded on any rename. There, a name
+is one field among a dozen and the console cannot show a map, so
+dropping it is the safe reading of the invalidation rule. Here the name
+*is* the row, so an operator may send the new translations in the same
+request; only a rename that says nothing about them drops them
+(`_name_fields`, three cases, tested through the PATCH in `tests/test_admin_category_endpoints.py`).
+
+**Assignment lives on the assigned resource**, not here: `category_id`
+is a field on `PATCH /skills/{id}` and `PATCH /connector-catalog/{id}`,
+and lands in their existing audit rows — where someone asking "who moved
+this" will look. It is also the one field on those two surfaces whose
+explicit `null` means *clear* rather than *leave alone*. Both schemas'
+empty-body guard therefore keys on `model_fields_set` instead of on the
+non-`None` values, and both endpoints still build their change set from
+`model_dump(exclude_none=True)` but put this one field back from
+`model_fields_set` afterwards. An
+unknown `category_id` is refused with a 404 `category_not_found` rather
+than left to the foreign key: an `IntegrityError` would surface as the
+generic 409 *and*, raised inside `audit()`, abort the transaction and
+take the audit row with it.
+
+Categories are created here, not in the scripts —
+`scripts/upload_skill.py --category NAME` and
+`manage_connector_catalog.py set-category` only *file* something under an
+existing one, resolving **by name**, because a name is what the operator
+reads off the category list and a typo in one fails loudly while a
+mistyped id would not.
+
+"Here" is `frontend-admin`'s `/categories` — one route with a
+ViewSwitcher over the two taxonomies, matching the one module that
+serves them. Creating, renaming, retranslating, reordering and
+publishing all happen there; **filing** does not, because assigning a
+category is an edit to the skill or the entry and belongs in the audit
+row someone asking "who moved this" will read. On a fresh database the
+two scripts' `NAME` has nothing to resolve against until a category
+exists, and both say so when it fails.
+
 ### Payments (`app/api/admin/payment.py`, `app/services/payment/analytics.py`)
 
 The RMB side, kept off the credits dashboard so the two units never
@@ -463,12 +564,17 @@ today" has one definition platform-wide, tested in
 
 `AuditAction` carries **only what the console can actually do**, which
 is why it is short: `staff.*`, `user.update`, `credit.adjust`,
-`session.view`, `feedback.update`, `skill.upload`, `skill.update`,
-`connector_catalog.create` / `.update`, `invite.create`. Every surface
-added since the first slice added at most one member, and the
-read-only ones (ratings, dashboard, payments, connector list) added
-none — an action exists because something writes, not because a page
-exists.
+`feedback.update`, `skill.upload`, `skill.update`,
+`connector_catalog.create` / `.update`,
+`skill_category.create` / `.update`,
+`connector_category.create` / `.update`, `invite.create`. Every surface
+added since the first slice added at most one member per writable
+resource, and the read-only ones (ratings, dashboard, payments,
+connector list) added none — an action exists because something writes,
+not because a page exists. Filing a skill or an entry under a category
+added none either: it is a `category_id` entry in the existing
+`skill.update` / `connector_catalog.update` payload, which is where
+someone reading the trail would look for it.
 
 Still deliberately out, with scripts covering them: **withdrawal
 review** (the only remaining item that blocks a *user* — the
@@ -481,8 +587,9 @@ secret, and bulk re-packaging platform bundles from a checkout.
 - **Console frontend — settled and scaffolded (2026-08-06):
   `frontend-admin/`**, official `create-next-app` scaffold (Next 16 /
   React 19 / TS / Tailwind v4, latest unpinned), same stack as `ppig/`
-  for one-toolchain consistency and to later port ppig's
-  `message.blocks` renderer into the session view. **Auth mirrors
+  for one-toolchain consistency. (An early plan to port ppig's
+  `message.blocks` renderer into a console session view is void — the
+  console does not open sessions.) **Auth mirrors
   ppig's architecture**: the staff JWT lives in an `httpOnly` cookie
   (`staff_jwt`); client code calls same-origin `/api/...` route
   handlers, and `app/api/_backend.ts` forwards to the backend with the
@@ -500,8 +607,8 @@ secret, and bulk re-packaging platform bundles from a checkout.
   script). Skeleton verified by a full-stack smoke (throwaway DB +
   backend + built console: login/cookie/guard/proxy/logout). Built so
   far: login, auth guard + sidebar shell, users list (the wired
-  reference page) + user detail; feedback / staff / audit-log /
-  session-view pages are placeholders naming their endpoints. No SSO —
+  reference page) + user detail; staff / audit-log pages are
+  placeholders naming their endpoints. No SSO —
   the login form + `/auth/access-tokens` is the design.
 - **Deployment shape** — `deploy.sh` third sibling vs. manual.
   **Network exposure is settled: never public.** Bind `127.0.0.1:8006`;

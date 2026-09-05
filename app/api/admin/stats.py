@@ -1,18 +1,31 @@
 """Dashboard aggregates over the credit ledger.
 
-- ``GET /stats/credits``       — tiles, daily series, spend by model.
-- ``GET /stats/top-spenders``  — the spend leaderboard.
-- ``GET /stats/recent-users``   — the same rows, most recent first.
-- ``GET /stats/check-ins``     — daily-check-in engagement.
+- ``GET /stats/credits``          — tiles, daily series, spend by model.
+- ``GET /stats/top-spenders``     — the spend leaderboard.
+- ``GET /stats/recent-users``     — the same rows, most recent first.
+- ``GET /stats/check-in-leaders`` — the check-in leaderboard.
+- ``GET /stats/recent-check-ins`` — the same rows, newest first.
+- ``GET /stats/check-ins``        — daily-check-in engagement.
+- ``GET /stats/users``            — new accounts in the window.
+- ``GET /stats/tokens``           — tokens burned in the window.
 
 Under ``/stats``, not ``/metrics``: the ASGI factory already serves
 Prometheus at ``/metrics`` on both apps.
 
-**Not audited.** These are aggregates, never one customer's content, so
-they don't meet the bar that makes ``session.view`` the console's single
-audited read. The aggregation itself lives in
-:mod:`app.services.credits.analytics` — the ledger's own domain owns
-questions about the ledger.
+**Not audited**, like every read here: the console has no audited read
+because it has no way to read one customer's content at all. These are
+counts, never a conversation.
+
+**No aggregation lives in this module.** Each figure is computed by
+whichever domain owns the table it comes from — the ledger's four by
+:mod:`app.services.credits.analytics`, check-ins by
+:mod:`app.services.check_in`, registrations by
+:mod:`app.services.user.stats`, tokens by
+:mod:`app.services.session.stats`. Folding any of them into
+``/stats/credits`` would make the credits module answer for a table it
+does not own — which is why this module is a row of narrow endpoints
+rather than one fat one, and why a new figure arrives as another
+endpoint rather than another field.
 """
 
 from fastapi import APIRouter, Query
@@ -26,9 +39,11 @@ from app.schemas.admin.stats import (
     CreditsStatsResponse,
     DailySpendPoint,
     ModelSpendEntry,
+    TokenStatsResponse,
     UserActivityEntry,
+    UserStatsResponse,
 )
-from app.services import check_in
+from app.services import check_in, session as session_service, user as user_service
 from app.services.credits import analytics
 from app.services.credits.analytics import UserActivityOrder
 from app.services.credits.rates import credits_from_micro
@@ -77,7 +92,7 @@ async def read_top_spenders(
     A bare list, not a ``PaginatedResponse``: a leaderboard is a top-N
     by definition — paging into the tail is what the users list is for.
     """
-    return await _read_user_activity(ctx, days, limit, UserActivityOrder.SPEND)
+    return await _read_user_activity(ctx, days=days, limit=limit, order=UserActivityOrder.SPEND)
 
 
 @router.get("/stats/recent-users", response_model=list[UserActivityEntry])
@@ -92,11 +107,12 @@ async def read_recent_users(
     a login without usage costs nothing and doesn't belong on a credits
     view.
     """
-    return await _read_user_activity(ctx, days, limit, UserActivityOrder.RECENT)
+    return await _read_user_activity(ctx, days=days, limit=limit, order=UserActivityOrder.RECENT)
 
 
 async def _read_user_activity(
     ctx: StaffContext,
+    *,
     days: int,
     limit: int,
     order: UserActivityOrder,
@@ -147,7 +163,7 @@ async def _check_in_activity(
     *,
     days: int,
     limit: int,
-    order: "check_in.CheckInRankOrder",
+    order: check_in.CheckInRankOrder,
 ) -> list[CheckInActivityEntry]:
     """Shared body of the two check-in rankings — same rows, different
     ordering, mirroring the spend pair above."""
@@ -176,3 +192,29 @@ async def read_check_in_stats(ctx: StaffContext, days: WindowDays) -> CheckInSta
     """
     check_ins, users = await check_in.count_in_window(ctx.db, since=window_start(days))
     return CheckInStatsResponse(days=days, check_ins=check_ins, users=users)
+
+
+@router.get("/stats/users", response_model=UserStatsResponse)
+async def read_user_stats(ctx: StaffContext, days: WindowDays) -> UserStatsResponse:
+    """Return how many accounts were created in the window.
+
+    Its own endpoint for the same reason the check-in one is: the count
+    comes off the ``user`` table, which :mod:`app.services.user.stats`
+    owns, and the ledger's response has no business carrying it.
+    """
+    new_users = await user_service.count_registered_since(ctx.db, since=window_start(days))
+    return UserStatsResponse(days=days, new_users=new_users)
+
+
+@router.get("/stats/tokens", response_model=TokenStatsResponse)
+async def read_token_stats(ctx: StaffContext, days: WindowDays) -> TokenStatsResponse:
+    """Return tokens burned in the window.
+
+    Its own endpoint for the same reason the check-in and user ones are:
+    the counts come off ``session_turn``, which
+    :mod:`app.services.session.stats` owns.
+    """
+    input_tokens, output_tokens = await session_service.count_tokens_since(
+        ctx.db, since=window_start(days)
+    )
+    return TokenStatsResponse(days=days, input_tokens=input_tokens, output_tokens=output_tokens)

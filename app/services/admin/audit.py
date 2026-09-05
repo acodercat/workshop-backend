@@ -11,7 +11,6 @@ block::
         action=AuditAction.STAFF_UPDATE,
         target_type="staff",
         target_id=account.id,
-        reason=body.reason,
     ) as draft:
         account.status = body.status
         draft.payload = {"status": {"from": "ACTIVE", "to": "DISABLED"}}
@@ -65,10 +64,6 @@ class AuditDraft:
     """Its key; stringified on write so int and UUID keys share one
     column."""
 
-    reason: str | None = None
-    """Operator-supplied justification. Endpoints that move money should
-    require it in their request schema."""
-
     payload: dict[str, Any] = field(default_factory=dict)
     """Parameters and before → after values, flat. Credential-shaped keys
     are redacted on write."""
@@ -81,15 +76,14 @@ async def audit(
     action: AuditAction,
     target_type: str | None = None,
     target_id: str | int | None = None,
-    reason: str | None = None,
 ) -> AsyncIterator[AuditDraft]:
     """Run a console mutation and commit it together with its audit row.
 
-    ``target_type`` / ``target_id`` / ``reason`` seed the draft when known
-    up front; the block can also set them on the yielded draft (a create
-    only learns its id after the flush).
+    ``target_type`` / ``target_id`` seed the draft when known up front;
+    the block can also set them on the yielded draft (a create only
+    learns its id after the flush).
     """
-    draft = AuditDraft(target_type=target_type, target_id=target_id, reason=reason)
+    draft = AuditDraft(target_type=target_type, target_id=target_id)
 
     yield draft
 
@@ -99,7 +93,6 @@ async def audit(
             action=action.value,
             target_type=draft.target_type,
             target_id=None if draft.target_id is None else str(draft.target_id),
-            reason=draft.reason,
             payload=_redact(draft.payload),
             request_id=ctx.request_id,
             ip_address=ctx.ip_address,
@@ -123,7 +116,7 @@ def _redact(payload: dict[str, Any]) -> dict[str, Any]:
 
     Shallow by design: audit payloads are flat parameter maps, and a
     recursive walk would invite callers to dump whole request bodies
-    here — exactly what ``reason`` and the target fields exist to avoid.
+    here — exactly what the target fields exist to avoid.
     """
     return {
         key: (

@@ -23,8 +23,11 @@ class AuditAction(StrEnum):
     FEEDBACK_UPDATE = "feedback.update"
     SKILL_UPLOAD = "skill.upload"
     SKILL_UPDATE = "skill.update"
+    SKILL_CATEGORY_CREATE = "skill_category.create"
+    SKILL_CATEGORY_UPDATE = "skill_category.update"
     CONNECTOR_CATALOG_CREATE = "connector_catalog.create"
     CONNECTOR_CATALOG_UPDATE = "connector_catalog.update"
+    CONNECTOR_CATEGORY_CREATE = "connector_category.create"
+    CONNECTOR_CATEGORY_UPDATE = "connector_category.update"
     INVITE_CREATE = "invite.create"
     # The console's one audited *read*: customer conversation content.
-    SESSION_VIEW = "session.view"

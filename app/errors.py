@@ -635,6 +635,19 @@ class SkillNotFoundError(AppError):
     error_type = "skill_not_found"
 
 
+class CategoryNotFoundError(AppError):
+    """No category with that id (admin-console lookup, both taxonomies).
+
+    One error for ``skill_category`` and ``connector_category`` alike: they
+    are separate tables, so passing one's id where the other is expected
+    already lands here, and the operator's next move — pick a real id out of
+    ``GET /{skill,connector}-categories`` — is the same either way. The
+    message names the taxonomy; the type does not need to."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "category_not_found"
+
+
 class ConnectorCatalogUrlTakenError(AppError):
     """The catalog already offers this URL. Two entries pointing at one
     server are the same Connector offered twice, whatever they are

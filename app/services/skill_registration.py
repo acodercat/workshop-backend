@@ -168,6 +168,7 @@ async def register_platform_skill_bundle(
     filename: str,
     data: bytes,
     enabled: bool | None = None,
+    category_id: int | None = None,
 ) -> tuple[Skill, str | None]:
     """Register (or replace) a platform skill bundle.
 
@@ -208,6 +209,11 @@ async def register_platform_skill_bundle(
     a content change, so re-deriving the flag would switch a live
     ``OFFICIAL`` skill off for everyone on the default. Pass
     ``enabled=False`` to stage a ``SYSTEM`` bundle without exposing it.
+
+    ``category_id`` is tri-state for the same reason and with the same
+    shape: ``None`` leaves the row alone, so re-uploading a bundle keeps
+    the tab an operator filed it under. It has no per-origin default —
+    a new skill is simply uncategorised until someone files it.
 
     Raises the same typed kinds the user path does.
     """
@@ -260,6 +266,8 @@ async def register_platform_skill_bundle(
     skill.bundle_key = bundle_key
     skill.bundle_size = len(data)
     skill.enabled = enabled
+    if category_id is not None:
+        skill.category_id = category_id
 
     try:
         await db.flush()

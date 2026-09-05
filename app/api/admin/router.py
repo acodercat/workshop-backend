@@ -16,6 +16,7 @@ from fastapi import APIRouter
 from app.api.admin import (
     audit,
     auth,
+    category,
     connector,
     feedback,
     invite,
@@ -42,5 +43,6 @@ admin_router.include_router(message_feedback.router)
 admin_router.include_router(invite.router)
 admin_router.include_router(skill.router)
 admin_router.include_router(connector.router)
+admin_router.include_router(category.router)
 admin_router.include_router(payment.router)
 admin_router.include_router(audit.router)

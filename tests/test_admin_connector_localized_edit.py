@@ -1,6 +1,7 @@
-"""An edit must not leave a field behind that its own change invalidated.
+"""An edit must not leave a field behind that its own change invalidated,
+and must record faithfully what it did.
 
-Two of those: the locale map beside a canonical column, and the OAuth
+Two of the first: the locale map beside a canonical column, and the OAuth
 scope on an entry that is no longer OAUTH.
 
 The rule and its reason live in ``app.services.localized_text``. What
@@ -9,8 +10,13 @@ from the console: this endpoint returns the canonical column, so the
 operator watches the edit take effect while the public catalog keeps
 serving the old text and ``build_connector`` copies that onto every
 Connector created from the entry afterwards.
+
+The audit payload is pinned here for the same reason: it is the only copy
+left of what a cleared column held, and no console screen reads it back,
+so a wrong value or a colliding key is just as invisible.
 """
 
+import json
 from datetime import UTC, datetime
 
 from fastapi import FastAPI
@@ -87,7 +93,7 @@ def _client(db: _FakeDb) -> TestClient:
 
 
 def _patch(db: _FakeDb, **body):
-    return _client(db).patch("/connector-catalog/3", json={"reason": "TICKET-1", **body})
+    return _client(db).patch("/connector-catalog/3", json=body)
 
 
 def _audit(db: _FakeDb) -> AdminAuditLog:
@@ -165,3 +171,58 @@ def test_an_edit_elsewhere_leaves_the_translations_alone() -> None:
     assert entry.name_i18n == {"zh-CN": "飞书", "en-US": "Lark"}
     assert entry.description_i18n == {"zh-CN": "旧描述", "en-US": "Old blurb"}
     assert "cleared_name_i18n" not in _audit(db).payload
+
+
+def test_clearing_the_scope_records_the_value_it_replaced() -> None:
+    """The trail must name the scope the entry *had*, not the one this
+    request was carrying when it also switched auth off OAuth.
+
+    The sibling test above only flips ``auth_type``, so ``entry.oauth_scope``
+    still holds the old value by the time the clearing branch reads it and
+    the bug is invisible. Change both in one request and the write loop has
+    already replaced it — this pins that the ``from`` is captured first.
+    ``read write`` is the only copy left once the column is nulled."""
+    entry = _entry(oauth_scope="read write")
+    db = _FakeDb(entry)
+
+    _patch(db, auth_type="NONE", oauth_scope="read:new")
+
+    assert entry.oauth_scope is None
+    assert _audit(db).payload["oauth_scope"] == {"from": "read write", "to": None}
+
+
+def test_a_renamed_entry_keeps_both_its_label_and_its_diff() -> None:
+    """``name`` is editable here, so the label and the before → after entry
+    cannot share a key: one would overwrite the other and ``payload["name"]``
+    would be a string on some rows and a diff on others."""
+    db = _FakeDb(_entry())
+
+    _patch(db, name="飞书 Pro")
+
+    payload = _audit(db).payload
+    assert payload["entry_name"] == "飞书 Pro"
+    assert payload["name"] == {"from": "飞书", "to": "飞书 Pro"}
+
+
+def test_the_payload_records_values_not_their_reprs() -> None:
+    """Raw values, as ``update_skill`` and the category endpoints write them.
+    Stringified, ``published`` lands as ``"False"`` and a cleared column as
+    the literal ``"None"``, which the action/created index exists to be
+    queried by."""
+    db = _FakeDb(_entry())
+
+    _patch(db, published=False, sort_order=5, auth_type="NONE")
+
+    payload = _audit(db).payload
+    assert payload["published"] == {"from": True, "to": False}
+    assert payload["sort_order"] == {"from": 0, "to": 5}
+    # ``auth_type`` is the only non-primitive that reaches the change set,
+    # and the payload is a JSONB column, so it has to survive
+    # ``json.dumps``. It does only because ``MCPServerAuthType`` is a
+    # ``StrEnum`` — the ``str()`` this test forbids used to make that true
+    # whatever the enum's base class was, and no fake-db unit test would
+    # notice it stopping.
+    assert json.loads(json.dumps(payload))["auth_type"] == {
+        "from": "OAUTH",
+        "to": "NONE",
+    }

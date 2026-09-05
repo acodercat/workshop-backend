@@ -74,6 +74,33 @@ class CheckInStatsResponse(BaseModel):
     users: int
 
 
+class UserStatsResponse(BaseModel):
+    """New accounts for the window.
+
+    Its own response for the reason :class:`CheckInStatsResponse` is: the
+    count comes off the ``user`` table, and the ledger's response has no
+    business carrying it.
+    """
+
+    days: int
+    new_users: int
+
+
+class TokenStatsResponse(BaseModel):
+    """Tokens measured on turns that terminated in the window.
+
+    Its own response for the same reason, one table further out: the
+    counts live on ``session_turn``. Split rather than totalled — a
+    window that moved on input is a context-length story and one that
+    moved on output is a generation-length story, and the caller can add
+    them when it only wants the size.
+    """
+
+    days: int
+    input_tokens: int
+    output_tokens: int
+
+
 class CheckInActivityEntry(BaseModel):
     """One user's check-in habit over the window.
 

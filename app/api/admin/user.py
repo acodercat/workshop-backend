@@ -31,11 +31,19 @@ from app.schemas.admin.user import (
 )
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.credits import CreditsTransactionEntry
-from app.services import credits
+from app.services import credits, session as session_service
 from app.services.admin import AdminContext, AuditAction, audit
+from app.services.credits import analytics
 from app.services.credits.rates import credits_from_micro, micro_from_credits
 
 router = APIRouter(tags=["users"])
+
+# ``apply_adjust`` still takes a real justification because
+# ``scripts/adjust_credits.py`` passes an operator-typed ``--reason``.
+# The console stopped asking for one, so it names itself instead; who
+# made the correction is already on the same ledger reference as
+# ``admin_id``.
+_ADJUST_REASON = "admin console adjustment"
 
 
 async def _get_or_404(ctx: AdminContext, user_id: int) -> User:
@@ -143,7 +151,6 @@ async def update_user(ctx: StaffContext, user_id: int, body: UserUpdate) -> User
         action=AuditAction.USER_UPDATE,
         target_type="user",
         target_id=user.id,
-        reason=body.reason,
     ) as draft:
         user.status = body.status
         draft.payload = {"status": {"from": before.value, "to": body.status.value}}
@@ -210,14 +217,13 @@ async def create_credit_adjustment(
             action=AuditAction.CREDIT_ADJUST,
             target_type="user",
             target_id=user.id,
-            reason=body.reason,
         ) as draft:
             entry = await credits.apply_adjust(
                 ctx.db,
                 user_id=user.id,
                 amount_micro=micro_from_credits(body.amount_credits),
                 idempotency_key=f"admin:{body.idempotency_key}",
-                reason=body.reason,
+                reason=_ADJUST_REASON,
                 admin_id=ctx.staff.id,
             )
             draft.payload = {
@@ -254,13 +260,42 @@ async def list_user_sessions(
     rows = (
         await ctx.db.scalars(
             paginate(
-                select(Session).where(filter_clause).order_by(Session.updated_at.desc()),
+                select(Session)
+                .where(filter_clause)
+                # Same tiebreak as the platform-wide list, for the same
+                # reason: OFFSET paging over a sort free to reorder equal
+                # keys drops or repeats rows between pages.
+                .order_by(Session.updated_at.desc(), Session.id.desc()),
                 page,
                 page_size,
             )
         )
     ).all()
+
+    # Two grouped queries for the whole page, not two per row, each
+    # asked of the module that owns the table it reads: usage of the
+    # session domain, money of the ledger's — see ``session_spend`` for
+    # why only a negative SETTLE counts as spend.
+    session_ids = [row.id for row in rows]
+    turns = await session_service.per_session_usage(ctx.db, session_ids)
+    spend_micro = await analytics.session_spend(ctx.db, session_ids)
+
     return PaginatedResponse(
-        items=[SessionResponse.model_validate(row) for row in rows],
+        items=[
+            SessionResponse(
+                id=row.id,
+                title=row.title,
+                status=row.status,
+                agent_type=row.agent_type,
+                model_id=row.model_id,
+                turn_count=turns.get(row.id, session_service.NO_TURN_USAGE).turn_count,
+                total_tokens=turns.get(row.id, session_service.NO_TURN_USAGE).total_tokens,
+                spent_credits=credits_from_micro(spend_micro.get(row.id, 0)),
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                deleted_at=row.deleted_at,
+            )
+            for row in rows
+        ],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

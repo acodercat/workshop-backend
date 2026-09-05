@@ -5,7 +5,6 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.models.invite_code import InviteCodeOrigin
-from app.schemas.admin.fields import Reason
 
 
 class InviteCodeResponse(BaseModel):
@@ -40,7 +39,6 @@ class InviteCodeCreate(BaseModel):
 
     max_uses: int | None = Field(default=1, ge=1, le=10_000)
     note: str | None = Field(default=None, max_length=500)
-    reason: Reason
 
 
 class InviteRedemptionResponse(BaseModel):

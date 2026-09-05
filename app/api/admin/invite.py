@@ -109,7 +109,6 @@ async def create_invite_code(ctx: StaffContext, body: InviteCodeCreate) -> Invit
         ctx,
         action=AuditAction.INVITE_CREATE,
         target_type="invite_code",
-        reason=body.reason,
     ) as draft:
         code = await invite_service.create_invite_code(
             ctx.db,

@@ -46,10 +46,14 @@ Within this package:
 
 Two rules bind everything admin:
 
-1. **Never write a domain table directly.** Call the service that owns
-   it. If no service function exists for what the console needs, add one
-   under ``app/services/`` rather than issuing the UPDATE from an
-   endpoint.
+1. **Invariants live in the service layer; plain reads and plain writes
+   stay inline.** A column with a rule attached — a status that must not
+   orphan the last active operator, a balance that must stay equal to its
+   ledger — is written through the service that owns the rule, never by
+   an endpoint re-deriving it. A column with no invariant (``user.status``,
+   ``feedback.status``, a skill's picker metadata) is assigned on the ORM
+   row right here; routing it through a service function that would only
+   forward buys indirection and no guarantee.
 2. **Every mutation commits through** :func:`app.services.admin.audit`,
    which writes the audit row in the same transaction. Not a convention
    to remember: it owns the commit, so a mutation outside it does not

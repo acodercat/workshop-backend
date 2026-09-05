@@ -42,6 +42,20 @@ def test_the_identity_is_editable() -> None:
     assert "url" in ConnectorCatalogEntryUpdate.model_fields
 
 
+def test_an_entry_can_arrive_already_filed() -> None:
+    """The add form offers the tab, so an operator does not save an entry
+    and then immediately edit it to put it on one. That the id names a
+    real category is checked in the endpoint (``_enforce_category_exists``),
+    not here — the schema cannot see the table."""
+    assert _create(category_id=7).category_id == 7
+
+
+def test_an_entry_arrives_uncategorised_unless_told_otherwise() -> None:
+    """The same state every entry created before the taxonomy existed
+    carries, so omitting the field is not a special case."""
+    assert _create().category_id is None
+
+
 def test_an_entry_arrives_as_a_draft() -> None:
     """Publishing is the separate PATCH, which is what makes "check the
     URL and icon first" a step rather than advice."""
@@ -66,7 +80,7 @@ def test_a_url_that_is_not_https_is_refused(url: str) -> None:
         _create(url=url)
 
     with pytest.raises(ValidationError):
-        ConnectorCatalogEntryUpdate(url=url, reason="fix the url")
+        ConnectorCatalogEntryUpdate(url=url)
 
 
 _CANONICAL = "https://mcp.notion.com/mcp"
@@ -88,7 +102,7 @@ def test_the_console_stores_the_canonical_spelling(typed: str) -> None:
     would catch. The edit path normalizes too — it is the other way one
     gets in."""
     assert _create(url=typed).url == _CANONICAL
-    assert ConnectorCatalogEntryUpdate(url=typed, reason="repoint").url == _CANONICAL
+    assert ConnectorCatalogEntryUpdate(url=typed).url == _CANONICAL
 
 
 def test_the_scheme_is_judged_after_normalizing() -> None:
@@ -113,7 +127,7 @@ def test_the_address_check_is_left_to_connect_time() -> None:
 @pytest.mark.parametrize("auth_type", sorted(INSTANTIABLE_AUTH_TYPES))
 def test_an_instantiable_auth_type_is_accepted(auth_type) -> None:
     assert _create(auth_type=auth_type).auth_type is auth_type
-    assert ConnectorCatalogEntryUpdate(auth_type=auth_type, reason="fix").auth_type is auth_type
+    assert ConnectorCatalogEntryUpdate(auth_type=auth_type).auth_type is auth_type
 
 
 @pytest.mark.parametrize("auth_type", [MCPServerAuthType.BEARER, MCPServerAuthType.HEADER])
@@ -130,12 +144,21 @@ def test_an_auth_type_no_user_could_add_is_refused(auth_type) -> None:
         _create(auth_type=auth_type)
 
     with pytest.raises(ValidationError):
-        ConnectorCatalogEntryUpdate(auth_type=auth_type, reason="fix")
+        ConnectorCatalogEntryUpdate(auth_type=auth_type)
 
 
 def test_an_absent_auth_type_still_means_leave_alone() -> None:
     """The update schema documents ``None`` as "leave this field alone",
     so an explicit ``null`` must pass the instantiable check rather than
     trip it."""
-    assert ConnectorCatalogEntryUpdate(reason="fix").auth_type is None
-    assert ConnectorCatalogEntryUpdate(auth_type=None, reason="fix").auth_type is None
+    # A carrier field is needed now that nothing else is required — an
+    # entirely empty update is refused by ``_at_least_one_change``.
+    assert ConnectorCatalogEntryUpdate(name="Notion").auth_type is None
+    assert ConnectorCatalogEntryUpdate(name="Notion", auth_type=None).auth_type is None
+
+
+def test_an_empty_update_is_refused() -> None:
+    """Same guard as the skill PATCH: nothing is required on its own, so
+    the model has to refuse a body that asks for nothing."""
+    with pytest.raises(ValidationError):
+        ConnectorCatalogEntryUpdate()

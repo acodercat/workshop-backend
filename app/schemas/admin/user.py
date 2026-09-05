@@ -15,7 +15,6 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 from app.models.user import UserStatus
-from app.schemas.admin.fields import Reason
 
 
 class UserResponse(BaseModel):
@@ -44,12 +43,9 @@ class UserDetailResponse(UserResponse):
 
 
 class UserUpdate(BaseModel):
-    """Change a user's account status — the only field the console may
-    write. ``reason`` is required: locking a customer out is exactly the
-    kind of action the audit trail must explain."""
+    """Change a user's account status — the only field the console may write."""
 
     status: UserStatus
-    reason: Reason
 
 
 class CreditAdjustmentCreate(BaseModel):
@@ -66,7 +62,6 @@ class CreditAdjustmentCreate(BaseModel):
         le=1_000_000,
         description="Signed whole credits; positive grants, negative claws back.",
     )
-    reason: Reason
     idempotency_key: str = Field(min_length=8, max_length=64)
 
     @field_validator("amount_credits")

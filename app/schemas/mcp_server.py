@@ -135,6 +135,26 @@ class ConnectorCatalogEntryResponse(BaseModel):
     auth_type: str
     description: str | None
     icon_url: str | None
+    # The tab this entry browses under; ``None`` is uncategorised, and so
+    # is an id the client cannot resolve. The id alone, never the name —
+    # ``list_skill_categories`` explains why.
+    category_id: int | None
+
+
+class ConnectorCategoryResponse(BaseModel):
+    """One tab on the connectors page, already localized.
+
+    Its own class rather than one shared with the skills taxonomy's, for
+    the reason the tables are separate: a generated client should not be
+    able to hand an id from one to an endpoint expecting the other.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    #: Resolved for the request locale. ``name_i18n`` never leaves the
+    #: backend — the client renders this string as-is.
+    name: str
 
 
 class _ConnectorAuthFields(BaseModel):

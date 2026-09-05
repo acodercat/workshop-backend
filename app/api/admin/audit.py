@@ -82,7 +82,6 @@ async def list_audit_logs(
                 action=entry.action,
                 target_type=entry.target_type,
                 target_id=entry.target_id,
-                reason=entry.reason,
                 payload=entry.payload,
                 request_id=entry.request_id,
                 ip_address=entry.ip_address,

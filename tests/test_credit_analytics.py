@@ -24,13 +24,15 @@ def test_spend_counts_only_the_negative_settle_row() -> None:
 
 
 def test_every_spend_query_interpolates_the_shared_predicate() -> None:
-    # Totals, the daily series, the model split and the leaderboard must
-    # answer the same question, so each interpolates the constant…
+    # Totals, the daily series, the model split, the leaderboard and the
+    # per-session figure must answer the same question, so each
+    # interpolates the constant…
     for query_owner in (
         analytics.summarize,
         analytics.user_activity,
         analytics._daily_spend,
         analytics._spend_by_model,
+        analytics.session_spend,
     ):
         assert "{_SPEND_ROWS}" in inspect.getsource(query_owner)
 

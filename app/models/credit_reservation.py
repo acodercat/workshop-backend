@@ -114,6 +114,13 @@ class CreditReservation(Base):
             "user_id",
             postgresql_where=text("state = 'OPEN'"),
         ),
+        # Backs ``analytics.session_spend``: "what did these sessions
+        # cost" filters reservations by session, then joins the ledger
+        # through ``ix_credit_ledger_reservation_id``. The partial index
+        # below cannot serve it — that one covers only OPEN rows, and a
+        # settled session is exactly the case being asked about. Plain,
+        # not partial: every reservation carrying a session is in scope.
+        Index("ix_credit_reservation_session_id", "session_id"),
         # DB backstop for the settle path: one session may have at most
         # one OPEN reservation. Historical settled rows remain
         # unconstrained, and NULL session reservations are not part of

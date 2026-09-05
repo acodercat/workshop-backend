@@ -33,12 +33,13 @@ from app.api.dependencies import get_db
 from app.api.uploads import read_capped
 from app.auth import authenticate_and_get_user
 from app.models.skill import Skill, SkillOrigin
+from app.models.skill_category import SkillCategory
 from app.models.user import User
 from app.models.user_skill_preference import UserSkillPreference
 from app.rate_limit import limiter
 from app.schemas.file import DownloadUrlResponse
-from app.schemas.skill import SkillResponse, SkillUpdate
-from app.services import file_storage
+from app.schemas.skill import SkillCategoryResponse, SkillResponse, SkillUpdate
+from app.services import file_storage, localized_text
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_enablement import ensure_enable_capacity
 from app.services.skill_i18n import (
@@ -130,6 +131,49 @@ async def list_skills(
             response.enabled = preference_enabled
         responses.append(response)
     return responses
+
+
+@router.get("/skills/categories")
+async def list_skill_categories(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+    locale: str = Query(default=DEFAULT_LOCALE),
+) -> list[SkillCategoryResponse]:
+    """The tabs the skills page groups OFFICIAL skills under.
+
+    Declared before the parameterized ``/skills/{skill_id}`` routes, as
+    literal segments are throughout this codebase.
+
+    **The array order is the tab order** — rendered as given, not sorted
+    by name, which would undo the ordering the operator set.
+
+    Two things the client owns rather than this endpoint. A
+    ``category_id`` it cannot resolve here reads as uncategorised: an
+    unpublished category keeps its rows, so the tab returns intact when
+    it is republished. And an empty category renders an empty tab the
+    client drops on its own — it holds both lists already, where
+    filtering here would mean a subquery on every request.
+    """
+    resolved_locale = normalize_locale(locale)
+    rows = (
+        await db.scalars(
+            select(SkillCategory)
+            .where(SkillCategory.published.is_(True))
+            .order_by(SkillCategory.sort_order, SkillCategory.id)
+        )
+    ).all()
+    return [_localized_category_response(row, resolved_locale) for row in rows]
+
+
+def _localized_category_response(category: SkillCategory, locale: str) -> SkillCategoryResponse:
+    """One tab as the client sees it, in *locale*.
+
+    A module-level named function, not an inline comprehension: it is
+    what lets the resolution be tested without a database.
+    """
+    response = SkillCategoryResponse.model_validate(category)
+    response.name = localized_text.resolve(category.name, category.name_i18n, locale)
+    return response
 
 
 @router.patch("/skills/{skill_id}")

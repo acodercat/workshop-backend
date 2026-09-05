@@ -91,6 +91,18 @@ class Skill(Base):
         nullable=False,
         server_default=text("true"),
     )
+    # Browsing taxonomy — a tab on the skills page. Only OFFICIAL rows are
+    # browsed that way: a CUSTOM upload lives behind 「个人」 and a SYSTEM
+    # skill is never listed at all, so both are left NULL. Not constrained
+    # to OFFICIAL, because a category on either is unread data rather than
+    # a row that could pass for something it is not. ``SET NULL`` rather
+    # than CASCADE, the same choice as ``mcp_server.catalog_id``: retiring
+    # a category must not take the skills in it with it.
+    category_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("skill_category.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

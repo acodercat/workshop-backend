@@ -47,6 +47,7 @@ from app.errors import (
     ConnectorUrlConflictError,
     OAuthNotConfiguredError,
 )
+from app.models.connector_category import ConnectorCategory
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.user import User
@@ -56,6 +57,7 @@ from app.schemas.mcp_server import (
     ConnectionTestResponse,
     ConnectorAuthorizationResponse,
     ConnectorCatalogEntryResponse,
+    ConnectorCategoryResponse,
     ConnectorCreate,
     ConnectorResponse,
     ConnectorUpdate,
@@ -148,6 +150,43 @@ def _localized_catalog_response(
     response.description = localized_text.resolve_optional(
         entry.description, entry.description_i18n, locale
     )
+    return response
+
+
+@router.get("/connectors/catalog/categories")
+async def list_connector_categories(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+    locale: str = Query(default=DEFAULT_LOCALE),
+) -> list[ConnectorCategoryResponse]:
+    """The tabs the connectors page groups catalog entries under.
+
+    Under ``/connectors/catalog`` rather than beside it, because that is
+    what these group: a user's own Connectors live behind the pinned
+    personal tab and are not the platform's to classify.
+
+    **The array order is the tab order** — rendered as given, not sorted
+    by name. An unresolvable ``category_id`` and an empty category are
+    both the client's to handle; the reasoning is written out on
+    ``list_skill_categories``, which answers the same contract.
+    """
+    resolved_locale = normalize_locale(locale)
+    rows = (
+        await db.scalars(
+            select(ConnectorCategory)
+            .where(ConnectorCategory.published.is_(True))
+            .order_by(ConnectorCategory.sort_order, ConnectorCategory.id)
+        )
+    ).all()
+    return [_localized_connector_category_response(row, resolved_locale) for row in rows]
+
+
+def _localized_connector_category_response(
+    category: ConnectorCategory, locale: str
+) -> ConnectorCategoryResponse:
+    """One tab as the client sees it, in *locale*."""
+    response = ConnectorCategoryResponse.model_validate(category)
+    response.name = localized_text.resolve(category.name, category.name_i18n, locale)
     return response
 
 

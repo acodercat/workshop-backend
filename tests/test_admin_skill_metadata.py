@@ -91,9 +91,7 @@ def test_a_rename_clears_the_bundle_locale_map() -> None:
     skill = _skill()
     db = _FakeDb(skill)
 
-    response = _client(db).patch(
-        "/skills/5", json={"display_name": "PDF Tools", "reason": "TICKET-1"}
-    )
+    response = _client(db).patch("/skills/5", json={"display_name": "PDF Tools"})
 
     assert response.status_code == 200
     assert skill.display_name == "PDF Tools"
@@ -104,7 +102,7 @@ def test_editing_only_the_description_leaves_the_locale_map() -> None:
     skill = _skill()
     db = _FakeDb(skill)
 
-    _client(db).patch("/skills/5", json={"description": "reads and writes pdfs", "reason": "r"})
+    _client(db).patch("/skills/5", json={"description": "reads and writes pdfs"})
 
     assert skill.description == "reads and writes pdfs"
     assert skill.display_name_i18n == {"zh": "PDF 工具"}
@@ -115,7 +113,7 @@ def test_the_audit_payload_records_each_changed_field() -> None:
 
     _client(db).patch(
         "/skills/5",
-        json={"display_name": "PDF Tools", "enabled": True, "reason": "TICKET-1"},
+        json={"display_name": "PDF Tools", "enabled": True},
     )
 
     (row,) = _audit_rows(db)
@@ -129,9 +127,7 @@ def test_the_audit_payload_records_each_changed_field() -> None:
 def test_an_edit_that_changes_nothing_writes_no_audit_row() -> None:
     db = _FakeDb(_skill())
 
-    response = _client(db).patch(
-        "/skills/5", json={"display_name": "PDF", "enabled": False, "reason": "r"}
-    )
+    response = _client(db).patch("/skills/5", json={"display_name": "PDF", "enabled": False})
 
     assert response.status_code == 200
     assert _audit_rows(db) == []
@@ -144,6 +140,23 @@ def test_the_bundle_name_cannot_be_edited() -> None:
     skill = _skill()
     db = _FakeDb(skill)
 
-    _client(db).patch("/skills/5", json={"name": "not-pdf", "reason": "r"})
+    response = _client(db).patch("/skills/5", json={"name": "not-pdf", "display_name": "PDF Tools"})
 
+    assert response.status_code == 200
+    # The rename rode along with a change that *is* accepted, and was
+    # dropped on its own.
+    assert skill.display_name == "PDF Tools"
     assert skill.name == "pdf"
+
+
+def test_an_empty_patch_is_refused() -> None:
+    """Every field is optional, so without ``_at_least_one_change`` an
+    empty body would be a valid PATCH that the no-op guard then answers
+    200 — a request that did nothing, reported as success."""
+    db = _FakeDb(_skill())
+
+    response = _client(db).patch("/skills/5", json={})
+
+    assert response.status_code == 422
+    assert _audit_rows(db) == []
+    assert db.commits == 0

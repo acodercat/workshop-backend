@@ -34,6 +34,13 @@ Usage::
         --url https://mcp.figma.com/mcp --client-id vFtd...
     uv run python -m scripts.manage_connector_catalog set-oauth-client \
         --url https://mcp.figma.com/mcp --clear
+
+    # file an entry under one of the connectors page's tabs, by the name
+    # the console shows — a typo fails here, a mistyped id would not
+    uv run python -m scripts.manage_connector_catalog set-category \
+        --url https://mcp.notion.com/mcp --category 生产力
+    uv run python -m scripts.manage_connector_catalog set-category \
+        --url https://mcp.notion.com/mcp --clear
 """
 
 import argparse
@@ -46,6 +53,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
+from app.models.connector_category import ConnectorCategory
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.services import localized_text
@@ -54,6 +62,7 @@ from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
 from app.services.mcp.url_identity import normalize_connector_url
 
 _URL_HELP = "the entry's MCP server URL, exactly as `list` prints it"
+_CATEGORY_HELP = "a connector category, by the name the console shows"
 
 
 class _LocaleMap(argparse.Action):
@@ -83,6 +92,12 @@ async def _add(db: AsyncSession, args: argparse.Namespace) -> int:
         )
         return 1
 
+    category_id = None
+    if args.category is not None:
+        category_id = await _resolve_category_id(db, args.category)
+        if category_id is None:
+            return 1
+
     entry = MCPServerCatalogEntry(
         name=args.name,
         name_i18n=localized_text.clean_map(args.name_i18n),
@@ -93,6 +108,7 @@ async def _add(db: AsyncSession, args: argparse.Namespace) -> int:
         description=args.description,
         icon_url=args.icon_url,
         sort_order=args.sort_order,
+        category_id=category_id,
     )
     db.add(entry)
     await db.commit()
@@ -144,6 +160,30 @@ async def _set_oauth_client(db: AsyncSession, args: argparse.Namespace) -> int:
     return 0
 
 
+async def _set_category(db: AsyncSession, args: argparse.Namespace) -> int:
+    """File an entry under a category, or return it to uncategorised.
+
+    Shaped like ``set-oauth-client``: one address (``--url``), and a
+    ``--clear`` flag rather than an empty ``--category``, so removing a
+    value is spelled as its own instruction.
+    """
+    entry = await _find(db, args.url)
+    if entry is None:
+        print(f"no catalog entry for {args.url}", file=sys.stderr)
+        return 1
+
+    category_id = None
+    if not args.clear:
+        category_id = await _resolve_category_id(db, args.category)
+        if category_id is None:
+            return 1
+
+    entry.category_id = category_id
+    await db.commit()
+    print(f"{entry.name!r}: category {'cleared' if args.clear else args.category}")
+    return 0
+
+
 async def _set_published(db: AsyncSession, url: str, published: bool) -> int:
     entry = await _find(db, url)
     if entry is None:
@@ -175,6 +215,33 @@ async def _list(db: AsyncSession) -> int:
     return 0
 
 
+async def _resolve_category_id(db: AsyncSession, name: str) -> int | None:
+    """The id of the category named *name*, or ``None`` after saying so.
+
+    By name rather than by id, the same choice ``upload_skill.py`` makes:
+    a name is what the operator reads off ``GET /connector-categories``,
+    and a typo in one ends here with the known names beside it instead of
+    filing the entry under a tab nobody meant. Categories themselves are
+    created on the admin API (``POST /connector-categories``) — the
+    console has the routes but not yet a screen for them. This script
+    manages catalog entries, not the taxonomy.
+    """
+    category_id = await db.scalar(
+        select(ConnectorCategory.id).where(ConnectorCategory.name == name)
+    )
+    if category_id is None:
+        known = (
+            await db.scalars(select(ConnectorCategory.name).order_by(ConnectorCategory.name))
+        ).all()
+        print(
+            f"no connector category named {name!r}; "
+            f"known: {', '.join(known) or '(none)'}\n"
+            "create one first: POST /connector-categories on the admin API",
+            file=sys.stderr,
+        )
+    return category_id
+
+
 async def _find(db: AsyncSession, url: str) -> MCPServerCatalogEntry | None:
     """The entry offering *url*, which is what identifies one — the catalog
     holds at most a single row per server, and ``name`` is only its label."""
@@ -199,6 +266,8 @@ async def main(args: argparse.Namespace) -> int:
             return await _set_published(db, args.url, False)
         if args.command == "set-oauth-client":
             return await _set_oauth_client(db, args)
+        if args.command == "set-category":
+            return await _set_category(db, args)
     return 1  # pragma: no cover — argparse rejects unknown commands first
 
 
@@ -231,6 +300,7 @@ def _parse_args() -> argparse.Namespace:
         )
     add.add_argument("--icon-url", default=None)
     add.add_argument("--sort-order", type=int, default=0)
+    add.add_argument("--category", default=None, help=_CATEGORY_HELP)
 
     sub.add_parser("list", help="list every entry, published or not")
 
@@ -245,6 +315,19 @@ def _parse_args() -> argparse.Namespace:
         "--clear",
         action="store_true",
         help="remove the app; adds fall back to DCR/CIMD",
+    )
+
+    set_category = sub.add_parser(
+        "set-category",
+        help="file an entry under a category, or clear it",
+    )
+    set_category.add_argument("--url", required=True, help=_URL_HELP)
+    category_group = set_category.add_mutually_exclusive_group(required=True)
+    category_group.add_argument("--category", help=_CATEGORY_HELP)
+    category_group.add_argument(
+        "--clear",
+        action="store_true",
+        help="return the entry to uncategorised",
     )
 
     for name, help_text in (

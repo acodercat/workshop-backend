@@ -91,7 +91,7 @@ def test_issuing_mints_a_system_code_and_audits_it() -> None:
 
     response = _client(db).post(
         "/invite-codes",
-        json={"max_uses": 5, "note": "conference booth", "reason": "TICKET-1"},
+        json={"max_uses": 5, "note": "conference booth"},
     )
 
     assert response.status_code == 201
@@ -106,7 +106,6 @@ def test_issuing_mints_a_system_code_and_audits_it() -> None:
     (row,) = _audit_rows(db)
     assert row.action == "invite.create"
     assert (row.target_type, row.target_id) == ("invite_code", "1")
-    assert row.reason == "TICKET-1"
     # The code itself is in the payload: "who let this account in" should
     # be answerable from the trail alone.
     assert row.payload == {"code": body["code"], "max_uses": 5}
@@ -116,9 +115,8 @@ def test_issuing_mints_a_system_code_and_audits_it() -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        {"max_uses": 5, "note": "no reason given"},  # reason is required
-        {"reason": "TICKET-1", "max_uses": 0},  # below the floor
-        {"reason": "TICKET-1", "max_uses": 10_001},  # above the ceiling
+        {"max_uses": 0},  # below the floor
+        {"max_uses": 10_001},  # above the ceiling
     ],
 )
 def test_a_rejected_body_writes_nothing(body: dict) -> None:

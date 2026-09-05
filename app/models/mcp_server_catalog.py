@@ -23,6 +23,7 @@ from sqlalchemy import (
     TIMESTAMP,
     Boolean,
     Enum as SAEnum,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -112,6 +113,15 @@ class MCPServerCatalogEntry(Base):
         Integer,
         nullable=False,
         server_default=text("0"),
+    )
+    # Browsing taxonomy — a tab on the connectors page. ``SET NULL`` rather
+    # than CASCADE, the same choice as ``mcp_server.catalog_id``: retiring a
+    # category must not take the entries in it with it, they simply read as
+    # uncategorised.
+    category_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("connector_category.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

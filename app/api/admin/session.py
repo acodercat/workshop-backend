@@ -1,76 +1,98 @@
-"""Viewing a session's content from the console.
+"""The console's platform-wide session list.
 
-``GET /sessions/{id}`` — metadata + the rendered message blocks,
-read-only. The per-user session *list* lives with the user resource
-(``GET /users/{id}/sessions`` in :mod:`app.api.admin.user`); this module
-is only the content view.
+- ``GET /sessions`` — every session, newest activity first, soft-deleted
+  included, with the owner on the row.
 
-**This read is audited** (``session.view``) — the only audited read in
-the console. It is customer conversation content, the most
-privacy-sensitive thing the console can show, so "who looked at whose
-conversation" must stay answerable. The audit block wraps no mutation;
-committing the row is the whole point.
+**There is exactly one route here, and no ``GET /sessions/{id}``.** A
+conversation is the most private thing the platform holds, and no
+question this surface exists to answer needs one — so rather than
+auditing the read, the read does not exist. What the row carries instead
+is usage: ``turn_count`` / ``total_tokens`` / ``spent_credits`` answer
+"was this session expensive, and why" without anyone reading a word the
+user wrote.
 
-**No cancel, no delete.** Cancel would need a Redis client in this
-process (deliberately absent) and stuck turns are already recovered by
-the worker's stale-lease cron and the budget enforcer; delete is the
-user's own action.
+The per-user view of the same rows lives in :mod:`app.api.admin.user`
+(``GET /users/{id}/sessions``). This one differs by the owner column and
+nothing else — same ordering, same page size, same soft-delete policy,
+same usage columns — so an operator who learns one list can read the
+other.
 """
 
-import uuid
-
-from fastapi import APIRouter
-from sqlalchemy import select
+from fastapi import APIRouter, Query
+from sqlalchemy import func, select
 
 from app.api.admin.dependencies import StaffContext
-from app.errors import SessionNotFoundError
-from app.models.message import Message
+from app.common.pagination import paginate
 from app.models.session import Session
-from app.schemas.admin.session import MessageResponse, SessionDetailResponse
-from app.services.admin import AuditAction, audit
+from app.models.user import User
+from app.schemas.admin.session import SessionWithOwnerResponse
+from app.schemas.collection_response import PaginatedResponse, PaginationMeta
+from app.services import session as session_service
+from app.services.credits import analytics
+from app.services.credits.rates import credits_from_micro
 
 router = APIRouter(tags=["sessions"])
 
 
-@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
-async def read_session(ctx: StaffContext, session_id: uuid.UUID) -> SessionDetailResponse:
-    """Return one session with its full message history, soft-deleted or
-    not — a PK lookup with no ``deleted_at`` filter, because "what was in
-    the session they deleted" is a question support actually gets.
-
-    The audit payload carries the owner's ``user_id`` so the trail
-    answers "who looked at whose conversation", not just at which
-    session id.
-    """
-    session = await ctx.db.get(Session, session_id)
-    if session is None:
-        raise SessionNotFoundError(f"No session with id {session_id}.")
-
-    messages = (
-        await ctx.db.scalars(
-            select(Message).where(Message.session_id == session.id).order_by(Message.id)
+@router.get("/sessions", response_model=PaginatedResponse[SessionWithOwnerResponse])
+async def list_sessions(
+    ctx: StaffContext,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> PaginatedResponse[SessionWithOwnerResponse]:
+    """Return one page of every session on the platform, most recently
+    active first — **including soft-deleted ones**, ``deleted_at``
+    visible. The customer list hides those; support is often asked about
+    exactly them."""
+    total = await ctx.db.scalar(select(func.count()).select_from(Session))
+    # The owner is joined rather than resolved per row, the same shape
+    # the audit log uses for its operator: the list is read as "whose
+    # session is this", and a page of rows must not become a page of
+    # lookups. Outer, because ``session.user_id`` is nullable — an inner
+    # join would silently drop such a row from a page whose ``total``
+    # still counted it.
+    #
+    # ``id`` breaks ties on ``updated_at`` so a row cannot appear on two
+    # pages or none: OFFSET paging over a non-deterministic sort is free
+    # to reorder equal keys between requests. ``ix_session_updated_at``
+    # is keyed on both, in this direction, so the sort is read off the
+    # index rather than done.
+    rows = (
+        await ctx.db.execute(
+            paginate(
+                select(Session, User.username)
+                .outerjoin(User, User.id == Session.user_id)
+                .order_by(Session.updated_at.desc(), Session.id.desc()),
+                page,
+                page_size,
+            )
         )
     ).all()
 
-    # Audited after the content is in hand: a failed load must not leave
-    # a row claiming a view that never made it to the operator's screen.
-    async with audit(
-        ctx,
-        action=AuditAction.SESSION_VIEW,
-        target_type="session",
-        target_id=str(session.id),
-    ) as draft:
-        draft.payload = {"user_id": session.user_id}
+    session_ids = [session.id for session, _ in rows]
+    turns = await session_service.per_session_usage(ctx.db, session_ids)
+    spend_micro = await analytics.session_spend(ctx.db, session_ids)
 
-    return SessionDetailResponse(
-        id=session.id,
-        user_id=session.user_id,
-        title=session.title,
-        status=session.status,
-        tier=session.tier,
-        agent_type=session.agent_type,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-        deleted_at=session.deleted_at,
-        messages=[MessageResponse.model_validate(m) for m in messages],
+    # A session that has run nothing is absent from both aggregates by
+    # design, so both are read through a default rather than indexed.
+    return PaginatedResponse(
+        items=[
+            SessionWithOwnerResponse(
+                id=session.id,
+                title=session.title,
+                status=session.status,
+                agent_type=session.agent_type,
+                model_id=session.model_id,
+                turn_count=turns.get(session.id, session_service.NO_TURN_USAGE).turn_count,
+                total_tokens=turns.get(session.id, session_service.NO_TURN_USAGE).total_tokens,
+                spent_credits=credits_from_micro(spend_micro.get(session.id, 0)),
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                deleted_at=session.deleted_at,
+                user_id=session.user_id,
+                owner_username=owner_username,
+            )
+            for session, owner_username in rows
+        ],
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

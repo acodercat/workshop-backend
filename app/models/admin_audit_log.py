@@ -2,9 +2,11 @@
 through the admin console.
 
 This platform moves real money (credit grants, payment reconciliation,
-commission withdrawals). "Who changed this balance, when, and why" has to
-be answerable after the fact, so every write the console performs lands a
-row here **in the same transaction as the mutation it describes**.
+commission withdrawals). "Who changed this balance, when, and what it
+was before" has to be answerable after the fact, so every write the
+console performs lands a row here **in the same transaction as the
+mutation it describes**. The console asks for no typed justification;
+``payload``'s before → after diff is the record of what happened.
 Same-transaction is the whole point: an audit trail written on a
 best-effort basis is one failed commit away from recording an action that
 never happened, or missing one that did.
@@ -43,7 +45,6 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
-    Text,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -74,10 +75,6 @@ class AdminAuditLog(Base):
     # export, a login) have no single target.
     target_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     target_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Operator-supplied justification. Required by the service layer for
-    # money-moving actions, optional for benign ones — hence nullable at
-    # the schema level.
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Action parameters + before/after diff.
     payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB,

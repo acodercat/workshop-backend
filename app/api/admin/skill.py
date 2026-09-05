@@ -22,8 +22,9 @@ from sqlalchemy import func, select
 from app.api.admin.dependencies import StaffContext
 from app.api.uploads import read_capped
 from app.common.pagination import paginate
-from app.errors import SkillNotFoundError
+from app.errors import CategoryNotFoundError, SkillNotFoundError
 from app.models.skill import Skill, SkillOrigin
+from app.models.skill_category import SkillCategory
 from app.models.user import User
 from app.schemas.admin.skill import PlatformSkillOrigin, SkillResponse, SkillUpdate
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
@@ -43,6 +44,7 @@ def _to_skill_response(skill: Skill, owner_username: str | None) -> SkillRespons
         description=skill.description,
         enabled=skill.enabled,
         bundle_size=skill.bundle_size,
+        category_id=skill.category_id,
         user_id=skill.user_id,
         owner_username=owner_username,
         created_at=skill.created_at,
@@ -123,11 +125,8 @@ async def upload_skill(
     to, which a replace deliberately does not re-derive. The response is
     201 either way: a new bundle now exists either way.
 
-    **No ``reason``**, following the console's rule for creates (see
-    ``schemas/admin/staff.py``): the payload *is* the record. It names
-    the skill, its origin, the bundle and the one it displaced, which is
-    the whole deed — a required justification on top of that would only
-    teach operators to type filler.
+    The audit payload *is* the record: it names the skill, its origin,
+    the bundle and the one it displaced, which is the whole deed.
 
     400 if the bundle is malformed or the extension is not allowed,
     413 if it exceeds ``SKILL_POLICY.max_bytes``.
@@ -182,7 +181,19 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
         else await ctx.db.scalar(select(User.username).where(User.id == skill.user_id))
     )
 
-    fields = body.model_dump(exclude={"reason"}, exclude_none=True)
+    fields = body.model_dump(exclude_none=True)
+    # Put back the one field whose explicit ``null`` is an instruction
+    # rather than a default — see ``SkillUpdate.category_id``.
+    if "category_id" in body.model_fields_set:
+        fields["category_id"] = body.category_id
+
+    # Not left to the foreign key: an ``IntegrityError`` raised inside
+    # ``audit()`` aborts the transaction and takes the audit row with
+    # it, and reaches the operator as the generic 409.
+    category_id = fields.get("category_id")
+    if category_id is not None and await ctx.db.get(SkillCategory, category_id) is None:
+        raise CategoryNotFoundError(f"No skill category with id {category_id}.")
+
     changes = {
         field: {"from": getattr(skill, field), "to": value}
         for field, value in fields.items()
@@ -196,7 +207,6 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
         action=AuditAction.SKILL_UPDATE,
         target_type="skill",
         target_id=skill.id,
-        reason=body.reason,
     ) as draft:
         for field, value in fields.items():
             setattr(skill, field, value)

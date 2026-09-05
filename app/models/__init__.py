@@ -12,8 +12,10 @@ from app.database import Base
 for module_info in pkgutil.iter_modules(__path__):
     importlib.import_module(f"{__name__}.{module_info.name}")
 
-from app.models.admin_audit_log import AdminAuditLog  # re-exports for convenience
+from app.models.actor import Actor  # re-exports for convenience
+from app.models.admin_audit_log import AdminAuditLog
 from app.models.check_in import CheckIn
+from app.models.connector_category import ConnectorCategory
 from app.models.invite_code import InviteCode, InviteCodeOrigin
 from app.models.invite_redemption import InviteRedemption
 from app.models.mcp_server import MCPServer, MCPServerAuthType
@@ -28,15 +30,18 @@ from app.models.session_files import SessionFile
 from app.models.session_mcp_server import SessionMCPServer
 from app.models.session_share import SessionShare
 from app.models.skill import Skill, SkillOrigin
+from app.models.skill_category import SkillCategory
 from app.models.staff import Staff, StaffStatus
 from app.models.user import User, UserStatus
 from app.models.user_feedback import FeedbackStatus, UserFeedback
 from app.models.user_skill_preference import UserSkillPreference
 
 __all__ = [
+    "Actor",
     "AdminAuditLog",
     "Base",
     "CheckIn",
+    "ConnectorCategory",
     "FeedbackStatus",
     "InviteCode",
     "InviteCodeOrigin",
@@ -55,6 +60,7 @@ __all__ = [
     "SessionMCPServer",
     "SessionShare",
     "Skill",
+    "SkillCategory",
     "SkillOrigin",
     "Staff",
     "StaffStatus",
