@@ -64,8 +64,8 @@ class _Rows:
 
 class _FakeDb:
     """Serves the endpoint's fixed call order: the count, the joined
-    page of ``(session, owner_username)``, then the grouped turn
-    aggregate."""
+    page of ``(session, owner_username, owner_name)``, then the grouped
+    turn aggregate."""
 
     def __init__(self, page: list, turn_rows: list) -> None:
         self._total = len(page)
@@ -107,11 +107,21 @@ def test_owner_and_usage_land_on_the_row(monkeypatch) -> None:
     ``session_turn`` query, credits off the ledger's own module —
     3_000_000_000 µ-credits is 300 whole credits at the console's 1e7
     rate."""
-    db = _FakeDb([(_session(_OWNED, 42), "axon_42")], [_TurnRow(_OWNED, 3, 120_000)])
+    db = _FakeDb(
+        [(_session(_OWNED, 42), "axon_42", "王小明")],
+        [_TurnRow(_OWNED, 3, 120_000)],
+    )
 
     (row,) = _items(db, monkeypatch, {_OWNED: 3_000_000_000})
 
-    assert (row["user_id"], row["owner_username"]) == (42, "axon_42")
+    # Both name columns, off the one join: the console shows the username
+    # with the display name under it, the same identity the leaderboards
+    # render beside this list on the dashboard.
+    assert (row["user_id"], row["owner_username"], row["owner_name"]) == (
+        42,
+        "axon_42",
+        "王小明",
+    )
     assert (row["turn_count"], row["total_tokens"], row["spent_credits"]) == (3, 120_000, 300)
     # ``model_id`` is what ran and was billed; ``tier`` is only what the
     # customer picked, and the console does not carry it.
@@ -123,11 +133,16 @@ def test_an_ownerless_session_renders_rather_than_500s(monkeypatch) -> None:
     """``session.user_id`` is nullable, so the outer join can hand back a
     row with no owner. It belongs on the page — a response model that
     could not represent it would fail the whole request over one row."""
-    db = _FakeDb([(_session(_ORPHAN, None), None)], [])
+    db = _FakeDb([(_session(_ORPHAN, None), None, None)], [])
 
     (row,) = _items(db, monkeypatch, {})
 
-    assert (row["user_id"], row["owner_username"]) == (None, None)
+    # Null together: the outer join supplies both columns or neither.
+    assert (row["user_id"], row["owner_username"], row["owner_name"]) == (
+        None,
+        None,
+        None,
+    )
     # Absent from both aggregates: zeros, not nulls.
     assert (row["turn_count"], row["total_tokens"], row["spent_credits"]) == (0, 0, 0)
 
@@ -135,7 +150,7 @@ def test_an_ownerless_session_renders_rather_than_500s(monkeypatch) -> None:
 def test_the_row_carries_no_conversation(monkeypatch) -> None:
     """The list is the only session surface on this side, so it must not
     grow a content field by way of a schema someone reuses."""
-    db = _FakeDb([(_session(_OWNED, 42), "axon_42")], [])
+    db = _FakeDb([(_session(_OWNED, 42), "axon_42", "王小明")], [])
 
     (row,) = _items(db, monkeypatch, {})
 

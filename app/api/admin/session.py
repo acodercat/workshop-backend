@@ -48,7 +48,9 @@ async def list_sessions(
     # The owner is joined rather than resolved per row, the same shape
     # the audit log uses for its operator: the list is read as "whose
     # session is this", and a page of rows must not become a page of
-    # lookups. Outer, because ``session.user_id`` is nullable — an inner
+    # lookups. Both name columns come off the one join — the console
+    # shows a username with the display name under it, and fetching the
+    # second separately would be the per-row lookup this avoids. Outer, because ``session.user_id`` is nullable — an inner
     # join would silently drop such a row from a page whose ``total``
     # still counted it.
     #
@@ -60,7 +62,7 @@ async def list_sessions(
     rows = (
         await ctx.db.execute(
             paginate(
-                select(Session, User.username)
+                select(Session, User.username, User.name)
                 .outerjoin(User, User.id == Session.user_id)
                 .order_by(Session.updated_at.desc(), Session.id.desc()),
                 page,
@@ -69,7 +71,7 @@ async def list_sessions(
         )
     ).all()
 
-    session_ids = [session.id for session, _ in rows]
+    session_ids = [session.id for session, _, _ in rows]
     turns = await session_service.per_session_usage(ctx.db, session_ids)
     spend_micro = await analytics.session_spend(ctx.db, session_ids)
 
@@ -91,8 +93,9 @@ async def list_sessions(
                 deleted_at=session.deleted_at,
                 user_id=session.user_id,
                 owner_username=owner_username,
+                owner_name=owner_name,
             )
-            for session, owner_username in rows
+            for session, owner_username, owner_name in rows
         ],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

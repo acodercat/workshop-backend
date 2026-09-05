@@ -113,7 +113,7 @@ they can never collide with payment-webhook keys (`hf:…`).
 
 | Route | What | Audit |
 |---|---|---|
-| `GET /sessions` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. Same row plus `user_id` / `owner_username`, both nullable because `session.user_id` is. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. | — |
+| `GET /sessions` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. Same row plus `user_id` / `owner_username` / `owner_name`, all nullable because `session.user_id` is and all null together — the outer join supplies them or it does not. The display name rides along so the row renders the same operator-facing identity the dashboard leaderboards do beside it. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. | — |
 | `GET /users/{id}/sessions` | The same rows for one user, `ORDER BY updated_at DESC`. Paginated **including soft-deleted** (`deleted_at` visible — unlike the customer list, support needs to see what was deleted). Row: id, title, status, agent_type, `model_id`, `turn_count`, `total_tokens`, `spent_credits`, created_at, updated_at, deleted_at. | — |
 
 `session.tier` is deliberately **not** on either row. It is the capability

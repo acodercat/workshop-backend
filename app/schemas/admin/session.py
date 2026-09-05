@@ -62,11 +62,18 @@ class SessionWithOwnerResponse(SessionResponse):
     because the row genuinely is a session row with the owner added —
     the usage columns and their meaning are identical.
 
-    ``owner_username`` is nullable because ``session.user_id`` is:
-    the column is ``ON DELETE CASCADE``, so a live orphan is not
-    expected, but a response model that cannot represent one would 500
-    on the row instead of showing it.
+    Both owner fields are nullable because ``session.user_id`` is: the
+    column is ``ON DELETE CASCADE``, so a live orphan is not expected,
+    but a response model that cannot represent one would 500 on the row
+    instead of showing it. They are null together — the outer join
+    supplies both or neither.
+
+    ``owner_name`` rides along beside the username for the reason
+    :class:`~app.schemas.admin.stats.UserActivityEntry` carries both: the
+    console renders an operator-facing identity, and a username alone
+    reads as an id to whoever knows the person by their display name.
     """
 
     user_id: int | None
     owner_username: str | None
+    owner_name: str | None
