@@ -40,6 +40,7 @@ from app.schemas.file import DownloadUrlResponse
 from app.schemas.skill import SkillCategoryResponse, SkillResponse, SkillUpdate
 from app.services import file_storage, localized_text
 from app.services.file_storage import SKILL_POLICY
+from app.services.skill_download import skill_download_url
 from app.services.skill_enablement import ensure_enable_capacity
 from app.services.skill_i18n import (
     DEFAULT_LOCALE,
@@ -305,16 +306,7 @@ async def get_skill_download_url(
     own CUSTOM skills — mirrors the visibility of ``GET /skills``.
     """
     skill = await _get_visible_skill(db, skill_id, current_user.id)
-    url, expires_in = file_storage.generate_download_url(
-        SKILL_POLICY,
-        skill.bundle_key,
-        skill.download_filename,
-    )
-    return DownloadUrlResponse(
-        download_url=url,
-        file_key=skill.bundle_key,
-        expires_in=expires_in,
-    )
+    return skill_download_url(skill)
 
 
 async def _get_owned_skill(

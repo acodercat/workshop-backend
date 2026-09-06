@@ -15,10 +15,12 @@ from fastapi.testclient import TestClient
 
 from app.api.admin import skill as admin_skill
 from app.api.dependencies import get_db
+from app.api.public import skill as public_skill
 from app.auth import authenticate_and_get_staff
 from app.exception_handlers import install_error_handlers
 from app.models.skill import Skill, SkillOrigin
 from app.models.staff import Staff, StaffStatus
+from app.services import skill_download
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -69,7 +71,7 @@ def _client(db: _FakeDb) -> TestClient:
 
 
 def test_the_url_is_signed_for_the_slug_not_the_stored_key(monkeypatch) -> None:
-    """The OSS key carries a UUID and whatever the uploader called the
+    """The stored key carries a UUID and whatever the uploader called the
     file; neither means anything to the operator opening it. The saved
     name is the skill's own identifier plus the key's extension — the
     same choice the customer surface makes, so a bundle saved from
@@ -80,7 +82,7 @@ def test_the_url_is_signed_for_the_slug_not_the_stored_key(monkeypatch) -> None:
         signed.update(policy=policy, file_key=file_key, filename=filename)
         return "https://oss.example/signed", 900
 
-    monkeypatch.setattr(admin_skill.file_storage, "generate_download_url", fake_url)
+    monkeypatch.setattr(skill_download.file_storage, "generate_download_url", fake_url)
 
     body = _client(_FakeDb(_skill())).get("/skills/5/download-url").json()
 
@@ -100,7 +102,7 @@ def test_a_users_own_upload_is_refused(monkeypatch) -> None:
     def fail(*_args, **_kwargs):
         raise AssertionError("no URL should be signed for a CUSTOM bundle")
 
-    monkeypatch.setattr(admin_skill.file_storage, "generate_download_url", fail)
+    monkeypatch.setattr(skill_download.file_storage, "generate_download_url", fail)
 
     response = _client(_FakeDb(_skill(origin=SkillOrigin.CUSTOM, user_id=42))).get(
         "/skills/5/download-url"
@@ -117,7 +119,7 @@ def test_a_system_bundle_is_downloadable(monkeypatch) -> None:
     surface cannot serve these at all, so this is the only way to read
     one back."""
     monkeypatch.setattr(
-        admin_skill.file_storage,
+        skill_download.file_storage,
         "generate_download_url",
         lambda *_args: ("https://oss.example/signed", 900),
     )
@@ -128,11 +130,24 @@ def test_a_system_bundle_is_downloadable(monkeypatch) -> None:
     assert response.json()["download_url"] == "https://oss.example/signed"
 
 
-def test_a_key_with_no_extension_still_saves_as_a_zip() -> None:
-    """The fallback branch of ``Skill.download_filename``. Bundles are
+def test_a_key_with_no_extension_still_saves_as_a_zip(monkeypatch) -> None:
+    """The fallback branch of the shared signing helper. Bundles are
     zips, so a key that lost its suffix somewhere should not hand the
-    operator an extensionless file the OS cannot open."""
-    assert _skill(bundle_key="official/pdf/9f3c1a2b/blob").download_filename == ("pdf-tools.zip")
+    operator an extensionless file the OS cannot open.
+
+    Asserted through the endpoint rather than against the helper: what
+    matters is the name the operator's browser is told to save under."""
+    signed: dict = {}
+
+    def fake_url(policy, file_key, filename):
+        signed.update(filename=filename)
+        return "https://oss.example/signed", 900
+
+    monkeypatch.setattr(skill_download.file_storage, "generate_download_url", fake_url)
+
+    _client(_FakeDb(_skill(bundle_key="official/pdf/9f3c1a2b/blob"))).get("/skills/5/download-url")
+
+    assert signed["filename"] == "pdf-tools.zip"
 
 
 def test_the_boundary_is_an_allowlist() -> None:
@@ -150,3 +165,18 @@ def test_an_unknown_id_is_a_404() -> None:
     response = _client(_FakeDb(None)).get("/skills/5/download-url")
 
     assert response.status_code == 404
+
+
+def test_both_surfaces_sign_through_one_helper() -> None:
+    """The console and the customer API hand out a URL to the same
+    object, and what a bundle is *opened* under — its filename and the
+    storage policy — must not depend on which of them answered. That is
+    the whole reason the helper is a module rather than a private
+    function beside one caller.
+
+    Pinned by identity, not by name: the customer endpoint has no test of
+    its own, so a surface quietly growing its own copy of the rule is a
+    change nothing else here would notice.
+    """
+    assert admin_skill.skill_download_url is skill_download.skill_download_url
+    assert public_skill.skill_download_url is skill_download.skill_download_url

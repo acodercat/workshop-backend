@@ -44,9 +44,10 @@ from app.models.user import User
 from app.schemas.admin.skill import PlatformSkillOrigin, SkillResponse, SkillUpdate
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.file import DownloadUrlResponse
-from app.services import file_storage, user as user_service
+from app.services import user as user_service
 from app.services.admin import AuditAction, audit
 from app.services.file_storage import SKILL_POLICY
+from app.services.skill_download import skill_download_url
 from app.services.skill_registration import register_platform_skill_bundle
 
 router = APIRouter(tags=["skills"])
@@ -263,6 +264,10 @@ async def read_skill_download_url(ctx: StaffContext, skill_id: int) -> DownloadU
     ``CUSTOM`` is refused with a 403, not hidden behind a 404: the row is
     on the operator's screen and pretending it does not exist would read
     as a bug. See this module's docstring for why the bytes are refused.
+
+    Signed through :func:`~app.services.skill_download.skill_download_url`
+    rather than here: the customer surface signs the same bundle, and a
+    bundle saved from either has to land under one name and one policy.
     """
     skill = await ctx.db.get(Skill, skill_id)
     if skill is None:
@@ -272,10 +277,4 @@ async def read_skill_download_url(ctx: StaffContext, skill_id: int) -> DownloadU
             f"Skill {skill_id} is not a platform bundle and cannot be downloaded here."
         )
 
-    # ``Skill.download_filename`` rather than a name built here: the
-    # customer surface signs the same bundle, and a bundle saved from
-    # either has to land under one name.
-    url, expires_in = file_storage.generate_download_url(
-        SKILL_POLICY, skill.bundle_key, skill.download_filename
-    )
-    return DownloadUrlResponse(download_url=url, file_key=skill.bundle_key, expires_in=expires_in)
+    return skill_download_url(skill)
