@@ -109,7 +109,7 @@ async def list_payments(
                 select(PaymentOrder, User.username, User.name)
                 .join(User, User.id == PaymentOrder.user_id)
                 .where(*filters)
-                .order_by(PaymentOrder.created_at.desc()),
+                .order_by(PaymentOrder.created_at.desc(), PaymentOrder.id.desc()),
                 page,
                 page_size,
             )

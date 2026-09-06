@@ -101,7 +101,7 @@ async def list_users(
     rows = (
         await ctx.db.scalars(
             paginate(
-                select(User).where(*filters).order_by(User.created_at.desc()),
+                select(User).where(*filters).order_by(User.created_at.desc(), User.id.desc()),
                 page,
                 page_size,
             )

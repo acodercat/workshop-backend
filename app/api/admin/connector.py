@@ -311,7 +311,7 @@ async def list_connectors(
                 select(MCPServer, User.username, User.name)
                 .join(User, User.id == MCPServer.user_id)
                 .where(*filters)
-                .order_by(MCPServer.created_at.desc()),
+                .order_by(MCPServer.created_at.desc(), MCPServer.id.desc()),
                 page,
                 page_size,
             )

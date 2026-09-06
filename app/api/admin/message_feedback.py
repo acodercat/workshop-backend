@@ -74,9 +74,8 @@ async def list_message_feedback(
 ) -> PaginatedResponse[MessageRatingResponse]:
     """Return one page of ratings, newest first.
 
-    Joined to the rated message so each row carries its excerpt and the
-    session it belongs to — a rating on its own says a reply was bad
-    without saying which reply.
+    Joined to the rated message so each row carries its excerpt — a
+    rating on its own says a reply was bad without saying which reply.
     """
     filters = [MessageFeedback.created_at >= window_start(days)]
     if rating is not None:
@@ -90,7 +89,7 @@ async def list_message_feedback(
                 .join(Message, Message.id == MessageFeedback.message_id)
                 .join(User, User.id == MessageFeedback.user_id)
                 .where(*filters)
-                .order_by(MessageFeedback.created_at.desc()),
+                .order_by(MessageFeedback.created_at.desc(), MessageFeedback.id.desc()),
                 page,
                 page_size,
             )
@@ -105,7 +104,6 @@ async def list_message_feedback(
                 comment=feedback.comment,
                 user_id=feedback.user_id,
                 username=username,
-                session_id=message.session_id,
                 message_id=message.id,
                 message_excerpt=_excerpt(message.blocks),
                 created_at=feedback.created_at,

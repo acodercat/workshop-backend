@@ -80,7 +80,7 @@ async def list_invite_codes(
                 select(InviteCode, User.username)
                 .outerjoin(User, User.id == InviteCode.owner_user_id)
                 .where(*filters)
-                .order_by(InviteCode.created_at.desc()),
+                .order_by(InviteCode.created_at.desc(), InviteCode.id.desc()),
                 page,
                 page_size,
             )
@@ -156,7 +156,7 @@ async def list_invite_redemptions(
                 .join(invitee, invitee.id == InviteRedemption.invitee_user_id)
                 .outerjoin(referrer, referrer.id == InviteRedemption.referrer_user_id)
                 .where(*filters)
-                .order_by(InviteRedemption.created_at.desc()),
+                .order_by(InviteRedemption.created_at.desc(), InviteRedemption.id.desc()),
                 page,
                 page_size,
             )

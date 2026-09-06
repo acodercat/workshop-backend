@@ -109,9 +109,14 @@ async def list_skills(
                 .outerjoin(User, User.id == Skill.user_id)
                 .where(*filters)
                 .order_by(
-                    # Platform rows (no owner) first, then newest.
+                    # Platform rows (no owner) first, then newest. ``id``
+                    # breaks the ties: platform skills are published by
+                    # one script and share a timestamp by the hundred,
+                    # and OFFSET paging over a tie is free to show a row
+                    # on two pages or none.
                     Skill.user_id.is_(None).desc(),
                     Skill.created_at.desc(),
+                    Skill.id.desc(),
                 ),
                 page,
                 page_size,
