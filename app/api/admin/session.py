@@ -61,17 +61,11 @@ async def list_sessions(
     if days is not None:
         filters.append(Session.updated_at >= window_start(days))
 
-    # Counted through the same join and the same filters as the page:
-    # a total that answered a wider question than the rows beneath it
-    # would put a page count on a list that cannot fill it. The join
-    # cannot multiply rows — a session has at most one owner — so it is
-    # unconditional rather than added only when a filter needs it.
-    total = await ctx.db.scalar(
-        select(func.count())
-        .select_from(Session)
-        .outerjoin(User, User.id == Session.user_id)
-        .where(*filters)
-    )
+    # Counted under the same filters as the page: a total that answered
+    # a wider question than the rows beneath it would put a page count on
+    # a list that cannot fill it. No join — nothing filtered here lives
+    # on the owner.
+    total = await ctx.db.scalar(select(func.count()).select_from(Session).where(*filters))
     # The owner is joined rather than resolved per row, the same shape
     # the audit log uses for its operator: the list is read as "whose
     # session is this", and a page of rows must not become a page of
