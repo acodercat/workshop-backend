@@ -141,10 +141,11 @@ def opened_sessions_query(*, since: datetime) -> Select[tuple[int, int]]:
 async def count_opened_since(db: AsyncSession, *, since: datetime) -> tuple[int, int]:
     """``(conversations, distinct users)`` opened since ``since``.
 
-    Platform-wide, so it includes conversations whose owner has since
-    been deleted: those happened too. ``users`` skips them —
-    ``COUNT(DISTINCT user_id)`` ignores NULL — which is the honest reading
-    of "how many people", not a bug to coalesce away.
+    No join onto ``user``: this counts conversations, and who owns one is
+    not part of the question. ``users`` is ``COUNT(DISTINCT user_id)``,
+    which skips a NULL owner rather than counting it as a person —
+    ``session.user_id`` is ``ON DELETE CASCADE``, so an ownerless row is
+    not expected, and this is written not to lie if one appears.
     """
     row = (await db.execute(opened_sessions_query(since=since))).one()
     return int(row.sessions), int(row.users)

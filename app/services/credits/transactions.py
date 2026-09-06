@@ -87,6 +87,9 @@ class TransactionRow(NamedTuple):
 # total can't drift from the page. The CTE body is defined once and
 # spliced into both statements rather than duplicated.
 #
+# ``tie_source`` / ``tie_id`` exist only to make the page query's sort a
+# total order; nothing selects them.
+#
 # The only non-obvious bit: the ``welcome-%`` LIKE pattern retags
 # ``apply_topup`` rows whose idempotency key starts with ``welcome-``
 # as ``WELCOME_GRANT`` — registration onboarding is the sole producer
@@ -95,6 +98,9 @@ _ROWS_CTE = """
     WITH reservation_rows AS (
         SELECT
             cr.created_at AS at,
+            -- Ordering only, never projected: see the ORDER BY below.
+            'reservation' AS tie_source,
+            cr.id AS tie_id,
             CASE cr.state
                 WHEN 'SETTLED' THEN 'TURN_USED'
                 ELSE                'TURN_PENDING'
@@ -121,6 +127,8 @@ _ROWS_CTE = """
     direct_rows AS (
         SELECT
             cl.created_at AS at,
+            'ledger' AS tie_source,
+            cl.id AS tie_id,
             CASE
                 WHEN cl.kind = 'TOPUP' AND cl.idempotency_key LIKE 'welcome-%'
                     THEN 'WELCOME_GRANT'
@@ -146,7 +154,15 @@ _TRANSACTIONS_PAGE_SQL = text(
     + """
     SELECT kind, amount, at, ref
     FROM all_rows
-    ORDER BY at DESC
+    -- ``at`` alone is not a total order, and OFFSET paging over a sort
+    -- whose keys tie is free to order the tied rows differently on each
+    -- request — the same row on two pages, or on none. Both source
+    -- tables default ``created_at`` to ``now()``, which in Postgres is
+    -- the *transaction* timestamp, so a registration that writes a
+    -- welcome grant and a referral bonus together gives them the same
+    -- ``at`` to the microsecond. The two ids come from different
+    -- sequences and can collide, hence the source name first.
+    ORDER BY at DESC, tie_source, tie_id DESC
     OFFSET :offset
     LIMIT :limit
     """

@@ -96,9 +96,9 @@ class SessionStatsResponse(BaseModel):
 
     A conversation is a session with at least one turn, cut on the
     session's ``created_at`` — see
-    :func:`app.services.session.stats.count_opened_since`. Platform-wide:
-    a conversation whose owner has since been deleted is in ``sessions``
-    (it happened) and not in ``users`` (nobody to count).
+    :func:`app.services.session.stats.count_opened_since`. ``users``
+    counts distinct owners and skips a NULL one rather than counting it
+    as a person.
     """
 
     days: int
