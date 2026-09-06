@@ -7,7 +7,6 @@ only useful next to the answer it judges.
 """
 
 from datetime import datetime
-from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -19,8 +18,8 @@ class MessageRatingResponse(BaseModel):
 
     ``message_excerpt`` is the head of the assistant message's first
     text block. A rating without the text it judges is unactionable, and
-    the full transcript is one click away at ``session_id`` — so this
-    carries the excerpt, not the message.
+    the excerpt is as far as this console goes: it has no transcript
+    view, so there is nothing for a session id here to open.
     """
 
     id: int
@@ -28,7 +27,6 @@ class MessageRatingResponse(BaseModel):
     comment: str | None
     user_id: int
     username: str
-    session_id: UUID | None
     message_id: int
     message_excerpt: str
     created_at: datetime
