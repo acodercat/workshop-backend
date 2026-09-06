@@ -22,6 +22,8 @@ from fastapi import APIRouter, Query
 from sqlalchemy import func, select
 
 from app.api.admin.dependencies import StaffContext
+from app.api.admin.window import OptionalWindowDays
+from app.common.business_time import window_start
 from app.common.pagination import paginate
 from app.models.session import Session
 from app.models.user import User
@@ -37,14 +39,39 @@ router = APIRouter(tags=["sessions"])
 @router.get("/sessions", response_model=PaginatedResponse[SessionWithOwnerResponse])
 async def list_sessions(
     ctx: StaffContext,
+    days: OptionalWindowDays,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> PaginatedResponse[SessionWithOwnerResponse]:
     """Return one page of every session on the platform, most recently
     active first — **including soft-deleted ones**, ``deleted_at``
     visible. The customer list hides those; support is often asked about
-    exactly them."""
-    total = await ctx.db.scalar(select(func.count()).select_from(Session))
+    exactly them.
+
+    ``days`` cuts on ``updated_at``, the column this list is sorted by
+    and the one it shows: filtering on anything else would order rows by
+    a date the operator cannot see and hide rows whose visible date is
+    inside the window. It also costs nothing —
+    ``ix_session_updated_at`` leads on that column in this direction, so
+    the filter becomes a range on the index the sort already reads.
+    (The conversation *statistics* cut on ``created_at`` instead: they
+    count conversations started, not touched.)
+    """
+    filters = []
+    if days is not None:
+        filters.append(Session.updated_at >= window_start(days))
+
+    # Counted through the same join and the same filters as the page:
+    # a total that answered a wider question than the rows beneath it
+    # would put a page count on a list that cannot fill it. The join
+    # cannot multiply rows — a session has at most one owner — so it is
+    # unconditional rather than added only when a filter needs it.
+    total = await ctx.db.scalar(
+        select(func.count())
+        .select_from(Session)
+        .outerjoin(User, User.id == Session.user_id)
+        .where(*filters)
+    )
     # The owner is joined rather than resolved per row, the same shape
     # the audit log uses for its operator: the list is read as "whose
     # session is this", and a page of rows must not become a page of
@@ -65,6 +92,7 @@ async def list_sessions(
             paginate(
                 select(Session, User.username, User.name)
                 .outerjoin(User, User.id == Session.user_id)
+                .where(*filters)
                 .order_by(Session.updated_at.desc(), Session.id.desc()),
                 page,
                 page_size,
