@@ -31,7 +31,7 @@ from config import settings
 
 USERS = [
     # ("tianlan", "tianlan20260518"),
-    ("mengxiang", "mengxiang20260812"),
+    ("gaofeng", "gaofeng20260906"),
     # ("vip202612", "20260324qsax"),
     # ("vip202613", "20260981ajsi"),
     # ("vip202614", "20260424q1sc"),

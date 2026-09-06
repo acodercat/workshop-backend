@@ -23,7 +23,7 @@ _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _OwnerRow(NamedTuple):
-    """Shaped like the ``Row`` ``_owner_identity`` reads by label — the
+    """Shaped like the ``Row`` ``owner_identity`` reads by label — the
     two name columns the console renders as one identity."""
 
     username: str

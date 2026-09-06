@@ -50,9 +50,10 @@ async def list_sessions(
     # session is this", and a page of rows must not become a page of
     # lookups. Both name columns come off the one join — the console
     # shows a username with the display name under it, and fetching the
-    # second separately would be the per-row lookup this avoids. Outer, because ``session.user_id`` is nullable — an inner
-    # join would silently drop such a row from a page whose ``total``
-    # still counted it.
+    # second separately would be the per-row lookup this avoids. Outer,
+    # because ``session.user_id`` is nullable — an inner join would
+    # silently drop such a row from a page whose ``total`` still counted
+    # it.
     #
     # ``id`` breaks ties on ``updated_at`` so a row cannot appear on two
     # pages or none: OFFSET paging over a non-deterministic sort is free

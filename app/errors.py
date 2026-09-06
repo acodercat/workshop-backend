@@ -635,6 +635,19 @@ class SkillNotFoundError(AppError):
     error_type = "skill_not_found"
 
 
+class PrivateSkillBundleError(AppError):
+    """The console asked for a bundle that is not the platform's.
+
+    403 rather than 404: the row is on the operator's screen, so
+    pretending it does not exist would read as a bug. What is refused is
+    the *bytes* — a ``CUSTOM`` bundle is a user's private file, the same
+    class of thing as a conversation, and the console reads neither.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "private_skill_bundle"
+
+
 class CategoryNotFoundError(AppError):
     """No category with that id (admin-console lookup, both taxonomies).
 

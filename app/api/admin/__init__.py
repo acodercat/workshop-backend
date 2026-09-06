@@ -39,10 +39,10 @@ Within this package:
   ``docs/admin-console.md``).
 - :mod:`~app.api.admin.router` — the route table; the ASGI app mounts
   exactly one router.
-- everything else — one module per resource (``auth``, ``me``,
-  ``staff``, ``audit``), directly in the package: inside a named
-  surface, every module *is* an endpoint module except the two
-  infrastructure files, which name themselves.
+- everything else — one module per resource (``user``, ``payment``,
+  ``skill``, ``invite``, ``audit``, …), directly in the package: inside
+  a named surface, every module *is* an endpoint module except the
+  three infrastructure files, which name themselves.
 
 Two rules bind everything admin:
 

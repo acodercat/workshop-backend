@@ -13,7 +13,6 @@ description) and the enable toggle.
 
 import asyncio
 import logging
-import os
 
 from fastapi import (
     APIRouter,
@@ -306,15 +305,10 @@ async def get_skill_download_url(
     own CUSTOM skills — mirrors the visibility of ``GET /skills``.
     """
     skill = await _get_visible_skill(db, skill_id, current_user.id)
-    # ``skill.name`` is the kebab-case identifier — file-system friendly
-    # and stable. The original upload's filename (and the UUID-suffixed
-    # OSS key) are meaningless to the user; reuse only its extension.
-    extension = os.path.splitext(skill.bundle_key)[1] or ".zip"
-    filename = f"{skill.name}{extension}"
     url, expires_in = file_storage.generate_download_url(
         SKILL_POLICY,
         skill.bundle_key,
-        filename,
+        skill.download_filename,
     )
     return DownloadUrlResponse(
         download_url=url,

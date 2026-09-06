@@ -5,6 +5,17 @@
 - ``POST  /skills``            — upload a platform bundle (new or a new
   version of one that exists).
 - ``PATCH /skills/{id}``       — flip a skill's platform-wide default.
+- ``GET   /skills/{id}/download-url`` — presigned GET for a **platform**
+  bundle.
+
+Download refuses ``CUSTOM``. A user's upload is their private file —
+the same class of thing as a conversation, which this console removed
+rather than audited — while a ``SYSTEM`` or ``OFFICIAL`` bundle is the
+platform's own artifact, and being able to pull it back is what makes
+the upload audit row's ``replaced_bundle_key`` a rollback rather than a
+note. Unaudited like every other read here, because refusing ``CUSTOM``
+is what keeps that rule intact: nothing this surface reads is a
+customer's.
 
 Upload goes through
 :func:`~app.services.skill_registration.register_platform_skill_bundle`,
@@ -22,18 +33,31 @@ from sqlalchemy import func, select
 from app.api.admin.dependencies import StaffContext
 from app.api.uploads import read_capped
 from app.common.pagination import paginate
-from app.errors import CategoryNotFoundError, SkillNotFoundError
+from app.errors import (
+    CategoryNotFoundError,
+    PrivateSkillBundleError,
+    SkillNotFoundError,
+)
 from app.models.skill import Skill, SkillOrigin
 from app.models.skill_category import SkillCategory
 from app.models.user import User
 from app.schemas.admin.skill import PlatformSkillOrigin, SkillResponse, SkillUpdate
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.services import user as user_service
+from app.schemas.file import DownloadUrlResponse
+from app.services import file_storage, user as user_service
 from app.services.admin import AuditAction, audit
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_registration import register_platform_skill_bundle
 
 router = APIRouter(tags=["skills"])
+
+#: Origins whose bundle the console may pull the bytes of. An allowlist,
+#: not ``!= CUSTOM``: this is a privacy boundary, and an origin added
+#: later must be refused until someone decides it belongs here rather
+#: than become downloadable by default. Deliberately not derived from
+#: ``PlatformSkillOrigin``, which answers a different question — who may
+#: *upload* — and would tie two rules that only happen to agree today.
+_DOWNLOADABLE_ORIGINS = frozenset({SkillOrigin.SYSTEM, SkillOrigin.OFFICIAL})
 
 
 def _to_skill_response(
@@ -220,3 +244,33 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
 
     await ctx.db.refresh(skill)
     return _to_skill_response(skill, owner_username, owner_name)
+
+
+@router.get("/skills/{skill_id}/download-url", response_model=DownloadUrlResponse)
+async def read_skill_download_url(ctx: StaffContext, skill_id: int) -> DownloadUrlResponse:
+    """Presigned GET URL for a platform bundle, for save-as in a browser.
+
+    Presigned rather than streamed through this process: the bundle is
+    already in OSS, and proxying megabytes through the API to re-serve
+    them would buy nothing but a slower download and a busier worker.
+    The URL expires — see ``file_storage._DOWNLOAD_URL_TTL_SECONDS``.
+
+    ``CUSTOM`` is refused with a 403, not hidden behind a 404: the row is
+    on the operator's screen and pretending it does not exist would read
+    as a bug. See this module's docstring for why the bytes are refused.
+    """
+    skill = await ctx.db.get(Skill, skill_id)
+    if skill is None:
+        raise SkillNotFoundError(f"No skill with id {skill_id}.")
+    if skill.origin not in _DOWNLOADABLE_ORIGINS:
+        raise PrivateSkillBundleError(
+            f"Skill {skill_id} is not a platform bundle and cannot be downloaded here."
+        )
+
+    # ``Skill.download_filename`` rather than a name built here: the
+    # customer surface signs the same bundle, and a bundle saved from
+    # either has to land under one name.
+    url, expires_in = file_storage.generate_download_url(
+        SKILL_POLICY, skill.bundle_key, skill.download_filename
+    )
+    return DownloadUrlResponse(download_url=url, file_key=skill.bundle_key, expires_in=expires_in)

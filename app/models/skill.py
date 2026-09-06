@@ -15,6 +15,7 @@ platform-owned (``user_id IS NULL``). The worker stages all three into
 the sandbox so axon's ``use_skill`` tool can surface them to the LLM.
 """
 
+import os
 from datetime import datetime
 from enum import StrEnum
 
@@ -141,6 +142,24 @@ class Skill(Base):
             name="ck_skill_origin_user_id_consistent",
         ),
     )
+
+    @property
+    def download_filename(self) -> str:
+        """What a downloaded bundle should be saved as.
+
+        Derived rather than stored: ``name`` is the kebab-case
+        identifier — file-system friendly and stable — while
+        ``bundle_key`` carries a UUID and whatever the uploader happened
+        to call the file, neither of which means anything to whoever
+        opens it. Only the extension is reused, defaulting to ``.zip``
+        for a key that has none.
+
+        A property because two surfaces sign a download URL for the same
+        bundle (the customer's own list and the console's), and a name
+        computed twice is a name that can differ.
+        """
+        extension = os.path.splitext(self.bundle_key)[1] or ".zip"
+        return f"{self.name}{extension}"
 
     def __repr__(self) -> str:
         return f"<Skill(id={self.id}, origin={self.origin}, name={self.name!r})>"

@@ -136,8 +136,12 @@ the ledger would have to live somewhere, and no module owns all three.
 let it.** A conversation is the most private thing the platform holds,
 and no question this surface exists to answer needs one — so rather than
 auditing the read, the read was removed. `GET /sessions/{id}` and the
-`session.view` action are both gone; the console now has no audited read
-because it has no content read at all.
+`session.view` action are both gone; the console has no audited read
+because it has no way to read one customer's content at all. The one
+thing it *can* pull bytes of is a platform skill bundle
+(`GET /skills/{id}/download-url`), which is the platform's own artifact
+and refuses `CUSTOM` for exactly this reason — the rule is about whose
+content it is, not about whether bytes move.
 
 What replaced it is usage on the list row. `turn_count` counts
 `session_turn` rows; `total_tokens` sums their measured
@@ -229,11 +233,11 @@ Credit-usage monitoring — the console's landing page.
 | Route | What | Audit |
 |---|---|---|
 | `GET /stats/credits?days=7\|30\|90` | Tiles (spend, granted + the free share of it, clawed back, active users, settled turns, outstanding liability) + gap-filled daily series + spend by model. | — |
-| `GET /stats/top-spenders?days=&limit=` | Spend leaderboard, biggest first. A bare list, not paginated — a top-N is what it is; paging into the tail is the users list. | — |
-| `GET /stats/recent-users?days=&limit=` | Last-active users, newest first — the same row shape as top-spenders, ordered differently. | — |
+| `GET /stats/user-activity?order=&days=&limit=` | Spend ranking — `order=spend` (default) biggest first, `order=recent` last-active first. A bare list, not paginated: a top-N is what it is; paging into the tail is the users list. | — |
 | `GET /stats/check-ins?days=` | Check-ins claimed and the distinct users who claimed them | — |
-| `GET /stats/check-in-leaders?days=&limit=` | Users ranked by days checked in | — |
-| `GET /stats/recent-check-ins?days=&limit=` | The same rows, newest claim first | — |
+| `GET /stats/check-in-activity?order=&days=&limit=` | Check-in ranking — `order=count` (default) by days claimed, `order=recent` by who came back most recently | — |
+| `GET /stats/users?days=` | Accounts created in the window | — |
+| `GET /stats/tokens?days=` | Input / output tokens burned in the window | — |
 
 **Granted is reported with its giveaway share split out.** `granted`
 is every credit added — `TOPUP` (bought) alongside `CHECKIN`,
@@ -296,6 +300,7 @@ millions, add `ix_credit_ledger_created_at` then.
 | `GET /skills?origin=&q=` | Every origin, including the `SYSTEM` skills hidden from users. Platform rows first, then newest; owner LEFT-joined (platform rows have none by construction). | — |
 | `POST /skills` | Upload a platform bundle — multipart, `{origin}` | `skill.upload` |
 | `PATCH /skills/{id}` | `{display_name, description, enabled, category_id}` — picker metadata, the **platform default**, and the tab it browses under | `skill.update` |
+| `GET /skills/{id}/download-url` | Presigned GET for a **platform** bundle, saved as `{skill.name}{ext}`. `CUSTOM` is a **403**, not a 404 — the row is on the operator's screen, and what is refused is the bytes. | — |
 
 The toggle's subtlety is surfaced in the UI, not just here: `enabled`
 is the default, and `user_skill_preference` overrides it per user

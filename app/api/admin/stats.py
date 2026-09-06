@@ -1,10 +1,8 @@
 """Dashboard aggregates over the credit ledger.
 
 - ``GET /stats/credits``          — tiles, daily series, spend by model.
-- ``GET /stats/top-spenders``     — the spend leaderboard.
-- ``GET /stats/recent-users``     — the same rows, most recent first.
-- ``GET /stats/check-in-leaders`` — the check-in leaderboard.
-- ``GET /stats/recent-check-ins`` — the same rows, newest first.
+- ``GET /stats/user-activity``     — the spend ranking, ``order`` picks which.
+- ``GET /stats/check-in-activity`` — the check-in ranking, likewise.
 - ``GET /stats/check-ins``        — daily-check-in engagement.
 - ``GET /stats/users``            — new accounts in the window.
 - ``GET /stats/tokens``           — tokens burned in the window.
@@ -26,6 +24,12 @@ whichever domain owns the table it comes from — the ledger's four by
 does not own — which is why this module is a row of narrow endpoints
 rather than one fat one, and why a new figure arrives as another
 endpoint rather than another field.
+
+The converse holds too: a *presentation* of a figure is not a new
+figure. The two rankings each answer one question and sort the answer
+two ways, so each is one endpoint with an ``order``, not one path per
+sort — a path per ordering is how ``recent-check-ins`` came to exist
+with nothing calling it.
 """
 
 from fastapi import APIRouter, Query
@@ -81,44 +85,23 @@ async def read_credits_stats(
     )
 
 
-@router.get("/stats/top-spenders", response_model=list[UserActivityEntry])
-async def read_top_spenders(
+@router.get("/stats/user-activity", response_model=list[UserActivityEntry])
+async def read_user_activity(
     ctx: StaffContext,
     days: WindowDays,
+    order: UserActivityOrder = UserActivityOrder.SPEND,
     limit: int = Query(20, ge=1, le=100),
 ) -> list[UserActivityEntry]:
-    """Return the heaviest consumers over the window, biggest first.
+    """Return the window's spenders, ``SPEND`` heaviest first or
+    ``RECENT`` latest first.
 
-    A bare list, not a ``PaginatedResponse``: a leaderboard is a top-N
-    by definition — paging into the tail is what the users list is for.
+    "Active" means *spent* on both orderings, matching the dashboard's
+    own tile — a login without usage costs nothing and doesn't belong on
+    a credits view.
+
+    A bare list, not a ``PaginatedResponse``: a ranking is a top-N by
+    definition — paging into the tail is what the users list is for.
     """
-    return await _read_user_activity(ctx, days=days, limit=limit, order=UserActivityOrder.SPEND)
-
-
-@router.get("/stats/recent-users", response_model=list[UserActivityEntry])
-async def read_recent_users(
-    ctx: StaffContext,
-    days: WindowDays,
-    limit: int = Query(20, ge=1, le=100),
-) -> list[UserActivityEntry]:
-    """Return the users who spent most recently, latest first.
-
-    "Active" means *spent* here, matching the dashboard's own tile —
-    a login without usage costs nothing and doesn't belong on a credits
-    view.
-    """
-    return await _read_user_activity(ctx, days=days, limit=limit, order=UserActivityOrder.RECENT)
-
-
-async def _read_user_activity(
-    ctx: StaffContext,
-    *,
-    days: int,
-    limit: int,
-    order: UserActivityOrder,
-) -> list[UserActivityEntry]:
-    """Shared body of the two rankings — same rows, same conversion,
-    different ordering."""
     rows = await analytics.user_activity(ctx.db, days=days, limit=limit, order=order)
     return [
         UserActivityEntry(
@@ -134,39 +117,18 @@ async def _read_user_activity(
     ]
 
 
-@router.get("/stats/check-in-leaders", response_model=list[CheckInActivityEntry])
-async def read_check_in_leaders(
+@router.get("/stats/check-in-activity", response_model=list[CheckInActivityEntry])
+async def read_check_in_activity(
     ctx: StaffContext,
     days: WindowDays,
+    order: check_in.CheckInRankOrder = check_in.CheckInRankOrder.COUNT,
     limit: int = Query(20, ge=1, le=100),
 ) -> list[CheckInActivityEntry]:
-    """Users ranked by how many days they checked in over the window."""
-    return await _check_in_activity(
-        ctx, days=days, limit=limit, order=check_in.CheckInRankOrder.COUNT
-    )
+    """Return the window's check-in ranking, ``COUNT`` by days claimed or
+    ``RECENT`` by who came back most recently.
 
-
-@router.get("/stats/recent-check-ins", response_model=list[CheckInActivityEntry])
-async def read_recent_check_ins(
-    ctx: StaffContext,
-    days: WindowDays,
-    limit: int = Query(20, ge=1, le=100),
-) -> list[CheckInActivityEntry]:
-    """The same users, newest check-in first — who came back today."""
-    return await _check_in_activity(
-        ctx, days=days, limit=limit, order=check_in.CheckInRankOrder.RECENT
-    )
-
-
-async def _check_in_activity(
-    ctx: StaffContext,
-    *,
-    days: int,
-    limit: int,
-    order: check_in.CheckInRankOrder,
-) -> list[CheckInActivityEntry]:
-    """Shared body of the two check-in rankings — same rows, different
-    ordering, mirroring the spend pair above."""
+    Mirrors the spend ranking above, down to the ``order`` parameter.
+    """
     rows = await check_in.user_activity(ctx.db, since=window_start(days), limit=limit, order=order)
     return [
         CheckInActivityEntry(
