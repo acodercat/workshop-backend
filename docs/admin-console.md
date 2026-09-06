@@ -113,7 +113,7 @@ they can never collide with payment-webhook keys (`hf:…`).
 
 | Route | What | Audit |
 |---|---|---|
-| `GET /sessions` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. Same row plus `user_id` / `owner_username` / `owner_name`, all nullable because `session.user_id` is and all null together — the outer join supplies them or it does not. The display name rides along so the row renders the same operator-facing identity the dashboard leaderboards do beside it. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. | — |
+| `GET /sessions?days=` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. `days` (1/7/30/90, omit for all time) cuts on `updated_at`, the column the list sorts and shows, which is also why the filter costs nothing. Same row plus `user_id` / `owner_username` / `owner_name`, all nullable because `session.user_id` is and all null together — the outer join supplies them or it does not. The display name rides along so the row renders the same operator-facing identity the dashboard leaderboards do beside it. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. | — |
 | `GET /users/{id}/sessions` | The same rows for one user, `ORDER BY updated_at DESC`. Paginated **including soft-deleted** (`deleted_at` visible — unlike the customer list, support needs to see what was deleted). Row: id, title, status, agent_type, `model_id`, `turn_count`, `total_tokens`, `spent_credits`, created_at, updated_at, deleted_at. | — |
 
 `session.tier` is deliberately **not** on either row. It is the capability
@@ -184,7 +184,7 @@ not have to know which table caught it.
 
 | Route | What | Audit |
 |---|---|---|
-| `GET /message-feedback?rating=&days=` | The queue, newest first, joined to the rated message and its author. Each row carries a 240-char excerpt of the reply and a link to its session. | — |
+| `GET /message-feedback?rating=&days=` | The queue, newest first, joined to the rated message and its author. Each row carries a 240-char excerpt of the reply — and no session id: there is no transcript view for one to open. | — |
 | `GET /message-feedback/stats?days=` | up / down / `down_rate` over the window | — |
 
 **Read-only, and therefore not audited.** There is no triage column to
@@ -232,12 +232,29 @@ Credit-usage monitoring — the console's landing page.
 
 | Route | What | Audit |
 |---|---|---|
-| `GET /stats/credits?days=7\|30\|90` | Tiles (spend, granted + the free share of it, clawed back, active users, settled turns, outstanding liability) + gap-filled daily series + spend by model. | — |
+| `GET /stats/credits?days=1\|7\|30\|90` | Tiles (spend, granted + the free share of it, clawed back, active users, settled turns, outstanding liability) + gap-filled daily series + spend by model. | — |
 | `GET /stats/user-activity?order=&days=&limit=` | Spend ranking — `order=spend` (default) biggest first, `order=recent` last-active first. A bare list, not paginated: a top-N is what it is; paging into the tail is the users list. | — |
 | `GET /stats/check-ins?days=` | Check-ins claimed and the distinct users who claimed them | — |
 | `GET /stats/check-in-activity?order=&days=&limit=` | Check-in ranking — `order=count` (default) by days claimed, `order=recent` by who came back most recently | — |
-| `GET /stats/users?days=` | Accounts created in the window | — |
+| `GET /stats/users?days=` | Accounts created in the window, plus `total_users` — every account right now, not windowed | — |
+| `GET /stats/sessions?days=` | Conversations opened in the window (sessions with at least one turn, cut on `session.created_at`) and the distinct users who opened them. Platform-wide: a conversation whose owner is gone counts, and is not in `users` | — |
 | `GET /stats/tokens?days=` | Input / output tokens burned in the window | — |
+
+`days` is the closed set `1 | 7 | 30 | 90` (`app/api/admin/window.py`);
+anything else falls back to 30 here, and to no window on the session
+list, whose default is everything. `1` is *today* — the window is aligned
+to the start of its first business day, so one day is the current day so
+far, not a rolling 24 hours.
+
+**The console's home pins the window at 30 days and has no time
+control.** It shows two time frames and names both: a snapshot row
+(`total_users`, `outstanding_credits`, and `days=1` for today's
+conversations, spend and revenue) and one "last 30 days" block holding
+every windowed figure, the rankings, and the latest sessions
+(`GET /sessions?days=30`). It used to carry a 7/30/90 selector that
+governed most panels and not all of them, which read as a bug; the
+parameter stays because the payments, ratings and session pages still
+offer it.
 
 **Granted is reported with its giveaway share split out.** `granted`
 is every credit added — `TOPUP` (bought) alongside `CHECKIN`,
@@ -248,10 +265,12 @@ payments summary. `granted_free` is defined as `_GRANT_ROWS AND kind <>
 'TOPUP'` rather than by listing kinds, so a new grant kind counts as
 free unless it is a purchase.
 
-**`outstanding` is the one figure the window selector does not move** —
-it is `SUM(user.credit_balance)`, a position rather than a flow. That is
-correct but reads as a bug next to six windowed tiles, so the tile says
-"all users, right now" where the others name their unit.
+**`outstanding` and `total_users` are not windowed** — `SUM(user.credit_balance)`
+and `COUNT(*)` over `user` are positions rather than flows. Each rides on
+the response of the module that owns its table (the ledger's and the
+user table's respectively) so the caller that asks for the flow gets the
+level beside it; the console shows both on its snapshot row, apart from
+the windowed tiles, and the tile hints say "right now".
 
 **Spend is the negative `SETTLE` row and nothing else.** A turn writes
 `RESERVE −estimate`, then `SETTLE +estimate` (release) and
@@ -300,7 +319,7 @@ millions, add `ix_credit_ledger_created_at` then.
 | `GET /skills?origin=&q=` | Every origin, including the `SYSTEM` skills hidden from users. Platform rows first, then newest; owner LEFT-joined (platform rows have none by construction). | — |
 | `POST /skills` | Upload a platform bundle — multipart, `{origin}` | `skill.upload` |
 | `PATCH /skills/{id}` | `{display_name, description, enabled, category_id}` — picker metadata, the **platform default**, and the tab it browses under | `skill.update` |
-| `GET /skills/{id}/download-url` | Presigned GET for a **platform** bundle, saved as `{skill.name}{ext}`. `CUSTOM` is a **403**, not a 404 — the row is on the operator's screen, and what is refused is the bytes. | — |
+| `GET /skills/{id}/download-url` | Presigned GET for a **platform** bundle, signed through `services/skill_download.py` — the one helper the customer API signs through too, so a bundle saved from either surface lands under one name (`{skill.name}{ext}`) and one policy. `CUSTOM` is a **403**, not a 404 — the row is on the operator's screen, and what is refused is the bytes. | — |
 
 The toggle's subtlety is surfaced in the UI, not just here: `enabled`
 is the default, and `user_skill_preference` overrides it per user
