@@ -19,10 +19,11 @@ Submodule responsibilities:
 from app.services.user.events import stream_user_events
 from app.services.user.hub import UserEventHub
 from app.services.user.identity import owner_identity
-from app.services.user.stats import count_registered_since
+from app.services.user.stats import count_all, count_registered_since
 
 __all__ = [
     "UserEventHub",
+    "count_all",
     "count_registered_since",
     "owner_identity",
     "stream_user_events",

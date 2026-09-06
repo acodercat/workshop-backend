@@ -25,3 +25,14 @@ async def count_registered_since(db: AsyncSession, *, since: datetime) -> int:
     return int(
         await db.scalar(select(func.count()).select_from(User).where(User.created_at >= since)) or 0
     )
+
+
+async def count_all(db: AsyncSession) -> int:
+    """How many accounts exist right now.
+
+    A position, not a flow — the one figure on the user table the
+    dashboard shows without a window, the way the ledger shows the
+    outstanding balance. Every status counts, for the reason
+    :func:`count_registered_since` gives.
+    """
+    return int(await db.scalar(select(func.count()).select_from(User)) or 0)

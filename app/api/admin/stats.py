@@ -4,7 +4,8 @@
 - ``GET /stats/user-activity``     — the spend ranking, ``order`` picks which.
 - ``GET /stats/check-in-activity`` — the check-in ranking, likewise.
 - ``GET /stats/check-ins``        — daily-check-in engagement.
-- ``GET /stats/users``            — new accounts in the window.
+- ``GET /stats/users``            — new accounts in the window, and the total.
+- ``GET /stats/sessions``         — conversations opened in the window.
 - ``GET /stats/tokens``           — tokens burned in the window.
 
 Under ``/stats``, not ``/metrics``: the ASGI factory already serves
@@ -43,6 +44,7 @@ from app.schemas.admin.stats import (
     CreditsStatsResponse,
     DailySpendPoint,
     ModelSpendEntry,
+    SessionStatsResponse,
     TokenStatsResponse,
     UserActivityEntry,
     UserStatsResponse,
@@ -158,14 +160,29 @@ async def read_check_in_stats(ctx: StaffContext, days: WindowDays) -> CheckInSta
 
 @router.get("/stats/users", response_model=UserStatsResponse)
 async def read_user_stats(ctx: StaffContext, days: WindowDays) -> UserStatsResponse:
-    """Return how many accounts were created in the window.
+    """Return how many accounts were created in the window, and how many
+    there are.
 
-    Its own endpoint for the same reason the check-in one is: the count
-    comes off the ``user`` table, which :mod:`app.services.user.stats`
-    owns, and the ledger's response has no business carrying it.
+    Its own endpoint for the same reason the check-in one is: the counts
+    come off the ``user`` table, which :mod:`app.services.user.stats`
+    owns, and the ledger's response has no business carrying them.
     """
     new_users = await user_service.count_registered_since(ctx.db, since=window_start(days))
-    return UserStatsResponse(days=days, new_users=new_users)
+    total_users = await user_service.count_all(ctx.db)
+    return UserStatsResponse(days=days, new_users=new_users, total_users=total_users)
+
+
+@router.get("/stats/sessions", response_model=SessionStatsResponse)
+async def read_session_stats(ctx: StaffContext, days: WindowDays) -> SessionStatsResponse:
+    """Return conversations opened in the window and who opened them.
+
+    Its own endpoint for the same reason the check-in and user ones are:
+    the counts come off ``session``, which
+    :mod:`app.services.session.stats` owns — and that module, not this
+    one, says what a conversation is.
+    """
+    sessions, users = await session_service.count_opened_since(ctx.db, since=window_start(days))
+    return SessionStatsResponse(days=days, sessions=sessions, users=users)
 
 
 @router.get("/stats/tokens", response_model=TokenStatsResponse)

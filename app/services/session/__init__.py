@@ -11,8 +11,9 @@ Submodule responsibilities:
 - :mod:`~app.services.session.title` — LLM-backed title generation.
 - :mod:`~app.services.session.recovery` — backend-side terminal writes
   (abandoned-session sweep + user-cancel of an unclaimed turn).
-- :mod:`~app.services.session.stats` — turn and token aggregates over
-  ``session_turn``, for the console's dashboard and session lists.
+- :mod:`~app.services.session.stats` — aggregates for the console: turns
+  and tokens over ``session_turn``, and conversations opened over
+  ``session``.
 
 Shared DB-query helpers for endpoint handlers live alongside the
 endpoint file itself — they build HTTP concerns (``HTTPException``,
@@ -24,6 +25,7 @@ from app.services.session.recovery import cancel_unclaimed_turn
 from app.services.session.stats import (
     NO_TURN_USAGE,
     TurnUsage,
+    count_opened_since,
     count_tokens_since,
     per_session_usage,
 )
@@ -34,6 +36,7 @@ __all__ = [
     "NO_TURN_USAGE",
     "TurnUsage",
     "cancel_unclaimed_turn",
+    "count_opened_since",
     "count_tokens_since",
     "generate_title",
     "per_session_usage",

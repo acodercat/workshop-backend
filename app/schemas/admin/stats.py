@@ -75,15 +75,35 @@ class CheckInStatsResponse(BaseModel):
 
 
 class UserStatsResponse(BaseModel):
-    """New accounts for the window.
+    """New accounts for the window, and how many accounts there are.
 
     Its own response for the reason :class:`CheckInStatsResponse` is: the
-    count comes off the ``user`` table, and the ledger's response has no
-    business carrying it.
+    counts come off the ``user`` table, and the ledger's response has no
+    business carrying them. ``total_users`` is the one that is *not*
+    windowed — a position, like ``outstanding_credits`` on the credits
+    response — and rides along for the same reason: the caller that asks
+    for the flow wants the level beside it.
     """
 
     days: int
     new_users: int
+    total_users: int
+
+
+class SessionStatsResponse(BaseModel):
+    """Conversations opened in the window and the distinct users who
+    opened them.
+
+    A conversation is a session with at least one turn, cut on the
+    session's ``created_at`` — see
+    :func:`app.services.session.stats.count_opened_since`. Platform-wide:
+    a conversation whose owner has since been deleted is in ``sessions``
+    (it happened) and not in ``users`` (nobody to count).
+    """
+
+    days: int
+    sessions: int
+    users: int
 
 
 class TokenStatsResponse(BaseModel):

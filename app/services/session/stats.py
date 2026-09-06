@@ -1,10 +1,10 @@
-"""Aggregate reporting over ``session_turn``.
+"""Aggregate reporting over ``session`` and ``session_turn``.
 
 Its own module for the reason :func:`app.services.check_in.count_in_window`
 and :func:`app.services.user.stats.count_registered_since` are: tokens
-are measured on the turn, not on the ledger, and folding a non-ledger
-figure into ``/stats/credits`` would make the credits module answer for a
-table it does not own.
+are measured on the turn and conversations on the session, not on the
+ledger, and folding a non-ledger figure into ``/stats/credits`` would
+make the credits module answer for a table it does not own.
 
 The window is cut on ``terminated_at``, not ``created_at``: a turn's
 token counts are written when it reaches a terminal that measured them,
@@ -18,9 +18,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, Select, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.session import Session
 from app.models.session_turn import SessionTurn
 
 
@@ -102,3 +103,48 @@ async def per_session_usage(
         )
         for row in rows
     }
+
+
+def _conversations_opened_since(since: datetime) -> tuple[ColumnElement[bool], ...]:
+    """What a conversation is, for every count that asks.
+
+    A session opened since ``since`` that somebody actually spoke in. The
+    client creates the row before the first message goes out, so a first
+    send that fails (no credits, a rejected upload) leaves a turnless
+    shell behind — and the sibling rankings count things that happened,
+    not attempts. Cut on ``created_at``: the question is "how many
+    conversations were started", and one opened in the window and still
+    going counts. (The session *list* cuts on ``updated_at`` — it shows
+    and sorts by last activity.) Soft-deleted sessions count too, as they
+    do on the platform-wide list — deleted is not the same as never
+    happened.
+
+    Its own function so the decision reads once, and so a second count
+    over sessions — per model, say — starts from the same definition
+    rather than drifting into its own.
+    """
+    return (
+        Session.created_at >= since,
+        exists().where(SessionTurn.session_id == Session.id),
+    )
+
+
+def opened_sessions_query(*, since: datetime) -> Select[tuple[int, int]]:
+    """The statement behind :func:`count_opened_since`, built apart so a
+    test can compile it and read the SQL rather than the source."""
+    return select(
+        func.count().label("sessions"),
+        func.count(func.distinct(Session.user_id)).label("users"),
+    ).where(*_conversations_opened_since(since))
+
+
+async def count_opened_since(db: AsyncSession, *, since: datetime) -> tuple[int, int]:
+    """``(conversations, distinct users)`` opened since ``since``.
+
+    Platform-wide, so it includes conversations whose owner has since
+    been deleted: those happened too. ``users`` skips them —
+    ``COUNT(DISTINCT user_id)`` ignores NULL — which is the honest reading
+    of "how many people", not a bug to coalesce away.
+    """
+    row = (await db.execute(opened_sessions_query(since=since))).one()
+    return int(row.sessions), int(row.users)
