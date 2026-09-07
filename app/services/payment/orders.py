@@ -17,7 +17,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, select
@@ -38,7 +38,7 @@ from app.services.credits.rates import (
     recharge_bonus_credits,
 )
 from app.services.payment.huifu import HuifuGateway
-from app.services.payment.provider import Channel, PaymentGateway, VerifiedEvent
+from app.services.payment.provider import Channel, ChargeState, PaymentGateway, VerifiedEvent
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -53,17 +53,90 @@ _provider: PaymentGateway = HuifuGateway()
 
 _TOPUP_REASON = "recharge"
 
-# Grace past ``expires_at`` before an order is reaped EXPIRED. A payment that
-# settles right at the deadline (still "processing" on the first poll) is then
-# caught by the reconciler's query path rather than stranded as EXPIRED if its
-# async notification is lost. Shared by the lazy read-path expiry and the
-# reconciler so the two never disagree on when an order is dead.
-_EXPIRE_GRACE_SECONDS = 180
+# The provider can only ever tell the reconciler one of three things about
+# an order that is not paid: FAILED (a verdict — the order is dead), PROCESSING
+# (no verdict — the customer may not have scanned, or the bank is still
+# settling a payment they authorised before the deadline), or nothing at all
+# (unreachable, a gateway rejection). Neither of the last two is evidence of
+# "unpaid", so an order in either keeps being asked about past ``expires_at``
+# — for a window sized to the process that could still change its answer —
+# and is reaped EXPIRED only when that window closes.
+#
+# Answered PROCESSING: a settlement takes minutes; after that a P is an order
+# nobody paid.
+_SETTLING_SECONDS = 15 * 60
+# Unanswered: an outage. Long enough to outlast one; bounded so an order the
+# provider will never answer for cannot occupy the reconciler forever — only
+# PENDING orders are reconciled, so an order expired here is never asked
+# about again, and that is why it is flagged and logged (see :func:`expire`).
+_UNANSWERED_SECONDS = 24 * 3600
 
 
-def is_expired(order: PaymentOrder, now: datetime) -> bool:
-    """True once an order is past its expiry **plus grace** — safe to reap."""
-    return order.expires_at < now - timedelta(seconds=_EXPIRE_GRACE_SECONDS)
+def expiry_due(order: PaymentOrder, now: datetime, *, answered: bool) -> bool:
+    """True once an unpaid order is past ``expires_at`` by the window that
+    fits what the provider said about it — ``answered`` (PROCESSING) or not
+    at all — and may be reaped EXPIRED."""
+    window = _SETTLING_SECONDS if answered else _UNANSWERED_SECONDS
+    return order.expires_at < now - timedelta(seconds=window)
+
+
+def expire(order: PaymentOrder, *, now: datetime, answered: bool) -> None:
+    """PENDING → EXPIRED. Caller holds the row lock and commits.
+
+    ``reference["expired"]`` records when, and what the provider had said —
+    ``processing`` or ``unanswered`` — so an EXPIRED row is never a mystery.
+    The unanswered kind is also logged at ERROR: the provider was not
+    reachable for the whole window, so this is the one way a paid order
+    can end EXPIRED, and support must be able to find these and re-query
+    the provider by hand when a customer reports a charge. The webhook
+    still resurrects either kind to PAID.
+    """
+    order.status = PaymentOrderStatus.EXPIRED
+    provider = "processing" if answered else "unanswered"
+    order.reference = {
+        **order.reference,
+        "expired": {"at": now.isoformat(), "provider": provider},
+    }
+    if not answered:
+        logger.error(
+            "payment order %s (out_trade_no=%s) expired without a provider answer",
+            order.id,
+            order.out_trade_no,
+        )
+
+
+def fail(order: PaymentOrder, event: VerifiedEvent, *, via: Literal["notify", "query"]) -> None:
+    """PENDING → FAILED on the provider's FAILED *verdict*, keeping an
+    excerpt of the payload under ``reference["fail_<via>"]`` for audit.
+    Caller holds the row lock and commits. A payment that arrives for the
+    wrong amount is a different failure with its own record — see
+    :func:`_fail_amount_mismatch`."""
+    order.status = PaymentOrderStatus.FAILED
+    order.reference = {**order.reference, f"fail_{via}": _excerpt(event.raw)}
+
+
+def _fail_amount_mismatch(
+    order: PaymentOrder,
+    event: VerifiedEvent,
+    *,
+    via: Literal["notify", "query"],
+) -> None:
+    """PENDING → FAILED because the provider reports a different amount than
+    the order froze — a tampered callback, or a genuine mismatch worth a
+    human. Both settle paths record the two figures, so the row says why it
+    failed instead of only that it did."""
+    logger.error(
+        "huifu %s amount mismatch order=%s expected_fen=%s got_fen=%s",
+        via,
+        order.id,
+        order.amount_fen,
+        event.amount_fen,
+    )
+    order.status = PaymentOrderStatus.FAILED
+    order.reference = {
+        **order.reference,
+        "amount_mismatch": {"expected_fen": order.amount_fen, "got_fen": event.amount_fen},
+    }
 
 
 def get_provider() -> PaymentGateway:
@@ -170,34 +243,27 @@ async def get_order(
     order_id: uuid.UUID,
     user_id: int,
 ) -> PaymentOrder:
-    """Fetch a caller-owned order, lazily expiring it if its TTL elapsed
-    while still PENDING. Raises :class:`OrderNotFoundError` (folds
-    not-owned into not-found). Caller commits to persist a lazy expiry.
+    """Fetch a caller-owned order. Raises :class:`OrderNotFoundError`
+    (folds not-owned into not-found).
 
-    The row is taken ``FOR UPDATE`` — the same lock the webhook and the
-    reconciler hold — so the PENDING → EXPIRED flip is decided against the
-    committed state, never a stale read. Without it a poll that raced a
-    paying customer could read PENDING, then commit EXPIRED *over* a PAID
-    the webhook wrote in the gap, dropping the order out of recharge
-    history and permanently skipping the referrer's commission (accrual
-    re-reads the order and only fires on PAID). Under the lock the two
-    serialize: if the success notification wins, the poll re-reads PAID
-    and skips expiry; if the poll wins, it expires and a genuine later
-    notification still resurrects the order to PAID (``_mark_paid`` is
-    status-unconditional). Either way an order that was actually paid
-    never ends EXPIRED."""
+    A read and nothing else — it does not expire the order it finds, and
+    it returns the stored status unmassaged. Expiry is the reconciler's
+    decision, made against the provider's answer; the read path has no
+    such answer, and an EXPIRED written on the clock alone would take the
+    order out of reconciliation (only PENDING orders are reconciled) while
+    a payment whose notification was lost is still out there. A client
+    that wants to grey out a dead QR has ``expires_at`` and its own clock
+    for that — deriving EXPIRED *here* would also stop it polling, and a
+    payment authorised just before the deadline settles just after it.
+    """
     order = await db.scalar(
-        select(PaymentOrder)
-        .where(
+        select(PaymentOrder).where(
             PaymentOrder.id == order_id,
             PaymentOrder.user_id == user_id,
         )
-        .with_for_update()
     )
     if order is None:
         raise OrderNotFoundError(f"Order {order_id} not found")
-    if order.status == PaymentOrderStatus.PENDING and is_expired(order, datetime.now(UTC)):
-        order.status = PaymentOrderStatus.EXPIRED
     return order
 
 
@@ -238,23 +304,14 @@ async def handle_webhook(db: AsyncSession, event: VerifiedEvent) -> None:
         return
     if order.status == PaymentOrderStatus.PAID:
         return  # already granted — idempotent no-op
-    if not event.succeeded:
+    if event.state is ChargeState.FAILED:
         if order.status == PaymentOrderStatus.PENDING:
-            order.status = PaymentOrderStatus.FAILED
-            order.reference = {**order.reference, "fail_notify": _excerpt(event.raw)}
+            fail(order, event, via="notify")
         return
+    if event.state is ChargeState.PROCESSING:
+        return  # no verdict — nothing to apply
     if event.amount_fen != order.amount_fen:
-        logger.error(
-            "huifu notify amount mismatch order=%s expected_fen=%s got_fen=%s",
-            order.id,
-            order.amount_fen,
-            event.amount_fen,
-        )
-        order.status = PaymentOrderStatus.FAILED
-        order.reference = {
-            **order.reference,
-            "amount_mismatch": {"expected_fen": order.amount_fen, "got_fen": event.amount_fen},
-        }
+        _fail_amount_mismatch(order, event, via="notify")
         return
     await _grant_paid(db, order, event)
 
@@ -265,13 +322,7 @@ async def reconcile_paid(db: AsyncSession, order: PaymentOrder, event: VerifiedE
     if order.status == PaymentOrderStatus.PAID:
         return
     if event.amount_fen != order.amount_fen:
-        logger.error(
-            "huifu reconcile amount mismatch order=%s expected_fen=%s got_fen=%s",
-            order.id,
-            order.amount_fen,
-            event.amount_fen,
-        )
-        order.status = PaymentOrderStatus.FAILED
+        _fail_amount_mismatch(order, event, via="query")
         return
     await _grant_paid(db, order, event)
 

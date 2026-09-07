@@ -12,7 +12,7 @@ import pytest
 
 import app.api.public.payment as ep
 from app.services.payment.exceptions import NotifySignatureError
-from app.services.payment.provider import VerifiedEvent
+from app.services.payment.provider import ChargeState, VerifiedEvent
 
 
 class _FakeRequest:
@@ -27,7 +27,7 @@ class _FakeProvider:
     def verify_notify(self, *, resp_data_raw: str, sign: str) -> VerifiedEvent:
         if sign == "bad":
             raise NotifySignatureError("bad signature")
-        return VerifiedEvent("hf1", "H9", 100, succeeded=True, raw={})
+        return VerifiedEvent("hf1", "H9", 100, state=ChargeState.PAID, raw={})
 
     def ack(self, out_trade_no: str) -> str:
         return "RECV_ORD_ID_" + out_trade_no

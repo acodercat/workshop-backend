@@ -12,8 +12,12 @@ crash, SIGKILL, connection loss) so it can never strand.
 Each PENDING order older than one poll interval (giving the webhook time
 to land first) is checked against the provider in its own short
 transaction — a bad row can't poison the batch. ``reconcile_order``
-settles a paid order (idempotent with the webhook) or expires a
-timed-out one.
+settles a paid order (idempotent with the webhook), fails a failed one,
+or expires one the provider gave no verdict on once its window closes.
+Orders the provider has no verdict on yet stay PENDING for up to a day,
+so a tick's batch is taken least-recently-attempted first: a full batch
+of them cannot stand between the poller and a newer order whose
+notification was lost.
 """
 
 import asyncio
@@ -72,8 +76,12 @@ async def run_forever(
 
 
 async def _tick() -> int:
-    """One reconcile cycle. Returns the number of orders actually touched
-    (0 when another host held the advisory lock).
+    """One reconcile cycle. Returns the number of orders that **left**
+    ``PENDING`` — settled, failed or expired (0 when another host held the
+    advisory lock). Every candidate is queried and stamped whether or not
+    it moves, so a quiet return does not mean a quiet tick; the per-order
+    INFO lines in :func:`~app.services.payment.reconcile.reconcile_order`
+    are where that work is visible.
 
     Like the settle sweeper, the lock session stays read-only for the
     whole tick (holding the advisory lock); each candidate is processed
@@ -98,8 +106,9 @@ async def _tick() -> int:
 
 async def _list_candidates(db: AsyncSession) -> list:
     """PENDING orders old enough that a notification should already have
-    arrived. The ``created_at`` grace (one poll interval) keeps the poller
-    from racing the webhook on brand-new orders; the ``status='PENDING'``
+    arrived, least recently attempted first — never tried before that.
+    The ``created_at`` grace (one poll interval) keeps the poller from
+    racing the webhook on brand-new orders; the ``status='PENDING'``
     partial index keeps this scan tiny."""
     cutoff = datetime.now(UTC) - timedelta(seconds=settings.payment_reconcile_interval_seconds)
     rows = await db.execute(
@@ -108,7 +117,7 @@ async def _list_candidates(db: AsyncSession) -> list:
             PaymentOrder.status == PaymentOrderStatus.PENDING,
             PaymentOrder.created_at < cutoff,
         )
-        .order_by(PaymentOrder.expires_at.asc())
+        .order_by(PaymentOrder.reconcile_attempted_at.asc().nulls_first())
         .limit(_SWEEP_BATCH)
     )
     return [row[0] for row in rows.all()]

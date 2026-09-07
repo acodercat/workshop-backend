@@ -85,8 +85,11 @@ class PaymentOrderStatus(StrEnum):
       out of.
     - ``PAID`` — provider confirmed payment; ``apply_topup`` granted the
       credits and ``ledger_id`` back-links the TOPUP row. Terminal.
-    - ``EXPIRED`` — TTL elapsed with no payment (set lazily on read or by
-      the reconciler). Terminal.
+    - ``EXPIRED`` — TTL elapsed and the provider gave no verdict inside
+      the window for what it did say (``reference.expired`` records when,
+      and whether that was ``processing`` or ``unanswered``). Written by
+      the reconciler only. Terminal, though a late notification still
+      resurrects it to PAID.
     - ``FAILED`` — provider reported a failed / amount-mismatched
       transaction. Terminal; no credits granted.
 
@@ -171,6 +174,16 @@ class PaymentOrder(Base):
         TIMESTAMP(timezone=True),
         nullable=False,
     )
+    # When the reconciler last asked the provider about this order (NULL:
+    # never). Stamped on every attempt so the poller takes the PENDING set
+    # least-recently-attempted first — an order the provider has no verdict
+    # on yet stays PENDING for up to a day, and a batch of those must not
+    # stand between the poller and a newer order whose notification was
+    # lost.
+    reconcile_attempted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         server_default=func.now(),
@@ -192,12 +205,12 @@ class PaymentOrder(Base):
             "user_id",
             text("created_at DESC"),
         ),
-        # The reconciler scans only actionable PENDING orders by expiry.
-        # Partial so it stays tiny forever even as paid/expired history
-        # grows — mirrors ``credit_reservation``'s OPEN partial index.
+        # The reconciler scans only PENDING orders, least recently attempted
+        # first. Partial so it stays tiny forever even as paid/expired
+        # history grows — mirrors ``credit_reservation``'s OPEN partial index.
         Index(
             "ix_payment_order_pending",
-            "expires_at",
+            text("reconcile_attempted_at NULLS FIRST"),
             postgresql_where=text("status = 'PENDING'"),
         ),
     )

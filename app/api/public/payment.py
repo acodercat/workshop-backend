@@ -150,9 +150,9 @@ async def huifu_webhook(
         return PlainTextResponse("FAIL", status_code=400)
 
     logger.info(
-        "huifu webhook received: out_trade_no=%s succeeded=%s",
+        "huifu webhook received: out_trade_no=%s state=%s",
         event.out_trade_no,
-        event.succeeded,
+        event.state,
     )
     try:
         await payment.handle_webhook(db, event)
@@ -177,9 +177,12 @@ async def get_payment_order(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> OrderStatusResponse:
-    """Poll one order's status (lazily expiring it if its TTL elapsed)."""
+    """Poll one order's status. A read, and the stored status as-is: only
+    the reconciler moves an order out of PENDING, on the provider's answer
+    rather than the clock, so a client polling "until it stops being
+    PENDING" keeps polling across the deadline and still catches a payment
+    that settles just after it."""
     order = await payment.get_order(db, order_id=order_id, user_id=current_user.id)
-    await db.commit()  # persist a lazy expiry
     return OrderStatusResponse(
         order_id=order.id,
         status=order.status.value,

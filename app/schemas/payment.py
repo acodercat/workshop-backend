@@ -43,7 +43,11 @@ class CreateOrderResponse(BaseModel):
 
 class OrderStatusResponse(BaseModel):
     """Response of ``GET /payments/orders/{id}`` — polled until the status
-    is terminal (``PAID`` / ``EXPIRED`` / ``FAILED``)."""
+    is terminal (``PAID`` / ``EXPIRED`` / ``FAILED``). ``status`` is the
+    stored status: an unpaid order stays ``PENDING`` past ``expires_at``
+    until the reconciler settles it against the provider, so a client
+    showing a dead QR derives that from ``expires_at`` itself rather than
+    waiting for this field to change."""
 
     order_id: uuid.UUID
     status: str

@@ -12,6 +12,7 @@ from app.errors import PaymentProviderError
 from app.services.payment import huifu
 from app.services.payment.exceptions import NotifySignatureError
 from app.services.payment.huifu import HuifuGateway
+from app.services.payment.provider import ChargeState
 from config import settings
 
 
@@ -45,7 +46,7 @@ def test_verify_notify_accepts_valid_signature(keypair) -> None:
         resp_data_raw=resp_data,
         sign=_signed(resp_data, priv_pem),
     )
-    assert event.succeeded is True
+    assert event.state is ChargeState.PAID
     assert event.out_trade_no == "hf1"
     assert event.provider_txn_id == "H9"
     assert event.amount_fen == 10000
@@ -64,21 +65,29 @@ def test_ack_format() -> None:
     assert HuifuGateway().ack("hfABC") == "RECV_ORD_ID_hfABC"
 
 
-def test_event_mapping_marks_unpaid_as_not_succeeded() -> None:
+def test_event_mapping_reads_processing_as_no_verdict() -> None:
     event = huifu._event_from_business_data(
         {"req_seq_id": "hf2", "sub_resp_code": "00000000", "trans_stat": "P", "trans_amt": "5.00"}
     )
-    assert event.succeeded is False  # trans_stat 'P' = processing
+    assert event.state is ChargeState.PROCESSING  # trans_stat 'P' = 处理中
     assert event.amount_fen == 500
 
 
-def test_event_missing_trans_stat_is_not_succeeded() -> None:
-    # An "accepted" payload with no trans_stat must NOT read as paid — the
-    # success gate has no default-to-success.
+def test_event_mapping_reads_f_as_failed() -> None:
     event = huifu._event_from_business_data(
-        {"req_seq_id": "hf9", "sub_resp_code": "00000000", "trans_amt": "1.00"}
+        {"req_seq_id": "hf3", "sub_resp_code": "10000001", "trans_stat": "F"}
     )
-    assert event.succeeded is False
+    assert event.state is ChargeState.FAILED
+
+
+def test_event_missing_or_unknown_trans_stat_is_no_verdict() -> None:
+    # An "accepted" payload with no trans_stat must read as neither paid
+    # nor failed — there is no default-to-success, and no default-to-dead.
+    for data in (
+        {"req_seq_id": "hf9", "sub_resp_code": "00000000", "trans_amt": "1.00"},
+        {"req_seq_id": "hf9", "sub_resp_code": "00000000", "trans_stat": "X"},
+    ):
+        assert huifu._event_from_business_data(data).state is ChargeState.PROCESSING
 
 
 def test_require_accepted_raises_on_non_dict() -> None:
@@ -136,6 +145,43 @@ async def test_create_charge_maps_amount_and_extracts_qr(monkeypatch) -> None:
         "req_seq_id": "hf3",
         "time_expire": "20260616120000",
     }
+
+
+async def test_sdk_exception_is_a_provider_error_on_query(monkeypatch) -> None:
+    # A transport failure inside dg-sdk (connection refused, timeout) is the
+    # same thing to a caller as a gateway rejection: the provider could not
+    # be asked. One exception class for both — the reconciler reads it as
+    # "no answer", never as "not paid".
+    monkeypatch.setattr(huifu, "_ensure_client", lambda: None)
+
+    def raising_post(self, extend_infos):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(huifu.dg_sdk.V2TradePaymentScanpayQueryRequest, "post", raising_post)
+    with pytest.raises(PaymentProviderError) as info:
+        await HuifuGateway().query_charge(out_trade_no="hf5", req_date="20260616")
+    assert isinstance(info.value.__cause__, ConnectionError)
+
+
+async def test_sdk_exception_is_a_provider_error_on_create(monkeypatch) -> None:
+    # The customer-facing path: an untranslated SDK exception here would be
+    # a 500 instead of the 502 ``PaymentProviderError`` carries.
+    monkeypatch.setattr(huifu, "_ensure_client", lambda: None)
+
+    def raising_post(self, extend_infos):
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(huifu.dg_sdk.V2TradePaymentJspayRequest, "post", raising_post)
+    with pytest.raises(PaymentProviderError) as info:
+        await HuifuGateway().create_charge(
+            out_trade_no="hf6",
+            amount_fen=100,
+            channel="ALIPAY",
+            goods_desc="x",
+            req_date="20260616",
+            time_expire="20260616120000",
+        )
+    assert isinstance(info.value.__cause__, TimeoutError)
 
 
 async def test_create_charge_raises_without_qr(monkeypatch) -> None:

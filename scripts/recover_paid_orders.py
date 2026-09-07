@@ -7,8 +7,9 @@ re-queries Huifu for each not-yet-granted order and, when Huifu confirms the
 payment, grants the credits — idempotently (``apply_topup`` dedupes), and even
 for ``EXPIRED`` orders.
 
-**Run this only with the current code** (the ``trans_stat == 'S'`` success
-gate); an older build under-detects payment and would skip real ones.
+**Run this only with the current code** (``trans_stat`` mapped to
+:class:`~app.services.payment.provider.ChargeState`, ``S`` → ``PAID``); an
+older build under-detects payment and would skip real ones.
 
 Usage::
 
@@ -35,6 +36,7 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.models.payment_order import PaymentOrder, PaymentOrderStatus
 from app.services.payment import orders
+from app.services.payment.provider import ChargeState
 
 
 async def _candidate_ids(*, out_trade_no: str | None, days: int) -> list:
@@ -72,14 +74,15 @@ async def _process_one(order_id, *, dry_run: bool) -> str:
             print(f"  {order.out_trade_no}: query_error: {exc}")
             return "query_error"
 
+        paid = event.state is ChargeState.PAID
         print(
             f"  {order.out_trade_no} status={order.status.value} "
-            f"provider_paid={event.succeeded} amount_fen={event.amount_fen}"
+            f"provider_state={event.state} amount_fen={event.amount_fen}"
         )
         if dry_run:
             print(f"    raw={event.raw}")
-            return "would_grant" if event.succeeded else "not_paid"
-        if not event.succeeded:
+            return "would_grant" if paid else "not_paid"
+        if not paid:
             return "not_paid"
 
         # reconcile_paid grants regardless of EXPIRED (only short-circuits on

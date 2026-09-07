@@ -14,6 +14,7 @@ adapter's concern.
 """
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 # The payment channel the user picked. Providers map it to their own
@@ -37,22 +38,37 @@ class ChargeResult:
     raw: dict[str, Any]
 
 
+class ChargeState(StrEnum):
+    """Where the provider says a charge stands.
+
+    Only ``PAID`` and ``FAILED`` are verdicts. ``PROCESSING`` is everything
+    else — awaiting the customer, in flight at the bank, and a missing or
+    unrecognised status — and it carries no information about the
+    outcome: an order in that state may still settle, so nothing may be
+    concluded from it, in either direction.
+    """
+
+    PAID = "PAID"
+    FAILED = "FAILED"
+    PROCESSING = "PROCESSING"
+
+
 @dataclass(frozen=True)
 class VerifiedEvent:
     """A signature-verified payment outcome, from either an async
     notification or a reconciliation query.
 
-    ``succeeded`` is the provider's terminal success verdict (汇付:
-    ``sub_resp_code == '00000000'`` / ``trans_stat == 'S'``).
-    ``amount_fen`` is the provider-reported paid amount in RMB cents,
-    compared against the order's frozen ``amount_fen`` to defend against
-    a tampered callback. ``provider_txn_id`` is the provider's own id.
+    ``state`` is the provider's view of the charge (汇付: ``trans_stat``
+    S / F / anything else). ``amount_fen`` is the provider-reported paid
+    amount in RMB cents, compared against the order's frozen ``amount_fen``
+    to defend against a tampered callback. ``provider_txn_id`` is the
+    provider's own id.
     """
 
     out_trade_no: str
     provider_txn_id: str | None
     amount_fen: int
-    succeeded: bool
+    state: ChargeState
     raw: dict[str, Any]
 
 
@@ -81,7 +97,10 @@ class PaymentGateway(Protocol):
         ...
 
     async def query_charge(self, *, out_trade_no: str, req_date: str) -> VerifiedEvent:
-        """Query the provider for an order's current state (reconciliation)."""
+        """Query the provider for an order's current state (reconciliation).
+        Raises :class:`~app.errors.PaymentProviderError` when the provider
+        cannot be asked — unreachable, or the query rejected — which the
+        reconciler treats as no answer, never as a verdict."""
         ...
 
     def verify_notify(self, *, resp_data_raw: str, sign: str) -> VerifiedEvent:

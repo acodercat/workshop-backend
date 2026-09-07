@@ -570,6 +570,15 @@ a unit test the same way the credit spend predicate is. `pending_orders`
 is deliberately *not* windowed: a stuck order from last week is exactly
 the one worth seeing.
 
+This console and the customer's own poll both return the **stored**
+status; only the recharge dialog greys its QR out early, on its own clock.
+So a customer can be looking at a dead QR while this list still says
+`PENDING` — an unpaid order now stays there past its TTL for as long as
+the reconciler still has a question outstanding: minutes when the provider
+answers "processing", up to a day when the provider cannot be reached at
+all. The tile's baseline therefore sits higher than it used to, and
+`reference.expired` on a reaped order records which of the two it was.
+
 **Read-only on purpose.** No "settle now" button — `payment_reconciler`
 already polls the provider and grants credits idempotently through the
 same `_grant_paid` path as the webhook. The gap this page fills is

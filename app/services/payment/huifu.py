@@ -34,15 +34,18 @@ from dg_sdk.core.rsa_utils import rsa_design
 
 from app.errors import PaymentProviderError
 from app.services.payment.exceptions import NotifySignatureError
-from app.services.payment.provider import Channel, ChargeResult, VerifiedEvent
+from app.services.payment.provider import Channel, ChargeResult, ChargeState, VerifiedEvent
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Payment-success code in ``sub_resp_code`` + ``trans_stat == 'S'`` mark a
-# completed (paid) transaction (used on the notify / query path).
 _SUCCESS_CODE = "00000000"
-_SUCCESS_TRANS_STAT = "S"
+
+# ``trans_stat`` is Huifu's authoritative transaction status on the notify /
+# query path: S=成功, F=失败, P=处理中. Only the two verdicts are mapped; P and
+# anything missing or unknown read as PROCESSING — never as paid, and never
+# as failed either.
+_TRANS_STAT_STATES: dict[str | None, ChargeState] = {"S": ChargeState.PAID, "F": ChargeState.FAILED}
 
 # Gateway-level "request accepted" codes in ``resp_code``. ``00000000`` =
 # success; ``00000100`` = 受理成功/处理中 — the NORMAL response when placing a
@@ -159,8 +162,7 @@ class HuifuGateway:
         extend_infos: dict[str, Any] = {"time_expire": time_expire}
         if settings.huifu_notify_url:
             extend_infos["notify_url"] = settings.huifu_notify_url
-        result = req.post(extend_infos)
-        return _require_accepted(result, op="create")
+        return _post(req, extend_infos, op="create")
 
     async def query_charge(self, *, out_trade_no: str, req_date: str) -> VerifiedEvent:
         data = await asyncio.to_thread(
@@ -176,8 +178,7 @@ class HuifuGateway:
         req.huifu_id = settings.huifu_merchant_id
         req.org_req_seq_id = out_trade_no
         req.org_req_date = req_date
-        result = req.post({})
-        return _require_accepted(result, op="query")
+        return _post(req, {}, op="query")
 
     def verify_notify(self, *, resp_data_raw: str, sign: str) -> VerifiedEvent:
         if not settings.huifu_rsa_public_key:
@@ -193,6 +194,23 @@ class HuifuGateway:
 
     def ack(self, out_trade_no: str) -> str:
         return "RECV_ORD_ID_" + out_trade_no
+
+
+def _post(req: Any, extend_infos: dict[str, Any], *, op: str) -> dict[str, Any]:
+    """Send one dg-sdk request and return its accepted business dict.
+
+    Everything short of that is one exception class, ``PaymentProviderError``
+    — a gateway rejection (:func:`_require_accepted`) and anything the SDK
+    itself raises on the way (a connection refused, a timeout), so callers
+    see "the provider could not be asked" as one thing: the endpoint answers
+    502, the reconciler treats it as no answer.
+    """
+    try:
+        result = req.post(extend_infos)
+    except Exception as exc:
+        logger.error("huifu %s raised %s: %s", op, type(exc).__name__, exc)
+        raise PaymentProviderError(f"Huifu {op} failed ({type(exc).__name__})") from exc
+    return _require_accepted(result, op=op)
 
 
 def _require_accepted(result: Any, *, op: str) -> dict[str, Any]:
@@ -233,17 +251,12 @@ def _require_accepted(result: Any, *, op: str) -> dict[str, Any]:
 def _event_from_business_data(data: dict[str, Any]) -> VerifiedEvent:
     """Map a Huifu business-data dict (from notify or query) to a
     :class:`VerifiedEvent`."""
-    # ``trans_stat`` is Huifu's authoritative transaction status (P=处理中,
-    # S=成功, F=失败); ``S`` is the only "paid" signal. No default — a
-    # missing/unknown status reads as NOT succeeded (never grant on an
-    # ambiguous payload).
-    succeeded = data.get("trans_stat") == _SUCCESS_TRANS_STAT
     trans_amt = data.get("trans_amt")
     amount_fen = _yuan_to_fen(trans_amt) if trans_amt else 0
     return VerifiedEvent(
         out_trade_no=data.get("req_seq_id", ""),
         provider_txn_id=data.get("hf_seq_id"),
         amount_fen=amount_fen,
-        succeeded=succeeded,
+        state=_TRANS_STAT_STATES.get(data.get("trans_stat"), ChargeState.PROCESSING),
         raw=data,
     )

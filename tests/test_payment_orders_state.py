@@ -14,7 +14,7 @@ from app.errors import OrderNotFoundError, PaymentAmountRangeError
 from app.models.payment_order import PaymentOrder, PaymentOrderStatus
 from app.services.credits import TopupAlreadyApplied
 from app.services.payment import orders
-from app.services.payment.provider import ChargeResult, VerifiedEvent
+from app.services.payment.provider import ChargeResult, ChargeState, VerifiedEvent
 
 _MICRO_1000_CREDITS = 1000 * 10_000_000
 
@@ -44,7 +44,7 @@ def _paid_event(amount_fen=10000) -> VerifiedEvent:
         out_trade_no="hf1",
         provider_txn_id="H9",
         amount_fen=amount_fen,
-        succeeded=True,
+        state=ChargeState.PAID,
         raw={"sub_resp_code": "00000000"},
     )
 
@@ -68,10 +68,28 @@ async def test_handle_webhook_failure_marks_failed_without_topup(monkeypatch) ->
     topup = AsyncMock()
     monkeypatch.setattr(orders, "apply_topup", topup)
 
-    fail_event = VerifiedEvent("hf1", None, 0, succeeded=False, raw={})
+    fail_event = VerifiedEvent("hf1", None, 0, state=ChargeState.FAILED, raw={"trans_stat": "F"})
     await orders.handle_webhook(MagicMock(), fail_event)
 
     assert order.status == PaymentOrderStatus.FAILED
+    assert order.reference["fail_notify"] == {"trans_stat": "F"}
+    topup.assert_not_awaited()
+
+
+async def test_handle_webhook_processing_changes_nothing(monkeypatch) -> None:
+    # No verdict: the order is neither paid nor dead. It stays PENDING for
+    # the reconciler; nothing is granted and nothing is failed.
+    order = _order()
+    monkeypatch.setattr(orders, "_lock_order", AsyncMock(return_value=order))
+    topup = AsyncMock()
+    monkeypatch.setattr(orders, "apply_topup", topup)
+
+    await orders.handle_webhook(
+        MagicMock(), VerifiedEvent("hf1", None, 0, state=ChargeState.PROCESSING, raw={})
+    )
+
+    assert order.status == PaymentOrderStatus.PENDING
+    assert order.reference == {}
     topup.assert_not_awaited()
 
 
@@ -164,17 +182,18 @@ async def test_create_order_rejects_amount_below_minimum() -> None:
 
 
 def _reapable_expires_at() -> datetime:
-    """An ``expires_at`` safely past ``expires_at + grace`` — reapable now."""
-    return datetime.now(UTC) - timedelta(
-        seconds=orders._EXPIRE_GRACE_SECONDS + 5,
-    )
+    """An ``expires_at`` past every reconciler window — reapable now."""
+    return datetime.now(UTC) - timedelta(seconds=orders._UNANSWERED_SECONDS + 5)
 
 
-async def test_get_order_takes_row_lock() -> None:
-    # The lazy-expiry read must lock the row so a poll can't clobber a
-    # PAID the webhook committed in the gap (see get_order docstring).
+async def test_get_order_is_a_read() -> None:
+    # No lock, no write: the poll path never expires an order, however far
+    # past its TTL — EXPIRED is the reconciler's decision, made against the
+    # provider's answer. A clock-only EXPIRED here would take the order out
+    # of reconciliation while a payment whose notification was lost is
+    # still out there.
     order = _order()
-    order.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    order.expires_at = _reapable_expires_at()
     captured: dict = {}
 
     async def _scalar(stmt):
@@ -184,33 +203,21 @@ async def test_get_order_takes_row_lock() -> None:
     db = MagicMock()
     db.scalar = _scalar
 
-    await orders.get_order(db, order_id=uuid.uuid4(), user_id=1)
-
-    assert "FOR UPDATE" in _sql(captured["stmt"])
-
-
-async def test_get_order_does_not_expire_a_paid_order() -> None:
-    # The webhook won the lock and wrote PAID; a poll reading it (even past
-    # the grace window) must never flip it to EXPIRED — the core of the fix.
-    order = _order(status=PaymentOrderStatus.PAID)
-    order.expires_at = _reapable_expires_at()
-    db = MagicMock()
-    db.scalar = AsyncMock(return_value=order)
-
     result = await orders.get_order(db, order_id=uuid.uuid4(), user_id=1)
 
-    assert result.status == PaymentOrderStatus.PAID
+    assert result.status == PaymentOrderStatus.PENDING
+    assert "FOR UPDATE" not in _sql(captured["stmt"])
 
 
-async def test_get_order_lazily_expires_pending_past_grace() -> None:
-    order = _order()
-    order.expires_at = _reapable_expires_at()
-    db = MagicMock()
-    db.scalar = AsyncMock(return_value=order)
-
-    result = await orders.get_order(db, order_id=uuid.uuid4(), user_id=1)
-
-    assert result.status == PaymentOrderStatus.EXPIRED
+def test_amount_mismatch_records_both_figures_on_either_settle_path() -> None:
+    """A FAILED row must say why. Both settle paths reach the same writer,
+    so the reconciler's mismatch is no longer the one FAILED with an empty
+    ``reference``."""
+    for via in ("notify", "query"):
+        order = _order(amount_fen=10000)
+        orders._fail_amount_mismatch(order, _paid_event(amount_fen=9900), via=via)
+        assert order.status == PaymentOrderStatus.FAILED
+        assert order.reference["amount_mismatch"] == {"expected_fen": 10000, "got_fen": 9900}
 
 
 async def test_get_order_missing_raises_not_found() -> None:
@@ -221,13 +228,36 @@ async def test_get_order_missing_raises_not_found() -> None:
         await orders.get_order(db, order_id=uuid.uuid4(), user_id=1)
 
 
-def test_is_expired_respects_grace() -> None:
+def test_expiry_window_depends_on_what_the_provider_said() -> None:
     now = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
     order = _order()
-    # Just past expires_at but within the grace → not yet reapable, so the
-    # reconciler keeps querying and can still catch a late-settling payment.
+    # Just past expires_at: neither kind is due — a payment authorised
+    # before the deadline may still be settling.
     order.expires_at = now - timedelta(seconds=10)
-    assert orders.is_expired(order, now) is False
-    # Past expires_at + grace → safe to reap.
-    order.expires_at = now - timedelta(seconds=orders._EXPIRE_GRACE_SECONDS + 1)
-    assert orders.is_expired(order, now) is True
+    assert orders.expiry_due(order, now, answered=True) is False
+    assert orders.expiry_due(order, now, answered=False) is False
+    # Past the settling window: an answered "processing" is an order nobody
+    # paid; an unanswered one may still be a paid order behind an outage.
+    order.expires_at = now - timedelta(seconds=orders._SETTLING_SECONDS + 1)
+    assert orders.expiry_due(order, now, answered=True) is True
+    assert orders.expiry_due(order, now, answered=False) is False
+    # Past the outage window: reap even the unanswered one.
+    order.expires_at = now - timedelta(seconds=orders._UNANSWERED_SECONDS + 1)
+    assert orders.expiry_due(order, now, answered=False) is True
+
+
+def test_expire_records_what_was_known_and_logs_only_the_unanswered_kind(caplog) -> None:
+    now = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
+    answered = _order()
+    with caplog.at_level("ERROR", logger="app.services.payment.orders"):
+        orders.expire(answered, now=now, answered=True)
+    assert answered.status == PaymentOrderStatus.EXPIRED
+    assert answered.reference["expired"] == {"at": now.isoformat(), "provider": "processing"}
+    assert caplog.text == ""
+
+    unanswered = _order()
+    with caplog.at_level("ERROR", logger="app.services.payment.orders"):
+        orders.expire(unanswered, now=now, answered=False)
+    assert unanswered.status == PaymentOrderStatus.EXPIRED
+    assert unanswered.reference["expired"] == {"at": now.isoformat(), "provider": "unanswered"}
+    assert "without a provider answer" in caplog.text
