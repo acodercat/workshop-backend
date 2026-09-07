@@ -188,6 +188,28 @@ class Session(Base):
     # ``timestamptz`` in revision c7d2f9a4e1b8).
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
+    # The session's ``/workspace`` storage, by generation — owned entirely
+    # by the worker (its sandbox reaper writes these, its turn claim reads
+    # them); the backend declares them so the model matches the schema and
+    # touches none of them. A fresh container mounts storage named for
+    # ``workspace_generation``; the reaper moves an idle session to the next
+    # generation in the statement that selects its storage for deletion, so
+    # the storage being deleted is one no turn can reach. Generation 0 is the
+    # pre-generation layout. ``workspace_reclaimed_generation`` is the
+    # generation up to which (exclusive) the older storage is confirmed gone
+    # — behind ``workspace_generation`` while a deletion is still pending;
+    # ``workspace_reclaim_attempted_at`` orders those retries fairly.
+    # Migration ``a3f9c1d7e2b4``.
+    workspace_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    workspace_reclaimed_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    workspace_reclaim_attempted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
     __table_args__ = (
         # Backs the public ``GET /sessions`` (a user's own list: filter
         # by user_id, ORDER BY updated_at DESC). Postgres does not
