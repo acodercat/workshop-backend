@@ -51,7 +51,7 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | No phone / SMS channel | `grep -rniE "phone\|sms\|dysms" app/ config.py` | Only the comment in `models/user.py` saying the field is gone. The channel was removed in `5fcf505` and the column in `b7e2d9a4c1f5`; a `phone:` field reappearing on the model is a merge bringing back a column this database does not have |
 | SMS dep gone | `grep -c 'dysmsapi' pyproject.toml uv.lock` | 0 in both |
 | OAuth client name | `grep -A1 "mcp_client_name" config.py` and `grep -c _CLIENT_NAME app/services/mcp/oauth.py` | `default="HKGAI Connector"` in `config.py`, and **0** in `oauth.py`. This is the name an authorization server prints on its consent screen, so a wrong value is visible only to the user and to nothing else. It moved out of `oauth.py` precisely so the conflict lands in `config.py`, where the two branches diverge by design — master's default reads `PPIG Connector`, and taking master's side here is the mistake this row exists to catch. A `_CLIENT_NAME` constant reappearing in `oauth.py` means a merge undid the move |
-| Migration head | `uv run alembic heads` | **One head, after you resolve it.** This branch owns `b7e2d9a4c1f5`, so a sync that brought new master revisions leaves two siblings: `uv run alembic merge heads -m "sync"`, once, then one head again. Two heads at deploy time is the failure this row exists to catch |
+| Migration head | `uv run alembic heads` | **One head, after you resolve it.** This branch owns revisions of its own, so a sync that brought new master revisions can leave two siblings: `uv run alembic merge heads -m "sync"`, once, then one head again. Two heads at deploy time is the failure this row exists to catch — but it is not the only chain failure a sync causes, and `merge heads` does not answer the other one. Read "⚠️ Alembic migration chain" before touching `alembic/versions/` |
 | Removed schema stays removed | `ls alembic/versions/b7e2d9a4c1f5_*.py` | exactly one file. It drops `payment_order` / `commission_ledger` / `withdrawal_request`, their four enum types, `user.commission_balance_fen` and `user.phone` — a merge that loses the file loses all of it. **A master revision that alters any of them will fail this branch's `upgrade`** — about one in ten historically. A later revision cannot undo an earlier one's failure, so the guard goes **in the revision itself, on this branch** — see `e2b7d4f9a1c6` **and** `a1c7f3e9d2b6` — one change written once on each branch, so both carry the same guard, because which of them runs first is not fixed (the deployed database applied one order, an empty one takes the other) — and `a9c4e2f7d1b8`, which aligns a `user.phone` this branch dropped. Each carries its own reasoning; read the guard, not this row |
 | No payment code | `grep -rn "services.payment\|services.commission\|dg_sdk" app/ scripts/ tests/` | empty |
 | No payment routes | `uv run python -c "from app.public_main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'commission' in p])"` | `[]` |
@@ -98,6 +98,16 @@ those modules, so git sees a pure addition and gives you **nothing to
 resolve** — the same silence the payment files themselves used to arrive in.
 Strip the imports and the `include_router` lines by hand after every merge
 that touches either file; `import app.public_main` is what catches a miss.
+
+**This has not actually been done for `app/api/admin/router.py`** (checked
+2026-09-07): it still imports `payment` and calls
+`admin_router.include_router(payment.router)`. It is masked today because
+nine of that file's thirteen imports name modules no checkout has, so
+`import app.admin_main` fails before it gets that far — inherited from
+master, not caused by a merge. The moment those modules arrive the payment
+router comes back live unless someone catches it. `import app.public_main`
+cannot see this one; the admin router needs `import app.admin_main`, which
+only becomes a usable probe once the other nine exist.
 
 ### `scripts/seed_users.py`, `scripts/deploy.sh`
 Keep hkgai's (`--ours`).
@@ -199,8 +209,48 @@ After the merge run `uv run alembic heads`. It should be a **single** head (mast
 migrations chain linearly). If there are **two**, create a join revision:
 `uv run alembic merge -m "merge heads" <head1> <head2>`. Then `uv run alembic upgrade head`
 must succeed. (Migrations are separate files, so they don't text-conflict — the risk is a
-divergent DAG, not a merge conflict.) hkgai adds no revisions of its own — see
-"Migrations are NOT excluded" above.
+divergent DAG, not a merge conflict.)
+
+**hkgai does own revisions of its own** — this section used to say it did not, contradicting
+the migration-head probe row above, which is the one that is right. As of 2026-09-07 they are
+`b7e2d9a4c1f5` (drops the removed subsystems' schema), `a1c7f3e9d2b6` (the OAuth-catalog twin),
+`cd91a1a5179a` (a merge revision), `a3f9c1d7e2b4` (see below) and `c8f2a5e1d94b`
+(drops `admin_audit_log`).
+
+### Two heads is not the only way a sync breaks the chain
+
+`alembic merge heads` answers the case where an upstream revision's parent is on a *sibling*
+branch. It does **not** answer the case where the parent is **absent from this branch
+entirely** — then `alembic upgrade head` fails with `Can't locate revision identified by
+'<parent>'`, and there are no two heads to merge.
+
+That is what happened with `a3f9c1d7e2b4` (the worker's workspace-generation columns): upstream
+it hangs off `f4c8a2b91d63`, one of six trunk revisions this branch never took. The fix is to
+**re-point `down_revision` at this branch's head and keep the upstream revision id**, so the two
+chains stay comparable. Say so in the file, or the next sync "corrects" it back.
+
+Bringing the whole intervening trunk run over instead — it is linear and rooted exactly at this
+branch's head, so it looks tidier — is the trap. `b6d2f8a04c17` sits in the middle of it and
+drops `admin_audit_log.reason`, and at the time that column was live here. Check what each
+intervening revision *does* before taking a chain for the shape of it.
+
+### Never overwrite `b6e3d9a70f52_mcp_server_resources_enabled.py` from master
+
+It is the one revision id both branches carry with a **different** `down_revision`: here its
+parent is this branch's merge revision `cd91a1a5179a`, upstream it is `f2c8b04e5da7`. Taking
+master's copy orphans the merge revision and drops `a1c7f3e9d2b6` and `b7e2d9a4c1f5` out of the
+graph with it.
+
+### The probes only look one way
+
+Everything above asks "did master's version leak over a hkgai delta". Nothing asks **"have we
+fallen behind on something outside this repo that now needs a schema change"** — and the
+`agent-worker` this deployment runs is outside this repo. It is `core/agent-worker`, shared with
+the metaseq deployment and pinned to nothing; when it grew the workspace-generation feature its
+`claim_next_turn` began selecting four columns that did not exist here, with no feature flag, so
+every turn claim would have failed. Add to the sync checklist: **read
+`core/agent-worker`'s log since the last sync for anything the backend owns the schema of**
+(`session`, `session_turn`, `sandbox`, `session_context`, `message`).
 
 ## Step-by-step workflow
 
