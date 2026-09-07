@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Enum as SAEnum, Index, String, TIMESTAMP, Uuid, text
+from sqlalchemy import Enum as SAEnum, Index, Integer, String, TIMESTAMP, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -81,6 +81,14 @@ class Sandbox(Base):
     )
     last_used_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+    )
+    # The generation of the session's ``/workspace`` storage this container
+    # mounted (``session.workspace_generation`` at the time). Worker-owned:
+    # written on INSERT, read by ``claim_next_turn`` so a turn reconnects
+    # only to a container on the session's current generation. Migration
+    # ``a3f9c1d7e2b4``.
+    workspace_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
     )
 
     # Worker's ``claim_next_turn`` runs a per-claim subquery against
