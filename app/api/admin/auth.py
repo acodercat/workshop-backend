@@ -15,14 +15,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.admin.dependencies import build_context, caller_ip
+from app.api.admin.dependencies import caller_ip
 from app.api.dependencies import get_db
 from app.auth import authenticate_staff, create_staff_access_token, is_staff_active
 from app.errors import StaffCredentialsError
 from app.rate_limit import limiter
 from app.schemas.admin.auth import StaffLoginRequest, StaffTokenResponse
 from app.schemas.admin.staff import StaffProfileResponse
-from app.services.admin import AuditAction, audit
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -43,18 +42,16 @@ async def sign_in(
     error: a former operator probing the console should not be able to
     confirm their account still exists.
 
-    A successful sign-in stamps ``last_login_at`` and records a
-    ``staff.login`` row — "who was in the console that afternoon" is a
-    question incident review actually asks. It commits through the same
-    unit of work as every other console write, so the timestamp and the
-    audit row cannot disagree.
+    A successful sign-in stamps ``last_login_at`` — the only trace this
+    deployment keeps of who was in the console, since it keeps no
+    operator trail.
 
-    A refused attempt goes to the *log*, not the audit trail: an audit
-    row is an action by an operator (``staff_id`` is ``NOT NULL``), and
-    pinning the attempt on the account it targeted would record something
-    its owner never did. The log line carries what the response withholds
-    — which of the uniform 401's causes actually fired — plus the caller
-    address; the correlation id is already bound to every line.
+    A refused attempt goes to the *log* only, and says more there than
+    the response does: pinning the attempt on the account it targeted
+    would record something its owner never did. The log line carries what
+    the response withholds — which of the uniform 401's causes actually
+    fired — plus the caller address; the correlation id is already bound
+    to every line.
     """
     account = await authenticate_staff(db, body.username, body.password)
     if account is None or not is_staff_active(account):
@@ -70,14 +67,8 @@ async def sign_in(
 
     token, expires_at = create_staff_access_token(account)
 
-    ctx = build_context(request, db=db, staff=account)
-    async with audit(
-        ctx,
-        action=AuditAction.STAFF_LOGIN,
-        target_type="staff",
-        target_id=account.id,
-    ):
-        account.last_login_at = datetime.now(timezone.utc)
+    account.last_login_at = datetime.now(timezone.utc)
+    await db.commit()
 
     return StaffTokenResponse(
         access_token=token,

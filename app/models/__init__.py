@@ -11,7 +11,6 @@ from app.database import Base
 for module_info in pkgutil.iter_modules(__path__):
     importlib.import_module(f"{__name__}.{module_info.name}")
 
-from app.models.admin_audit_log import AdminAuditLog  # re-exports for convenience
 from app.models.check_in import CheckIn
 from app.models.invite_code import InviteCode, InviteCodeOrigin
 from app.models.invite_redemption import InviteRedemption
@@ -33,7 +32,6 @@ from app.models.user_feedback import FeedbackStatus, UserFeedback
 from app.models.user_skill_preference import UserSkillPreference
 
 __all__ = [
-    "AdminAuditLog",
     "Base",
     "CheckIn",
     "FeedbackStatus",

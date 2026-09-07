@@ -1,11 +1,16 @@
-"""Console sign-in — the refused half.
+"""Console sign-in — the refused half, and that the accepted half saves.
 
-The success path stamps ``last_login_at`` and writes the ``staff.login``
-audit row; what these tests pin is the half that used to be invisible: a
+Most of what these tests pin is the half that used to be invisible: a
 refused attempt answers the caller uniformly and tells the log the truth.
 The two must diverge — the response so a former operator cannot confirm
 their account still exists, the log so incident review can see the
 console being probed at all.
+
+The last test covers the other side. ``last_login_at`` is the only trace
+this deployment keeps of who was in the console, and since the
+``audit()`` funnel that used to own the commit was removed with
+``admin_audit_log``, this endpoint now commits for itself — so whether it
+does is worth a test rather than a structural guarantee.
 
 The endpoint is exercised through a real app (the slowapi decorator wants
 a real ``Request``), with the two seams mocked where every offline test
@@ -60,6 +65,16 @@ def _sign_in(client: TestClient):
     )
 
 
+class _CommitCountingDb:
+    """The sign-in path only ever stamps and commits."""
+
+    def __init__(self) -> None:
+        self.commits = 0
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
 def test_a_refused_attempt_is_uniform_outside_and_specific_inside(
     monkeypatch, caplog
 ) -> None:
@@ -97,3 +112,35 @@ def test_a_refused_attempt_is_uniform_outside_and_specific_inside(
     assert all("'mallory'" in line for line in lines)
     assert "unknown account or wrong password" in lines[0]
     assert "account disabled" in lines[1]
+
+
+def test_an_accepted_sign_in_stamps_and_commits(monkeypatch) -> None:
+    account = Staff(
+        id=7,
+        username="op",
+        password_hash="x",
+        name="Operator",
+        status=StaffStatus.ACTIVE,
+        token_version=0,
+    )
+
+    async def _accepted(db, username, password):
+        return account
+
+    monkeypatch.setattr(admin_auth, "authenticate_staff", _accepted)
+
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(admin_auth.router)
+    db = _CommitCountingDb()
+    app.dependency_overrides[get_db] = lambda: db
+
+    response = TestClient(app).post(
+        "/auth/access-tokens", json={"username": "op", "password": "right"}
+    )
+
+    assert response.status_code == 200
+    assert account.last_login_at is not None
+    # Without this the stamp is a local attribute change that never
+    # reaches the row — the failure the removed funnel made impossible.
+    assert db.commits == 1

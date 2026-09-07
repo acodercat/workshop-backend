@@ -17,11 +17,10 @@ from config import settings
 
 stdlib_logger = logging.getLogger(__name__)
 
-# The longest correlation id this backend accepts — and therefore the
-# longest it ever has to store. ``admin_audit_log.request_id`` persists
-# the id at exactly this width, and that row commits in the same
-# transaction as the mutation it describes, so an id that fit the
-# acceptor but not the column would abort the very action being audited.
+# The longest correlation id this backend accepts. Nothing persists it
+# any more — ``admin_audit_log`` was the one column that did, and this
+# deployment keeps no operator trail (revision ``c8f2a5e1d94b``) — so the
+# cap now only bounds what reaches the log line.
 # Our own minted ids are 32 hex chars; 64 leaves room for any sane
 # gateway id. An inbound id past the cap is not truncated — it is
 # replaced, like any other value that fails the pattern.
@@ -65,10 +64,9 @@ class RequestIDMiddleware:
         request_id = candidate if _REQUEST_ID_RE.match(candidate) else uuid.uuid4().hex
 
         # Also expose it on the ASGI scope state, which is what backs
-        # ``request.state``. The loguru contextvar above covers *logging*,
-        # but code that needs to persist the correlation id alongside a
-        # row — ``admin_audit_log.request_id`` — needs to read it as a
-        # value. Additive: nothing else inspects this key.
+        # ``request.state``. The loguru contextvar above covers *logging*;
+        # this is for code that needs the id as a *value*. Additive:
+        # nothing else inspects this key.
         scope.setdefault("state", {})["request_id"] = request_id
 
         async def send_with_id(message):

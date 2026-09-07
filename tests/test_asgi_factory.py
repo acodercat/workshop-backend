@@ -38,7 +38,6 @@ class _ForbiddenError(AppError):
 settings.sentry_dsn = ""
 
 from app.asgi import create_app  # noqa: E402  (after the sentry guard)
-from app.models.admin_audit_log import AdminAuditLog  # noqa: E402
 from app.observability import REQUEST_ID_MAX_LENGTH  # noqa: E402
 
 _db_reason: list[str | None] = [None]
@@ -197,11 +196,3 @@ def test_a_request_id_too_long_to_store_is_replaced() -> None:
     minted = response.headers["X-Request-ID"]
     assert minted and minted != too_long
 
-
-def test_the_acceptor_cap_is_the_audit_column_width() -> None:
-    # ``admin_audit_log.request_id`` stores the id in the same transaction
-    # as the action it describes, so an id the acceptor admits but the
-    # column cannot hold would abort that action. The two live in
-    # different layers on purpose (the middleware owns the contract, the
-    # model stays free of app-layer imports) — this is what ties them.
-    assert AdminAuditLog.request_id.type.length == REQUEST_ID_MAX_LENGTH

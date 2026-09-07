@@ -14,7 +14,6 @@ URL is readable where the route is defined on both surfaces.
 from fastapi import APIRouter
 
 from app.api.admin import (
-    audit,
     auth,
     connector,
     feedback,
@@ -43,4 +42,3 @@ admin_router.include_router(invite.router)
 admin_router.include_router(skill.router)
 admin_router.include_router(connector.router)
 admin_router.include_router(payment.router)
-admin_router.include_router(audit.router)

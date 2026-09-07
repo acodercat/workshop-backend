@@ -42,25 +42,29 @@ after first deploy.
    revocation, and no customer row is one UPDATE from platform
    privileges.
 3. **No roles.** Every `ACTIVE` staff account has full console access —
-   the operator team is small and fully trusted, and the audit trail
-   records who did what. A role column plus a gate in
+   the operator team is small, fully trusted and named. A role column
+   plus a gate in
    `app/api/admin/dependencies.py` is one additive migration away if
    tiers are ever needed; starting without them keeps every slice a
    single `StaffContext` check.
 4. **Third JWT class via `scope="staff"`**, same `secret_key`, workday
    TTL, no refresh (operators sign in daily). All three decoders live in
    `app/auth.py` so their mutual exclusion stays auditable in one place.
-5. **Audit is structural, not conventional.** `admin_audit_log` is
-   append-only; `audit()` is the single writer *and* owns the commit, so
-   a mutation persists only together with its row. Target is a loose
-   `(target_type, target_id)` string pair, no FK — audit rows must
-   outlive their targets. Actions are `<domain>.<verb>` in VARCHAR with
-   a Python-side `AuditAction` enum (no migration to extend).
+5. **No operator trail.** Upstream funnels every console mutation
+   through an `audit()` context manager that writes an `admin_audit_log`
+   row *and* owns the commit, so a mutation persists only together with
+   its record. This deployment drops all of it (`c8f2a5e1d94b`): the
+   console is an internal tool reached by a handful of named accounts,
+   and the controls that matter sit outside the application. The cost is
+   worth naming — each endpoint now commits for itself, so a mutation
+   that forgets to commit silently does not stick, where forgetting used
+   to be impossible. `tests/test_admin_mutations_commit.py` is what
+   replaced the structural guarantee.
 6. **The console never re-implements a domain service.** Credit
    adjustments, withdrawal review, skill publishing all call the funnels
    that already hold the invariants (`credits._internal`,
    `commission._internal`, …). `services/admin/` exists only for what
-   nothing else owns (audit, staff accounts).
+   nothing else owns (staff accounts).
 7. **`api/public` + `api/admin` sibling layout** — already applied
    repo-wide; a third surface would be a third sibling.
 8. **Native PG enum** for `staff_status` (repo convention). Note the
@@ -71,8 +75,8 @@ after first deploy.
 ## Surfaces
 
 Every slice below is built on the staff-management reference shape
-(`StaffContext` in the signature, mutations inside `audit()`, reads
-inline), and **none added a service module**: every write calls a
+(`StaffContext` in the signature, mutations ending in their own
+`await ctx.db.commit()`, reads inline), and **none added a service module**: every write calls a
 funnel that already exists. That is the property to preserve when
 adding the next one — a surface that needs a new place to write from is
 the signal to put the rule in `app/services/`, not in the endpoint.
@@ -84,11 +88,11 @@ automated path does.
 
 ### Users (`app/api/admin/user.py` — routes under `/users`)
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /users?q=&status=` | Paginated directory. One `q` ILIKE-matched against username / email / phone (at ~100 users no index needed). Row: id, username, name, email, phone, status, balance_credits, created_at. | — |
-| `GET /users/{id}` | Profile + credit balance + session count. | — |
-| `PATCH /users/{id}` | `{status, reason}` — ACTIVE ↔ DISABLED. Takes effect on the user's next request (status is checked per request; no token bump needed). | `user.update` |
+| Route | What |
+|---|---|
+| `GET /users?q=&status=` | Paginated directory. One `q` ILIKE-matched against username / email / phone (at ~100 users no index needed). Row: id, username, name, email, phone, status, balance_credits, created_at. |
+| `GET /users/{id}` | Profile + credit balance + session count. |
+| `PATCH /users/{id}` | `{status, reason}` — ACTIVE ↔ DISABLED. Takes effect on the user's next request (status is checked per request; no token bump needed). |
 
 Not included: editing email/phone (the sudo-gated self-serve flows own
 those), password resets (OTP owns recovery), user deletion,
@@ -96,10 +100,10 @@ impersonation, user creation (invite flow owns it).
 
 ### Credits (same module — sub-resources of a user)
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /users/{id}/credits/transactions` | Paginated ledger via `credits.list_transactions` — kind, signed amount in credits, created_at, reference. | — |
-| `POST /users/{id}/credits/adjustments` | `{amount_credits (signed, non-zero), reason, idempotency_key}` → `credits.apply_adjust(admin_id=staff.id)`. The console frontend mints the idempotency key per form submission, so a network retry can't double-apply; a duplicate key returns 409. | `credit.adjust` |
+| Route | What |
+|---|---|
+| `GET /users/{id}/credits/transactions` | Paginated ledger via `credits.list_transactions` — kind, signed amount in credits, created_at, reference. |
+| `POST /users/{id}/credits/adjustments` | `{amount_credits (signed, non-zero), reason, idempotency_key}` → `credits.apply_adjust(admin_id=staff.id)`. The console frontend mints the idempotency key per form submission, so a network retry can't double-apply; a duplicate key returns 409. |
 
 No topup endpoint: a signed adjust covers manual grants and clawbacks,
 and real topups come from the payment webhook. Money on the wire is
@@ -110,15 +114,19 @@ they can never collide with payment-webhook keys (`hf:…`).
 
 ### Sessions (`app/api/admin/session.py` — `/sessions/{id}`; the user-scoped list lives with the user resource)
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /users/{id}/sessions` | Paginated list **including soft-deleted** (`deleted_at` visible — unlike the customer list, support needs to see what was deleted). Row: id, title, status, agent_type, tier, created_at, updated_at, deleted_at. | — |
-| `GET /sessions/{id}` | Meta + the rendered `blocks` — the conversation, read-only. | `session.view` |
+| Route | What |
+|---|---|
+| `GET /users/{id}/sessions` | Paginated list **including soft-deleted** (`deleted_at` visible — unlike the customer list, support needs to see what was deleted). Row: id, title, status, agent_type, tier, created_at, updated_at, deleted_at. |
+| `GET /sessions/{id}` | Meta + the rendered `blocks` — the conversation, read-only. |
 
-`session.view` is the **only audited read** in the console: it is
-customer conversation content, the most privacy-sensitive thing the
-console can show, so "who looked at whose conversation" must be
-answerable. The audit block simply wraps no mutation.
+Reading a conversation is the most privacy-sensitive thing this console
+can do, and upstream answers "who looked at whose conversation" with an
+audited read — the one read it audits. **This deployment has no trail to
+audit it with.** The surface does not exist here yet (`app/api/admin/`
+carries only `auth`, `me` and `staff`), so the decision lands on whoever
+brings the rest over: either accept an unrecorded read of customer
+content, or do what the MEP deployment did and drop the endpoint, which
+faced the same gap and removed the read rather than leave it unwatched.
 
 **No cancel, no delete** in v1. Cancel would need a Redis client in the
 console process (deliberately absent) and stuck turns are already
@@ -133,10 +141,10 @@ The review queue the public surface anticipated: `POST /feedback` only
 creates rows, and the `FeedbackStatus` workflow column exists for this
 module.
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /feedback?status=&user_id=` | The queue, newest first — `?status=OPEN` rides `ix_user_feedback_status_created`, built for exactly this. `username` LEFT-joined (a deleted author's feedback still belongs in the queue). | — |
-| `PATCH /feedback/{id}` | Triage: `OPEN` → `RESOLVED` / `IGNORED` (or back). `reason` is **optional** — benign triage's meaning is the status itself; requiring justification per click teaches operators to type noise. | `feedback.update` |
+| Route | What |
+|---|---|
+| `GET /feedback?status=&user_id=` | The queue, newest first — `?status=OPEN` rides `ix_user_feedback_status_created`, built for exactly this. `username` LEFT-joined (a deleted author's feedback still belongs in the queue). |
+| `PATCH /feedback/{id}` | Triage: `OPEN` → `RESOLVED` / `IGNORED` (or back). `reason` is **optional** — benign triage's meaning is the status itself; requiring justification per click teaches operators to type noise. |
 
 No delete — `IGNORED` is the dismissal and the record stays.
 `image_keys` are returned raw; minting presigned view URLs is the
@@ -150,12 +158,12 @@ assistant reply. Both live behind the console's Feedback page as two
 tabs, because an operator asking "what are users unhappy with" should
 not have to know which table caught it.
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /message-feedback?rating=&days=` | The queue, newest first, joined to the rated message and its author. Each row carries a 240-char excerpt of the reply and a link to its session. | — |
-| `GET /message-feedback/stats?days=` | up / down / `down_rate` over the window | — |
+| Route | What |
+|---|---|
+| `GET /message-feedback?rating=&days=` | The queue, newest first, joined to the rated message and its author. Each row carries a 240-char excerpt of the reply and a link to its session. |
+| `GET /message-feedback/stats?days=` | up / down / `down_rate` over the window |
 
-**Read-only, and therefore not audited.** There is no triage column to
+**Read-only.** There is no triage column to
 write — a thumb is the user's own verdict, not a ticket, and giving
 operators an "acknowledge" button would invent a workflow nobody asked
 for. The UI defaults the filter to `DOWN`: a page of thumbs-up is a
@@ -166,19 +174,19 @@ sample and reading it as a quality score would be wrong.
 
 The excerpt is cut in SQL from `message.blocks`, so the list does not
 carry whole transcripts across the wire; the full conversation is one
-click away in the session view, which is the surface that already
-audits a read.
+click away in the session view — see the note there about the read this
+deployment no longer records.
 
 ### Invites (`app/api/admin/invite.py` — `/invite-codes`, `/invite-redemptions`)
 
 Issuing a cold-start code, and seeing who came in through whom.
 Replaces reaching for `scripts/create_invite_code.py` over SSH.
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /invite-codes?origin=&q=` | Codes, newest first; `REFERRAL` rows carry their owner. `used_count` / `max_uses` is the whole state. | — |
-| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000, `reason` **required**) | `invite.create` |
-| `GET /invite-redemptions` | Who redeemed what, invitee and referrer both resolved through aliased joins | — |
+| Route | What |
+|---|---|
+| `GET /invite-codes?origin=&q=` | Codes, newest first; `REFERRAL` rows carry their owner. `used_count` / `max_uses` is the whole state. |
+| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000, `reason` **required**) |
+| `GET /invite-redemptions` | Who redeemed what, invitee and referrer both resolved through aliased joins |
 
 **Only `SYSTEM` codes are mintable here.** A `REFERRAL` code is a
 user's own, minted at registration and capped by
@@ -198,14 +206,14 @@ recoverable from it. No delete and no edit — exhausting a code is setting
 
 Credit-usage monitoring — the console's landing page.
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /stats/credits?days=7\|30\|90` | Tiles (spend, granted + the free share of it, clawed back, active users, settled turns, outstanding liability) + gap-filled daily series + spend by model. | — |
-| `GET /stats/top-spenders?days=&limit=` | Spend leaderboard, biggest first. A bare list, not paginated — a top-N is what it is; paging into the tail is the users list. | — |
-| `GET /stats/recent-users?days=&limit=` | Last-active users, newest first — the same row shape as top-spenders, ordered differently. | — |
-| `GET /stats/check-ins?days=` | Check-ins claimed and the distinct users who claimed them | — |
-| `GET /stats/check-in-leaders?days=&limit=` | Users ranked by days checked in | — |
-| `GET /stats/recent-check-ins?days=&limit=` | The same rows, newest claim first | — |
+| Route | What |
+|---|---|
+| `GET /stats/credits?days=7\|30\|90` | Tiles (spend, granted + the free share of it, clawed back, active users, settled turns, outstanding liability) + gap-filled daily series + spend by model. |
+| `GET /stats/top-spenders?days=&limit=` | Spend leaderboard, biggest first. A bare list, not paginated — a top-N is what it is; paging into the tail is the users list. |
+| `GET /stats/recent-users?days=&limit=` | Last-active users, newest first — the same row shape as top-spenders, ordered differently. |
+| `GET /stats/check-ins?days=` | Check-ins claimed and the distinct users who claimed them |
+| `GET /stats/check-in-leaders?days=&limit=` | Users ranked by days checked in |
+| `GET /stats/recent-check-ins?days=&limit=` | The same rows, newest claim first |
 
 **Granted is reported with its giveaway share split out.** `granted`
 is every credit added — `TOPUP` (bought) alongside `CHECKIN`,
@@ -255,19 +263,19 @@ leaders still put the currently-active user first.
 
 Aggregates live in `credits/analytics.py` (the ledger's domain
 owns questions about the ledger, like `credits/transactions.py`), not
-under `services/admin/`. Not audited — aggregates, never one customer's
-content. Path is `/stats/*` because the ASGI factory already serves
-Prometheus at `/metrics`. No schema change, no new tables. At current
+under `services/admin/`. Aggregates, never one customer's content. Path
+is `/stats/*` because the ASGI factory already serves Prometheus at
+`/metrics`. No schema change, no new tables. At current
 row counts the time-range scan is fine; if `credit_ledger` reaches
 millions, add `ix_credit_ledger_created_at` then.
 
 ### Skills (`app/api/admin/skill.py`)
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /skills?origin=&q=` | Every origin, including the `SYSTEM` skills hidden from users. Platform rows first, then newest; owner LEFT-joined (platform rows have none by construction). | — |
-| `POST /skills` | Upload a platform bundle — multipart, `{origin}` | `skill.upload` |
-| `PATCH /skills/{id}` | `{display_name, description, enabled, reason}` — picker metadata and the **platform default** | `skill.update` |
+| Route | What |
+|---|---|
+| `GET /skills?origin=&q=` | Every origin, including the `SYSTEM` skills hidden from users. Platform rows first, then newest; owner LEFT-joined (platform rows have none by construction). |
+| `POST /skills` | Upload a platform bundle — multipart, `{origin}` |
+| `PATCH /skills/{id}` | `{display_name, description, enabled, reason}` — picker metadata and the **platform default** |
 
 The toggle's subtlety is surfaced in the UI, not just here: `enabled`
 is the default, and `user_skill_preference` overrides it per user
@@ -290,9 +298,10 @@ re-uploading a name they own is a mistake worth a 409; an operator
 uploading `pdf` again is shipping a new version of `pdf`, so the row is
 updated in place — the id the worker has seen and every user's
 `user_skill_preference` both survive it. The displaced `bundle_key`
-goes into the audit payload, and the object is deliberately **left in
-the bucket**: a turn may be staging it at that moment, and the audit
-row is then the only way back to the previous version.
+is not recorded anywhere, and the object is deliberately **left in the
+bucket**: a turn may be staging it at that moment. Upstream's audit
+payload used to be the way back to the previous version; this deployment
+writes none, so the old object sits there unreferenced.
 
 `origin` is the one thing the bundle cannot state and it decides who
 sees the skill, so it is the **only** field the form asks for.
@@ -313,9 +322,9 @@ not where the row already explains itself.
 `skill_registration.register_platform_skill_bundle` is what both the
 console and `scripts/upload_skill.py` call; the script previously
 carried its own raw-SQL upsert, and the duplicate is gone. Like
-`create_invite_code`, the service **flushes without committing** —
-`audit()` owns the commit, so the bundle and its audit row land in one
-transaction. That is the general rule for any service the console
+`create_invite_code`, the service **flushes without committing** — the
+endpoint owns the commit, so a failure anywhere in the block leaves the
+bundle unwritten. That is the general rule for any service the console
 calls. The script stays as the path that still works when the console
 is down or an operator has only SSH; bulk re-packaging remains
 `scripts/replace_platform_skill_bundles.py`, which is a different job
@@ -323,12 +332,12 @@ is down or an operator has only SSH; bulk re-packaging remains
 
 ### Connectors (`app/api/admin/connector.py`)
 
-| Route | What | Audit |
-|---|---|---|
-| `GET /connector-catalog` | Whole catalog in display order, unpublished included. Unpaginated — paging a hand-sorted shortlist would hide the thing being sorted. | — |
-| `POST /connector-catalog` | New entry, created **unpublished** so the URL/icon can be checked first | `connector_catalog.create` |
-| `PATCH /connector-catalog/{id}` | Edit / publish / reorder. Editing `url` can 409 — it is the entry's identity. | `connector_catalog.update` |
-| `GET /connectors?user_id=&q=&connected=` | Users' own Connectors, **read-only**. `?connected=false` is the support view. | — |
+| Route | What |
+|---|---|
+| `GET /connector-catalog` | Whole catalog in display order, unpublished included. Unpaginated — paging a hand-sorted shortlist would hide the thing being sorted. |
+| `POST /connector-catalog` | New entry, created **unpublished** so the URL/icon can be checked first |
+| `PATCH /connector-catalog/{id}` | Edit / publish / reorder. Editing `url` can 409 — it is the entry's identity. |
+| `GET /connectors?user_id=&q=&connected=` | Users' own Connectors, **read-only**. `?connected=false` is the support view. |
 
 Adding an MCP server to the platform catalog is a console action, not a
 script one — the add form sends the entry's whole field set (key, name,
@@ -351,9 +360,9 @@ was carry the constraint that belongs on `url`.
 
 **Add and edit are one form**, since they are the same field set under
 the same rules and two of them would drift. Editing sends a **partial**
-patch — only the fields that actually changed — so the audit row's
-before → after payload is the real edit rather than every field
-rewritten with its own value. A blank optional field and an absent one
+patch — only the fields that actually changed — so a later reader of the
+row sees the real edit rather than every field rewritten with its own
+value. A blank optional field and an absent one
 are treated as equal when diffing, so leaving a never-set description
 alone does not read as a change.
 
@@ -437,16 +446,14 @@ now that check-in, credit reporting and revenue all need it. "What is
 today" has one definition platform-wide, tested in
 `tests/test_business_time.py`.
 
-### The audit vocabulary these produced
+### The vocabulary these produced
 
-`AuditAction` carries **only what the console can actually do**, which
-is why it is short: `staff.*`, `user.update`, `credit.adjust`,
-`session.view`, `feedback.update`, `skill.upload`, `skill.update`,
-`connector_catalog.create` / `.update`, `invite.create`. Every surface
-added since the first slice added at most one member, and the
-read-only ones (ratings, dashboard, payments, connector list) added
-none — an action exists because something writes, not because a page
-exists.
+Upstream each surface contributed at most one member to an `AuditAction`
+enum, and the read-only ones (ratings, dashboard, connector list)
+contributed none — an action existed because something wrote, not
+because a page existed. This deployment keeps no operator trail, so the
+enum is gone with the rest (`c8f2a5e1d94b`); what the list is still good
+for is reading off which surfaces mutate and which only display.
 
 Still deliberately out, with scripts covering them: **withdrawal
 review** (the only remaining item that blocks a *user* — the
@@ -478,8 +485,9 @@ secret, and bulk re-packaging platform bundles from a checkout.
   script). Skeleton verified by a full-stack smoke (throwaway DB +
   backend + built console: login/cookie/guard/proxy/logout). Built so
   far: login, auth guard + sidebar shell, users list (the wired
-  reference page) + user detail; feedback / staff / audit-log /
-  session-view pages are placeholders naming their endpoints. No SSO —
+  reference page) + user detail; feedback / staff / session-view pages
+  are placeholders naming their endpoints (the audit-log page has no
+  endpoint to name on this branch). No SSO —
   the login form + `/auth/access-tokens` is the design.
 - **Deployment shape** — `deploy.sh` third sibling vs. manual.
   **Network exposure is settled: never public.** Bind `127.0.0.1:8006`;
@@ -489,10 +497,11 @@ secret, and bulk re-packaging platform bundles from a checkout.
   deliberately no code-level IP allowlist — behind a proxy it degrades
   into trusting a spoofable ``X-Forwarded-For``; the bind address and
   the network are the controls, and the app-level defenses (token class,
-  TTL, rate limit, audit) are the second layer, not a substitute.
-- **Dual control** — current design is single-operator + audit trail. If
-  any action (large credit adjustments?) needs a second approver, that
-  is a structural addition, decide it here rather than retrofit.
+  TTL, rate limit) are the second layer, not a substitute.
+- **Dual control** — current design is single-operator, and with no
+  operator trail there is not even an after-the-fact record. If any
+  action (large credit adjustments?) needs a second approver, that is a
+  structural addition, decide it here rather than retrofit.
 
 ### Languages (`frontend-admin/i18n/`)
 
@@ -541,8 +550,10 @@ double-entry verified in SQL), the soft-deleted session still readable,
 feedback triage, the ratings queue with its excerpt and filter, a
 minted invite code coming back `SYSTEM`-origin and ownerless, the
 catalog's create/publish pair with **no secret-shaped field on the
-wire**, and an audit trail holding one row per mutating action —
-including `session.view`, naming the conversation's owner.
+wire**. The upstream smoke also asserted one audit row per mutating
+action; there is no trail here to assert against, so what stands in its
+place is `tests/test_admin_mutations_commit.py` — the mutation persisted
+at all.
 
 Two real bugs it caught that unit tests could not: reading the
 server-computed ``updated_at`` back after a flush raised
@@ -557,10 +568,11 @@ must contribute nothing), so the spend predicate is asserted against
 the real shape rather than a convenient one.
 
 The skill upload is the one check with a side effect outside the
-throwaway database: it PUTs a real bundle into the real OSS bucket, so
-the smoke reads the keys back out of the audit trail and deletes them
-in teardown. It earns that cost by being the only test that pushes
-**binary** through the Next relay — the proxy read bodies as text,
+throwaway database: it PUTs a real bundle into the real OSS bucket, and
+teardown has to delete the keys. Upstream reads them back out of the
+audit trail; without one the smoke must remember what it uploaded. It
+earns that cost by being the only test that pushes **binary** through
+the Next relay — the proxy read bodies as text,
 which silently corrupts a zip, and nothing else in the stack would have
 caught it.
 
@@ -573,8 +585,9 @@ a pre-existing wart, out of the console's scope.)
 
 In order, all on the production host:
 
-1. `uv run alembic upgrade head` — brings in `staff` + `admin_audit_log`
-   (revision `c4a91f7d20b3`; no accounts are created).
+1. `uv run alembic upgrade head` — brings in `staff` (revision
+   `c4a91f7d20b3`, which also created `admin_audit_log`; `c8f2a5e1d94b`
+   drops that table again on this branch). No accounts are created.
 2. `STAFF_PASSWORD='…' uv run python -m scripts.manage_staff --create
    --username=<op> --name="<Name>"` — first operator.
 3. Set `admin_cors_origins` in `.env` to the console SPA's origin.

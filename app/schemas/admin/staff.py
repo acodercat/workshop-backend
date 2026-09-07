@@ -15,7 +15,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.staff import StaffStatus
-from app.schemas.admin.fields import Password, Reason
+from app.schemas.admin.fields import Password
 
 
 class StaffCreate(BaseModel):
@@ -47,7 +47,6 @@ class StaffUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=64)
     status: StaffStatus | None = None
-    reason: Reason
 
     @model_validator(mode="after")
     def _at_least_one_change(self) -> "StaffUpdate":
@@ -70,7 +69,6 @@ class StaffPasswordReset(BaseModel):
     """
 
     password: Password
-    reason: Reason
 
 
 class StaffPasswordChange(BaseModel):

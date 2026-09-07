@@ -14,7 +14,6 @@ from app.api.admin.dependencies import StaffContext
 from app.auth import verify_password
 from app.errors import IncorrectPasswordError, SamePasswordError
 from app.schemas.admin.staff import StaffPasswordChange, StaffProfileResponse
-from app.services.admin import AuditAction, audit
 from app.services.admin import staff as staff_service
 
 router = APIRouter(tags=["me"])
@@ -48,12 +47,7 @@ async def change_my_password(ctx: StaffContext, body: StaffPasswordChange) -> Re
     if body.new_password == body.current_password:
         raise SamePasswordError("New password must differ from the current one.")
 
-    async with audit(
-        ctx,
-        action=AuditAction.STAFF_PASSWORD_CHANGE,
-        target_type="staff",
-        target_id=ctx.staff.id,
-    ):
-        await staff_service.set_password(ctx.db, ctx.staff, body.new_password)
+    await staff_service.set_password(ctx.db, ctx.staff, body.new_password)
+    await ctx.db.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)

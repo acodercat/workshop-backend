@@ -1,17 +1,16 @@
-"""Who is acting, on what session, from where — for one console request.
+"""Who is acting, on what session — for one console request.
 
 :class:`AdminContext` is the single value an admin endpoint carries
-around. It exists because the console's central invariant (*every
-mutation is audited*) needs four things at once — the DB session the
-mutation runs in, the operator to attribute it to, and the correlation id
-plus caller address that make the audit row worth reading. Threading four
-parameters through every call site is how one of them ends up omitted.
+around: the DB session the mutation runs in and the operator to attribute
+it to. It used to carry the correlation id and caller address too, for
+the audit row; this deployment keeps no operator trail (revision
+``c8f2a5e1d94b``) and nothing read them once that went, so they went too.
 
 It is **pure data**: no FastAPI types, no I/O. The console's HTTP layer
 (:mod:`app.api.admin.dependencies`) builds it from the request; the
-service layer only reads it. That direction is what keeps
-:mod:`app.services.admin.audit` free of any dependency on the web
-framework and testable without fabricating a ``Request``.
+service layer only reads it. That direction keeps the service layer free
+of any dependency on the web framework and testable without fabricating
+a ``Request``.
 """
 
 from dataclasses import dataclass
@@ -30,15 +29,7 @@ class AdminContext:
     """
 
     db: AsyncSession
-    """The request-scoped session. Mutation and audit row share it, which
-    is what lets them commit atomically."""
+    """The request-scoped session the mutation runs in, and commits."""
 
     staff: Staff
     """The authenticated operator."""
-
-    request_id: str | None
-    """Correlation id from ``RequestIDMiddleware`` — ties the audit row to
-    the full request trace in the logs."""
-
-    ip_address: str | None
-    """Best-effort caller address, for after-the-fact review."""

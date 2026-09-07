@@ -7,14 +7,14 @@
 - ``PUT    /staff/{id}/password``   — reset someone's password.
 
 There is no role tier — every signed-in operator can read and manage the
-directory (see ``docs/admin-console.md``); accountability comes from the
-audit trail, not from gates between operators.
+directory (see ``docs/admin-console.md``); the operator team is small and
+named, so there are no gates between operators.
 
 **This module is the reference slice.** Every future console feature —
 credit adjustments, withdrawal review, invite issuance — follows its
-shape: ``StaffContext`` in the signature, mutations inside
-:func:`~app.services.admin.audit` and never committing on their own,
-invariants in the service layer, plain reads inline.
+shape: ``StaffContext`` in the signature, mutations ending in their own
+``await ctx.db.commit()``, invariants in the service layer, plain reads
+inline.
 """
 
 from fastapi import APIRouter, Query, Response, status
@@ -31,7 +31,7 @@ from app.schemas.admin.staff import (
     StaffUpdate,
 )
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.services.admin import AdminContext, AuditAction, audit
+from app.services.admin import AdminContext
 from app.services.admin import staff as staff_service
 
 router = APIRouter(tags=["staff"])
@@ -75,20 +75,14 @@ async def list_staff(
 
 @router.post("/staff", response_model=StaffResponse, status_code=status.HTTP_201_CREATED)
 async def create_staff(ctx: StaffContext, body: StaffCreate) -> StaffResponse:
-    """Provision an operator account.
-
-    The target id is set **inside** the block: the account has no id
-    until :func:`app.services.admin.staff.create` flushes it.
-    """
-    async with audit(ctx, action=AuditAction.STAFF_CREATE, target_type="staff") as draft:
-        account = await staff_service.create(
-            ctx.db,
-            username=body.username,
-            name=body.name,
-            password=body.password,
-        )
-        draft.target_id = account.id
-        draft.payload = {"username": account.username}
+    """Provision an operator account."""
+    account = await staff_service.create(
+        ctx.db,
+        username=body.username,
+        name=body.name,
+        password=body.password,
+    )
+    await ctx.db.commit()
 
     return StaffResponse.model_validate(account)
 
@@ -105,36 +99,13 @@ async def update_staff(
 ) -> StaffResponse:
     """Change an account's name or status.
 
-    The payload records a before → after entry per field actually
-    changed, which is what makes the trail answer "when was this account
-    disabled" without diffing adjacent rows.
-
     A status change that would leave no active account is refused by the
-    service layer, and the whole transaction — audit row included — rolls
-    back with it.
+    service layer, and the transaction rolls back with it.
     """
     account = await _get_or_404(ctx, staff_id)
 
-    # Captured before the mutation, and only for fields that actually
-    # move — a "changed X from X to X" entry is noise in a trail whose
-    # value is that every row means something.
-    changes = {
-        field: {"from": str(getattr(account, field)), "to": str(value)}
-        for field, value in (("name", body.name), ("status", body.status))
-        if value is not None and getattr(account, field) != value
-    }
-
-    async with audit(
-        ctx,
-        action=AuditAction.STAFF_UPDATE,
-        target_type="staff",
-        target_id=account.id,
-        reason=body.reason,
-    ) as draft:
-        await staff_service.update(
-            ctx.db, account, name=body.name, status=body.status
-        )
-        draft.payload = changes
+    await staff_service.update(ctx.db, account, name=body.name, status=body.status)
+    await ctx.db.commit()
 
     return StaffResponse.model_validate(account)
 
@@ -145,19 +116,12 @@ async def reset_staff_password(
 ) -> Response:
     """Set another operator's password, signing that account out everywhere.
 
-    The new password is never recorded: the audit payload says a reset
-    happened and why, and :func:`app.services.admin.audit` would redact
-    the value even if a caller passed it.
+    The new password is never recorded anywhere — this deployment keeps
+    no operator trail at all.
     """
     account = await _get_or_404(ctx, staff_id)
 
-    async with audit(
-        ctx,
-        action=AuditAction.STAFF_PASSWORD_RESET,
-        target_type="staff",
-        target_id=account.id,
-        reason=body.reason,
-    ):
-        await staff_service.set_password(ctx.db, account, body.password)
+    await staff_service.set_password(ctx.db, account, body.password)
+    await ctx.db.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
