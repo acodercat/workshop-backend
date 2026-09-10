@@ -5,9 +5,15 @@ The follow loop in :func:`stream_events` only exits on a Redis
 (Postgres is the durable truth), so a Redis blip can swallow the terminal
 XADD, and a crash can drop it between the fenced DB commit and the emit.
 Either way the loop would block forever and hang the SSE client. The
-fallback consults ``session.status`` after an idle XREAD block and
-synthesizes the terminal when the DB is already terminal — without
-false-closing a legitimately slow but still-RUNNING turn.
+fallback consults ``session.status`` after an idle XREAD block — never on
+connect, which would answer from the DB while the worker's real terminal is
+still in flight — and synthesises the terminal when the DB is already
+terminal, without false-closing a legitimately slow but still-RUNNING turn.
+
+What it synthesises has to end the turn the way a reload would show it:
+the frontend reads ``stop_reason`` to tell cancelled from completed and
+takes ``agent.error`` as failure, so a bare ``agent.stopped`` for every
+terminal showed cancelled and failed turns as completed.
 
 asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 """
@@ -18,9 +24,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.common.event_types import EventType
+from app.models.session import SessionStatus
 from app.services.session import streaming
 from app.services.session.streaming import (
     _BLIND_FUSE_SECONDS,
+    _RUNNING,
+    _UNKNOWN,
     _Liveness,
     _safe_cursor,
 )
@@ -50,6 +59,10 @@ async def _collect(gen, limit: int = 20) -> list[dict]:
     return out
 
 
+def _terminals(events: list[dict]) -> list[dict]:
+    return [e for e in events if e["event"] == EventType.AGENT_STOPPED.value]
+
+
 async def test_idle_stream_with_terminal_db_synthesizes_stopped(monkeypatch):
     """Terminal in the DB, no terminal on the stream → synthesize + close.
 
@@ -64,7 +77,7 @@ async def test_idle_stream_with_terminal_db_synthesizes_stopped(monkeypatch):
     monkeypatch.setattr(
         streaming,
         "_session_liveness",
-        AsyncMock(return_value=_Liveness.TERMINAL),
+        AsyncMock(return_value=_Liveness.terminal(SessionStatus.COMPLETE)),
     )
 
     events = await _collect(streaming.stream_events(redis, "sess-1"))
@@ -74,8 +87,104 @@ async def test_idle_stream_with_terminal_db_synthesizes_stopped(monkeypatch):
     assert len(events) < 20
     assert events[-1]["event"] == EventType.AGENT_STOPPED.value
     assert json.loads(events[-1]["data"]) == {"content": ""}
-    terminals = [e for e in events if e["event"] == EventType.AGENT_STOPPED.value]
-    assert len(terminals) == 1
+    assert len(_terminals(events)) == 1
+
+
+async def test_connect_does_not_answer_from_the_db_before_following(monkeypatch):
+    """Attaching must not short-circuit to the DB, or it truncates the turn.
+
+    The worker commits the terminal status *before* emitting the wire
+    terminal, and on its failure path the gap spans harness teardown — so a
+    client attaching in that window would be told "terminal" by Postgres and
+    returned, losing the trailing text, the specific error code and the usage
+    that the real events (still in flight) carry. The generator must block on
+    Redis first and let those win."""
+    redis = AsyncMock()
+    redis.xrange = AsyncMock(return_value=[])  # backlog not yet written
+    real = [
+        (
+            "k",
+            [
+                ("7-0", {"type": "agent.message_chunk", "content": "tail", "ts": "1"}),
+                ("8-0", {"type": "agent.stopped", "content": "", "ts": "1"}),
+            ],
+        )
+    ]
+    monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=real))
+    liveness = AsyncMock(return_value=_Liveness.terminal(SessionStatus.FAILED))
+    monkeypatch.setattr(streaming, "_session_liveness", liveness)
+
+    events = await _collect(streaming.stream_events(redis, "sess-1"))
+
+    liveness.assert_not_awaited()  # never consulted: Redis had data
+    # The turn's real tail survived, and nothing synthetic was injected.
+    chunks = [
+        json.loads(e["data"])["content"] for e in events if e["event"] == "agent.message_chunk"
+    ]
+    assert chunks == ["tail"]
+    assert len(_terminals(events)) == 1
+
+
+async def test_synthetic_terminal_for_a_cancelled_row_says_so(monkeypatch):
+    """A ``CANCELLED`` row is closed with ``stop_reason="cancelled"`` — the
+    field the frontend reads to mark the turn cancelled. Without it the
+    live view said "completed" and the next reload said "cancelled"."""
+    redis = AsyncMock()
+    redis.xrange = AsyncMock(return_value=[])
+    monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        streaming,
+        "_session_liveness",
+        AsyncMock(return_value=_Liveness.terminal(SessionStatus.CANCELLED)),
+    )
+
+    events = await _collect(streaming.stream_events(redis, "sess-1"))
+
+    assert json.loads(events[-1]["data"]) == {"content": "", "stop_reason": "cancelled"}
+    assert all(e["event"] != EventType.AGENT_ERROR.value for e in events)
+
+
+async def test_synthetic_terminal_for_a_failed_row_is_the_error_alone(monkeypatch):
+    """A ``FAILED`` row closes on ``agent.error`` and nothing after it.
+
+    The client treats that event as terminal. A trailing ``agent.stopped``
+    would leave this generator in the same write, so the browser dispatches
+    it after the close — and it carries no failure marker, so it would put
+    the session back to ``COMPLETE``: precisely the live-versus-reload split
+    this shape exists to prevent."""
+    redis = AsyncMock()
+    redis.xrange = AsyncMock(return_value=[])
+    monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        streaming,
+        "_session_liveness",
+        AsyncMock(return_value=_Liveness.terminal(SessionStatus.FAILED)),
+    )
+
+    events = await _collect(streaming.stream_events(redis, "sess-1"))
+
+    assert (events[-1]["event"], json.loads(events[-1]["data"])) == (
+        EventType.AGENT_ERROR.value,
+        {"content": "agent_unavailable"},
+    )
+    assert _terminals(events) == []  # no stop to overwrite the failure
+
+
+async def test_synthetic_terminal_for_a_deleted_row_is_bare(monkeypatch):
+    """The row is gone (session deleted mid-stream): there is no status to
+    echo, so the close is the bare terminal — never a fabricated reason."""
+    redis = AsyncMock()
+    redis.xrange = AsyncMock(return_value=[])
+    monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        streaming,
+        "_session_liveness",
+        AsyncMock(return_value=_Liveness.terminal(None)),
+    )
+
+    events = await _collect(streaming.stream_events(redis, "sess-1"))
+
+    assert json.loads(events[-1]["data"]) == {"content": ""}
 
 
 async def test_idle_stream_still_running_does_not_false_close(monkeypatch):
@@ -97,7 +206,7 @@ async def test_idle_stream_still_running_does_not_false_close(monkeypatch):
         "read_stream",
         AsyncMock(side_effect=[[], real_terminal]),
     )
-    liveness = AsyncMock(return_value=_Liveness.RUNNING)  # still RUNNING at the idle check
+    liveness = AsyncMock(return_value=_RUNNING)  # still RUNNING at the idle check
     monkeypatch.setattr(streaming, "_session_liveness", liveness)
 
     events = await _collect(streaming.stream_events(redis, "sess-1"))
@@ -122,11 +231,7 @@ async def test_blind_dual_outage_trips_the_fuse(monkeypatch):
     redis = AsyncMock()
     redis.xrange = AsyncMock(return_value=[])
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))  # always idle
-    monkeypatch.setattr(
-        streaming,
-        "_session_liveness",
-        AsyncMock(return_value=_Liveness.UNKNOWN),
-    )
+    monkeypatch.setattr(streaming, "_session_liveness", AsyncMock(return_value=_UNKNOWN))
     # Deterministic monotonic clock: the first blind cycle records the start,
     # the second reads past the fuse window and trips it.
     ticks = iter([1.0, _BLIND_FUSE_SECONDS + 2.0] + [9_999.0] * 50)

@@ -27,7 +27,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from enum import Enum
 from typing import cast
 
@@ -81,12 +82,44 @@ _REPLAY_PAGE_SIZE = 500
 _BLIND_FUSE_SECONDS = 120.0
 
 
-class _Liveness(Enum):
-    """Tri-state result of the DB liveness check used by the SSE fallback."""
+# The ``agent.error`` code the worker puts on every failure it cannot name
+# more precisely (``agent_worker.wire.agent_errors.AGENT_ERROR_UNAVAILABLE``);
+# the recovery cron uses the same one for a turn it reclaims. A terminal the
+# backend has to synthesise for a ``FAILED`` row is that kind of failure — the
+# detail, if any, is in the worker log. Mirrored here rather than imported
+# for the reason :class:`~app.common.event_types.EventType` gives.
+_AGENT_ERROR_UNAVAILABLE = "agent_unavailable"
 
+
+class _LivenessKind(Enum):
     TERMINAL = "terminal"  # reached a terminal status (or the row is gone)
     RUNNING = "running"  # definitively still running
     UNKNOWN = "unknown"  # DB unreachable — couldn't determine; arms the fuse
+
+
+@dataclass(frozen=True)
+class _Liveness:
+    """What Postgres said about the session when the SSE fallback asked.
+
+    ``status`` rides along with the classification because a terminal the
+    backend synthesises has to say *how* the turn ended: the frontend reads
+    ``stop_reason`` off ``agent.stopped`` to tell a cancelled turn from a
+    completed one, and takes ``agent.error`` as failure. A bare terminal
+    showed every fallback-closed turn as completed until the next reload
+    disagreed with it. ``None`` under ``TERMINAL`` means the row is gone
+    (deleted mid-stream) — there is no status to echo.
+    """
+
+    kind: _LivenessKind
+    status: SessionStatus | None = None
+
+    @classmethod
+    def terminal(cls, status: SessionStatus | None) -> "_Liveness":
+        return cls(_LivenessKind.TERMINAL, status)
+
+
+_RUNNING = _Liveness(_LivenessKind.RUNNING)
+_UNKNOWN = _Liveness(_LivenessKind.UNKNOWN)
 
 
 def _safe_cursor(last_event_id: str | None) -> str | None:
@@ -116,7 +149,9 @@ async def _session_liveness(session_id: str) -> _Liveness:
     Opens its own short-lived session — the SSE generator deliberately
     holds no DB connection across its lifetime (it reads Redis only; see
     the stream endpoint), so this must not pin one either. Consulted only
-    after an idle XREAD block, never on the hot path.
+    after an idle XREAD block, never on the hot path and never on connect
+    (see the note where phase 2 begins for why the tempting entry-time
+    check is wrong).
 
     A missing row (session deleted mid-stream) counts as ``TERMINAL`` so the
     stream closes rather than blocking forever. A DB error returns ``UNKNOWN``
@@ -134,10 +169,54 @@ async def _session_liveness(session_id: str) -> _Liveness:
             session_id,
             exc_info=True,
         )
-        return _Liveness.UNKNOWN
+        return _UNKNOWN
     if status is None or status in _TERMINAL_STATUSES:
-        return _Liveness.TERMINAL
-    return _Liveness.RUNNING
+        return _Liveness.terminal(status)
+    return _RUNNING
+
+
+def _synthetic_terminal(status: SessionStatus | None) -> Iterator[SSEMessage]:
+    """The terminal the worker would have emitted for a row already at *status*.
+
+    Shaped like the worker's own error-path terminal
+    (``SessionEventEmitter.emit_terminal_done``) and the recovery cron's, so
+    the client reaches the same *status* a reload would show it. Only the
+    status: the events that would have carried the turn's text, usage and
+    specific error code were lost, and a ``FAILED`` row whose worker died
+    before emitting has no persisted error block either — so this renders a
+    generic error card live where a reload shows the turn merely aborted.
+    Per status:
+
+    - ``CANCELLED`` carries ``stop_reason="cancelled"``, the one field the
+      frontend reads to mark the turn cancelled rather than completed. (The
+      row is ``CANCELLED`` iff that was axon's stop reason — see
+      :class:`~app.models.session.SessionStatus`.)
+    - ``FAILED`` is announced by ``agent.error`` **alone**. The worker sends
+      a stop after its error, but it sends them as two Redis entries the
+      follow loop forwards on separate iterations; both halves of a
+      synthesised pair leave here inside one generator step, so they reach
+      the browser in one write and it dispatches both. The client already
+      treats ``agent.error`` as terminal (it closes the stream there), and a
+      trailing ``agent.stopped`` carries no failure marker — its queued
+      dispatch would run after that close and put the session back to
+      ``COMPLETE``, which is the live-versus-reload split this function
+      exists to remove.
+    - ``COMPLETE``, and a row that is gone, get the bare terminal.
+
+    Nothing the row does not say is invented: no ``termination_reason``, no
+    usage, no elapsed time — and the error code is the generic one, because
+    the specific code lives on the wire event that was lost, not on the row.
+    """
+    if status is SessionStatus.FAILED:
+        yield sse_event(
+            EventType.AGENT_ERROR.value,
+            data=json.dumps({"content": _AGENT_ERROR_UNAVAILABLE}),
+        )
+        return
+    payload = {"content": ""}
+    if status is SessionStatus.CANCELLED:
+        payload["stop_reason"] = "cancelled"
+    yield sse_event(EventType.AGENT_STOPPED.value, data=json.dumps(payload))
 
 
 async def _current_turn_id(session_id: str) -> str | None:
@@ -201,7 +280,8 @@ async def stream_events(
     Phase 2 — block-read new entries as the worker produces them,
     forwarding each until ``agent.stopped`` arrives. Two fallbacks cover a
     lost terminal: if an idle block finds the session already terminal in
-    Postgres, a synthetic ``agent.stopped`` closes the stream; if Redis and
+    Postgres, a synthetic terminal (:func:`_synthetic_terminal`, shaped to
+    the status the row carries) closes the stream; if Redis and
     Postgres are *both* unreachable past ``_BLIND_FUSE_SECONDS``, the stream
     closes so the client reconnects rather than following a dead stream.
 
@@ -277,6 +357,20 @@ async def stream_events(
         data=json.dumps({"ts": str(time.time())}),
     )
 
+    # Deliberately NOT consulting Postgres here, tempting though it is: a
+    # terminal status is committed *before* the wire terminal is emitted,
+    # and on the worker's failure path the two are far apart — the commit,
+    # then harness teardown (closing the sandbox client and any remote MCP
+    # clients, over the network), then ``emit_terminal_done``, which is also
+    # what flushes the emitter's buffered chunk run. A client attaching in
+    # that window would be answered from the DB and returned, permanently
+    # dropping the turn's trailing text, its real error code
+    # (``agent_max_steps`` / ``agent_timeout`` / ``insufficient_credits``,
+    # not the generic one this module can guess) and its usage. Waiting out
+    # one idle block costs a delay the client no longer feels — it
+    # cross-checks the per-user channel for exactly this case — and it is
+    # what lets the real events win the race whenever they are coming.
+
     # Monotonic reference for when the current fully-blind streak began (Redis
     # idle *and* DB unreachable), or None when not blind. Drives the fuse below.
     blind_since: float | None = None
@@ -303,19 +397,17 @@ async def stream_events(
         # this loop would otherwise block forever, hanging the SSE client
         # and every later replay within the stream TTL. Consult the source
         # of truth: if the session is already terminal, the event is not
-        # coming — synthesize ``agent.stopped`` (empty content, matching
-        # the worker's ``emit_terminal_done`` / recovery-cron shape) so the
-        # client closes cleanly and re-fetches the consistent DB state.
+        # coming — synthesise the terminal the worker would have sent
+        # (:func:`_synthetic_terminal`) so the client closes cleanly and
+        # re-fetches the consistent DB state.
         # A still-``RUNNING`` session never false-closes here, so a
         # legitimately slow turn (long tool call, cold-start sandbox) is safe.
         liveness = await _session_liveness(session_id)
-        if liveness is _Liveness.TERMINAL:
-            yield sse_event(
-                EventType.AGENT_STOPPED.value,
-                data=json.dumps({"content": ""}),
-            )
+        if liveness.kind is _LivenessKind.TERMINAL:
+            for message in _synthetic_terminal(liveness.status):
+                yield message
             return
-        if liveness is _Liveness.RUNNING:
+        if liveness.kind is _LivenessKind.RUNNING:
             # Still running and the DB is reachable — loop again;
             # sse-starlette's own ping (default 15s) handles keepalive.
             blind_since = None
