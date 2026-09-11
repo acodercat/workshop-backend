@@ -116,6 +116,23 @@ class MessageQueuedResponse(BaseModel):
     status: str = "queued"
 
 
+class CancelAcceptedResponse(BaseModel):
+    """Body of ``POST /sessions/{id}/cancel``.
+
+    ``already_stopped`` is the whole point of having a body here: the
+    request is accepted either way, but the caller cannot tell from the
+    status code whether a worker was actually signalled or the turn had
+    already finished. It needs to know, because the two cases end
+    differently — a signalled worker sends ``agent.stopped`` over the
+    stream and that is what releases the UI's running state, while a turn
+    that was already over sends nothing ever again. Without this flag a
+    client that had lost the stream would sit on a stop button that
+    answers 202 and then does nothing.
+    """
+
+    already_stopped: bool = False
+
+
 class MessageResponse(BaseModel):
     """One message in the ``GET /sessions/{id}`` payload.
 

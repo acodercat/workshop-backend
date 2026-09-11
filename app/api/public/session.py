@@ -66,6 +66,7 @@ from app.schemas.file import (
 )
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
 from app.schemas.session import (
+    CancelAcceptedResponse,
     MessageCreate,
     MessageQueuedResponse,
     MessageResponse,
@@ -745,6 +746,7 @@ async def create_message(
 @router.post(
     "/sessions/{session_id}/cancel",
     status_code=status.HTTP_202_ACCEPTED,
+    response_model=CancelAcceptedResponse,
 )
 @limiter.limit("30/minute")
 async def cancel_session(
@@ -760,7 +762,30 @@ async def cancel_session(
     holding the session picks up the pub/sub signal, fires
     :meth:`axon.Agent.cancel`, and the final ``agent.stopped`` event
     (with ``stop_reason="cancelled"``) arrives to the client via the
-    existing SSE stream. Completed / failed sessions 409.
+    existing SSE stream.
+
+    **A session that is already terminal is a no-op, not an error.** What
+    the caller asked for — this turn not running — already holds, so 202
+    is the honest answer; it used to be a 409, which reported a failure
+    for a request whose outcome was already true. The case is not rare
+    and not a race the client can win: the stop button is driven by the
+    live stream, and that stream can die in a way the browser never
+    surfaces (a suspend, a Wi-Fi handover, an idle timeout at the load
+    balancer), so the button outlives the turn and the next click landed
+    on a session the worker had finished minutes ago. The client-side
+    half of that is fixed separately (the frontend cross-checks the
+    per-user channel and stands the stream down), but a button that is
+    briefly wrong must not produce a red error when pressed.
+
+    Nothing is published for a terminal session: there is no worker
+    listening, and ``cancel_unclaimed_turn`` only matches a ``PENDING``
+    turn, which a terminal session does not have. That case answers
+    ``already_stopped: true`` — accepting the request quietly is not
+    enough on its own, because a caller's running state is normally
+    released by the ``agent.stopped`` a signalled worker sends, and here
+    no event is ever coming. The flag is what lets the client stand its
+    own state down instead of waiting for one that never arrives.
+
 
     The payload is the :class:`TerminationReason` the worker stamps on
     the turn — ``user_cancelled`` here; the budget enforcer publishes
@@ -776,17 +801,22 @@ async def cancel_session(
     """
     session = await _get_or_404(db, session_id, current_user.id)
     if session.status != SessionStatus.RUNNING:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Session is not running",
+        logger.info(
+            "cancel: session %s is already %s — nothing to stop",
+            session_id,
+            session.status.value,
         )
+        return CancelAcceptedResponse(already_stopped=True)
     if await cancel_unclaimed_turn(db, session_id=session_id):
         await db.commit()
-        return
+        # Hard-cancelled in the DB with no worker in the picture, so no
+        # ``agent.stopped`` follows this one either.
+        return CancelAcceptedResponse(already_stopped=True)
     await redis.publish(
         cancel_channel(str(session_id)),
         TerminationReason.USER_CANCELLED.value,
     )
+    return CancelAcceptedResponse()
 
 
 @router.get("/sessions/{session_id}/stream")
