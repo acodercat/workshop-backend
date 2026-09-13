@@ -16,7 +16,7 @@ from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_staff
 from app.exception_handlers import install_error_handlers
 from app.models.admin_audit_log import AdminAuditLog
-from app.models.skill import Skill, SkillOrigin
+from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.models.staff import Staff, StaffStatus
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -37,6 +37,16 @@ class _FakeDb:
     def add(self, obj) -> None:
         self.added.append(obj)
 
+    async def execute(self, _stmt):
+        class _Empty:
+            def first(self):
+                return None
+
+            def one_or_none(self):
+                return None
+
+        return _Empty()
+
     async def commit(self) -> None:
         self.commits += 1
 
@@ -53,6 +63,7 @@ def _skill(**over) -> Skill:
             "name": "pdf",
             "display_name": "PDF",
             "description": "reads pdfs",
+            "status": SkillStatus.STAGED,
             "enabled": False,
             "bundle_key": "official/pdf/x/pdf.zip",
             "bundle_size": 10,
@@ -113,13 +124,13 @@ def test_the_audit_payload_records_each_changed_field() -> None:
 
     _client(db).patch(
         "/skills/5",
-        json={"display_name": "PDF Tools", "enabled": True},
+        json={"display_name": "PDF Tools", "status": "PUBLISHED"},
     )
 
     (row,) = _audit_rows(db)
     assert row.action == "skill.update"
     assert row.payload["display_name"] == {"from": "PDF", "to": "PDF Tools"}
-    assert row.payload["enabled"] == {"from": False, "to": True}
+    assert row.payload["status"] == {"from": "STAGED", "to": "PUBLISHED"}
     assert "description" not in row.payload  # unsent, so unchanged
     assert db.commits == 1
 
@@ -127,7 +138,7 @@ def test_the_audit_payload_records_each_changed_field() -> None:
 def test_an_edit_that_changes_nothing_writes_no_audit_row() -> None:
     db = _FakeDb(_skill())
 
-    response = _client(db).patch("/skills/5", json={"display_name": "PDF", "enabled": False})
+    response = _client(db).patch("/skills/5", json={"display_name": "PDF", "status": "STAGED"})
 
     assert response.status_code == 200
     assert _audit_rows(db) == []
@@ -160,3 +171,26 @@ def test_an_empty_patch_is_refused() -> None:
     assert response.status_code == 422
     assert _audit_rows(db) == []
     assert db.commits == 0
+
+
+def test_a_users_own_skill_cannot_be_retired_from_here() -> None:
+    """The console does not touch a user's own file — the same boundary
+    the download route draws. Retiring one would strand it in a state
+    its owner cannot see, edit, delete or stop paying quota for."""
+    db = _FakeDb(_skill(origin=SkillOrigin.CUSTOM, user_id=42))
+
+    response = _client(db).patch("/skills/5", json={"status": "RETIRED"})
+
+    assert response.status_code == 403
+    assert _audit_rows(db) == []
+
+
+def test_a_users_own_skill_can_still_have_its_metadata_edited() -> None:
+    """Only the lifecycle is refused; the picker text is this surface's."""
+    skill = _skill(origin=SkillOrigin.CUSTOM, user_id=42)
+    db = _FakeDb(skill)
+
+    response = _client(db).patch("/skills/5", json={"display_name": "Renamed"})
+
+    assert response.status_code == 200
+    assert skill.display_name == "Renamed"

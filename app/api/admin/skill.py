@@ -36,6 +36,7 @@ from app.common.pagination import paginate
 from app.errors import (
     CategoryNotFoundError,
     PrivateSkillBundleError,
+    PrivateSkillLifecycleError,
     SkillNotFoundError,
 )
 from app.models.skill import Skill, SkillOrigin
@@ -48,6 +49,7 @@ from app.services import user as user_service
 from app.services.admin import AuditAction, audit
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_download import skill_download_url
+from app.services.skill_enablement import legacy_enabled
 from app.services.skill_registration import register_platform_skill_bundle
 
 router = APIRouter(tags=["skills"])
@@ -60,6 +62,12 @@ router = APIRouter(tags=["skills"])
 #: *upload* — and would tie two rules that only happen to agree today.
 _DOWNLOADABLE_ORIGINS = frozenset({SkillOrigin.SYSTEM, SkillOrigin.OFFICIAL})
 
+#: Origins whose lifecycle this surface owns. An allowlist for the same
+#: reason as the one above, and a separate one for the same reason too:
+#: "may we read these bytes" and "is it ours to publish" are different
+#: questions that only happen to agree today.
+_LIFECYCLE_ORIGINS = frozenset({SkillOrigin.SYSTEM, SkillOrigin.OFFICIAL})
+
 
 def _to_skill_response(
     skill: Skill, owner_username: str | None, owner_name: str | None
@@ -70,7 +78,7 @@ def _to_skill_response(
         name=skill.name,
         display_name=skill.display_name,
         description=skill.description,
-        enabled=skill.enabled,
+        status=skill.status,
         bundle_size=skill.bundle_size,
         category_id=skill.category_id,
         user_id=skill.user_id,
@@ -145,19 +153,16 @@ async def upload_skill(
 
     ``origin`` is the one thing the bundle cannot tell us and it decides
     who sees the skill: ``SYSTEM`` is agent-only core, ``OFFICIAL`` is
-    offered to users as an opt-in. For a **new** skill the service
-    derives ``enabled`` from it — an ``OFFICIAL`` one lands disabled
-    because ``skill.enabled`` is every user's default, and an
-    enabled-by-default skill would put its metadata in every turn's LLM
-    context.
+    offered to users as an opt-in. It is the only field this form asks
+    for — a new skill always lands ``STAGED``, and going live is the
+    separate, deliberate act of a PATCH.
 
     **Uploading a name that already exists replaces that skill's bundle**
     rather than failing: for a platform catalogue, re-uploading ``pdf``
-    is shipping a new version of ``pdf``. The row is updated in place, so
-    both halves of effective-enabled survive it — each user's own
-    ``user_skill_preference`` *and* the platform default they fall back
-    to, which a replace deliberately does not re-derive. The response is
-    201 either way: a new bundle now exists either way.
+    is shipping a new version of ``pdf``. The row is updated in place and
+    nothing about policy moves with it — neither the listing's status nor
+    any user's preference — because shipping a fix is a content change.
+    The response is 201 either way: a new bundle now exists either way.
 
     The audit payload *is* the record: it names the skill, its origin,
     the bundle and the one it displaced, which is the whole deed.
@@ -193,13 +198,13 @@ async def upload_skill(
 
 @router.patch("/skills/{skill_id}", response_model=SkillResponse)
 async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> SkillResponse:
-    """Edit a skill's picker metadata, or flip its platform-wide default.
+    """Edit a skill's picker metadata, or move it through its lifecycle.
 
-    ``enabled`` is the **default**, not the effective value: a user who
-    set their own ``user_skill_preference`` keeps it, because effective
-    enabled is ``COALESCE(pref.enabled, skill.enabled)``. Disabling a
-    skill here therefore does not switch it off for everyone — the
-    console says so beside the control.
+    ``status`` applies to everyone. Retiring a skill closes every route
+    to it — the skills page, ambient discovery, and an explicit composer
+    pick alike — including for the users who had turned it on. That is
+    the difference from the column this replaced, which only ever moved
+    the default for users who had never said.
 
     ``display_name`` / ``description`` are the same picker metadata the
     public surface lets a user edit on their own skill and refuses on a
@@ -209,6 +214,10 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
     skill = await ctx.db.get(Skill, skill_id)
     if skill is None:
         raise SkillNotFoundError(f"No skill with id {skill_id}.")
+    if body.status is not None and skill.origin not in _LIFECYCLE_ORIGINS:
+        raise PrivateSkillLifecycleError(
+            f"Skill {skill_id} belongs to a user; its status is not the console's to set."
+        )
 
     owner_username, owner_name = await user_service.owner_identity(ctx.db, skill.user_id)
 
@@ -241,6 +250,10 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
     ) as draft:
         for field, value in fields.items():
             setattr(skill, field, value)
+        # TRANSITIONAL — see ``skill_enablement.legacy_enabled``. Goes
+        # with the column in the follow-up migration.
+        if "status" in changes:
+            skill.enabled = legacy_enabled(skill.origin, skill.status)
         # Clearing the map is not optional — see the invalidation rule
         # in ``app.services.localized_text``. The bundle re-supplies it
         # on the next upload, so nothing is lost for good here.

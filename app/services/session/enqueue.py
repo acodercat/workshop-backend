@@ -50,7 +50,7 @@ from app.models.recipe import Recipe, RecipeOrigin
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
-from app.models.skill import Skill, SkillOrigin
+from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.schemas.session import FileRef
 from app.services import credits, file_storage
 from app.services.redis import (
@@ -159,11 +159,11 @@ async def queue_user_message(
     else:
         await credits.settle_open_for_user(db, session.user_id)
 
-    # Drop ``skills`` the user can't see (someone else's CUSTOM, or a
-    # hidden SYSTEM row). Visibility is the only gate here: an explicit
-    # per-turn pick is its own authorization, so the enable toggle —
-    # which governs ambient auto-discovery, not manual selection — is
-    # deliberately not consulted.
+    # Drop ``skills`` the user can't reach: someone else's CUSTOM, a
+    # hidden SYSTEM row, or a listing an operator has retired. The user's
+    # own toggle is deliberately not consulted — it governs ambient
+    # auto-discovery, not manual selection, and an explicit per-turn pick
+    # is its own authorization.
     accepted_skills = await _filter_invokable_skills(
         db,
         session.user_id,
@@ -481,16 +481,26 @@ async def _filter_invokable_skills(
     ``bundle_key`` pins the bytes; ``name`` rides along for log and
     LLM-reminder display.
 
-    A skill is invokable when it's visible to the user: their own
-    CUSTOM, or any OFFICIAL skill. The enable toggle is deliberately
-    **not** checked — it governs ambient auto-discovery (whether the
-    skill's metadata rides in the LLM context every turn, see the
-    worker's ``list_enabled``), while an explicit composer pick is its
-    own per-turn authorization. Unknown / hidden names are silently
-    dropped rather than raising; the user's intent (a free-text
-    composer prompt) is still useful even if one chip was stale, and
-    surfacing a 4xx mid-conversation would be a worse UX than gracefully
-    proceeding without that skill.
+    A skill is invokable when it is live and visible to the user: their
+    own CUSTOM, or any OFFICIAL skill, and ``PUBLISHED`` either way. The
+    user's own toggle is deliberately **not** checked — it governs
+    ambient auto-discovery (whether the skill's metadata rides in the LLM
+    context every turn, see the worker's ``list_enabled``), while an
+    explicit composer pick is its own per-turn authorization. The
+    listing's ``status`` *is* checked: that authorization is the user's
+    to give, not the operator's to lose track of, so retiring a skill has
+    to close this route too or it closes none that matter.
+
+    Retirement therefore takes effect here rather than in the worker. A
+    turn whose snapshot already names a skill keeps running against the
+    ``bundle_key`` pinned here — mid-turn consistency is worth more than
+    an immediate stop — so barring the name from *new* snapshots is what
+    makes ``RETIRED`` a kill switch.
+
+    Unknown / hidden names are silently dropped rather than raising; the
+    user's intent (a free-text composer prompt) is still useful even if
+    one chip was stale, and surfacing a 4xx mid-conversation would be a
+    worse UX than gracefully proceeding without that skill.
 
     Slug collisions between CUSTOM + OFFICIAL resolve CUSTOM-wins, matching
     the worker repo's ``ORDER BY (user_id IS NULL) ASC`` rule. Order is
@@ -505,6 +515,7 @@ async def _filter_invokable_skills(
 
     stmt = select(Skill.id, Skill.name, Skill.bundle_key, Skill.user_id).where(
         Skill.name.in_(requested_unique),
+        Skill.status == SkillStatus.PUBLISHED,
         (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.OFFICIAL),
     )
     result = await db.execute(stmt)

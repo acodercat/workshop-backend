@@ -318,13 +318,17 @@ millions, add `ix_credit_ledger_created_at` then.
 |---|---|---|
 | `GET /skills?origin=&q=` | Every origin, including the `SYSTEM` skills hidden from users. Platform rows first, then newest; owner LEFT-joined (platform rows have none by construction). | — |
 | `POST /skills` | Upload a platform bundle — multipart, `{origin}` | `skill.upload` |
-| `PATCH /skills/{id}` | `{display_name, description, enabled, category_id}` — picker metadata, the **platform default**, and the tab it browses under | `skill.update` |
+| `PATCH /skills/{id}` | `{display_name, description, status, category_id}` — picker metadata, the listing's lifecycle, and the tab it browses under | `skill.update` |
 | `GET /skills/{id}/download-url` | Presigned GET for a **platform** bundle, signed through `services/skill_download.py` — the one helper the customer API signs through too, so a bundle saved from either surface lands under one name (`{skill.name}{ext}`) and one policy. `CUSTOM` is a **403**, not a 404 — the row is on the operator's screen, and what is refused is the bytes. | — |
 
-The toggle's subtlety is surfaced in the UI, not just here: `enabled`
-is the default, and `user_skill_preference` overrides it per user
-(effective = `COALESCE(pref.enabled, skill.enabled)`), so disabling a
-skill does **not** switch it off for users who opted in.
+`status` and `user_skill_preference` answer two different questions and
+the console only owns one of them. `status` is whether the listing is
+live, and it applies to everyone — retiring a skill closes the skills
+page, ambient discovery and an explicit composer pick alike, including
+for the users who had turned it on. Whether a given user *wants* a live
+skill is theirs, written from the customer surface, and no control here
+touches it. The column this replaced conflated the two, which is why the
+old toggle needed a sentence of explanation beside it.
 
 **`display_name` and `description` are editable, following the public
 surface.** It calls them picker metadata — what the picker shows, not
@@ -337,14 +341,12 @@ clears `display_name_i18n`, exactly as the public PATCH does — the list
 endpoint resolves the locale map first, so a stale one would silently
 shadow the new name.
 
-**A replace keeps the platform default it found.** `skill.enabled` is
-what every user who never touched their own toggle reads through
-(`COALESCE(pref.enabled, skill.enabled)`), so re-deriving it from the
-origin would switch a live `OFFICIAL` skill off for all of them the
-moment an operator ships a fix — while the per-user preference rows,
-the half people think of, survive untouched. Only a *new* skill takes
-its origin's default; `scripts/replace_platform_skill_bundles.py` has
-always left the flag alone for the same reason.
+**A replace carries no policy with it.** Shipping a fixed bundle is a
+content change, so neither the listing's `status` nor any user's
+preference moves — and that is a property of the write rather than a
+rule it enforces: there is no policy field in it. The version this
+replaced had to special-case the flag precisely because content and
+policy shared a column.
 
 **Upload replaces by name rather than conflicting.** A user
 re-uploading a name they own is a mistake worth a 409; an operator
@@ -356,10 +358,10 @@ the bucket**: a turn may be staging it at that moment, and the audit
 row is then the only way back to the previous version.
 
 `origin` is the one thing the bundle cannot state and it decides who
-sees the skill, so it is the **only** field the form asks for.
-`enabled` follows from it (`SYSTEM` enabled, `OFFICIAL` disabled — the
-every-user-default rule above), which is why the form explains the
-choice rather than offering a toggle.
+sees the skill, so it is the **only** field the form asks for. A new
+listing always lands `STAGED` — uploading is not publishing, and the one
+thing an upload cannot undo is having been visible — so the form
+explains what `origin` chooses rather than offering a second control.
 
 **The console asks for no typed justification, anywhere.** The audit
 payload *is* the record — here it names the skill, its origin, the

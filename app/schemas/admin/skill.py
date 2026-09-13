@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.skill import SkillOrigin
+from app.models.skill import SkillOrigin, SkillStatus
 
 PlatformSkillOrigin = Literal["SYSTEM", "OFFICIAL"]
 """The origins an operator may upload into.
@@ -30,9 +30,11 @@ class SkillResponse(BaseModel):
     construction (the ``ck_skill_origin_user_id_consistent`` check
     enforces that).
 
-    ``enabled`` here is the **platform default**, not what any given
-    user experiences: ``user_skill_preference`` overrides it per user,
-    and the effective value is ``COALESCE(pref.enabled, skill.enabled)``.
+    ``status`` is the listing's own state and applies to everyone: a
+    ``RETIRED`` skill is gone for the users who had turned it on, not
+    only for the ones who never did. What each user wants is a separate
+    row (``user_skill_preference``) this surface does not read, because
+    it is not the operator's to set.
     """
 
     id: int
@@ -40,7 +42,7 @@ class SkillResponse(BaseModel):
     name: str
     display_name: str
     description: str
-    enabled: bool
+    status: SkillStatus
     bundle_size: int
     # The tab this skill browses under, meaningful only on ``OFFICIAL``
     # rows. ``None`` on a ``CUSTOM`` upload, which lives behind the
@@ -54,13 +56,16 @@ class SkillResponse(BaseModel):
 
 
 class SkillUpdate(BaseModel):
-    """Edit a skill's picker metadata, or flip its platform-wide default.
+    """Edit a skill's picker metadata, or move it through its lifecycle.
 
-    The same three fields the public surface calls editable, for the
-    same reason: ``display_name`` and ``description`` are what the
-    picker shows, not what the bundle *does*. A user may edit them on a
-    skill they own and is refused on a platform one — "they'd need to
-    mutate the shared row" — and this is the surface that owns that row.
+    ``display_name`` and ``description`` are what the picker shows, not
+    what the bundle *does*. A user may edit them on a skill they own and
+    is refused on a platform one — "they'd need to mutate the shared
+    row" — and this is the surface that owns that row.
+
+    ``status`` publishes or retires the listing. It has no counterpart on
+    the public surface: what a user flips there is their own preference
+    row, a different question about a different row.
 
     ``name`` stays immutable, as it is there: it is derived from the
     bundle's ``SKILL.md`` and is how the worker finds the staged
@@ -68,14 +73,14 @@ class SkillUpdate(BaseModel):
     bundle's contents are likewise immutable on this path.
 
     Every field is optional and a ``None`` is "leave alone", so one
-    endpoint serves a rename, a re-description and the toggle without a
-    caller having to resend what it is not changing —
-    ``category_id`` excepted, below.
+    endpoint serves a rename, a re-description and a publish without a
+    caller having to resend what it is not changing — ``category_id``
+    excepted, below.
     """
 
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = Field(default=None, min_length=1, max_length=1024)
-    enabled: bool | None = None
+    status: SkillStatus | None = None
     # The one field where an explicit ``null`` means "clear" rather than
     # "leave alone": retiring a category, or correcting a skill filed
     # under the wrong one, are ordinary operator moves that this

@@ -25,7 +25,7 @@ import logging
 import os
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +35,8 @@ from app.errors import (
     SkillNameConflictError,
     SkillQuotaExceededError,
 )
-from app.models.skill import Skill, SkillOrigin
+from app.models.skill import Skill, SkillOrigin, SkillStatus
+from app.models.user_skill_preference import UserSkillPreference
 from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_bundle import (
@@ -45,6 +46,7 @@ from app.services.skill_bundle import (
     parse_skill_md,
     validate_zip_structure,
 )
+from app.services.skill_enablement import legacy_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +82,13 @@ async def register_skill_bundle(
     - ``SkillNameConflictError`` (409) — extracted name collides with an
       existing skill of this user.
 
-    The row lands **disabled**: enabling a skill puts its metadata in
-    every turn's LLM context, so it's an explicit user opt-in (from the
-    skills page), not an upload side effect — same posture as OFFICIAL
-    skills. The freshly uploaded skill is still usable immediately via
-    an explicit composer pick, which doesn't consult the toggle.
+    The row lands ``PUBLISHED`` — a user's own upload has no review to
+    wait for — but with **no preference row**, which is how a user who
+    has never said reads as off. Turning a skill on puts its metadata in
+    every turn's LLM context, so that is an explicit opt-in from the
+    skills page, not an upload side effect. The freshly uploaded skill is
+    usable immediately via an explicit composer pick, which consults the
+    listing's status but not the user's toggle.
     """
     ext = _canonical_ext(filename)
     is_zip = ext == ".zip"
@@ -124,9 +128,6 @@ async def register_skill_bundle(
         bundle_key,
         data,
     )
-    # ``enabled=False`` is explicit: the column's ``server_default`` is
-    # ``true``, so omitting it would enable the skill. Uploads land
-    # disabled (rationale in the docstring).
     skill = Skill(
         user_id=user_id,
         origin=SkillOrigin.CUSTOM,
@@ -136,7 +137,8 @@ async def register_skill_bundle(
         description=parsed.description,
         bundle_key=bundle_key,
         bundle_size=len(data),
-        enabled=False,
+        status=SkillStatus.PUBLISHED,
+        enabled=legacy_enabled(SkillOrigin.CUSTOM, SkillStatus.PUBLISHED),
     )
     db.add(skill)
     try:
@@ -167,7 +169,7 @@ async def register_platform_skill_bundle(
     origin: SkillOrigin,
     filename: str,
     data: bytes,
-    enabled: bool | None = None,
+    publish: bool = False,
     category_id: int | None = None,
 ) -> tuple[Skill, str | None]:
     """Register (or replace) a platform skill bundle.
@@ -196,24 +198,23 @@ async def register_platform_skill_bundle(
     same staging reason. The caller records the replaced key in its
     audit payload, which is what makes an unwanted version recoverable.
 
-    ``enabled`` is decided three ways, in order: an explicit argument
-    wins; otherwise a **replace keeps whatever the row already has**;
-    otherwise a new skill takes its origin's rule — ``SYSTEM`` enabled
-    (agent-only, where disabled means invisible to the agent),
-    ``OFFICIAL`` disabled, because ``skill.enabled`` is the default every
-    user who never touched the toggle falls back to and an
-    enabled-by-default official skill would push its metadata into every
-    user's every-turn LLM context.
+    **Shipping a bundle is a content change.** A replace leaves the
+    listing's ``status`` and every user's preference where they were, so
+    an operator fixing a bug cannot pull the skill out from under the
+    people using it.
 
-    The middle rule is the one worth stating: shipping a fixed bundle is
-    a content change, so re-deriving the flag would switch a live
-    ``OFFICIAL`` skill off for everyone on the default. Pass
-    ``enabled=False`` to stage a ``SYSTEM`` bundle without exposing it.
+    ``publish`` is the exception, and only because it is not a side
+    effect: it is the caller saying so. A new row lands ``STAGED`` —
+    uploading is not publishing, and the one thing an upload cannot undo
+    is having been visible — and ``publish=True`` says to go live, on a
+    new row or an existing one alike. Without that second half, a
+    deployment whose only publish path is this script (hkgai has no
+    console) could stage a listing and never get it live.
 
-    ``category_id`` is tri-state for the same reason and with the same
-    shape: ``None`` leaves the row alone, so re-uploading a bundle keeps
-    the tab an operator filed it under. It has no per-origin default —
-    a new skill is simply uncategorised until someone files it.
+    ``category_id`` is tri-state: ``None`` leaves the row alone, so
+    re-uploading a bundle keeps the tab an operator filed it under. It
+    has no per-origin default — a new skill is simply uncategorised
+    until someone files it.
 
     Raises the same typed kinds the user path does.
     """
@@ -232,24 +233,14 @@ async def register_platform_skill_bundle(
         is_zip=is_zip,
     )
 
-    # Looked up before the upload so the row's current state can decide
-    # ``enabled`` below — and so a failure here costs no OSS object.
+    # Looked up before the upload so a failure here costs no OSS object.
     skill = await db.scalar(select(Skill).where(Skill.user_id.is_(None), Skill.name == parsed.name))
     replaced_key = skill.bundle_key if skill is not None else None
-
-    if enabled is None:
-        # A replace is a content change, not a policy one. The row's
-        # ``enabled`` is the platform default every user who never
-        # touched the toggle falls back to (``COALESCE(pref.enabled,
-        # skill.enabled)``), so re-deriving it from the origin would
-        # switch a live OFFICIAL skill off for all of them the moment an
-        # operator ships a fix. Only a *new* skill takes the origin's
-        # default. ``scripts/replace_platform_skill_bundles.py`` has
-        # always left ``enabled`` alone for the same reason.
-        if skill is not None:
-            enabled = skill.enabled
-        else:
-            enabled = origin is SkillOrigin.SYSTEM
+    became_agent_only = (
+        skill is not None
+        and origin is SkillOrigin.SYSTEM
+        and skill.origin is not SkillOrigin.SYSTEM
+    )
 
     # Keyed by origin rather than by owner (there is none) — the same
     # scheme ``scripts/upload_skill.py`` has always written, so bundles
@@ -257,15 +248,27 @@ async def register_platform_skill_bundle(
     bundle_key = f"{origin.value.lower()}/{parsed.name}/{uuid.uuid4()}/{parsed.name}{ext}"
     await asyncio.to_thread(file_storage.upload, SKILL_POLICY, bundle_key, data)
     if skill is None:
-        skill = Skill(user_id=None, name=parsed.name)
+        skill = Skill(user_id=None, name=parsed.name, status=SkillStatus.STAGED)
         db.add(skill)
+    if publish:
+        skill.status = SkillStatus.PUBLISHED
+    if became_agent_only:
+        # An existing listing turning agent-only strands whatever its
+        # users had said about it: nothing lists a SYSTEM skill, so
+        # nothing can unsay it, and a stale ``enabled = false`` would
+        # hide a core skill from them for good. Dropping those rows is
+        # what keeps "a preference row exists only for a skill its user
+        # can see" true rather than merely usual.
+        await db.execute(
+            delete(UserSkillPreference).where(UserSkillPreference.skill_id == skill.id)
+        )
     skill.origin = origin
     skill.display_name = parsed.display_name
     skill.display_name_i18n = parsed.display_name_i18n
     skill.description = parsed.description
     skill.bundle_key = bundle_key
     skill.bundle_size = len(data)
-    skill.enabled = enabled
+    skill.enabled = legacy_enabled(origin, skill.status)
     if category_id is not None:
         skill.category_id = category_id
 
@@ -277,13 +280,13 @@ async def register_platform_skill_bundle(
         raise
 
     logger.info(
-        "platform skill %s: id=%s origin=%s name=%r size=%d enabled=%s",
+        "platform skill %s: id=%s origin=%s name=%r size=%d status=%s",
         "replaced" if replaced_key else "registered",
         skill.id,
         origin.value,
         skill.name,
         skill.bundle_size,
-        enabled,
+        skill.status.value,
     )
     return skill, replaced_key
 

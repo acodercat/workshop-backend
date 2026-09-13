@@ -6,21 +6,21 @@ so the validation, the OSS key scheme and the replace-by-name behaviour
 are one implementation with two front doors. This script is the path
 that still works when the console is down, or when all you have is SSH.
 
-``enabled`` follows the origin **for a skill that does not exist yet**:
-SYSTEM lands enabled — agent-only, and disabled means invisible to the
-agent (``--disabled`` stages a bundle without exposing it) — while
-OFFICIAL lands disabled, because ``skill.enabled`` is the default every
-user who never touched the toggle falls back to
-(``COALESCE(pref.enabled, skill.enabled)``) and an enabled-by-default
-official skill would push its metadata into every user's every-turn LLM
-context. Users opt in from the skills page — or just pick the skill in
-the composer, which doesn't consult the toggle at all.
+A new listing lands ``STAGED``: uploaded, validated, reaching nobody.
+Uploading is not publishing, and the one thing an upload cannot undo is
+having been visible. ``--publish`` collapses the two steps for the case
+where an operator already knows; otherwise the listing goes live from
+the console.
+
+Whether a user then *wants* an ``OFFICIAL`` skill is a separate question
+on a separate row: they opt in from the skills page, or pick the skill
+in the composer, which consults the listing's status but not their
+toggle.
 
 Idempotent by name: re-uploading a name that exists replaces that
-skill's bundle in place, keeping its id, every user's preference **and
-the platform default an operator has since set** — shipping a fix is a
-content change, so it does not re-derive the flag. ``--disabled`` still
-overrides it.
+skill's bundle in place, keeping its id and every user's preference.
+Nothing about policy moves with it — not the listing's status either —
+because shipping a fix is a content change.
 
 ``--category`` files the skill under one of the tabs the skills page
 groups by, **resolved by name rather than by id**: a name is what the
@@ -37,7 +37,7 @@ Usage:
     cd backend
     uv run python -m scripts.upload_skill path/to/my-skill.zip
     uv run python -m scripts.upload_skill path/to/another.zip --origin OFFICIAL
-    uv run python -m scripts.upload_skill path/to/another.zip --disabled
+    uv run python -m scripts.upload_skill path/to/another.zip --publish
     uv run python -m scripts.upload_skill path/to/another.zip \
         --origin OFFICIAL --category 写作
 """
@@ -76,7 +76,7 @@ async def _resolve_category_id(db: AsyncSession, name: str) -> int:
 
 
 async def upload_bundle(
-    bundle_path: Path, origin: SkillOrigin, disabled: bool, category: str | None
+    bundle_path: Path, origin: SkillOrigin, publish: bool, category: str | None
 ) -> None:
     data = bundle_path.read_bytes()
     print(f"Read {len(data)} bytes from {bundle_path}")
@@ -89,9 +89,9 @@ async def upload_bundle(
                 origin=origin,
                 filename=bundle_path.name,
                 data=data,
-                # ``None`` lets the origin decide (SYSTEM on, OFFICIAL
-                # off); ``--disabled`` is the one case a caller overrides.
-                enabled=False if disabled else None,
+                # A new listing lands STAGED unless asked otherwise;
+                # a replace never touches status at all.
+                publish=publish,
                 # ``None`` leaves the row's category alone — a re-upload
                 # is a content change, not a refiling.
                 category_id=category_id,
@@ -110,8 +110,7 @@ async def upload_bundle(
             print(f"  replaced bundle: {replaced_key}")
         if category is not None:
             print(f"  category: {category} (id={skill.category_id})")
-        status = "enabled" if skill.enabled else "disabled"
-        print(f"  DB upserted (id={skill.id}, {origin.value}, {status})")
+        print(f"  DB upserted (id={skill.id}, {origin.value}, {skill.status.value})")
 
 
 def main() -> None:
@@ -128,11 +127,12 @@ def main() -> None:
         help="Platform origin: SYSTEM (always-on core, default) or OFFICIAL (user opts in).",
     )
     parser.add_argument(
-        "--disabled",
+        "--publish",
         action="store_true",
-        help="SYSTEM only: insert with enabled=false (bundle exists in DB "
-        "but stays invisible to the agent). OFFICIAL is always "
-        "disabled — the toggle default is per-user opt-in.",
+        help="Go live. A new listing is STAGED by default — uploaded and "
+        "validated but reaching nobody — because the one thing an upload "
+        "cannot undo is having been visible. Also promotes a listing that "
+        "is already staged; without the flag a replace leaves status alone.",
     )
     parser.add_argument(
         "--category",
@@ -145,7 +145,7 @@ def main() -> None:
     if not bundle_path.exists():
         sys.exit(f"File not found: {bundle_path}")
 
-    asyncio.run(upload_bundle(bundle_path, SkillOrigin(args.origin), args.disabled, args.category))
+    asyncio.run(upload_bundle(bundle_path, SkillOrigin(args.origin), args.publish, args.category))
     print("Done.")
 
 

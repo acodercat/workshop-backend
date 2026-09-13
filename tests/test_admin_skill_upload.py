@@ -3,7 +3,7 @@
 The properties worth pinning are the ones an operator cannot see from
 the response: that a same-named upload *replaces* instead of failing,
 that the displaced bundle key survives in the audit payload, and that
-``enabled`` follows the origin rather than the uploader's intent.
+uploading is not publishing.
 
 OSS is stubbed — the object store is not what these assert. Bundle
 parsing is real, so the fixtures are real zips.
@@ -22,7 +22,7 @@ from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_staff
 from app.exception_handlers import install_error_handlers
 from app.models.admin_audit_log import AdminAuditLog
-from app.models.skill import Skill, SkillOrigin
+from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.models.staff import Staff, StaffStatus
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -45,6 +45,7 @@ class _FakeDb:
     endpoint writes lands in ``added``."""
 
     def __init__(self, existing: Skill | None = None) -> None:
+        self.executed: list = []
         self.existing = existing
         self.added: list = []
         self.commits = 0
@@ -57,6 +58,9 @@ class _FakeDb:
         if isinstance(obj, Skill):
             obj.id = 5
             obj.created_at = obj.updated_at = _NOW
+
+    async def execute(self, stmt):
+        self.executed.append(stmt)
 
     async def flush(self) -> None:
         pass
@@ -76,7 +80,8 @@ def _existing_skill() -> Skill:
         name="smoke-skill",
         display_name="Old Name",
         description="old",
-        enabled=True,
+        status=SkillStatus.PUBLISHED,
+        enabled=False,
         bundle_key="official/smoke-skill/OLD/smoke-skill.zip",
         bundle_size=10,
     )
@@ -123,7 +128,7 @@ def _audit_rows(db: _FakeDb) -> list[AdminAuditLog]:
     return [obj for obj in db.added if isinstance(obj, AdminAuditLog)]
 
 
-def test_a_new_official_bundle_lands_disabled_and_audited(oss_keys) -> None:
+def test_a_new_bundle_lands_staged_and_audited(oss_keys) -> None:
     db = _FakeDb()
 
     response = _post(_client(db), _bundle())
@@ -133,8 +138,9 @@ def test_a_new_official_bundle_lands_disabled_and_audited(oss_keys) -> None:
     assert body["origin"] == "OFFICIAL"
     assert body["name"] == "smoke-skill"
     assert body["user_id"] is None and body["owner_username"] is None
-    # OFFICIAL is every user's default, so it must not arrive switched on.
-    assert body["enabled"] is False
+    # Uploading is not publishing: the one thing an upload cannot undo
+    # is having been visible, so going live is a separate act.
+    assert body["status"] == "STAGED"
 
     (row,) = _audit_rows(db)
     assert row.action == "skill.upload"
@@ -145,45 +151,42 @@ def test_a_new_official_bundle_lands_disabled_and_audited(oss_keys) -> None:
     assert db.commits == 1
 
 
-def test_a_system_bundle_lands_enabled() -> None:
+def test_a_system_bundle_stages_too() -> None:
+    """``origin`` decides who may see a skill, never whether it is live."""
     db = _FakeDb()
 
     response = _post(_client(db), _bundle(), origin="SYSTEM")
 
     assert response.status_code == 201
-    assert response.json()["enabled"] is True
+    assert response.json()["status"] == "STAGED"
 
 
-def test_a_replace_keeps_the_platform_default_the_operator_set() -> None:
+def test_a_replace_leaves_a_live_listing_live() -> None:
     """Shipping a fixed bundle is a content change, not a policy one.
 
-    ``skill.enabled`` is the default every user who never touched the
-    toggle falls back to (``COALESCE(pref.enabled, skill.enabled)``), so
-    re-deriving it from the origin would switch a live OFFICIAL skill
-    off for all of them the moment an operator uploads a fix — while
-    their own preference rows, the half people think of, survive.
+    Nothing in the write touches ``status``, so an operator shipping a
+    fix cannot pull the skill out from under the users who have it —
+    which is what re-deriving from the origin would have done.
     """
     live = _existing_skill()
-    live.enabled = True  # an operator turned it on after the first upload
     db = _FakeDb(existing=live)
 
     response = _post(_client(db), _bundle(), origin="OFFICIAL")
 
     assert response.status_code == 201
-    assert live.enabled is True
-    assert response.json()["enabled"] is True
+    assert live.status is SkillStatus.PUBLISHED
+    assert response.json()["status"] == "PUBLISHED"
 
 
-def test_a_replace_keeps_a_default_that_is_off_too() -> None:
-    """The rule is "keep what is there", not "keep it on"."""
-    live = _existing_skill()
-    live.enabled = False
-    db = _FakeDb(existing=live)
+def test_a_replace_leaves_a_staged_listing_staged() -> None:
+    """The rule is "leave it alone", not "leave it live"."""
+    staged = _existing_skill()
+    staged.status = SkillStatus.STAGED
+    db = _FakeDb(existing=staged)
 
     _post(_client(db), _bundle(), origin="SYSTEM")
 
-    # SYSTEM's own rule would have enabled it; the existing row wins.
-    assert live.enabled is False
+    assert staged.status is SkillStatus.STAGED
 
 
 def test_the_same_name_replaces_and_records_the_displaced_bundle() -> None:
@@ -225,3 +228,30 @@ def test_a_custom_origin_is_not_accepted() -> None:
 
     assert response.status_code == 422
     assert db.added == [] and db.commits == 0
+
+
+def test_turning_a_listing_agent_only_drops_what_users_said_about_it() -> None:
+    """Nothing lists a SYSTEM skill, so nothing can unsay a stale answer.
+
+    An ``enabled = false`` row left behind would hide a core skill from
+    that user for good, with no surface to undo it on — and it would
+    break the invariant that a preference row only exists for a skill
+    its user can see.
+    """
+    live = _existing_skill()  # OFFICIAL
+    db = _FakeDb(existing=live)
+
+    _post(_client(db), _bundle(), origin="SYSTEM")
+
+    deletes = [str(s) for s in db.executed if str(s).startswith("DELETE")]
+    assert len(deletes) == 1
+    assert "user_skill_preference" in deletes[0]
+
+
+def test_replacing_within_the_same_origin_leaves_preferences_alone() -> None:
+    """The drop is for the origin change, not for every upload."""
+    db = _FakeDb(existing=_existing_skill())  # OFFICIAL
+
+    _post(_client(db), _bundle(), origin="OFFICIAL")
+
+    assert not [s for s in db.executed if str(s).startswith("DELETE")]

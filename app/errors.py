@@ -648,6 +648,21 @@ class PrivateSkillBundleError(AppError):
     error_type = "private_skill_bundle"
 
 
+class PrivateSkillLifecycleError(AppError):
+    """The console tried to publish or retire a user's own skill.
+
+    The same boundary :class:`PrivateSkillBundleError` draws, one step
+    further in: not only are a ``CUSTOM`` bundle's bytes the user's, so
+    is whether it exists for them. Retiring one would leave it where its
+    owner cannot see, edit, delete or stop paying quota for it, and no
+    surface would explain where it went. 403 for the same reason: the
+    row is on the operator's screen.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "private_skill_lifecycle"
+
+
 class CategoryNotFoundError(AppError):
     """No category with that id (admin-console lookup, both taxonomies).
 
