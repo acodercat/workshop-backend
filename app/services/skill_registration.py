@@ -50,11 +50,12 @@ from app.services.skill_enablement import legacy_enabled
 
 logger = logging.getLogger(__name__)
 
-# Per-user CUSTOM skill count cap. Bounds account-level abuse only —
-# paired with the per-bundle ``SKILL_POLICY.max_bytes`` cap so total
-# OSS storage per user is implicitly bounded too. The per-turn LLM
-# context cost is bounded separately (and much lower) by
-# ``skill_enablement.MAX_ENABLED_SKILLS``.
+# Per-user CUSTOM skill count cap, and the only cap a user's skills have
+# left. Bounds account-level abuse — paired with the per-bundle
+# ``SKILL_POLICY.max_bytes`` cap so total OSS storage per user is
+# implicitly bounded too. Nothing bounds how many a user may *enable*,
+# because enabling one lists it in their composer rather than loading it
+# into a turn.
 _MAX_SKILLS_PER_USER = 100
 
 

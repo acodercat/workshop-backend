@@ -293,20 +293,6 @@ class SkillQuotaExceededError(AppError):
     error_type = "skill_quota_exceeded"
 
 
-class SkillEnableQuotaExceededError(AppError):
-    """User already has the maximum allowed number of skills *enabled*.
-
-    Distinct from :class:`SkillQuotaExceededError` (upload/storage cap):
-    enabled skills cost LLM context every turn, so simultaneously
-    enabled CUSTOM + OFFICIAL skills are capped separately. Disabling
-    one (or just picking the skill per-turn in the composer, which is
-    uncapped) frees a slot.
-    """
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "skill_enable_quota_exceeded"
-
-
 class InvalidConnectorUrlError(AppError):
     """The Connector URL isn't a usable public https endpoint — wrong scheme,
     unresolvable host, or it resolves to a private / loopback / link-local

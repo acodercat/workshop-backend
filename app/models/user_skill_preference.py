@@ -1,4 +1,4 @@
-"""Whether one user wants one skill in their every-turn context.
+"""Whether one user keeps one skill in their composer picker.
 
 One row per ``(user_id, skill_id)``, written by
 :func:`app.api.public.skill.update_skill` whatever the skill's origin.
@@ -6,11 +6,18 @@ An ``OFFICIAL`` row is shared by everyone and a ``CUSTOM`` one has an
 audience of one, but the answer is the user's either way, so it lives
 here either way — the ``skill`` row carries no opinion about it.
 
-**No row is the answer "never said", and that reads as off.** There is
-no platform-wide default to fall back to: a skill nobody asked for does
-not get to spend a user's context budget, and an operator who wants one
-noticed puts it somewhere users see it rather than somewhere they do
-not. ``skill.status`` still gates everything on top of this: a listing
+**This is a shortlist, not a load.** It decides what the composer offers;
+it does not put the skill in front of the model. What a turn actually
+carries is the agent-only ``SYSTEM`` set plus the skills the user picked
+for that turn, and a pick is honoured whatever this row says — someone
+can name a skill they never turned on, and a freshly uploaded one is
+usable before it is listed. So nothing per-turn is spent by turning a
+skill on, which is why no quota bounds how many a user may have.
+
+**No row is the answer "never said", and that reads as off.** There is no
+platform-wide default to fall back to: an operator who wants a skill
+noticed puts it somewhere users see it rather than pre-filling everyone's
+picker. ``skill.status`` still gates everything on top of this: a listing
 that is not live reaches nobody, however this row reads.
 
 ``SYSTEM`` skills have no rows here and never should: they are

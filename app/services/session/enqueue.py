@@ -161,9 +161,9 @@ async def queue_user_message(
 
     # Drop ``skills`` the user can't reach: someone else's CUSTOM, a
     # hidden SYSTEM row, or a listing an operator has retired. The user's
-    # own toggle is deliberately not consulted — it governs ambient
-    # auto-discovery, not manual selection, and an explicit per-turn pick
-    # is its own authorization.
+    # own toggle is deliberately not consulted — it governs which skills
+    # the composer offers, and an explicit per-turn pick is its own
+    # authorization however the request came by the name.
     accepted_skills = await _filter_invokable_skills(
         db,
         session.user_id,
@@ -483,13 +483,19 @@ async def _filter_invokable_skills(
 
     A skill is invokable when it is live and visible to the user: their
     own CUSTOM, or any OFFICIAL skill, and ``PUBLISHED`` either way. The
-    user's own toggle is deliberately **not** checked — it governs
-    ambient auto-discovery (whether the skill's metadata rides in the LLM
-    context every turn, see the worker's ``list_enabled``), while an
-    explicit composer pick is its own per-turn authorization. The
-    listing's ``status`` *is* checked: that authorization is the user's
-    to give, not the operator's to lose track of, so retiring a skill has
-    to close this route too or it closes none that matter.
+    user's own toggle is deliberately **not** checked — it governs which
+    skills the composer *offers* (see
+    :mod:`app.models.user_skill_preference`), which is a convenience for
+    finding them, not an authorization boundary. An explicit pick is its
+    own authorization, so naming a skill that was never turned on still
+    works: that is what makes a freshly uploaded skill usable, and what
+    keeps a stale composer chip from failing a turn.
+
+    This route is now the **only** way an OFFICIAL or CUSTOM skill reaches
+    the model — the worker's listing carries the agent-only SYSTEM set and
+    these picks, nothing else. The listing's ``status`` *is* therefore
+    checked here, and it is the one place it can be: retiring a skill has
+    to close this route or it closes none that matter.
 
     Retirement therefore takes effect here rather than in the worker. A
     turn whose snapshot already names a skill keeps running against the

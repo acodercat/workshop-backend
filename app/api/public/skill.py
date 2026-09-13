@@ -41,7 +41,7 @@ from app.schemas.skill import SkillCategoryResponse, SkillResponse, SkillUpdate
 from app.services import file_storage, localized_text
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_download import skill_download_url
-from app.services.skill_enablement import ensure_enable_capacity, preference_join
+from app.services.skill_enablement import preference_join
 from app.services.skill_i18n import (
     DEFAULT_LOCALE,
     normalize_locale,
@@ -55,7 +55,7 @@ router = APIRouter(tags=["skills"])
 
 
 def _to_response(skill: Skill, *, enabled: bool, display_name: str | None = None) -> SkillResponse:
-    """One skill as its owner's picker sees it.
+    """One skill as a user sees it — list, upload and PATCH replies alike.
 
     ``enabled`` is required rather than read off the row: it lives in
     ``user_skill_preference``, so it is the caller's to supply and a
@@ -108,8 +108,9 @@ async def register_skill(
         filename=file.filename or "skill.zip",
         data=data,
     )
-    # A fresh upload has no preference row: usable by an explicit pick
-    # and silent otherwise, until its owner turns it on.
+    # A fresh upload has no preference row, so it is not in its owner's
+    # composer picker until they turn it on. Reachable meanwhile by a
+    # request that names it directly — a pick is its own authorization.
     return _to_response(skill, enabled=False)
 
 
@@ -134,10 +135,16 @@ async def list_skills(
     who had turned it on.
 
     ``enabled`` is this user's own answer — their ``user_skill_preference``
-    row, or ``false`` where they have never said. It is what the toggle
-    on the skills page shows, and (combined with the listing being live,
-    which every row here already is) what decides whether the skill rides
-    in their context every turn.
+    row, or ``false`` where they have never said. It is what the toggle on
+    the skills page shows, and what decides whether the skill is offered
+    in the composer's picker. It does **not** load the skill: what reaches
+    the model is the agent-only ``SYSTEM`` set plus whatever the user
+    picked for that turn.
+
+    Every row is returned whatever that answer is — the skills page is
+    where the answer gets given, so filtering by it here would hide the
+    switch from the only screen that has one. The composer filters the
+    same payload down to the enabled ones.
     """
     resolved_locale = normalize_locale(locale)
     stmt = (
@@ -220,16 +227,16 @@ async def update_skill(
     - ``enabled`` is this caller's own answer and always lands in their
       ``user_skill_preference`` row, whatever the skill's origin. An
       ``OFFICIAL`` row is shared, and a ``CUSTOM`` one has an audience of
-      one; neither is a reason for the toggle to live anywhere else.
+      one; neither is a reason for the toggle to live anywhere else. It
+      decides whether the composer offers the skill, not whether the model
+      loads it, so there is no quota on it — nothing per-turn is spent.
     - ``display_name`` / ``description`` are the listing's own metadata.
       Only its owner may edit them, so on an ``OFFICIAL`` skill they are
       403 — the console owns that row.
 
     A skill the caller cannot see, or one that is not live, is 404 via
-    :func:`_get_visible_skill`. Enabling is capped at
-    ``skill_enablement.MAX_ENABLED_SKILLS`` (403
-    ``skill_enable_quota_exceeded``). The bundle itself is immutable
-    here — re-upload for content changes.
+    :func:`_get_visible_skill`. The bundle itself is immutable here —
+    re-upload for content changes.
     """
     skill = await _get_visible_skill(db, skill_id, current_user.id)
 
@@ -239,14 +246,6 @@ async def update_skill(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot edit metadata of an OFFICIAL skill",
         )
-    # Both checks run before anything is written — authorization, then
-    # the budget — so a request that cannot have what it asked for does
-    # not do half its work first. Excluding this skill from the count
-    # keeps re-enabling an already-on skill a no-op rather than a
-    # spurious rejection at the boundary.
-    if body.enabled:
-        await ensure_enable_capacity(db, current_user.id, exclude_skill_id=skill.id)
-
     if edits_metadata:
         # One UPDATE rather than ORM mutation: avoids the
         # read-modify-write race where two concurrent PATCHes each load
