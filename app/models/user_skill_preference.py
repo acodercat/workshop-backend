@@ -1,16 +1,21 @@
-"""Per-user override of a skill's default ``enabled`` flag.
+"""Whether one user wants one skill in their every-turn context.
 
-CUSTOM skills' ``enabled`` lives on the ``skill`` row itself — the
-owner can flip it directly. Platform skills (SYSTEM/OFFICIAL) are
-platform-wide rows (``user_id IS NULL``) that no end user can mutate
-without affecting everyone, so per-user toggles need a separate place
-to live.
+One row per ``(user_id, skill_id)``, written by
+:func:`app.api.public.skill.update_skill` whatever the skill's origin.
+An ``OFFICIAL`` row is shared by everyone and a ``CUSTOM`` one has an
+audience of one, but the answer is the user's either way, so it lives
+here either way — the ``skill`` row carries no opinion about it.
 
-This table fills that gap. One row per ``(user_id, skill_id)`` —
-``enabled`` overrides ``skill.enabled`` when present; absent rows fall
-back to the skill's default. Mechanically the override works for any
-origin, but the only path that writes to it today is the platform-skill
-toggle in :func:`app.api.public.skill.update_skill`.
+**No row is the answer "never said", and that reads as off.** There is
+no platform-wide default to fall back to: a skill nobody asked for does
+not get to spend a user's context budget, and an operator who wants one
+noticed puts it somewhere users see it rather than somewhere they do
+not. ``skill.status`` still gates everything on top of this: a listing
+that is not live reaches nobody, however this row reads.
+
+``SYSTEM`` skills have no rows here and never should: they are
+agent-only, never listed to a user and not togglable, so there is
+nothing for a user to have said.
 """
 
 from datetime import datetime

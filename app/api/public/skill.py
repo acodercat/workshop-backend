@@ -25,14 +25,14 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import and_, func, or_, select, update as sql_update
+from sqlalchemy import func, or_, select, update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
 from app.api.uploads import read_capped
 from app.auth import authenticate_and_get_user
-from app.models.skill import Skill, SkillOrigin
+from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.models.user import User
 from app.models.user_skill_preference import UserSkillPreference
 from app.rate_limit import limiter
@@ -40,7 +40,10 @@ from app.schemas.file import DownloadUrlResponse
 from app.schemas.skill import SkillResponse, SkillUpdate
 from app.services import file_storage
 from app.services.file_storage import SKILL_POLICY
-from app.services.skill_enablement import ensure_enable_capacity
+from app.services.skill_enablement import (
+    ensure_enable_capacity,
+    preference_join,
+)
 from app.services.skill_i18n import (
     DEFAULT_LOCALE,
     normalize_locale,
@@ -51,6 +54,32 @@ from app.services.skill_registration import register_skill_bundle
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["skills"])
+
+
+def _to_response(
+    skill: Skill, *, enabled: bool, display_name: str | None = None,
+) -> SkillResponse:
+    """One skill as its owner's picker sees it.
+
+    ``enabled`` is required rather than read off the row: it lives in
+    ``user_skill_preference``, so it is the caller's to supply and a
+    route that forgot would otherwise report a plausible lie.
+
+    ``display_name`` overrides the stored default where the caller has
+    already resolved it for a locale.
+    """
+    return SkillResponse(
+        id=skill.id,
+        origin=skill.origin,
+        name=skill.name,
+        display_name=display_name or skill.display_name,
+        description=skill.description,
+        bundle_size=skill.bundle_size,
+        enabled=enabled,
+        created_at=skill.created_at,
+        updated_at=skill.updated_at,
+    )
+
 
 @router.post("/skills", status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/minute")
@@ -80,7 +109,9 @@ async def register_skill(
         filename=file.filename or "skill.zip",
         data=data,
     )
-    return SkillResponse.model_validate(skill)
+    # A fresh upload has no preference row: usable by an explicit pick
+    # and silent otherwise, until its owner turns it on.
+    return _to_response(skill, enabled=False)
 
 
 @router.get("/skills")
@@ -99,39 +130,38 @@ async def list_skills(
     ``display_name_i18n`` map returns its localized name, everything else the
     stored default. The i18n map itself is never exposed.
 
-    The ``enabled`` field in the response is the **effective** state
-    for this user: a ``user_skill_preference`` row overrides
-    ``skill.enabled`` when present. That row only ever exists for
-    OFFICIAL skills the user has toggled (CUSTOM uses ``skill.enabled``
-    directly, owner-mutated).
+    Only live listings appear: a skill an operator has retired or not
+    yet published is gone from here for everyone, including the users
+    who had turned it on.
+
+    ``enabled`` is this user's own answer — their
+    ``user_skill_preference`` row, or ``false`` where they have never
+    said. It is what the toggle on the skills page shows, and (combined
+    with the listing being live, which every row here already is) what
+    decides whether the skill rides in their context every turn.
     """
     resolved_locale = normalize_locale(locale)
     stmt = (
         select(Skill, UserSkillPreference.enabled.label("preference_enabled"))
-        .outerjoin(
-            UserSkillPreference,
-            and_(
-                UserSkillPreference.skill_id == Skill.id,
-                UserSkillPreference.user_id == current_user.id,
-            ),
-        )
+        .outerjoin(UserSkillPreference, preference_join(current_user.id))
         .where(
+            Skill.status == SkillStatus.PUBLISHED,
             (Skill.user_id == current_user.id)
-            | (Skill.origin == SkillOrigin.OFFICIAL)
+            | (Skill.origin == SkillOrigin.OFFICIAL),
         )
         .order_by(Skill.created_at.desc())
     )
     result = await db.execute(stmt)
-    responses: list[SkillResponse] = []
-    for skill, preference_enabled in result.all():
-        response = SkillResponse.model_validate(skill)
-        response.display_name = resolve_display_name(
-            skill.display_name, skill.display_name_i18n, resolved_locale
+    return [
+        _to_response(
+            skill,
+            enabled=bool(preference_enabled),
+            display_name=resolve_display_name(
+                skill.display_name, skill.display_name_i18n, resolved_locale
+            ),
         )
-        if preference_enabled is not None:
-            response.enabled = preference_enabled
-        responses.append(response)
-    return responses
+        for skill, preference_enabled in result.all()
+    ]
 
 
 @router.patch("/skills/{skill_id}")
@@ -141,70 +171,69 @@ async def update_skill(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SkillResponse:
-    """Edit a skill's picker-visible metadata or flip its enable toggle.
+    """Edit a skill's picker-visible metadata, or flip this user's toggle.
 
-    Three cases:
+    The two halves of the body go to two different rows, which is why
+    they answer to different rules:
 
-    - **CUSTOM owned by caller** — full edit (display_name, description,
-      enabled all writable on the ``skill`` row).
-    - **OFFICIAL** — only ``enabled`` is writable, via a per-user
-      ``user_skill_preference`` row (the platform row stays shared).
-      ``display_name`` / ``description`` reject with 403 because they'd
-      need to mutate the shared row.
-    - **CUSTOM not owned / SYSTEM** — 404 via :func:`_get_visible_skill`.
+    - ``enabled`` is this caller's own answer and always lands in their
+      ``user_skill_preference`` row, whatever the skill's origin. An
+      ``OFFICIAL`` row is shared, and a ``CUSTOM`` one has an audience of
+      one; neither is a reason for the toggle to live anywhere else.
+    - ``display_name`` / ``description`` are the listing's own metadata.
+      Only its owner may edit them, so on an ``OFFICIAL`` skill they are
+      403 — the platform owns that row.
 
-    Enabling is capped at ``skill_enablement.MAX_ENABLED_SKILLS``
-    simultaneously enabled skills (403 ``skill_enable_quota_exceeded``).
-    The bundle itself is immutable on every path — re-upload for content
-    changes.
+    A skill the caller cannot see, or one that is not live, is 404 via
+    :func:`_get_visible_skill`. Enabling is capped at
+    ``skill_enablement.MAX_ENABLED_SKILLS`` (403
+    ``skill_enable_quota_exceeded``). The bundle itself is immutable
+    here — re-upload for content changes.
     """
     skill = await _get_visible_skill(db, skill_id, current_user.id)
 
-    # Enabling costs an ambient-context slot (the skill's metadata rides
-    # in every turn); cap simultaneously enabled skills. Excluding this
-    # skill from the count keeps re-enabling an already-on skill a no-op.
+    edits_metadata = body.display_name is not None or body.description is not None
+    if edits_metadata and skill.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot edit metadata of an OFFICIAL skill",
+        )
+    # Both checks run before anything is written — authorization, then
+    # the budget — so a request that cannot have what it asked for does
+    # not do half its work first. Excluding this skill from the count
+    # keeps re-enabling an already-on skill a no-op rather than a
+    # spurious rejection at the boundary.
     if body.enabled:
         await ensure_enable_capacity(
             db, current_user.id, exclude_skill_id=skill.id,
         )
 
-    if skill.origin == SkillOrigin.OFFICIAL:
-        if body.display_name is not None or body.description is not None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot edit metadata of an OFFICIAL skill",
-            )
-        if body.enabled is not None:
-            await _upsert_preference(
-                db, current_user.id, skill.id, body.enabled,
-            )
-        await db.commit()
-        response = SkillResponse.model_validate(skill)
-        if body.enabled is not None:
-            response.enabled = body.enabled
-        return response
-
-    # CUSTOM owned by the caller. Collect non-null fields and apply
-    # them in a single UPDATE statement — avoids the read-modify-write
-    # race where two concurrent PATCHes both load the ORM object, each
-    # mutates one field, and the second commit wipes the first.
-    updates = {
-        field: value
-        for field, value in body.model_dump(exclude_unset=True).items()
-        if value is not None
-    }
-    # An explicit rename must win over a bundle-shipped locale map — the
-    # list endpoint resolves ``display_name_i18n`` first, so leaving a
-    # stale map in place would silently shadow the edit.
-    if "display_name" in updates:
-        updates["display_name_i18n"] = None
-    if updates:
+    if edits_metadata:
+        # One UPDATE rather than ORM mutation: avoids the
+        # read-modify-write race where two concurrent PATCHes each load
+        # the row, mutate one field, and the second commit wipes the
+        # first. An explicit rename must also win over a bundle-shipped
+        # locale map — the list endpoint resolves ``display_name_i18n``
+        # first, so a stale map would silently shadow the edit.
+        updates: dict[str, object] = {}
+        if body.display_name is not None:
+            updates["display_name"] = body.display_name
+            updates["display_name_i18n"] = None
+        if body.description is not None:
+            updates["description"] = body.description
         await db.execute(
             sql_update(Skill).where(Skill.id == skill.id).values(**updates)
         )
-        await db.commit()
-        await db.refresh(skill)
-    return skill
+
+    if body.enabled is not None:
+        await _upsert_preference(db, current_user.id, skill.id, body.enabled)
+
+    await db.commit()
+    await db.refresh(skill)
+    return _to_response(
+        skill,
+        enabled=await _preference_enabled(db, current_user.id, skill.id),
+    )
 
 
 @router.delete("/skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -293,16 +322,17 @@ async def _get_owned_skill(
 async def _get_visible_skill(
     db: AsyncSession, skill_id: int, user_id: int,
 ) -> Skill:
-    """Fetch a skill visible to ``user_id`` (own CUSTOM or any OFFICIAL).
+    """Fetch a live skill visible to ``user_id`` (own CUSTOM or OFFICIAL).
 
-    Used by PATCH (OFFICIAL toggle path uses ``user_skill_preference``;
-    the row itself is shared) and GET /skills/{id}/download-url — both
-    operate on the wider "visible" set than the owner-only
-    ``_get_owned_skill``. SYSTEM skills are agent-only, so they resolve
-    to 404 here just like a stranger's CUSTOM.
+    Used by PATCH and GET /skills/{id}/download-url — both operate on
+    the wider "visible" set than the owner-only ``_get_owned_skill``.
+    SYSTEM skills are agent-only, so they resolve to 404 here just like
+    a stranger's CUSTOM — and so does anything an operator has retired
+    or not yet published: a listing that is not live is not addressable.
     """
     stmt = select(Skill).where(
         Skill.id == skill_id,
+        Skill.status == SkillStatus.PUBLISHED,
         or_(Skill.user_id == user_id, Skill.origin == SkillOrigin.OFFICIAL),
     )
     result = await db.execute(stmt)
@@ -312,6 +342,20 @@ async def _get_visible_skill(
             status_code=status.HTTP_404_NOT_FOUND, detail="skill not found",
         )
     return skill
+
+
+async def _preference_enabled(
+    db: AsyncSession, user_id: int, skill_id: int,
+) -> bool:
+    """This user's answer for one skill; ``False`` where they never gave one."""
+    return bool(
+        await db.scalar(
+            select(UserSkillPreference.enabled).where(
+                UserSkillPreference.user_id == user_id,
+                UserSkillPreference.skill_id == skill_id,
+            )
+        )
+    )
 
 
 async def _upsert_preference(

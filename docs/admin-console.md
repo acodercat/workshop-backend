@@ -275,12 +275,13 @@ millions, add `ix_credit_ledger_created_at` then.
 |---|---|
 | `GET /skills?origin=&q=` | Every origin, including the `SYSTEM` skills hidden from users. Platform rows first, then newest; owner LEFT-joined (platform rows have none by construction). |
 | `POST /skills` | Upload a platform bundle — multipart, `{origin}` |
-| `PATCH /skills/{id}` | `{display_name, description, enabled, reason}` — picker metadata and the **platform default** |
+| `PATCH /skills/{id}` | `{display_name, description, status, reason}` — picker metadata and the listing's lifecycle |
 
-The toggle's subtlety is surfaced in the UI, not just here: `enabled`
-is the default, and `user_skill_preference` overrides it per user
-(effective = `COALESCE(pref.enabled, skill.enabled)`), so disabling a
-skill does **not** switch it off for users who opted in.
+`status` and `user_skill_preference` answer two different questions and
+this surface only owns one. `status` is whether the listing is live and
+applies to everyone — retiring a skill closes every route to it,
+including for the users who had turned it on. Whether a given user
+*wants* a live skill is theirs, written from the customer surface.
 
 **`display_name` and `description` are editable, following the public
 surface.** It calls them picker metadata — what the picker shows, not

@@ -50,7 +50,7 @@ from app.models.recipe import Recipe, RecipeOrigin
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
-from app.models.skill import Skill, SkillOrigin
+from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.schemas.session import FileRef
 from app.services import credits, file_storage
 from app.services.redis import (
@@ -471,9 +471,13 @@ async def _filter_invokable_skills(
     ``bundle_key`` pins the bytes; ``name`` rides along for log and
     LLM-reminder display.
 
-    A skill is invokable when it's visible to the user: their own
-    CUSTOM, or any OFFICIAL skill. The enable toggle is deliberately
-    **not** checked — it governs ambient auto-discovery (whether the
+    A skill is invokable when it is live and visible to the user: their
+    own CUSTOM, or any OFFICIAL skill, and ``PUBLISHED`` either way. The
+    listing's ``status`` is checked because retiring a skill has to close
+    this route too, or it closes none that matter; retirement therefore
+    takes effect here rather than in the worker, since a turn whose
+    snapshot already names a skill keeps running against the pinned
+    ``bundle_key``. The user's own toggle is deliberately **not** checked — it governs ambient auto-discovery (whether the
     skill's metadata rides in the LLM context every turn, see the
     worker's ``list_enabled``), while an explicit composer pick is its
     own per-turn authorization. Unknown / hidden names are silently
@@ -495,6 +499,7 @@ async def _filter_invokable_skills(
 
     stmt = select(Skill.id, Skill.name, Skill.bundle_key, Skill.user_id).where(
         Skill.name.in_(requested_unique),
+        Skill.status == SkillStatus.PUBLISHED,
         (Skill.user_id == user_id) | (Skill.origin == SkillOrigin.OFFICIAL),
     )
     result = await db.execute(stmt)

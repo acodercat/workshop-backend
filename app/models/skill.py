@@ -13,6 +13,14 @@ User-facing visibility is ``OFFICIAL`` + the caller's own ``CUSTOM``;
 ``SYSTEM`` is agent-only. ``SYSTEM`` and ``OFFICIAL`` are both
 platform-owned (``user_id IS NULL``). The worker stages all three into
 the sandbox so axon's ``use_skill`` tool can surface them to the LLM.
+
+Whether a skill actually reaches a given user is two independent
+questions, answered in two places: :class:`SkillStatus` on this row says
+whether the listing is live at all, and ``user_skill_preference`` says
+whether that user wants it in their context. Neither column means
+something different depending on ``origin`` — the one exemption is that
+``SYSTEM``, being agent-only, has no user side to consult, which only
+the worker ever has to account for since nothing user-facing lists one.
 """
 
 from datetime import datetime
@@ -43,6 +51,35 @@ class SkillOrigin(StrEnum):
     SYSTEM = "SYSTEM"
     OFFICIAL = "OFFICIAL"
     CUSTOM = "CUSTOM"
+
+
+class SkillStatus(StrEnum):
+    """Where the listing sits in its life, independent of any user.
+
+    - ``STAGED`` — uploaded and validated, exposed to nobody. Where an
+      operator parks a platform bundle before it goes live.
+    - ``PUBLISHED`` — live. The only state a skill can be reached in, by
+      ambient discovery and by an explicit composer pick alike.
+    - ``RETIRED`` — pulled. The row survives (session snapshots point at
+      its id and bundle key) but every route to it is closed, including
+      for the users who had turned it on.
+
+    Only ``PUBLISHED`` is reachable; the other two differ in what they
+    say about a row, not in what they do to it, and an operator moves
+    between them freely. A ``CUSTOM`` skill is ``PUBLISHED`` from birth
+    and stays there — it has no review to wait for and no audience to be
+    pulled from, and its owner removes it by deleting it.
+
+    Orthogonal to ``user_skill_preference``, which answers a different
+    question: not *is this listing live* but *does this user want it in
+    their context*. Member values match the Postgres ``skill_status``
+    enum and the Python member names — same convention as
+    :class:`SkillOrigin`.
+    """
+
+    STAGED = "STAGED"
+    PUBLISHED = "PUBLISHED"
+    RETIRED = "RETIRED"
 
 
 class Skill(Base):
@@ -83,6 +120,26 @@ class Skill(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     bundle_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     bundle_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Deliberately no default, in either layer. A new ``CUSTOM`` row is
+    # ``PUBLISHED`` (its owner can use it at once) and a new platform row
+    # is ``STAGED`` (an operator decides when it goes live), so there is
+    # no one value a forgotten write should fall back to — and the column
+    # this one replaces is the cautionary tale: its ``server_default`` of
+    # ``true`` was the opposite of what uploads wanted, which is why the
+    # insert had to spell out the opposite.
+    status: Mapped[SkillStatus] = mapped_column(
+        SAEnum(
+            SkillStatus, name="skill_status",
+            values_callable=lambda cls: [m.value for m in cls],
+        ),
+        nullable=False,
+    )
+    # TRANSITIONAL — dropped in the follow-up migration, do not read.
+    # ``core/agent-worker`` is shared by this deployment and metaseq's,
+    # and queries ``COALESCE(p.enabled, s.enabled)``; it cannot learn
+    # about ``status`` until both databases have the column. Until that
+    # worker ships, every write keeps this column at the value that makes
+    # the old formula agree with the new one — see ``skill_enablement``.
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"),
     )

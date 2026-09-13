@@ -6,25 +6,26 @@ so the validation, the OSS key scheme and the replace-by-name behaviour
 are one implementation with two front doors. This script is the path
 that still works when the console is down, or when all you have is SSH.
 
-``enabled`` follows the origin: SYSTEM skills land enabled — they are
-agent-only and reach the worker through the same effective-enabled read
-as everything else, so disabled means invisible to the agent
-(``--disabled`` stages a bundle without exposing it). OFFICIAL skills
-always land **disabled**: ``skill.enabled`` is the default every user
-who never touched the toggle falls back to
-(``COALESCE(pref.enabled, skill.enabled)``), and an enabled-by-default
-official skill would push its metadata into every user's every-turn LLM
-context. Users opt in from the skills page — or just pick the skill in
-the composer, which doesn't consult the toggle at all.
+A new listing lands ``STAGED``: uploaded, validated, reaching nobody.
+Uploading is not publishing, and the one thing an upload cannot undo is
+having been visible. ``--publish`` says to go live — on a
+new listing or one already staged.
+
+Whether a user then *wants* an ``OFFICIAL`` skill is a separate question
+on a separate row: they opt in from the skills page, or pick the skill
+in the composer, which consults the listing's status but not their
+toggle.
 
 Idempotent by name: re-uploading a name that exists replaces that
 skill's bundle in place, keeping its id and every user's preference.
+Nothing about policy moves with it — not the listing's status either —
+because shipping a fix is a content change.
 
 Usage:
     cd backend
     uv run python -m scripts.upload_skill path/to/my-skill.zip
     uv run python -m scripts.upload_skill path/to/another.zip --origin OFFICIAL
-    uv run python -m scripts.upload_skill path/to/another.zip --disabled
+    uv run python -m scripts.upload_skill path/to/another.zip --publish
 """
 
 import argparse
@@ -39,7 +40,7 @@ from app.services.skill_registration import register_platform_skill_bundle
 
 
 async def upload_bundle(
-    bundle_path: Path, origin: SkillOrigin, disabled: bool
+    bundle_path: Path, origin: SkillOrigin, publish: bool
 ) -> None:
     data = bundle_path.read_bytes()
     print(f"Read {len(data)} bytes from {bundle_path}")
@@ -51,9 +52,9 @@ async def upload_bundle(
                 origin=origin,
                 filename=bundle_path.name,
                 data=data,
-                # ``None`` lets the origin decide (SYSTEM on, OFFICIAL
-                # off); ``--disabled`` is the one case a caller overrides.
-                enabled=False if disabled else None,
+                # A new listing lands STAGED unless asked otherwise;
+                # a replace never touches status at all.
+                publish=publish,
             )
         except AppError as exc:
             sys.exit(f"Rejected: {exc}")
@@ -67,8 +68,10 @@ async def upload_bundle(
             # Printed because the row no longer points at it: this is the
             # only way back to the previous version.
             print(f"  replaced bundle: {replaced_key}")
-        status = "enabled" if skill.enabled else "disabled"
-        print(f"  DB upserted (id={skill.id}, {origin.value}, {status})")
+        print(
+            f"  DB upserted (id={skill.id}, {origin.value}, "
+            f"{skill.status.value})"
+        )
 
 
 def main() -> None:
@@ -85,10 +88,11 @@ def main() -> None:
              "OFFICIAL (user opts in).",
     )
     parser.add_argument(
-        "--disabled", action="store_true",
-        help="SYSTEM only: insert with enabled=false (bundle exists in DB "
-             "but stays invisible to the agent). OFFICIAL is always "
-             "disabled — the toggle default is per-user opt-in.",
+        "--publish", action="store_true",
+        help="Go live. A new listing is STAGED by default — uploaded and "
+             "validated but reaching nobody. Also promotes a listing "
+             "that is already staged; without the flag a replace leaves "
+             "status alone.",
     )
     args = parser.parse_args()
 
@@ -96,7 +100,7 @@ def main() -> None:
     if not bundle_path.exists():
         sys.exit(f"File not found: {bundle_path}")
 
-    asyncio.run(upload_bundle(bundle_path, SkillOrigin(args.origin), args.disabled))
+    asyncio.run(upload_bundle(bundle_path, SkillOrigin(args.origin), args.publish))
     print("Done.")
 
 
