@@ -30,11 +30,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["recipes"])
 
 # Per-user cap on CUSTOM recipes — bounds account-level abuse so one
-# account can't flood the picker / table. Matches the skill *upload*
-# cap (``skill_registration._MAX_SKILLS_PER_USER`` = 100), not the much
-# smaller *enabled* cap (``skill_enablement.MAX_ENABLED_SKILLS`` = 20,
-# which exists to bound ambient LLM context — a concern recipes don't
-# have, since a recipe is picked per-turn, never auto-loaded).
+# account can't flood the picker / table. Matches the skill upload cap
+# (``skill_registration._MAX_SKILLS_PER_USER`` = 100), which is likewise
+# about storage rather than per-turn cost: a recipe, like a skill, only
+# reaches a turn the user picked it for.
 _MAX_RECIPES_PER_USER = 100
 
 
@@ -50,7 +49,7 @@ async def create_recipe(
 
     403 if the user is already at the per-user recipe cap.
     """
-    # Race-acceptable like the skill cap: two concurrent creates could
+    # Race-acceptable like the skill upload cap: two concurrent creates
     # each pass and put the user one over. Not worth a row lock for a
     # soft policy limit. OFFICIAL rows have ``user_id IS NULL`` so they
     # don't count against a user.

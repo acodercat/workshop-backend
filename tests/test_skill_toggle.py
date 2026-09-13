@@ -4,8 +4,11 @@ The refactor these pin replaced a branch on ``origin`` with one path:
 whatever the skill, a user's answer goes to *their* preference row and
 never to the shared listing. The regression it guards against is the
 old shape creeping back — a ``CUSTOM`` toggle mutating ``skill`` again,
-which would work for the owner and be invisible to the worker, since the
-worker prefers the preference row.
+which would work for the owner and be invisible to everyone else.
+
+What that answer now means is narrower: the composer offers the skill.
+It no longer decides whether the model sees it, so nothing here is
+rationed.
 
 The database is a fake that records statements: what matters here is
 *which table each field lands in*, which is a property of the SQL, not
@@ -43,7 +46,7 @@ class _FakeResult:
 
 
 class _FakeDb:
-    """Records every statement; answers the two scalar reads by shape."""
+    """Records every statement; answers the one scalar read."""
 
     def __init__(self, skill: Skill | None, *, preference: bool | None = None):
         self.skill = skill
@@ -56,10 +59,8 @@ class _FakeDb:
         return _FakeResult(self.skill)
 
     async def scalar(self, stmt):
-        sql = _sql(stmt)
-        self.statements.append(sql)
-        # ``ensure_enable_capacity`` counts; ``_preference_enabled`` reads.
-        return 0 if "count(" in sql else self.preference
+        self.statements.append(_sql(stmt))
+        return self.preference
 
     async def commit(self) -> None:
         self.commits += 1
@@ -173,13 +174,18 @@ def test_a_rename_clears_the_locale_map() -> None:
     assert "display_name_i18n=NULL" in update.replace(" ", "")
 
 
-def test_turning_one_on_is_capped_and_turning_one_off_is_not() -> None:
-    """The cap is on context spend, so only the direction that spends
-    pays for it — otherwise a user at the cap could not switch off."""
-    on = _FakeDb(_skill())
-    _client(on).patch("/skills/5", json={"enabled": True})
-    assert any("count(" in s for s in on.statements)
+def test_turning_one_on_costs_nothing_and_so_is_not_counted() -> None:
+    """No quota on the toggle, in either direction.
 
-    off = _FakeDb(_skill())
-    _client(off).patch("/skills/5", json={"enabled": False})
-    assert all("count(" not in s for s in off.statements)
+    The cap this replaces bounded per-turn context: every enabled skill
+    spent a metadata line in the ``use_skill`` listing. Enabling now only
+    lists the skill in the composer, so there is nothing to ration — and
+    a COUNT reappearing here would mean the budget came back with it.
+    """
+    for enabled in (True, False):
+        db = _FakeDb(_skill())
+
+        response = _client(db).patch("/skills/5", json={"enabled": enabled})
+
+        assert response.status_code == 200
+        assert all("count(" not in stmt for stmt in db.statements)

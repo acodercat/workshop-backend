@@ -14,13 +14,19 @@ User-facing visibility is ``OFFICIAL`` + the caller's own ``CUSTOM``;
 platform-owned (``user_id IS NULL``). The worker stages all three into
 the sandbox so axon's ``use_skill`` tool can surface them to the LLM.
 
-Whether a skill actually reaches a given user is two independent
+Whether a skill is offered to a given user is two independent
 questions, answered in two places: :class:`SkillStatus` on this row says
 whether the listing is live at all, and ``user_skill_preference`` says
-whether that user wants it in their context. Neither column means
-something different depending on ``origin`` — the one exemption is that
-``SYSTEM``, being agent-only, has no user side to consult, which only
-the worker ever has to account for since nothing user-facing lists one.
+whether that user keeps it in their composer picker. Neither column
+means something different depending on ``origin`` — the one exemption is
+that ``SYSTEM``, being agent-only, has no user side to consult, which
+only the worker ever has to account for since nothing user-facing lists
+one.
+
+Being offered is not being loaded. An ``OFFICIAL`` or ``CUSTOM`` skill
+reaches a turn only because the user picked it there; only ``SYSTEM``
+rides along unasked. The shared worker holds that rule in one place
+(``agent_worker.infra.skill_repository``).
 """
 
 from datetime import datetime
@@ -71,8 +77,8 @@ class SkillStatus(StrEnum):
     pulled from, and its owner removes it by deleting it.
 
     Orthogonal to ``user_skill_preference``, which answers a different
-    question: not *is this listing live* but *does this user want it in
-    their context*. Member values match the Postgres ``skill_status``
+    question: not *is this listing live* but *does this user keep it in
+    their composer picker*. Member values match the Postgres ``skill_status``
     enum and the Python member names — same convention as
     :class:`SkillOrigin`.
     """

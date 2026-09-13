@@ -161,11 +161,11 @@ async def queue_user_message(
     else:
         await credits.settle_open_for_user(db, session.user_id)
 
-    # Drop ``skills`` the user can't see (someone else's CUSTOM, or a
-    # hidden SYSTEM row). Visibility is the only gate here: an explicit
-    # per-turn pick is its own authorization, so the enable toggle —
-    # which governs ambient auto-discovery, not manual selection — is
-    # deliberately not consulted.
+    # Drop ``skills`` the user can't reach: someone else's CUSTOM, a
+    # hidden SYSTEM row, or a listing an operator has retired. The user's
+    # own toggle is deliberately not consulted — it governs which skills
+    # the composer offers, and an explicit per-turn pick is its own
+    # authorization however the request came by the name.
     accepted_skills = await _filter_invokable_skills(
         db, session.user_id, skills or [],
     )
@@ -477,14 +477,24 @@ async def _filter_invokable_skills(
     this route too, or it closes none that matter; retirement therefore
     takes effect here rather than in the worker, since a turn whose
     snapshot already names a skill keeps running against the pinned
-    ``bundle_key``. The user's own toggle is deliberately **not** checked — it governs ambient auto-discovery (whether the
-    skill's metadata rides in the LLM context every turn, see the
-    worker's ``list_enabled``), while an explicit composer pick is its
-    own per-turn authorization. Unknown / hidden names are silently
-    dropped rather than raising; the user's intent (a free-text
-    composer prompt) is still useful even if one chip was stale, and
-    surfacing a 4xx mid-conversation would be a worse UX than gracefully
-    proceeding without that skill.
+    ``bundle_key``.
+
+    The user's own toggle is deliberately **not** checked — it governs
+    which skills the composer *offers* (see
+    :mod:`app.models.user_skill_preference`), which is a convenience for
+    finding them, not an authorization boundary. An explicit pick is its
+    own authorization, so naming a skill that was never turned on still
+    works: that is what makes a freshly uploaded skill usable, and what
+    keeps a stale composer chip from failing a turn.
+
+    This route is now the **only** way an OFFICIAL or CUSTOM skill reaches
+    the model — the worker's listing carries the agent-only SYSTEM set and
+    these picks, nothing else.
+
+    Unknown / hidden names are silently dropped rather than raising; the
+    user's intent (a free-text composer prompt) is still useful even if
+    one chip was stale, and surfacing a 4xx mid-conversation would be a
+    worse UX than gracefully proceeding without that skill.
 
     Slug collisions between CUSTOM + OFFICIAL resolve CUSTOM-wins, matching
     the worker repo's ``ORDER BY (user_id IS NULL) ASC`` rule. Order is
