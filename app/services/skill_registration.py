@@ -176,16 +176,19 @@ async def register_platform_skill_bundle(
     row is updated in place, so every user's ``user_skill_preference``
     and the id the worker has seen both survive the update.
 
-    **Flushes but does not commit** — the console's caller is inside
-    ``audit()``, which owns the commit so the bundle and its audit row
-    land in one transaction. A flush failure compensates the OSS upload
-    and re-raises; a failure in the caller's *commit* leaves the object
-    for bucket lifecycle to collect, which is the accepted trade (the
-    alternative is deleting an object a concurrent turn may be staging).
+    **Flushes but does not commit** — the caller owns the commit.
+    :mod:`scripts.upload_skill` is the only caller here; this deployment
+    has no admin skill endpoint. A flush failure compensates the OSS
+    upload and re-raises; a failure in the caller's *commit* leaves the
+    object for bucket lifecycle to collect, which is the accepted trade
+    (the alternative is deleting an object a concurrent turn may be
+    staging).
 
     The previous bundle object is **left in OSS** on a replace, for that
-    same staging reason. The caller records the replaced key in its
-    audit payload, which is what makes an unwanted version recoverable.
+    same staging reason. Its key is *returned* rather than recorded
+    anywhere — this deployment keeps no operator trail (revision
+    ``c8f2a5e1d94b``), so the caller printing it is the only way back to
+    that version.
 
     **Shipping a bundle is a content change.** A replace leaves the
     listing's ``status`` and every user's preference where they were, so

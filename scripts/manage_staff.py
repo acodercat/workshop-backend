@@ -11,10 +11,11 @@ fully locked-out console is recoverable without a working account.
 The account rules themselves are **not** duplicated here: this drives
 :mod:`app.services.admin.staff`, the same module the console's endpoints
 call, so the password floor and the sign-out-on-reset behaviour cannot
-drift between the two entry points. What the script does *not* get is an
-audit row — ``admin_audit_log.staff_id`` is ``NOT NULL`` and a script run
-has no operator to attribute the action to. That is the honest record:
-these runs are authorized by database credentials, and the shell they
+drift between the two entry points.
+
+Nothing about a run is recorded in the database — this deployment keeps
+no operator trail for the console either (revision ``c8f2a5e1d94b``).
+These runs are authorized by database credentials, and the shell they
 were typed into is where they are traceable.
 
 The password is read from the ``STAFF_PASSWORD`` environment variable

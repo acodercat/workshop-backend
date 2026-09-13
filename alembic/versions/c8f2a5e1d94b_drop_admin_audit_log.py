@@ -7,8 +7,8 @@ the only way to commit through it, the ``AuditAction`` vocabulary and the
 ``/audit-logs`` endpoint all go together.
 
 **This destroys history, and the downgrade does not bring it back.** The
-column shape returns; the rows do not. Take a dump of ``admin_audit_log``
-first if anything downstream reads it.
+column shape returns; the rows do not. That is the intent and it has been
+confirmed: the rows are not wanted and no dump is being kept.
 
 What replaces it: nothing. Every console mutation now ends with its own
 ``await ctx.db.commit()``. The property that made the funnel worth having
