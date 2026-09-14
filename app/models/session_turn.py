@@ -159,6 +159,26 @@ class SessionTurn(Base):
         server_default=text("'[]'::jsonb"),
         default=list,
     )
+    # Per-turn system reminders: model-facing context the backend renders
+    # at enqueue time, which the worker appends verbatim to this turn's
+    # ``Agent.run(reminders=...)`` — each string its own
+    # ``<system-reminder>`` block. Shape: ``["...", ...]``.
+    #
+    # Rendered text rather than a structured snapshot, so the worker stays
+    # ignorant of where the context came from: a scheduled run
+    # (``app/services/schedule/briefing.py``) needs no schedule-shaped code
+    # in the worker. Written only by server-side callers of
+    # ``queue_user_message``; no request schema carries it, so a client can
+    # never put text in front of the model this way.
+    #
+    # A collection (0..N): NOT NULL DEFAULT '[]' so "no reminders" is the
+    # empty array, never NULL — mirrors ``skills`` above.
+    reminders: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
+    )
     # Per-turn recipe snapshot, or NULL. The backend resolves the picked
     # recipe id → its vetted ``instructions`` server-side (the client
     # sends only ``recipe_id``, never raw text) and pins the rendered

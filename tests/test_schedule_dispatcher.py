@@ -28,7 +28,7 @@ from app.models.schedule import (
     ScheduleStatus,
 )
 from app.models.session import AgentType, Tier
-from app.services.schedule import catch_up_grace
+from app.services.schedule import catch_up_grace, render_run_reminder
 from app.services.session.exceptions import ConcurrentTaskLimitError, UnconfiguredTierError
 from app.workers import schedule_dispatcher
 
@@ -222,6 +222,17 @@ class TestCarriedContext:
         # Names, in the owner's order — the worker lists them to the model
         # that way. Resolution happens inside ``queue_user_message``.
         assert calls["queue"][0]["skills"] == ["pptx", "web-research"]
+
+    async def test_briefs_the_model_on_the_occurrence_it_is_running(self, monkeypatch):
+        schedule = _schedule(late_by=timedelta(minutes=40))
+        occurrence = schedule.next_run_at
+        _, calls = _patch(monkeypatch, schedule)
+
+        await schedule_dispatcher._process_one(7, redis=None)
+
+        # Rendered for the occurrence that came due, not the moment of the
+        # enqueue — this one is forty minutes late.
+        assert calls["queue"][0]["reminders"] == [render_run_reminder(schedule, occurrence)]
 
     async def test_passes_the_schedules_connectors_to_the_session(self, monkeypatch):
         schedule = _schedule()

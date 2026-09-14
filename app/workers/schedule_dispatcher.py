@@ -2,9 +2,10 @@
 
 The dispatcher runs nothing itself. It claims a due ``schedule``, builds a
 session, and hands it to ``queue_user_message`` — the same call the message
-endpoint makes — so by the time the worker claims the turn there is nothing
-left to distinguish it from one a user typed. That is why this feature
-needed no change in ``agent-worker`` or ``axon``.
+endpoint makes. The one thing a scheduled turn carries that a typed one does
+not is a system reminder telling the model so (:mod:`app.services.schedule.briefing`),
+rendered here and stored on the turn as plain text; the worker forwards it
+like any other, and still knows nothing about schedules.
 
 Sibling to the settle sweeper: same tick skeleton, its own advisory lock,
 every host runs it and exactly one wins each tick.
@@ -58,6 +59,7 @@ from app.services.schedule import (
     connectors as schedule_connectors,
     files as schedule_files,
     next_run_after,
+    render_run_reminder,
 )
 from app.services.session import build_session, queue_user_message
 from app.services.session.exceptions import ConcurrentTaskLimitError, UnconfiguredTierError
@@ -592,6 +594,9 @@ async def _enqueue(
         # Whatever no longer resolves is dropped here rather than failing
         # the occurrence — a schedule outlives the skills it names.
         skills=schedule.skills,
+        # Nobody is there to answer a clarifying question, and "today" means
+        # the owner's zone at the occurrence, not the host clock at enqueue.
+        reminders=[render_run_reminder(schedule, occurrence)],
     )
 
 

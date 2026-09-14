@@ -80,6 +80,7 @@ async def queue_user_message(
     skills: list[str] | None = None,
     recipe_id: int | None = None,
     agent_type: AgentType | None = None,
+    reminders: list[str] | None = None,
 ) -> None:
     """Persist the user message + session_turn, flip status, wake worker.
 
@@ -121,6 +122,10 @@ async def queue_user_message(
     row at step 3 and rides along to the worker through the claim
     query — no separate binding needed (skill rows are already
     user-scoped, the worker re-checks ownership at lookup time).
+    ``reminders`` are model-facing context strings a server-side caller
+    rendered (a scheduled run's briefing); they are stored on the turn as
+    given and the worker appends them to the run's system reminders. Never
+    pass client-supplied text here.
 
     Sandbox ownership lives on ``sandbox.session_id``. The worker
     resumes the latest non-TERMINATED sandbox for this session, or
@@ -200,6 +205,7 @@ async def queue_user_message(
         skills=accepted_skills,
         mcp_servers=accepted_connectors,
         recipe=recipe_snapshot,
+        reminders=reminders or [],
         status=SessionTurnStatus.PENDING,
     )
     db.add(session_turn)
