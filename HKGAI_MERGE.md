@@ -342,11 +342,14 @@ git stash pop                      # restore the local-only edits
 6. Anything under `app/services/payment/` or `app/services/commission/` on master — arrives as a
    modify/delete conflict; resolve `git rm`
 
-## Known inconsistency to watch
+## Tier labels name no model
 
-Backend `session_tier_models` maps **ADVANCED → deepseek-v4-pro**, but the frontend hkgai labels
-the advanced tier "高级（Fable）". Pick one (map ADVANCED to fable backend-side, or relabel the
-frontend) so the UI label matches the model actually used — out of scope for a sync merge.
+The frontend labels the tiers `快速 / 标准 / 高级` (`Fast / Standard / Advanced`) with no model
+name — the same as share. It used to read "高级（Fable）" while this file mapped ADVANCED to a
+different model; the frontend dropped the name (project-mars `ecd6ef5`) rather than chase it.
+Which model a tier runs is decided here, in `session_tier_models`, and nowhere else — so a change
+to that mapping needs no frontend edit. The frontend guide carries a probe that fails if a model
+name comes back into a tier label.
 
 ## When in doubt
 
