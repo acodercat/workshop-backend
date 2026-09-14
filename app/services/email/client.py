@@ -60,9 +60,7 @@ class EmailSendError(Exception):
 
 def _check_settings() -> None:
     if not settings.smtp_host:
-        raise EmailSendError(
-            "SMTP host missing — set ``smtp_host`` (e.g. smtp.larksuite.com)"
-        )
+        raise EmailSendError("SMTP host missing — set ``smtp_host`` (e.g. smtp.larksuite.com)")
     if not settings.smtp_username or not settings.smtp_password:
         raise EmailSendError(
             "SMTP credentials missing — set ``smtp_username`` and ``smtp_password``"
@@ -84,9 +82,7 @@ def _build_message(*, to: str, subject: str, html_body: str, message_id: str) ->
     # text-only clients (and spam filters that downgrade HTML-only
     # mails) happy. The fallback is intentionally generic since the
     # whole point of the HTML body is the formatted code.
-    msg.set_content(
-        "Your verification code is in the HTML version of this email."
-    )
+    msg.set_content("Your verification code is in the HTML version of this email.")
     msg.add_alternative(html_body, subtype="html")
     return msg
 
@@ -109,9 +105,7 @@ async def send_html_email(*, to: str, subject: str, html_body: str) -> str:
     # malformed (the SMTP send will surface the real error).
     domain = settings.smtp_from_address.split("@", 1)[-1] or uuid.uuid4().hex
     message_id = make_msgid(domain=domain)
-    msg = _build_message(
-        to=to, subject=subject, html_body=html_body, message_id=message_id
-    )
+    msg = _build_message(to=to, subject=subject, html_body=html_body, message_id=message_id)
 
     try:
         if settings.smtp_use_ssl:
@@ -140,7 +134,10 @@ async def send_html_email(*, to: str, subject: str, html_body: str) -> str:
         code = getattr(exc, "code", None)
         logger.warning(
             "SMTP send failed: code=%s message=%s message_id=%s to=%s",
-            code, exc, message_id, to,
+            code,
+            exc,
+            message_id,
+            to,
         )
         raise EmailSendError(
             message=str(exc) or "SMTP server rejected the send",

@@ -57,7 +57,6 @@ import psycopg
 
 from config import settings
 
-
 # Find candidate messages — same SQL as the Pass 1 diagnostic, scoped to
 # rows that have ANY intra-message duplicate. We then pull each candidate's
 # full blocks array and recompute the rename in Python so the logic stays
@@ -100,7 +99,9 @@ WHERE id = %(message_id)s
 # because the ``X#1`` shape itself doesn't collide with ``X``.
 
 
-def rename_duplicates(blocks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[tuple[int, str, str]]]:
+def rename_duplicates(
+    blocks: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[tuple[int, str, str]]]:
     """Return ``(new_blocks, renames)`` where ``renames`` is a list of
     ``(array_index, old_tool_use_id, new_tool_use_id)`` tuples for
     every block whose id changed. ``new_blocks`` is a fresh list of
@@ -165,9 +166,7 @@ def _summarize_renames(renames: list[tuple[int, str, str]]) -> str:
     grouped: dict[tuple[str, str], int] = defaultdict(int)
     for _, old, new in renames:
         grouped[(old, new)] += 1
-    return ", ".join(
-        f"{old}→{new} ({n}x)" for (old, new), n in sorted(grouped.items())
-    )
+    return ", ".join(f"{old}→{new} ({n}x)" for (old, new), n in sorted(grouped.items()))
 
 
 def _process_message(
@@ -240,24 +239,30 @@ def main() -> int:
         help="UUID of one session to scope the backfill to. Defaults to all.",
     )
     parser.add_argument(
-        "--days", type=int, default=None,
+        "--days",
+        type=int,
+        default=None,
         help="Lookback window in days. Default: scan all history (since "
-             "this is a one-shot cleanup, not a periodic job).",
+        "this is a one-shot cleanup, not a periodic job).",
     )
     parser.add_argument(
-        "--message-id", type=int,
+        "--message-id",
+        type=int,
         help="If set, preview the rename for this single message and exit "
-             "(implies dry-run regardless of --apply).",
+        "(implies dry-run regardless of --apply).",
     )
     parser.add_argument(
-        "--apply", action="store_true",
+        "--apply",
+        action="store_true",
         help="Actually write the renames. Without this flag the script "
-             "only previews what would change.",
+        "only previews what would change.",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=50,
+        "--batch-size",
+        type=int,
+        default=50,
         help="Commit every N messages. A mid-run Ctrl-C leaves the DB "
-             "consistent up to the last batch boundary.",
+        "consistent up to the last batch boundary.",
     )
     args = parser.parse_args()
 
@@ -284,7 +289,11 @@ def main() -> int:
         batch_renames = 0
         for batch_pos, (message_id, session_id, _, blocks) in enumerate(rows):
             n = _process_message(
-                cur, message_id, session_id, blocks, apply=args.apply,
+                cur,
+                message_id,
+                session_id,
+                blocks,
+                apply=args.apply,
             )
             total_renames += n
             batch_renames += n

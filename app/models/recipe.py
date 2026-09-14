@@ -24,6 +24,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     Boolean,
     CheckConstraint,
     Enum as SAEnum,
@@ -32,7 +33,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    TIMESTAMP,
     UniqueConstraint,
     text,
 )
@@ -51,7 +51,9 @@ class Recipe(Base):
     __tablename__ = "recipe"
 
     id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True,
+        Integer,
+        primary_key=True,
+        autoincrement=True,
     )
     user_id: Mapped[int | None] = mapped_column(
         Integer,
@@ -77,14 +79,20 @@ class Recipe(Base):
     # user's query.
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true"),
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
@@ -94,7 +102,8 @@ class Recipe(Base):
         # won't prevent duplicates (NULL ≠ NULL in SQL). This partial
         # index enforces name uniqueness within the platform set.
         Index(
-            "uq_recipe_platform_name", "name",
+            "uq_recipe_platform_name",
+            "name",
             unique=True,
             postgresql_where=text("user_id IS NULL"),
         ),

@@ -536,6 +536,47 @@ class SkillNotFoundError(AppError):
     error_type = "skill_not_found"
 
 
+class PrivateSkillBundleError(AppError):
+    """The console asked for a bundle that is not the platform's.
+
+    403 rather than 404: the row is on the operator's screen, so
+    pretending it does not exist would read as a bug. What is refused is
+    the *bytes* — a ``CUSTOM`` bundle is a user's private file, the same
+    class of thing as a conversation, and the console reads neither.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "private_skill_bundle"
+
+
+class PrivateSkillLifecycleError(AppError):
+    """The console tried to publish or retire a user's own skill.
+
+    The same boundary :class:`PrivateSkillBundleError` draws, one step
+    further in: not only are a ``CUSTOM`` bundle's bytes the user's, so
+    is whether it exists for them. Retiring one would leave it where its
+    owner cannot see, edit, delete or stop paying quota for it, and no
+    surface would explain where it went. 403 for the same reason: the
+    row is on the operator's screen.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "private_skill_lifecycle"
+
+
+class CategoryNotFoundError(AppError):
+    """No category with that id (admin-console lookup, both taxonomies).
+
+    One error for ``skill_category`` and ``connector_category`` alike: they
+    are separate tables, so passing one's id where the other is expected
+    already lands here, and the operator's next move — pick a real id out of
+    ``GET /{skill,connector}-categories`` — is the same either way. The
+    message names the taxonomy; the type does not need to."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "category_not_found"
+
+
 class ConnectorCatalogUrlTakenError(AppError):
     """The catalog already offers this URL. Two entries pointing at one
     server are the same Connector offered twice, whatever they are

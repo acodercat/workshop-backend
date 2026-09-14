@@ -8,6 +8,13 @@ Base project template with async SQLAlchemy, JWT auth, and Alembic migrations.
 # Install dependencies
 uv sync
 
+# Let `git blame` look through the whole-tree formatting commits listed in
+# .git-blame-ignore-revs rather than at them, so a line reads back to whoever
+# wrote it instead of to a formatter. Once per clone: GitHub reads that file on
+# its own, but a local checkout has to opt in, because a repository may not
+# decide on its own which commits your `blame` skips.
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+
 # Configure environment variables
 cp .env.example .env
 # Edit .env with your database URI and secret key

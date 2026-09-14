@@ -30,13 +30,13 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     UniqueConstraint,
     Uuid,
     text,

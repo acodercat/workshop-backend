@@ -57,7 +57,8 @@ async def apply_check_in_reward(
         await db.rollback()
         logger.info(
             "check-in duplicate user=%s date=%s (treated as already-claimed)",
-            user_id, check_in_date,
+            user_id,
+            check_in_date,
         )
         raise CheckInAlreadyClaimed(
             f"Check-in for user={user_id} date={check_in_date} already claimed"

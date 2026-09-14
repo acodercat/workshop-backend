@@ -55,22 +55,16 @@ class TestWhatItMustNotTouch:
         assert normalize_connector_url(url) == url
 
     def test_a_non_default_port_stays(self):
-        assert normalize_connector_url("https://x.com:8443/mcp") == (
-            "https://x.com:8443/mcp"
-        )
+        assert normalize_connector_url("https://x.com:8443/mcp") == ("https://x.com:8443/mcp")
 
     def test_the_default_port_is_read_per_scheme(self):
         # 443 is default for https and *not* for http; dropping it from both
         # would rewrite where an http URL points.
-        assert normalize_connector_url("http://x.com:443/mcp") == (
-            "http://x.com:443/mcp"
-        )
+        assert normalize_connector_url("http://x.com:443/mcp") == ("http://x.com:443/mcp")
         assert normalize_connector_url("http://x.com:80/mcp") == "http://x.com/mcp"
 
     def test_an_ipv6_literal_keeps_its_brackets(self):
-        assert normalize_connector_url("https://[::1]:8443/mcp") == (
-            "https://[::1]:8443/mcp"
-        )
+        assert normalize_connector_url("https://[::1]:8443/mcp") == ("https://[::1]:8443/mcp")
 
     def test_credentials_in_the_url_are_carried_through(self):
         # Dropping them would turn an authenticated endpoint into an anonymous
@@ -81,9 +75,7 @@ class TestWhatItMustNotTouch:
 
 
 class TestMalformedInputIsLeftToItsJudge:
-    @pytest.mark.parametrize(
-        "written", ["not a url", "https://x.com:notaport/mcp", "", "/mcp"]
-    )
+    @pytest.mark.parametrize("written", ["not a url", "https://x.com:notaport/mcp", "", "/mcp"])
     def test_it_comes_back_as_written(self, written):
         # Rejecting belongs to ``url_guard`` and the field constraints. A
         # normalizer that also judged would give them somewhere to disagree.
@@ -94,21 +86,15 @@ class TestEveryWayInGoesThroughIt:
     """On the type, not at the call sites — five of those write a URL."""
 
     def test_creating_a_connector(self):
-        assert ConnectorCreate(name="n", url="HTTPS://X.com/mcp/").url == (
-            "https://x.com/mcp"
-        )
+        assert ConnectorCreate(name="n", url="HTTPS://X.com/mcp/").url == ("https://x.com/mcp")
 
     def test_editing_one(self):
-        assert ConnectorUpdate(url="https://x.com:443/mcp#f").url == (
-            "https://x.com/mcp"
-        )
+        assert ConnectorUpdate(url="https://x.com:443/mcp#f").url == ("https://x.com/mcp")
 
     def test_testing_a_connection(self):
         # The probe too: a test that succeeded against one spelling and a row
         # stored under another is a confusing way to fail later.
-        assert ConnectionTestRequest(url="https://X.com/mcp/").url == (
-            "https://x.com/mcp"
-        )
+        assert ConnectionTestRequest(url="https://X.com/mcp/").url == ("https://x.com/mcp")
 
     def test_an_omitted_url_stays_omitted(self):
         assert ConnectorUpdate().url is None

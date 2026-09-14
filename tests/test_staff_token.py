@@ -11,7 +11,7 @@ the other's tests would not see.
 asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
@@ -51,7 +51,7 @@ def test_round_trips_username_and_token_version() -> None:
     assert claims is not None
     assert claims.username == "alice"
     assert claims.token_version == 3
-    assert expires_at > datetime.now(timezone.utc)
+    assert expires_at > datetime.now(UTC)
 
 
 def test_expiry_honours_the_admin_specific_ttl() -> None:
@@ -60,9 +60,7 @@ def test_expiry_honours_the_admin_specific_ttl() -> None:
     # window a stolen console token stays live.
     _, expires_at = auth.create_staff_access_token(_staff())
 
-    expected = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.admin_access_token_expire_minutes
-    )
+    expected = datetime.now(UTC) + timedelta(minutes=settings.admin_access_token_expire_minutes)
     assert abs((expires_at - expected).total_seconds()) < 5
 
 
@@ -122,7 +120,7 @@ def test_rejects_an_expired_token() -> None:
             "sub": "alice",
             "scope": auth.STAFF_SCOPE,
             "token_version": 0,
-            "exp": datetime.now(timezone.utc) - timedelta(seconds=1),
+            "exp": datetime.now(UTC) - timedelta(seconds=1),
         }
     )
 
@@ -130,9 +128,7 @@ def test_rejects_an_expired_token() -> None:
 
 
 def test_rejects_an_unknown_scope() -> None:
-    wrong_scope = _encode(
-        {"sub": "alice", "scope": "something-else", "token_version": 0}
-    )
+    wrong_scope = _encode({"sub": "alice", "scope": "something-else", "token_version": 0})
 
     assert auth.decode_staff_token(wrong_scope) is None
 
@@ -160,6 +156,4 @@ async def test_missing_credentials_raise_the_same_error_as_a_bad_token() -> None
     # None, and the dependency must produce the same opaque error rather
     # than a distinguishable "Not authenticated".
     with pytest.raises(StaffAuthenticationError):
-        await auth.authenticate_and_get_staff(
-            request=None, db=None, credentials=None
-        )
+        await auth.authenticate_and_get_staff(request=None, db=None, credentials=None)

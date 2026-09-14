@@ -25,13 +25,13 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -100,7 +100,9 @@ class Organization(Base):
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -116,10 +118,7 @@ class Organization(Base):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"<Organization(id={self.id}, name={self.name!r}, "
-            f"kind={self.kind.value})>"
-        )
+        return f"<Organization(id={self.id}, name={self.name!r}, kind={self.kind.value})>"
 
 
 class OrganizationMember(Base):
@@ -154,12 +153,16 @@ class OrganizationMember(Base):
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
     __table_args__ = (
         UniqueConstraint(
-            "organization_id", "user_id", name="uq_organization_member",
+            "organization_id",
+            "user_id",
+            name="uq_organization_member",
         ),
         # FK index for "list this user's orgs" — Postgres doesn't
         # auto-index FK columns, and we'll query by user_id from the

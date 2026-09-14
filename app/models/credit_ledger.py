@@ -36,13 +36,13 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
     Index,
     String,
-    TIMESTAMP,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -113,7 +113,10 @@ class CreditLedger(Base):
         nullable=False,
     )
     reference: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict,
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
     )
     # The turn hold this row belongs to (``credit_reservation.id``). A typed,
     # FK-backed column rather than a ``reference`` JSONB key because it is a
@@ -132,10 +135,14 @@ class CreditLedger(Base):
     # on TOPUP / ADJUST so admin scripts / future payment webhooks can
     # retry safely.
     idempotency_key: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, unique=True,
+        String(64),
+        nullable=True,
+        unique=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
     __table_args__ = (

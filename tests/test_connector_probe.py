@@ -58,9 +58,7 @@ class TestProbe:
 
         monkeypatch.setattr(probe_mod, "guarded_client", _fake_http_client)
         monkeypatch.setattr(probe_mod, "streamable_http_client", _fake_transport)
-        monkeypatch.setattr(
-            probe_mod, "Client", lambda *args, **kwargs: _FakeSession()
-        )
+        monkeypatch.setattr(probe_mod, "Client", lambda *args, **kwargs: _FakeSession())
 
         result = await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
 
@@ -70,12 +68,10 @@ class TestProbe:
             {"name": "create", "description": ""},
         ]
 
-    async def test_it_negotiates_the_protocol_rather_than_assuming_one(
-        self, monkeypatch,
-    ):
+    async def test_it_negotiates_the_protocol_rather_than_assuming_one(self, monkeypatch):
         # The reason this backend is on the 2.x SDK at all. ``mode="auto"``
-        # probes ``server/discover`` and falls back to ``initialize``; pinned
-        # to ``initialize`` it would refuse every server that speaks only the
+        # probes ``server/discover`` and falls back to ``initialize``; pinned to
+        # ``initialize`` it would refuse every server that speaks only the
         # 2026-07-28 stateless protocol — which is the class of server that
         # could not be added before, and the failure would look like an
         # unreachable host rather than a protocol mismatch.
@@ -103,25 +99,19 @@ class TestProbe:
         # re-list button a no-op against a server that had changed.
         assert captured["cache"] is None
 
-    async def test_a_server_without_tools_lists_none_rather_than_failing(
-        self, monkeypatch,
-    ):
-        # Asking a server that never advertised the capability earns
-        # ``-32601``, which this module reports as the server being
-        # unreachable — sending the user to debug a connection that is working.
+    async def test_a_server_without_tools_lists_none_rather_than_failing(self, monkeypatch):
+        # Asking a server that never advertised the capability earns ``-32601``,
+        # which this module reports as the server being unreachable — sending
+        # the user to debug a connection that is working.
         class _Toolless(_FakeSession):
             server_capabilities = SimpleNamespace(tools=None)
 
             async def list_tools(self, cursor=None):
-                raise AssertionError(
-                    "asked a server that never advertised tools"
-                )
+                raise AssertionError("asked a server that never advertised tools")
 
         _install(monkeypatch, _Toolless())
 
-        result = await probe(
-            "https://mcp.example.com/x", MCPServerAuthType.NONE, None
-        )
+        result = await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
 
         assert result.tools == []
         assert result.server_name == "Demo Server"
@@ -150,13 +140,13 @@ class TestProbe:
 
 
 class TestServerIcons:
-    """``serverInfo.icons`` (SEP-973) gives a connector its own artwork. Every
+    """``server_info.icons`` (SEP-973) gives a connector its own artwork. Every
     source the browser can load directly is kept, because which one is best
     depends on the device and the colour scheme — and only the browser knows
     those."""
 
     def _server_info(self, *icons):
-        """A ``serverInfo`` whose icons are the given dicts, SDK-shaped."""
+        """A ``server_info`` whose icons are the given dicts, SDK-shaped."""
         from mcp.types import Icon, Implementation
 
         return Implementation(
@@ -184,14 +174,16 @@ class TestServerIcons:
         from app.services.mcp.probe import _usable_icons
 
         [icon] = _usable_icons(
-            self._server_info({
-                "src": "https://cdn.example.com/i.png",
-                "mime_type": "image/png",
-                "sizes": ["48x48"],
-                # Not modelled by the SDK, so it arrives as an extra field —
-                # dropping it would take dark-mode support with it.
-                "theme": "dark",
-            })
+            self._server_info(
+                {
+                    "src": "https://cdn.example.com/i.png",
+                    "mime_type": "image/png",
+                    "sizes": ["48x48"],
+                    # Not modelled by the SDK, so it arrives as an extra field —
+                    # dropping it would take dark-mode support with it.
+                    "theme": "dark",
+                }
+            )
         )
 
         assert icon == {
@@ -206,9 +198,7 @@ class TestServerIcons:
         from app.services.mcp.probe import _usable_icons
 
         [icon] = _usable_icons(
-            self._server_info(
-                {"src": "https://cdn.example.com/i.png", "nonsense": {"deep": [1]}}
-            )
+            self._server_info({"src": "https://cdn.example.com/i.png", "nonsense": {"deep": [1]}})
         )
 
         assert set(icon) == {"src", "mime_type", "sizes", "theme"}
@@ -219,9 +209,9 @@ class TestServerIcons:
 
     def test_skips_sources_the_browser_should_not_load(self):
         for bad in (
-            "http://cdn.example.com/i.png",       # plaintext
-            "javascript:alert(1)",                 # not an image at all
-            "data:text/html,<script>x</script>",   # data URI, wrong type
+            "http://cdn.example.com/i.png",  # plaintext
+            "javascript:alert(1)",  # not an image at all
+            "data:text/html,<script>x</script>",  # data URI, wrong type
             "file:///etc/passwd",
         ):
             assert self._srcs(self._server_info({"src": bad})) == []
@@ -241,16 +231,19 @@ class TestServerIcons:
         # cannot make that list as long as it likes.
         from app.services.mcp.probe import _MAX_ICONS
 
-        assert len(
-            self._srcs(
-                self._server_info(
-                    *[
-                        {"src": f"https://cdn.example.com/{n}.png"}
-                        for n in range(_MAX_ICONS + 5)
-                    ]
+        assert (
+            len(
+                self._srcs(
+                    self._server_info(
+                        *[
+                            {"src": f"https://cdn.example.com/{n}.png"}
+                            for n in range(_MAX_ICONS + 5)
+                        ]
+                    )
                 )
             )
-        ) == _MAX_ICONS
+            == _MAX_ICONS
+        )
 
     def test_no_icons_is_not_an_error(self):
         from app.services.mcp.probe import _usable_icons
@@ -289,20 +282,17 @@ class TestProbePagination:
         from app.models.mcp_server import MCPServerAuthType
         from app.services.mcp import probe as probe_mod
 
-        session = self._PagingSession(
-            [(["search"], "c1"), (["delete_account"], None)]
-        )
+        session = self._PagingSession([(["search"], "c1"), (["delete_account"], None)])
         _install(monkeypatch, session)
 
-        result = await probe_mod.probe(
-            "https://mcp.example.com/mcp", MCPServerAuthType.NONE, None
-        )
+        result = await probe_mod.probe("https://mcp.example.com/mcp", MCPServerAuthType.NONE, None)
 
         assert [tool["name"] for tool in result.tools] == ["search", "delete_account"]
         assert session.cursors_seen == [None, "c1"]
 
     async def test_a_repeated_cursor_is_refused_rather_than_truncated(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         # Storing what arrived would be indistinguishable from a whole catalog:
         # the card would read healthy while the tools past the loop are simply
@@ -315,9 +305,7 @@ class TestProbePagination:
         _install(monkeypatch, session)
 
         with pytest.raises(ConnectorUnreachableError):
-            await probe_mod.probe(
-                "https://mcp.example.com/mcp", MCPServerAuthType.NONE, None
-            )
+            await probe_mod.probe("https://mcp.example.com/mcp", MCPServerAuthType.NONE, None)
 
 
 class TestStoredListingIsSwitchable:
@@ -338,19 +326,20 @@ class TestStoredListingIsSwitchable:
         from app.services.mcp import probe as probe_mod
 
         _install(monkeypatch, self._OneShotSession(tools))
-        return await probe_mod.probe(
-            "https://mcp.example.com/mcp", MCPServerAuthType.NONE, None
-        )
+        return await probe_mod.probe("https://mcp.example.com/mcp", MCPServerAuthType.NONE, None)
 
     async def test_an_unswitchable_name_is_dropped(self, monkeypatch, caplog):
         # Past the limit the schema rejects, so it could only ever render a
         # switch that cannot be thrown.
         from app.schemas.mcp_server import MAX_TOOL_NAME_LEN
 
-        result = await self._probe(monkeypatch, [
-            SimpleNamespace(name="search", description="ok"),
-            SimpleNamespace(name="x" * (MAX_TOOL_NAME_LEN + 1), description=""),
-        ])
+        result = await self._probe(
+            monkeypatch,
+            [
+                SimpleNamespace(name="search", description="ok"),
+                SimpleNamespace(name="x" * (MAX_TOOL_NAME_LEN + 1), description=""),
+            ],
+        )
 
         assert [tool["name"] for tool in result.tools] == ["search"]
 
@@ -358,9 +347,12 @@ class TestStoredListingIsSwitchable:
         # Unlike axon, which needs a whole schema or none, this copy only reads.
         from app.services.mcp.probe import _MAX_DESCRIPTION_CHARS
 
-        result = await self._probe(monkeypatch, [
-            SimpleNamespace(name="search", description="d" * 10_000),
-        ])
+        result = await self._probe(
+            monkeypatch,
+            [
+                SimpleNamespace(name="search", description="d" * 10_000),
+            ],
+        )
 
         assert len(result.tools) == 1
         assert len(result.tools[0]["description"]) == _MAX_DESCRIPTION_CHARS
@@ -368,18 +360,24 @@ class TestStoredListingIsSwitchable:
     async def test_the_listing_stops_at_the_switchable_count(self, monkeypatch):
         from app.schemas.mcp_server import MAX_DISABLED_TOOLS
 
-        result = await self._probe(monkeypatch, [
-            SimpleNamespace(name=f"t{index}", description="")
-            for index in range(MAX_DISABLED_TOOLS + 50)
-        ])
+        result = await self._probe(
+            monkeypatch,
+            [
+                SimpleNamespace(name=f"t{index}", description="")
+                for index in range(MAX_DISABLED_TOOLS + 50)
+            ],
+        )
 
         assert len(result.tools) == MAX_DISABLED_TOOLS
 
     async def test_an_ordinary_catalog_is_untouched(self, monkeypatch):
-        result = await self._probe(monkeypatch, [
-            SimpleNamespace(name="search", description="Find things"),
-            SimpleNamespace(name="create", description="Make things"),
-        ])
+        result = await self._probe(
+            monkeypatch,
+            [
+                SimpleNamespace(name="search", description="Find things"),
+                SimpleNamespace(name="create", description="Make things"),
+            ],
+        )
 
         assert result.tools == [
             {"name": "search", "description": "Find things"},
@@ -407,6 +405,7 @@ def _install(monkeypatch, session):
     over — and that client is entered here too, or the ``async with`` around it
     would have nothing to enter.
     """
+
     async def _guard_ok(url):
         return None
 

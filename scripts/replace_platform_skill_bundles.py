@@ -109,16 +109,12 @@ def main() -> int:
                 print(f"  ✗ {name}: invalid bundle — {exc}")
                 continue
             if parsed_name != name:
-                print(
-                    f"  ✗ {name}: SKILL.md name is {parsed_name!r}, "
-                    f"expected {name!r} — skipped"
-                )
+                print(f"  ✗ {name}: SKILL.md name is {parsed_name!r}, expected {name!r} — skipped")
                 continue
 
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT origin, bundle_key FROM skill "
-                    "WHERE name = %s AND user_id IS NULL",
+                    "SELECT origin, bundle_key FROM skill WHERE name = %s AND user_id IS NULL",
                     (name,),
                 )
                 row = cur.fetchone()

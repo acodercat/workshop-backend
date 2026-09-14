@@ -3,19 +3,64 @@
 E2E tests are opt-in via ``RUN_E2E_TESTS=1`` because they require the
 full pipeline running (backend + worker + Redis + Postgres + sandbox)
 and burn real LLM tokens. Apply :data:`requires_e2e` to gate them.
+
+This file is loaded by pytest **before** any test module imports, which
+matters: ``config`` instantiates a module-level ``settings`` singleton at
+import time and seven of its fields are mandatory. The environment
+defaults below let the suite run on a fresh checkout with no ``.env`` —
+production deploys still get a fail-loud ``ValidationError`` when any of
+them is missing. Mirrors ``agent-worker/tests/conftest.py``.
 """
 
 import os
-import secrets
-from typing import AsyncIterator, Iterator
+from pathlib import Path
 
-import bcrypt
-import httpx
-import psycopg
-import pytest
+from dotenv import dotenv_values
 
-from config import settings
+# Obvious fakes: nothing offline reaches these, and an accidental live call
+# should fail rather than land somewhere real. They exist so the suite runs on
+# a fresh checkout with no ``.env`` at all.
+#
+# ``setdefault`` is **not** enough to leave a real ``.env`` alone, which is the
+# trap here: a dotenv value is not in ``os.environ``, and pydantic-settings
+# ranks environment variables *above* the dotenv file. Seeding unconditionally
+# therefore overrides the developer's configured values rather than filling in
+# for them — and the ``test_user`` fixture below derives its libpq DSN from
+# ``settings.db_uri``, so ``RUN_E2E_TESTS=1`` would provision and tear down
+# against ``localhost/test`` instead of the database that is actually
+# configured. So the seed prefers the configured value where there is one:
+# ``os.environ`` ends up complete either way, and it never disagrees with
+# ``.env``.
+_TEST_DEFAULTS = {
+    "db_uri": "postgresql+psycopg://test:test@localhost:5432/test",
+    # 32+ bytes: PyJWT warns below that for HMAC-SHA256, and a warning in
+    # every run is noise the next person has to learn to ignore.
+    "secret_key": "test-secret-key-not-for-production-use",
+    "redis_url": "redis://localhost:6379/0",
+    "oss_access_key_id": "test-oss-key-id",
+    "oss_access_key_secret": "test-oss-secret",
+    "llm_base_url": "https://test.llm.example.com/v1",
+    "llm_api_key": "test-llm-key",
+}
 
+# ``Settings`` reads ``env_file=".env"`` relative to the process's working
+# directory; this resolves it the same way regardless of where pytest was
+# invoked from.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+_CONFIGURED = dotenv_values(_ENV_FILE) if _ENV_FILE.exists() else {}
+
+for _key, _value in _TEST_DEFAULTS.items():
+    os.environ.setdefault(_key, _CONFIGURED.get(_key) or _value)
+
+import secrets  # noqa: E402
+from collections.abc import AsyncIterator, Iterator  # noqa: E402
+
+import bcrypt  # noqa: E402
+import httpx  # noqa: E402
+import psycopg  # noqa: E402
+import pytest  # noqa: E402
+
+from config import settings  # noqa: E402
 
 # Gate: skip every test marked with this unless the operator explicitly
 # opted in. Mirrors the axon module's ``RUN_INTEGRATION_TESTS`` pattern.
@@ -32,7 +77,8 @@ requires_e2e = pytest.mark.skipif(
 # (see app/public_main.py), and dev defaults to localhost:8005. Override via
 # env if a test environment lives elsewhere.
 BACKEND_BASE_URL = os.environ.get(
-    "BACKEND_BASE_URL", "http://localhost:8005/api/v1",
+    "BACKEND_BASE_URL",
+    "http://localhost:8005/api/v1",
 )
 
 
@@ -43,10 +89,8 @@ def _psycopg_uri() -> str:
     ``postgresql+asyncpg://`` driver prefix; psycopg's connect() wants
     the bare ``postgresql://`` form.
     """
-    return (
-        settings.db_uri
-        .replace("postgresql+psycopg://", "postgresql://")
-        .replace("postgresql+asyncpg://", "postgresql://")
+    return settings.db_uri.replace("postgresql+psycopg://", "postgresql://").replace(
+        "postgresql+asyncpg://", "postgresql://"
     )
 
 
@@ -121,15 +165,15 @@ def test_user() -> Iterator[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM sandbox WHERE session_id IN "
-                '(SELECT id FROM session WHERE user_id = %s)',
+                "(SELECT id FROM session WHERE user_id = %s)",
                 (user_id,),
             )
             cur.execute(
                 "DELETE FROM session_files WHERE session_id IN "
-                '(SELECT id FROM session WHERE user_id = %s)',
+                "(SELECT id FROM session WHERE user_id = %s)",
                 (user_id,),
             )
-            cur.execute('DELETE FROM session WHERE user_id = %s', (user_id,))
+            cur.execute("DELETE FROM session WHERE user_id = %s", (user_id,))
             # Clear the user→org back-link before deleting the org so
             # the RESTRICT FK on ``user.organization_id`` doesn't block.
             cur.execute(
@@ -137,7 +181,8 @@ def test_user() -> Iterator[dict]:
                 (user_id,),
             )
             cur.execute(
-                "DELETE FROM organization WHERE id = %s", (organization_id,),
+                "DELETE FROM organization WHERE id = %s",
+                (organization_id,),
             )
             cur.execute('DELETE FROM "user" WHERE id = %s', (user_id,))
         conn.commit()
@@ -152,7 +197,8 @@ async def http_client(test_user: dict) -> AsyncIterator[httpx.AsyncClient]:
     still override per-request via ``client.stream(..., timeout=...)``.
     """
     async with httpx.AsyncClient(
-        base_url=BACKEND_BASE_URL, timeout=30.0,
+        base_url=BACKEND_BASE_URL,
+        timeout=30.0,
     ) as client:
         resp = await client.post(
             "/auth/access-tokens",
@@ -161,9 +207,7 @@ async def http_client(test_user: dict) -> AsyncIterator[httpx.AsyncClient]:
                 "password": test_user["password"],
             },
         )
-        assert resp.status_code == 200, (
-            f"login failed: {resp.status_code} {resp.text}"
-        )
+        assert resp.status_code == 200, f"login failed: {resp.status_code} {resp.text}"
         token = resp.json()["access_token"]
         client.headers["Authorization"] = f"Bearer {token}"
         yield client

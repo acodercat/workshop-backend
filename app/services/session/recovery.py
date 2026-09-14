@@ -67,7 +67,9 @@ _NON_TERMINAL_TURN = (SessionTurnStatus.PENDING, SessionTurnStatus.RUNNING)
 
 
 async def fail_abandoned_turn(
-    db: AsyncSession, *, session_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    session_id: uuid.UUID,
 ) -> bool:
     """Terminalize a session whose worker never wrote a terminal status.
 
@@ -107,7 +109,7 @@ async def fail_abandoned_turn(
             terminated_at=func.now(),
         )
     )
-    if turn_result.rowcount == 0:
+    if turn_result.rowcount == 0:  # type: ignore[attr-defined]  # UPDATE returns a CursorResult
         # Either a worker grabbed the turn between sweeps and holds a live
         # lease, or there's no non-terminal turn. Don't flip the session —
         # keeping turn+session in lockstep is the whole point.
@@ -129,7 +131,9 @@ async def fail_abandoned_turn(
 
 
 async def cancel_unclaimed_turn(
-    db: AsyncSession, *, session_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    session_id: uuid.UUID,
 ) -> bool:
     """Cancel a turn the user stopped before any worker claimed it.
 
@@ -174,7 +178,7 @@ async def cancel_unclaimed_turn(
             terminated_at=func.now(),
         )
     )
-    if turn_result.rowcount == 0:
+    if turn_result.rowcount == 0:  # type: ignore[attr-defined]  # UPDATE returns a CursorResult
         # No unclaimed turn — either a worker claimed it (now RUNNING) or
         # it is already terminal. Leave it to the pub/sub cancel path.
         return False

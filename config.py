@@ -1,5 +1,5 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MINUTES_PER_WEEK = 60 * 24 * 7
 MINUTES_PER_WORKDAY = 60 * 8
@@ -17,17 +17,29 @@ class Settings(BaseSettings):
     db_uri: str = Field(description="PostgreSQL connection URI")
     db_pool_size: int = Field(default=30, description="SQLAlchemy pool size")
     db_max_overflow: int = Field(default=10, description="SQLAlchemy max overflow connections")
-    db_pool_recycle_seconds: int = Field(default=300, description="Recycle connections after N seconds")
-    db_pool_timeout_seconds: int = Field(default=30, description="Wait N seconds for a free connection")
+    db_pool_recycle_seconds: int = Field(
+        default=300, description="Recycle connections after N seconds"
+    )
+    db_pool_timeout_seconds: int = Field(
+        default=30, description="Wait N seconds for a free connection"
+    )
     db_echo: bool = Field(default=False, description="Echo SQL statements (debug only)")
-    db_echo_pool: bool = Field(default=False, description="Echo connection-pool events (debug only)")
+    db_echo_pool: bool = Field(
+        default=False, description="Echo connection-pool events (debug only)"
+    )
 
     # Startup readiness — how long to wait for DB / Redis to come up
     # before giving up. Bumped on container orchestrators where
     # dependencies may not be ready when this process starts.
-    startup_probe_attempts: int = Field(default=20, description="Max DB/Redis ping attempts at startup")
-    startup_probe_base_delay_seconds: float = Field(default=0.5, description="Initial backoff for startup probes (exponential)")
-    startup_probe_max_delay_seconds: float = Field(default=10.0, description="Cap for startup-probe backoff")
+    startup_probe_attempts: int = Field(
+        default=20, description="Max DB/Redis ping attempts at startup"
+    )
+    startup_probe_base_delay_seconds: float = Field(
+        default=0.5, description="Initial backoff for startup probes (exponential)"
+    )
+    startup_probe_max_delay_seconds: float = Field(
+        default=10.0, description="Cap for startup-probe backoff"
+    )
 
     # Security
     secret_key: str = Field(description="Secret key for JWT encoding")
@@ -45,10 +57,12 @@ class Settings(BaseSettings):
     # authorize time rather than at startup.
     # e.g. https://app.example.com/api/connectors/oauth/callback
     mcp_oauth_redirect_uri: str = Field(
-        default="", description="Public OAuth callback URL for MCP Connectors",
+        default="",
+        description="Public OAuth callback URL for MCP Connectors",
     )
     mcp_oauth_state_ttl_seconds: int = Field(
-        default=600, description="TTL for the pending-OAuth-authorization Redis state",
+        default=600,
+        description="TTL for the pending-OAuth-authorization Redis state",
     )
     # Public URL of our OAuth Client ID Metadata Document (CIMD): the URL *is*
     # the client_id, and the authorization server fetches it instead of us
@@ -66,7 +80,8 @@ class Settings(BaseSettings):
     # it fails the authorization outright, which is worse than leaving this empty.
     # e.g. https://app.example.com/api/connectors/client-metadata
     mcp_client_metadata_url: str = Field(
-        default="", description="Public URL of our OAuth client metadata document (CIMD)",
+        default="",
+        description="Public URL of our OAuth client metadata document (CIMD)",
     )
     # How this client names itself to an authorization server — what the user
     # reads on the consent screen, so it has to be this deployment's own brand.
@@ -144,7 +159,9 @@ class Settings(BaseSettings):
         default="5/minute",
         description="Per-IP admin-console login attempts",
     )
-    rate_limit_message_create: str = Field(default="30/minute", description="Per-IP message-create rate")
+    rate_limit_message_create: str = Field(
+        default="30/minute", description="Per-IP message-create rate"
+    )
     rate_limit_upload_url: str = Field(
         default="300/minute",
         description=(
@@ -158,7 +175,8 @@ class Settings(BaseSettings):
         ),
     )
     max_concurrent_running_tasks: int = Field(
-        default=10, ge=1,
+        default=10,
+        ge=1,
         description="Max simultaneously RUNNING tasks (sessions) per user; a new turn past this is rejected (429).",
     )
     rate_limit_share_unlock: str = Field(
@@ -207,7 +225,9 @@ class Settings(BaseSettings):
     # would let SSE traffic starve the short-op path.
     redis_url: str = Field(description="Redis connection URL")
     redis_pool_size: int = Field(default=30, description="Max connections for short Redis ops")
-    redis_streaming_pool_size: int = Field(default=100, description="Max connections for SSE long-poll (per worker process)")
+    redis_streaming_pool_size: int = Field(
+        default=100, description="Max connections for SSE long-poll (per worker process)"
+    )
     # Read timeout for the STREAMING pool. An SSE XREAD blocks up to
     # ``read_stream``'s ``block_ms`` (15s), so this MUST exceed it — else
     # the blocking read trips the socket timeout and the SSE dies mid-poll.
@@ -233,15 +253,21 @@ class Settings(BaseSettings):
     # Short-op pool uses BlockingConnectionPool: when full, callers wait
     # this long for a connection before raising. Trades a tail-latency
     # spike for fewer 5xx during traffic bursts.
-    redis_pool_timeout_seconds: float = Field(default=3.0, description="Wait N seconds for a short-op connection before failing")
+    redis_pool_timeout_seconds: float = Field(
+        default=3.0, description="Wait N seconds for a short-op connection before failing"
+    )
 
     # Observability. Sentry stays a no-op until ``sentry_dsn`` is set, so
     # dev boxes boot without it (same pattern as the SMTP creds);
     # the Prometheus ``/metrics`` endpoint has no external dependency, so
     # it defaults on.
     sentry_dsn: str = Field(default="", description="Sentry DSN; empty disables error tracking")
-    sentry_environment: str = Field(default="", description="Sentry environment tag (e.g. production, staging)")
-    sentry_traces_sample_rate: float = Field(default=0.0, description="Fraction of requests traced by Sentry performance monitoring")
+    sentry_environment: str = Field(
+        default="", description="Sentry environment tag (e.g. production, staging)"
+    )
+    sentry_traces_sample_rate: float = Field(
+        default=0.0, description="Fraction of requests traced by Sentry performance monitoring"
+    )
     metrics_enabled: bool = Field(default=True, description="Expose Prometheus metrics at /metrics")
 
     # Alibaba Cloud OSS — credentials required from the environment; no
@@ -249,9 +275,15 @@ class Settings(BaseSettings):
     # of falling back to baked-in keys.
     oss_access_key_id: str = Field(description="OSS access key id")
     oss_access_key_secret: str = Field(description="OSS access key secret")
-    oss_document_bucket_name: str = Field(default="metaseq-computer", description="OSS document bucket")
-    oss_skill_bucket_name: str = Field(default="axon-skills", description="OSS bucket for user-uploaded SKILL.md bundles")
-    oss_endpoint: str = Field(default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL")
+    oss_document_bucket_name: str = Field(
+        default="metaseq-computer", description="OSS document bucket"
+    )
+    oss_skill_bucket_name: str = Field(
+        default="axon-skills", description="OSS bucket for user-uploaded SKILL.md bundles"
+    )
+    oss_endpoint: str = Field(
+        default="https://oss-cn-shenzhen.aliyuncs.com", description="OSS endpoint URL"
+    )
     # Custom domain (CNAME) bound to the document bucket, e.g.
     # https://files.metaseq.com.cn. Set this to make inline preview URLs
     # render in the browser: the default ``*.aliyuncs.com`` endpoint forces
@@ -306,7 +338,9 @@ class Settings(BaseSettings):
         default=True,
         description="True → SSL-on-connect (port 465). False → STARTTLS (port 587).",
     )
-    smtp_username: str = Field(default="", description="SMTP login (usually the full sender email address)")
+    smtp_username: str = Field(
+        default="", description="SMTP login (usually the full sender email address)"
+    )
     smtp_password: str = Field(default="", description="SMTP password / app-specific password")
     smtp_from_address: str = Field(
         default="",
@@ -339,7 +373,7 @@ class Settings(BaseSettings):
         description="Max attachments per single user message",
     )
     max_file_bytes: int = Field(
-        default=600 * 1024 * 1024,
+        default=200 * 1024 * 1024,
         description="Per-file upload size cap (bytes)",
     )
     max_session_files_bytes_per_user: int = Field(
@@ -362,21 +396,23 @@ class Settings(BaseSettings):
 
     # Sessions
     supported_session_model_ids: frozenset[str] = Field(
-        default=frozenset({
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-sonnet-4-6",
-            "kimi-k2",
-            "HKGAI-V1",
-            "HKGAI-V3",
-            "qwen3.7-max",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-            "glm-5.1",
-            "glm-5.2",
-            "MiniMax/MiniMax-M2.7",
-            "fable",
-        }),
+        default=frozenset(
+            {
+                "claude-opus-4-6",
+                "claude-opus-4-7",
+                "claude-sonnet-4-6",
+                "kimi-k2",
+                "HKGAI-V1",
+                "HKGAI-V3",
+                "qwen3.7-max",
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "glm-5.1",
+                "glm-5.2",
+                "MiniMax/MiniMax-M2.7",
+                "fable",
+            }
+        ),
         description="Whitelist of model_ids that POST /api/sessions accepts. Must match keys in agent-worker/models.toml; mismatches surface as a worker-side ValueError on the next turn.",
     )
     # Capability tiers shown in the UI → the concrete model_id each resolves
@@ -426,14 +462,70 @@ class Settings(BaseSettings):
     # ``credit_per_second_credits`` below.
     credit_rates: dict[str, dict[str, float]] = Field(
         default_factory=lambda: {
-            "claude-opus-4-7":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096, "reserve_est_input_tokens": 50000},
-            "fable":             {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096, "reserve_est_input_tokens": 50000},
-            "claude-opus-4-6":   {"in_per_1k_usd": 0.005,   "out_per_1k_usd": 0.025,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 4096, "reserve_est_input_tokens": 50000},
-            "claude-sonnet-4-6": {"in_per_1k_usd": 0.003,   "out_per_1k_usd": 0.015,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 250000},
-            "kimi-k2":           {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
-            "kimi-k2-code":      {"in_per_1k_usd": 0.00055, "out_per_1k_usd": 0.0022, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 225000},
-            "HKGAI-V1":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
-            "HKGAI-V3":          {"in_per_1k_usd": 0.001,   "out_per_1k_usd": 0.005,  "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 100000},
+            "claude-opus-4-7": {
+                "in_per_1k_usd": 0.005,
+                "out_per_1k_usd": 0.025,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 4096,
+                "reserve_est_input_tokens": 50000,
+            },
+            "fable": {
+                "in_per_1k_usd": 0.005,
+                "out_per_1k_usd": 0.025,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 4096,
+                "reserve_est_input_tokens": 50000,
+            },
+            "claude-opus-4-6": {
+                "in_per_1k_usd": 0.005,
+                "out_per_1k_usd": 0.025,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 4096,
+                "reserve_est_input_tokens": 50000,
+            },
+            "claude-sonnet-4-6": {
+                "in_per_1k_usd": 0.003,
+                "out_per_1k_usd": 0.015,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 250000,
+            },
+            "kimi-k2": {
+                "in_per_1k_usd": 0.00055,
+                "out_per_1k_usd": 0.0022,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 100000,
+            },
+            "kimi-k2-code": {
+                "in_per_1k_usd": 0.00055,
+                "out_per_1k_usd": 0.0022,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 225000,
+            },
+            "HKGAI-V1": {
+                "in_per_1k_usd": 0.001,
+                "out_per_1k_usd": 0.005,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 100000,
+            },
+            "HKGAI-V3": {
+                "in_per_1k_usd": 0.001,
+                "out_per_1k_usd": 0.005,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 100000,
+            },
             # DashScope-hosted models. USD COGS derived from Aliyun 百炼 pricing pages
             # (CNY converted at ~1 USD = 7.2 CNY). Conservative: glm-5.1 uses the
             # <32K-context tier; longer turns nominally cost ~33% more on the wire
@@ -442,18 +534,60 @@ class Settings(BaseSettings):
             # officially published, expected ≤3.6's). deepseek-v4-pro uses post-promo
             # standard rates ($1.74/$3.48 per M) to avoid charging below COGS once
             # the 2026-05-31 promo expires.
-            "qwen3.7-max":       {"in_per_1k_usd": 0.0013,  "out_per_1k_usd": 0.0078, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 45000},
-            "deepseek-v4-pro":   {"in_per_1k_usd": 0.00174, "out_per_1k_usd": 0.00348,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 225000},
+            "qwen3.7-max": {
+                "in_per_1k_usd": 0.0013,
+                "out_per_1k_usd": 0.0078,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 45000,
+            },
+            "deepseek-v4-pro": {
+                "in_per_1k_usd": 0.00174,
+                "out_per_1k_usd": 0.00348,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 225000,
+            },
             # deepseek-v4-flash budget tier — permanent ¥1/¥2 per M
             # tokens (≈$0.14/$0.28 per M), no promo expiry. Cheaper than
             # v4-pro by ~10×; same DashScope endpoint and reasoning knobs.
-            "deepseek-v4-flash": {"in_per_1k_usd": 0.00014, "out_per_1k_usd": 0.00028,"token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 2000},
-            "glm-5.1":           {"in_per_1k_usd": 0.00083, "out_per_1k_usd": 0.0033, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 425000},
-            "glm-5.2":           {"in_per_1k_usd": 0.00070, "out_per_1k_usd": 0.00080, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 425000},
+            "deepseek-v4-flash": {
+                "in_per_1k_usd": 0.00014,
+                "out_per_1k_usd": 0.00028,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 2000,
+            },
+            "glm-5.1": {
+                "in_per_1k_usd": 0.00083,
+                "out_per_1k_usd": 0.0033,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 425000,
+            },
+            "glm-5.2": {
+                "in_per_1k_usd": 0.00070,
+                "out_per_1k_usd": 0.00080,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 425000,
+            },
             # MiniMax M2.7 namespaced SKU on DashScope: ¥2.1/¥8.4 per M tokens
             # → $0.000292/$0.00117 per 1K (1 USD ≈ 7.2 CNY). Cached input
             # ¥0.42/M not separately tracked here; settle uses uncached rate.
-            "MiniMax/MiniMax-M2.7": {"in_per_1k_usd": 0.000292, "out_per_1k_usd": 0.00117, "token_markup": 3.0, "model_fee_credits": 0, "reserve_max_output_tokens": 8192, "reserve_est_input_tokens": 60000},
+            "MiniMax/MiniMax-M2.7": {
+                "in_per_1k_usd": 0.000292,
+                "out_per_1k_usd": 0.00117,
+                "token_markup": 3.0,
+                "model_fee_credits": 0,
+                "reserve_max_output_tokens": 8192,
+                "reserve_est_input_tokens": 60000,
+            },
         },
         description="Per-model rate card for credit billing. Snapshotted onto each credit_reservation at reserve time so a config change can't re-price open turns.",
     )
@@ -473,14 +607,16 @@ class Settings(BaseSettings):
     # 19 credits ($0.19); watch for low-balance users hitting
     # InsufficientCreditsError on send.
     credit_per_second_credits: float = Field(
-        default=0.01, ge=0.0,
+        default=0.01,
+        ge=0.0,
         description="Credits per second of turn duration (β). 0 = disabled.",
     )
     # Pessimistic upper bound on ``turn_seconds`` used at reserve time
     # so the hold covers a fully-occupied worker. Matches the worker's
     # ``max_execution_time`` (1800s) + its hard timeout buffer (~60s).
     credit_reserve_max_turn_seconds: int = Field(
-        default=1860, gt=0,
+        default=1860,
+        gt=0,
         description="Upper bound on turn_seconds assumed at reserve time. Settle uses actual.",
     )
     # Fallback input-token estimate at reserve time, for models whose
@@ -503,11 +639,13 @@ class Settings(BaseSettings):
         description="Run the mid-turn budget enforcer in the background process.",
     )
     budget_enforcer_interval_seconds: int = Field(
-        default=5, gt=0,
+        default=5,
+        gt=0,
         description="Seconds between budget-enforcer ticks. With the worker's 20s heartbeat, worst-case overrun detection latency is roughly one heartbeat + one tick.",
     )
     budget_enforcer_buffer_credits: int = Field(
-        default=80, ge=0,
+        default=80,
+        ge=0,
         description="Stop turns once the user's projected post-settle balance falls to this many credits. 0 = stop at exactly zero, tolerating one detection window of overshoot (Manus-style).",
     )
     # Auto-grant on registration. 500 credits at the post-redenomination
@@ -554,7 +692,8 @@ class Settings(BaseSettings):
     # NOT touch billing / settle / balance — those stay on the µ-credit
     # ledger and the USD cost peg; this is pure sell-side pricing.
     credit_price_cny: float = Field(
-        default=0.1, gt=0.0,
+        default=0.1,
+        gt=0.0,
         description="Customer-facing RMB price of 1 credit at top-up. ¥0.1 → ¥100 buys 1000 credits.",
     )
 

@@ -60,7 +60,11 @@ _MAX_SKILLS_PER_USER = 100
 
 
 async def register_skill_bundle(
-    db: AsyncSession, *, user_id: int, filename: str, data: bytes,
+    db: AsyncSession,
+    *,
+    user_id: int,
+    filename: str,
+    data: bytes,
 ) -> Skill:
     """Validate, store, and register an uploaded skill bundle.
 
@@ -103,7 +107,9 @@ async def register_skill_bundle(
     # the event loop (and with it every SSE stream / enqueue on this
     # process) for the duration of the unpack.
     data, parsed = await asyncio.to_thread(
-        _validate_and_parse, data, is_zip=is_zip,
+        _validate_and_parse,
+        data,
+        is_zip=is_zip,
     )
 
     await _enforce_user_quota(db, user_id)
@@ -116,11 +122,12 @@ async def register_skill_bundle(
     #
     # The key's filename segment is **derived** — parsed name + canonical
     # extension, not the user's original filename (see ``_canonical_ext``).
-    bundle_key = (
-        f"{SKILL_POLICY.key_prefix}/{user_id}/{uuid.uuid4()}/{parsed.name}{ext}"
-    )
+    bundle_key = f"{SKILL_POLICY.key_prefix}/{user_id}/{uuid.uuid4()}/{parsed.name}{ext}"
     await asyncio.to_thread(
-        file_storage.upload, SKILL_POLICY, bundle_key, data,
+        file_storage.upload,
+        SKILL_POLICY,
+        bundle_key,
+        data,
     )
     skill = Skill(
         user_id=user_id,
@@ -149,7 +156,10 @@ async def register_skill_bundle(
     await db.refresh(skill)
     logger.info(
         "skill registered: id=%s user_id=%s name=%r size=%d",
-        skill.id, user_id, skill.name, skill.bundle_size,
+        skill.id,
+        user_id,
+        skill.name,
+        skill.bundle_size,
     )
     return skill
 
@@ -161,6 +171,7 @@ async def register_platform_skill_bundle(
     filename: str,
     data: bytes,
     publish: bool = False,
+    category_id: int | None = None,
 ) -> tuple[Skill, str | None]:
     """Register (or replace) a platform skill bundle.
 
@@ -177,18 +188,16 @@ async def register_platform_skill_bundle(
     row is updated in place, so every user's ``user_skill_preference``
     and the id the worker has seen both survive the update.
 
-    **Flushes but does not commit** — the caller owns the commit.
-    :mod:`scripts.upload_skill` is the only caller here; this deployment
-    has no admin skill endpoint. A flush failure compensates the OSS
-    upload and re-raises; a failure in the caller's *commit* leaves the
-    object for bucket lifecycle to collect, which is the accepted trade
-    (the alternative is deleting an object a concurrent turn may be
-    staging).
+    **Flushes but does not commit** — the caller owns the commit. A flush
+    failure compensates the OSS upload and re-raises; a failure in the
+    caller's *commit* leaves the object for bucket lifecycle to collect,
+    which is the accepted trade (the alternative is deleting an object a
+    concurrent turn may be staging).
 
     The previous bundle object is **left in OSS** on a replace, for that
     same staging reason. Its key is *returned* rather than recorded
     anywhere — this deployment keeps no operator trail (revision
-    ``c8f2a5e1d94b``), so the caller printing it is the only way back to
+    ``c8f2a5e1d94b``), so the caller surfacing it is the only way back to
     that version.
 
     **Shipping a bundle is a content change.** A replace leaves the
@@ -204,12 +213,15 @@ async def register_platform_skill_bundle(
     deployment whose only publish path is this script (hkgai has no
     console) could stage a listing and never get it live.
 
+    ``category_id`` is tri-state: ``None`` leaves the row alone, so
+    re-uploading a bundle keeps the tab an operator filed it under. It
+    has no per-origin default — a new skill is simply uncategorised
+    until someone files it.
+
     Raises the same typed kinds the user path does.
     """
     if origin is SkillOrigin.CUSTOM:
-        raise ValueError(
-            "CUSTOM skills are owned by a user; use register_skill_bundle"
-        )
+        raise ValueError("CUSTOM skills are owned by a user; use register_skill_bundle")
 
     ext = _canonical_ext(filename)
     is_zip = ext == ".zip"
@@ -218,26 +230,25 @@ async def register_platform_skill_bundle(
             f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
         )
     data, parsed = await asyncio.to_thread(
-        _validate_and_parse, data, is_zip=is_zip,
+        _validate_and_parse,
+        data,
+        is_zip=is_zip,
     )
 
-    # Keyed by origin rather than by owner (there is none) — the same
-    # scheme ``scripts/upload_skill.py`` has always written, so bundles
-    # from either caller are indistinguishable in the bucket.
-    bundle_key = (
-        f"{origin.value.lower()}/{parsed.name}/{uuid.uuid4()}/{parsed.name}{ext}"
-    )
-    await asyncio.to_thread(file_storage.upload, SKILL_POLICY, bundle_key, data)
-
-    skill = await db.scalar(
-        select(Skill).where(Skill.user_id.is_(None), Skill.name == parsed.name)
-    )
+    # Looked up before the upload so a failure here costs no OSS object.
+    skill = await db.scalar(select(Skill).where(Skill.user_id.is_(None), Skill.name == parsed.name))
     replaced_key = skill.bundle_key if skill is not None else None
     became_agent_only = (
         skill is not None
         and origin is SkillOrigin.SYSTEM
         and skill.origin is not SkillOrigin.SYSTEM
     )
+
+    # Keyed by origin rather than by owner (there is none) — the same
+    # scheme ``scripts/upload_skill.py`` has always written, so bundles
+    # from either caller are indistinguishable in the bucket.
+    bundle_key = f"{origin.value.lower()}/{parsed.name}/{uuid.uuid4()}/{parsed.name}{ext}"
+    await asyncio.to_thread(file_storage.upload, SKILL_POLICY, bundle_key, data)
     if skill is None:
         skill = Skill(user_id=None, name=parsed.name, status=SkillStatus.STAGED)
         db.add(skill)
@@ -260,6 +271,8 @@ async def register_platform_skill_bundle(
     skill.bundle_key = bundle_key
     skill.bundle_size = len(data)
     skill.enabled = legacy_enabled(origin, skill.status)
+    if category_id is not None:
+        skill.category_id = category_id
 
     try:
         await db.flush()
@@ -271,7 +284,10 @@ async def register_platform_skill_bundle(
     logger.info(
         "platform skill %s: id=%s origin=%s name=%r size=%d status=%s",
         "replaced" if replaced_key else "registered",
-        skill.id, origin.value, skill.name, skill.bundle_size,
+        skill.id,
+        origin.value,
+        skill.name,
+        skill.bundle_size,
         skill.status.value,
     )
     return skill, replaced_key
@@ -326,13 +342,10 @@ async def _enforce_user_quota(db: AsyncSession, user_id: int) -> None:
     concurrent uploads at the boundary could both succeed, leaving
     the user one over. Not worth a row lock for a soft policy limit.
     """
-    used = await db.scalar(
-        select(func.count(Skill.id)).where(Skill.user_id == user_id)
-    ) or 0
+    used = await db.scalar(select(func.count(Skill.id)).where(Skill.user_id == user_id)) or 0
     if used >= _MAX_SKILLS_PER_USER:
         raise SkillQuotaExceededError(
-            f"user already has {used} skills; "
-            f"per-user limit is {_MAX_SKILLS_PER_USER}"
+            f"user already has {used} skills; per-user limit is {_MAX_SKILLS_PER_USER}"
         )
 
 
@@ -349,5 +362,6 @@ async def _best_effort_delete_oss(bundle_key: str) -> None:
     except Exception as exc:
         logger.warning(
             "skill upload rollback: OSS cleanup failed for %s: %s",
-            bundle_key, exc,
+            bundle_key,
+            exc,
         )

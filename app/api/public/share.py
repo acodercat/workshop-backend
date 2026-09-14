@@ -68,14 +68,10 @@ router = APIRouter(tags=["shares"])
 # 403 them on the way in. ``_require_view_access`` decides per-share
 # whether missing credentials is fatal.
 _share_view_bearer = HTTPBearer(auto_error=False)
-_ShareViewCredentials = Annotated[
-    HTTPAuthorizationCredentials | None, Depends(_share_view_bearer)
-]
+_ShareViewCredentials = Annotated[HTTPAuthorizationCredentials | None, Depends(_share_view_bearer)]
 
 
-async def _resolve_share(
-    db: AsyncSession, token: str
-) -> tuple[SessionShare, Session]:
+async def _resolve_share(db: AsyncSession, token: str) -> tuple[SessionShare, Session]:
     """Look up a share + its non-deleted session in one query. 404 on miss.
 
     Returns both rows so callers don't need a follow-up ``db.get``,
@@ -147,9 +143,7 @@ async def get_share(
     await _require_view_access(share, credentials)
 
     messages_stmt = (
-        select(Message)
-        .where(Message.session_id == session.id)
-        .order_by(Message.created_at.asc())
+        select(Message).where(Message.session_id == session.id).order_by(Message.created_at.asc())
     )
     rows = (await db.execute(messages_stmt)).scalars().all()
     messages = [
@@ -235,7 +229,9 @@ async def get_share_file_url(
     await _require_view_access(share, credentials)
     try:
         await assert_file_belongs_to_session(
-            db, session_id=share.session_id, file_key=file_key,
+            db,
+            session_id=share.session_id,
+            file_key=file_key,
         )
     except FileNotInSessionError:
         raise HTTPException(
@@ -244,10 +240,14 @@ async def get_share_file_url(
         )
 
     url, expires_in = file_storage.generate_download_url(
-        file_storage.SESSION_FILE_POLICY, file_key, filename,
+        file_storage.SESSION_FILE_POLICY,
+        file_key,
+        filename,
     )
     return DownloadUrlResponse(
-        download_url=url, file_key=file_key, expires_in=expires_in,
+        download_url=url,
+        file_key=file_key,
+        expires_in=expires_in,
     )
 
 
@@ -274,7 +274,9 @@ async def get_share_file_preview_url(
     await _require_view_access(share, credentials)
     try:
         await assert_file_belongs_to_session(
-            db, session_id=share.session_id, file_key=file_key,
+            db,
+            session_id=share.session_id,
+            file_key=file_key,
         )
     except FileNotInSessionError:
         raise HTTPException(
@@ -284,12 +286,16 @@ async def get_share_file_preview_url(
 
     try:
         url, expires_in = file_storage.generate_inline_url(
-            file_storage.SESSION_FILE_POLICY, file_key,
+            file_storage.SESSION_FILE_POLICY,
+            file_key,
         )
     except file_storage.InlinePreviewNotAllowedError as exc:
         raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc),
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
         )
     return PreviewUrlResponse(
-        preview_url=url, file_key=file_key, expires_in=expires_in,
+        preview_url=url,
+        file_key=file_key,
+        expires_in=expires_in,
     )

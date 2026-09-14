@@ -16,6 +16,7 @@ OpenAPI schema byte-identical to what it was before the table existed.
 from fastapi import APIRouter
 
 from app.api.public import (
+    actor,
     auth,
     check_in,
     credits,
@@ -30,6 +31,7 @@ from app.api.public import (
 
 public_router = APIRouter()
 
+public_router.include_router(actor.router)
 public_router.include_router(auth.router)
 public_router.include_router(check_in.router)
 public_router.include_router(credits.router)

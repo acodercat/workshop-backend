@@ -21,26 +21,13 @@ from app.schemas.file import UploadUrlResponse
 from config import settings
 
 
-class UnsupportedFileTypeError(ValueError):
-    """Extension outside the policy's whitelist → HTTP 400."""
-
-    def __init__(self, ext: str, allowed: list[str]) -> None:
-        self.ext = ext
-        self.allowed = allowed
-        super().__init__(
-            f"Unsupported file extension {ext!r}. Allowed: {', '.join(allowed)}"
-        )
-
-
 class FileTooLargeError(ValueError):
     """Declared size above the policy's cap → HTTP 413."""
 
     def __init__(self, size_bytes: int, max_bytes: int) -> None:
         self.size_bytes = size_bytes
         self.max_bytes = max_bytes
-        super().__init__(
-            f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap"
-        )
+        super().__init__(f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap")
 
 
 class FileObjectNotFoundError(ValueError):
@@ -67,11 +54,24 @@ class InlinePreviewNotAllowedError(ValueError):
         super().__init__(f"{ext!r} cannot be previewed inline; download it instead")
 
 
-# Extensions that must never be served inline (they execute script on the
-# document origin). SVG is the only scriptable type in the image
-# allow-list — raster images are inert, HTML deliverables are the intended
-# inline payload.
-_INLINE_FORBIDDEN_EXTENSIONS = frozenset({".svg"})
+# The only extensions that may be served with an ``inline`` disposition.
+#
+# An allow-list, and it has to be: uploads accept any extension now, so a
+# deny-list would have to enumerate every scriptable type the browser
+# might ever execute on the document origin (``.html``, ``.svg``,
+# ``.xhtml``, ``.xml``, ``.mjs``, whatever ships next) and would be one
+# omission away from stored XSS on our own domain. Inverting it means a
+# type nobody vetted downloads instead of rendering — the safe default,
+# and the only thing that changes for the user is one click.
+#
+# ``.html`` is here because it *is* the intended payload: agent-produced
+# web deliverables render in an iframe, which is what this whole path
+# exists for. It is also the reason the list can't simply be "images":
+# raster images are inert, but HTML is not, and it is trusted here
+# because the worker wrote it — not because someone uploaded it.
+_INLINE_ALLOWED_EXTENSIONS = frozenset(
+    {".html", ".htm", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+)
 
 
 UPLOAD_URL_TTL_SECONDS = 15 * 60
@@ -91,10 +91,15 @@ ORPHAN_TAGGING_HEADER = f"{_ORPHAN_TAG_KEY}={_ORPHAN_TAG_VALUE}"
 @dataclass(frozen=True)
 class UploadPolicy:
     """Per-asset-type config scoping all OSS operations."""
+
     bucket_name: str
     key_prefix: str
     max_bytes: int
-    allowed_types: dict[str, str]   # extension → content-type
+    # extension → content-type. For session files this is a *lookup table*,
+    # not a gate: an extension missing from it uploads as
+    # ``application/octet-stream``. ``SKILL_POLICY`` still treats it as an
+    # allow-list — see ``skill_registration.validate_skill_filename``.
+    allowed_types: dict[str, str]
 
 
 # Session file uploads (any whitelisted type, 100 MiB cap). The OSS
@@ -225,9 +230,15 @@ def generate_upload_url(
         raise FileTooLargeError(size_bytes, policy.max_bytes)
     filename = validate_input_filename(filename)
     ext = os.path.splitext(filename)[1].lower()
-    content_type = policy.allowed_types.get(ext)
-    if content_type is None:
-        raise UnsupportedFileTypeError(ext, sorted(policy.allowed_types))
+    # Any extension uploads. The table still supplies a precise
+    # Content-Type where we know one — it is signed into the URL and
+    # becomes the object's stored type, which is what later decides
+    # whether a browser renders or downloads it — and everything else
+    # gets the inert generic. Nothing about "can this be uploaded"
+    # depends on the extension any more; what a file is *allowed to do*
+    # afterwards is decided at the point of use (see
+    # ``_INLINE_ALLOWED_EXTENSIONS`` for the inline-preview gate).
+    content_type = policy.allowed_types.get(ext, "application/octet-stream")
 
     file_key = f"{policy.key_prefix}/{key_extra}{uuid.uuid4()}/{filename}"
     # Tag the object orphan at upload (M5) so a never-bound upload is reaped
@@ -296,7 +307,9 @@ def delete(policy: UploadPolicy, file_key: str) -> None:
 
 
 def generate_download_url(
-    policy: UploadPolicy, file_key: str, filename: str,
+    policy: UploadPolicy,
+    file_key: str,
+    filename: str,
 ) -> tuple[str, int]:
     """Presigned GET URL with Content-Disposition for browser save-as.
 
@@ -342,17 +355,16 @@ def generate_inline_url(policy: UploadPolicy, file_key: str) -> tuple[str, int]:
     disposition. Falls back to the default endpoint when unset (the URL
     then downloads, but nothing breaks).
 
-    Raises :class:`InlinePreviewNotAllowedError` for a scriptable type
-    (``.svg``): serving it inline on the document origin would be stored
-    XSS. The single choke point for both the session and share preview
-    endpoints, so neither can mint an inline URL for one.
+    Raises :class:`InlinePreviewNotAllowedError` for anything outside
+    ``_INLINE_ALLOWED_EXTENSIONS`` — serving an unvetted type inline on the
+    document origin would be stored XSS. The single choke point for both
+    the session and share preview endpoints, so neither can mint an inline
+    URL for one.
     """
     ext = os.path.splitext(file_key)[1].lower()
-    if ext in _INLINE_FORBIDDEN_EXTENSIONS:
+    if ext not in _INLINE_ALLOWED_EXTENSIONS:
         raise InlinePreviewNotAllowedError(ext)
-    url = get_bucket(
-        policy.bucket_name, cname_domain=settings.oss_document_domain
-    ).sign_url(
+    url = get_bucket(policy.bucket_name, cname_domain=settings.oss_document_domain).sign_url(
         "GET",
         file_key,
         expires=_DOWNLOAD_URL_TTL_SECONDS,

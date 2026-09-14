@@ -97,14 +97,15 @@ async def insert_ledger_and_bump_balance(
     db.add(entry)
 
     await db.execute(
-        update(User)
-        .where(User.id == user_id)
-        .values(credit_balance=User.credit_balance + amount)
+        update(User).where(User.id == user_id).values(credit_balance=User.credit_balance + amount)
     )
     await db.flush()  # surface IntegrityError on duplicate idempotency_key now
 
     logger.info(
         "credit ledger: user=%s kind=%s amount=%s ref=%s",
-        user_id, kind.value, amount, reference,
+        user_id,
+        kind.value,
+        amount,
+        reference,
     )
     return entry

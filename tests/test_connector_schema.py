@@ -25,11 +25,17 @@ class TestCreateAuthValidation:
     def test_header_requires_name_and_value(self):
         with pytest.raises(ValidationError):
             ConnectorCreate(
-                name="gh", url="https://x/y", auth_type="HEADER", credential="k",
+                name="gh",
+                url="https://x/y",
+                auth_type="HEADER",
+                credential="k",
             )
         ok = ConnectorCreate(
-            name="gh", url="https://x/y", auth_type="HEADER",
-            credential="k", header_name="X-Api-Key",
+            name="gh",
+            url="https://x/y",
+            auth_type="HEADER",
+            credential="k",
+            header_name="X-Api-Key",
         )
         assert ok.header_name == "X-Api-Key"
 
@@ -49,12 +55,15 @@ class TestCreateSourceValidation:
         with pytest.raises(ValidationError):
             ConnectorCreate(url="https://mcp.gh.dev/x")
 
-    @pytest.mark.parametrize("extra", [
-        {"name": "gh"},
-        {"url": "https://mcp.gh.dev/x"},
-        {"auth_type": "BEARER", "credential": "tok"},
-        {"oauth_scope": "read"},
-    ])
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"name": "gh"},
+            {"url": "https://mcp.gh.dev/x"},
+            {"auth_type": "BEARER", "credential": "tok"},
+            {"oauth_scope": "read"},
+        ],
+    )
     def test_catalog_id_rejects_fields_the_entry_owns(self, extra):
         # Silently ignoring them would let a caller think they overrode the
         # official definition.

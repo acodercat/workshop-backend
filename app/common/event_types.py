@@ -28,6 +28,7 @@ class EventType(StrEnum):
     ``SESSION_*`` / ``AGENT_STOPPED`` here, so this enum is the documented
     catalog of what crosses the wire, not a filter.
     """
+
     SESSION_READY = "session.ready"
     # Marks the Phase-1-replay → Phase-2-live boundary so clients can
     # tell "I've caught up to live" without time-based heuristics.

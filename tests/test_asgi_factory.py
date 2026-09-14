@@ -15,10 +15,8 @@ asyncio_mode = "auto" applies to async tests; these drive the app through
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
-
-from fastapi import status
 
 from app.errors import AppError, StaffAuthenticationError
 from config import settings
@@ -31,6 +29,7 @@ class _ForbiddenError(AppError):
 
     status_code = status.HTTP_403_FORBIDDEN
     error_type = "forbidden_test"
+
 
 # Building an app initializes Sentry if a DSN is configured; a unit-test
 # process must never report there. Cleared before the factory import path
@@ -118,9 +117,7 @@ def test_app_error_serializes_into_the_envelope() -> None:
     response = client.get("/boom-forbidden")
 
     assert response.status_code == 403
-    assert response.json() == {
-        "error": {"type": "forbidden_test", "message": "not allowed"}
-    }
+    assert response.json() == {"error": {"type": "forbidden_test", "message": "not allowed"}}
 
 
 def test_details_ride_along_when_an_error_carries_them() -> None:
@@ -162,9 +159,7 @@ def test_every_response_carries_a_request_id() -> None:
 
 
 def test_a_sane_inbound_request_id_is_reused() -> None:
-    response = client.get(
-        "/health/live", headers={"X-Request-ID": "trace-abc.123"}
-    )
+    response = client.get("/health/live", headers={"X-Request-ID": "trace-abc.123"})
 
     assert response.headers["X-Request-ID"] == "trace-abc.123"
 
@@ -172,9 +167,7 @@ def test_a_sane_inbound_request_id_is_reused() -> None:
 def test_a_garbage_inbound_request_id_is_replaced() -> None:
     # An id that fails the sanity pattern would poison every log line it
     # gets bound to; the middleware mints a fresh one instead.
-    response = client.get(
-        "/health/live", headers={"X-Request-ID": "bad id with spaces!"}
-    )
+    response = client.get("/health/live", headers={"X-Request-ID": "bad id with spaces!"})
 
     minted = response.headers["X-Request-ID"]
     assert minted and minted != "bad id with spaces!"
@@ -195,4 +188,3 @@ def test_a_request_id_too_long_to_store_is_replaced() -> None:
 
     minted = response.headers["X-Request-ID"]
     assert minted and minted != too_long
-

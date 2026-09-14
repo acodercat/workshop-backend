@@ -31,8 +31,12 @@ from config import settings
 def main() -> None:
     ap = argparse.ArgumentParser(description="Export a session into a portable bundle.")
     ap.add_argument("--session-id", required=True, help="Source session UUID.")
-    ap.add_argument("--out", type=Path, default=Path("session_migration"),
-                    help="Output bundle directory (default: ./session_migration).")
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=Path("session_migration"),
+        help="Output bundle directory (default: ./session_migration).",
+    )
     args = ap.parse_args()
     sid, out = args.session_id, args.out
     files_dir = out / "files"
@@ -55,9 +59,14 @@ def main() -> None:
             sys.exit(f"source session {sid} not found")
         title, model_id, tier, agent_type, thinking, status, created, updated = row
         session = {
-            "title": title, "model_id": model_id, "tier": tier,
-            "agent_type": agent_type, "thinking_enabled": thinking, "status": status,
-            "created_at": created.isoformat(), "updated_at": updated.isoformat(),
+            "title": title,
+            "model_id": model_id,
+            "tier": tier,
+            "agent_type": agent_type,
+            "thinking_enabled": thinking,
+            "status": status,
+            "created_at": created.isoformat(),
+            "updated_at": updated.isoformat(),
         }
 
         cur.execute(
@@ -65,8 +74,7 @@ def main() -> None:
             (sid,),
         )
         messages = [
-            {"role": r, "blocks": b, "created_at": c.isoformat()}
-            for r, b, c in cur.fetchall()
+            {"role": r, "blocks": b, "created_at": c.isoformat()} for r, b, c in cur.fetchall()
         ]
 
         cur.execute(
@@ -88,19 +96,25 @@ def main() -> None:
         (out / local).write_bytes(data)
         warn = "" if sz in (None, len(data)) else f"  ⚠️ size db={sz} got={len(data)}"
         print(f"  [{origin:<11}] {len(data):>9}  {fn}{warn}")
-        files.append({
-            "file_key": key, "origin": origin, "filename": fn, "mime_type": mt,
-            "size_bytes": len(data), "created_at": cts.isoformat(), "local": local,
-        })
+        files.append(
+            {
+                "file_key": key,
+                "origin": origin,
+                "filename": fn,
+                "mime_type": mt,
+                "size_bytes": len(data),
+                "created_at": cts.isoformat(),
+                "local": local,
+            }
+        )
 
-    manifest = {"source_session_id": sid, "session": session,
-                "messages": messages, "files": files}
-    (out / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
-    )
+    manifest = {"source_session_id": sid, "session": session, "messages": messages, "files": files}
+    (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     total = sum(f["size_bytes"] for f in files)
-    print(f"\nexported: {len(messages)} messages, {len(files)} files, "
-          f"{total / 1024 / 1024:.1f} MB -> {out}")
+    print(
+        f"\nexported: {len(messages)} messages, {len(files)} files, "
+        f"{total / 1024 / 1024:.1f} MB -> {out}"
+    )
 
 
 if __name__ == "__main__":

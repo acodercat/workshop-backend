@@ -34,6 +34,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.types import Lifespan
 
 from app.database import engine
 from app.exception_handlers import install_error_handlers
@@ -66,7 +67,7 @@ def create_app(
     title: str,
     root_path: str,
     cors_origins: list[str],
-    lifespan: Callable[[FastAPI], object],
+    lifespan: Lifespan[FastAPI],
     readiness_probes: Mapping[str, ReadinessProbe],
 ) -> FastAPI:
     """Build an app with this project's standard HTTP stack.
@@ -93,7 +94,12 @@ def create_app(
     )
 
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+    # Narrowed handler against Starlette's ``Exception`` signature — see
+    # ``exception_handlers.install_error_handlers`` for why that is sound.
+    app.add_exception_handler(
+        RateLimitExceeded,
+        rate_limit_exceeded_handler,  # type: ignore[arg-type]
+    )
     install_error_handlers(app)
 
     # SlowAPIMiddleware makes ``limiter.default_limits`` an actual global
@@ -126,9 +132,7 @@ def create_app(
     return app
 
 
-def _install_health_routes(
-    app: FastAPI, readiness_probes: Mapping[str, ReadinessProbe]
-) -> None:
+def _install_health_routes(app: FastAPI, readiness_probes: Mapping[str, ReadinessProbe]) -> None:
     """Register ``/health/live`` and ``/health/ready``.
 
     Both are rate-limit exempt: K8s polls them every few seconds per

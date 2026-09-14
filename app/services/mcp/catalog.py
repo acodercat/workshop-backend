@@ -49,7 +49,8 @@ async def list_published(db: AsyncSession) -> list[MCPServerCatalogEntry]:
 
 
 async def get_published_entry(
-    db: AsyncSession, catalog_id: int,
+    db: AsyncSession,
+    catalog_id: int,
 ) -> MCPServerCatalogEntry:
     """One entry the caller is allowed to add.
 
@@ -63,9 +64,7 @@ async def get_published_entry(
     result = await db.execute(stmt)
     entry = result.scalar_one_or_none()
     if entry is None:
-        raise ConnectorCatalogEntryNotFoundError(
-            f"catalog entry {catalog_id} is not available"
-        )
+        raise ConnectorCatalogEntryNotFoundError(f"catalog entry {catalog_id} is not available")
     return entry
 
 
@@ -103,13 +102,10 @@ def build_connector(
     takes_credential = entry.auth_type in CREDENTIAL_AUTH_TYPES
     if takes_credential and encrypted_credential is None:
         raise ConnectorCatalogCredentialError(
-            f"catalog entry {entry.id} requires your {entry.auth_type.value} "
-            f"credential to be added"
+            f"catalog entry {entry.id} requires your {entry.auth_type.value} credential to be added"
         )
     if not takes_credential and encrypted_credential is not None:
-        raise ConnectorCatalogCredentialError(
-            f"catalog entry {entry.id} takes no credential"
-        )
+        raise ConnectorCatalogCredentialError(f"catalog entry {entry.id} takes no credential")
     return MCPServer(
         user_id=user_id,
         catalog_id=entry.id,

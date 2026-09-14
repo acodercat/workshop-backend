@@ -13,33 +13,37 @@ from app.services.mcp import url_guard
 
 
 class TestValidatePublicUrl:
-    @pytest.mark.parametrize("url", [
-        "http://mcp.example.com/x",    # not https
-        "https:///x",                  # no host
-        "https://127.0.0.1/x",         # loopback
-        "https://10.0.0.5/x",          # private
-        "https://192.168.1.1/x",       # private
-        "https://169.254.169.254/x",   # cloud metadata / link-local
-        # Shared address space (RFC 6598). Neither ``is_private`` nor
-        # ``is_loopback``, so a blocklist waves it through — and it is where
-        # Tailscale, carrier-grade NAT and plenty of internal services live.
-        "https://100.64.0.10/x",
-        "https://192.0.0.1/x",         # IETF protocol assignments
-        "https://198.18.0.1/x",        # benchmarking range
-        "https://[fc00::1]/x",         # IPv6 unique-local
-        # An IPv4 address wrapped in a globally-assigned IPv6 prefix. ``is_global``
-        # judges the outer address and says yes; on a NAT64/DNS64 network the
-        # translator then dials the inner one, which here is 127.0.0.1.
-        "https://[64:ff9b::7f00:1]/x",  # NAT64 well-known (RFC 6052)
-        "https://[::7f00:1]/x",         # IPv4-compatible, deprecated (RFC 4291)
-    ])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://mcp.example.com/x",  # not https
+            "https:///x",  # no host
+            "https://127.0.0.1/x",  # loopback
+            "https://10.0.0.5/x",  # private
+            "https://192.168.1.1/x",  # private
+            "https://169.254.169.254/x",  # cloud metadata / link-local
+            # Shared address space (RFC 6598). Neither ``is_private`` nor
+            # ``is_loopback``, so a blocklist waves it through — and it is where
+            # Tailscale, carrier-grade NAT and plenty of internal services live.
+            "https://100.64.0.10/x",
+            "https://192.0.0.1/x",  # IETF protocol assignments
+            "https://198.18.0.1/x",  # benchmarking range
+            "https://[fc00::1]/x",  # IPv6 unique-local
+            # An IPv4 address wrapped in a globally-assigned IPv6 prefix. ``is_global``
+            # judges the outer address and says yes; on a NAT64/DNS64 network the
+            # translator then dials the inner one, which here is 127.0.0.1.
+            "https://[64:ff9b::7f00:1]/x",  # NAT64 well-known (RFC 6052)
+            "https://[::7f00:1]/x",  # IPv4-compatible, deprecated (RFC 4291)
+        ],
+    )
     def test_rejects_unsafe(self, url):
         with pytest.raises(InvalidConnectorUrlError):
             url_guard.validate_public_url(url)
 
     def test_accepts_public(self, monkeypatch):
         monkeypatch.setattr(
-            url_guard.socket, "getaddrinfo",
+            url_guard.socket,
+            "getaddrinfo",
             lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
         )
         url_guard.validate_public_url("https://mcp.example.com/x")  # no raise
@@ -62,11 +66,14 @@ class TestEmbeddedIPv4Prefixes:
     registry judges is global, and the one that gets dialled is inside it.
     """
 
-    @pytest.mark.parametrize("address,dialled", [
-        ("2002:7f00:0001::", "127.0.0.1"),
-        ("2002:0a00:0005::", "10.0.0.5"),
-        ("2002:a9fe:a9fe::", "169.254.169.254"),   # cloud metadata
-    ])
+    @pytest.mark.parametrize(
+        "address,dialled",
+        [
+            ("2002:7f00:0001::", "127.0.0.1"),
+            ("2002:0a00:0005::", "10.0.0.5"),
+            ("2002:a9fe:a9fe::", "169.254.169.254"),  # cloud metadata
+        ],
+    )
     def test_a_6to4_wrapper_is_refused(self, address, dialled):
         import ipaddress
 
@@ -85,38 +92,40 @@ class TestEmbeddedIPv4Prefixes:
         with pytest.raises(InvalidConnectorUrlError):
             url_guard.validate_public_url(f"https://[{address}]/x")
 
-    @pytest.mark.parametrize("address,dialled", [
-        ("64:ff9b::7f00:1", "127.0.0.1"),
-        ("64:ff9b::a00:5", "10.0.0.5"),
-        ("64:ff9b::a9fe:a9fe", "169.254.169.254"),   # cloud metadata
-        ("::7f00:1", "127.0.0.1"),
-    ])
+    @pytest.mark.parametrize(
+        "address,dialled",
+        [
+            ("64:ff9b::7f00:1", "127.0.0.1"),
+            ("64:ff9b::a00:5", "10.0.0.5"),
+            ("64:ff9b::a9fe:a9fe", "169.254.169.254"),  # cloud metadata
+            ("::7f00:1", "127.0.0.1"),
+        ],
+    )
     def test_a_wrapped_internal_address_is_refused(self, address, dialled):
         import ipaddress
 
         # The premise, asserted rather than asserted-about: without the extra
         # check these pass, and what they reach is an internal host.
         assert ipaddress.ip_address(address).is_global
-        assert str(ipaddress.ip_address(
-            int(ipaddress.ip_address(address)) & 0xFFFFFFFF
-        )) == dialled
+        assert str(ipaddress.ip_address(int(ipaddress.ip_address(address)) & 0xFFFFFFFF)) == dialled
 
         with pytest.raises(InvalidConnectorUrlError):
             url_guard.validate_public_url(f"https://[{address}]/x")
 
-    @pytest.mark.parametrize("address,dialled", [
-        ("64:ff9b::8.8.8.8", "8.8.8.8"),
-        ("64:ff9b::1.1.1.1", "1.1.1.1"),
-    ])
+    @pytest.mark.parametrize(
+        "address,dialled",
+        [
+            ("64:ff9b::8.8.8.8", "8.8.8.8"),
+            ("64:ff9b::1.1.1.1", "1.1.1.1"),
+        ],
+    )
     def test_a_wrapped_public_address_is_allowed(self, address, dialled):
         import ipaddress
 
         # The prefix is not the answer, the address inside it is. DNS64 answers
         # for every IPv4-only host out of this prefix, so refusing the prefix
         # would leave an IPv6-only deployment with no reachable Connector at all.
-        assert str(ipaddress.ip_address(
-            int(ipaddress.ip_address(address)) & 0xFFFFFFFF
-        )) == dialled
+        assert str(ipaddress.ip_address(int(ipaddress.ip_address(address)) & 0xFFFFFFFF)) == dialled
 
         url_guard.validate_public_url(f"https://[{address}]/x")
 
@@ -124,7 +133,8 @@ class TestEmbeddedIPv4Prefixes:
         # The boundary. Refusing whole swathes of IPv6 to close this would cost
         # every legitimate v6-only MCP server.
         monkeypatch.setattr(
-            url_guard.socket, "getaddrinfo",
+            url_guard.socket,
+            "getaddrinfo",
             lambda *args, **kwargs: [
                 (None, None, None, None, ("2606:4700::6810:85e5", 443, 0, 0)),
             ],
@@ -139,7 +149,8 @@ class TestPinnedResolveTransport:
         # pre-flight check alone leaves open. (loop.getaddrinfo delegates to
         # socket.getaddrinfo, so patching it drives the async resolution.)
         monkeypatch.setattr(
-            url_guard.socket, "getaddrinfo",
+            url_guard.socket,
+            "getaddrinfo",
             lambda *args, **kwargs: [(2, 1, 6, "", ("10.0.0.5", 443))],
         )
         transport = url_guard._PinnedResolveTransport()
@@ -155,7 +166,8 @@ class TestPinnedResolveTransport:
         # route, and the next request would succeed where this one did not. An
         # ordinary client tries each; pinning must not cost that.
         monkeypatch.setattr(
-            url_guard.socket, "getaddrinfo",
+            url_guard.socket,
+            "getaddrinfo",
             lambda *args, **kwargs: [
                 (10, 1, 6, "", ("2602:f79a::1", 443, 0, 0)),
                 (2, 1, 6, "", ("208.103.161.1", 443)),
@@ -183,7 +195,8 @@ class TestPinnedResolveTransport:
         # It happens after the request was sent, so the server may already have
         # acted on it — re-sending a token exchange would spend the grant twice.
         monkeypatch.setattr(
-            url_guard.socket, "getaddrinfo",
+            url_guard.socket,
+            "getaddrinfo",
             lambda *args, **kwargs: [
                 (2, 1, 6, "", ("208.103.161.1", 443)),
                 (2, 1, 6, "", ("208.103.161.2", 443)),
@@ -233,8 +246,10 @@ class TestSchemeEnforcedPerRequest:
         from app.services.mcp import url_guard
 
         monkeypatch.setattr(
-            url_guard.asyncio.get_running_loop().__class__, "getaddrinfo",
-            _resolving_to("10.0.0.5"), raising=False,
+            url_guard.asyncio.get_running_loop().__class__,
+            "getaddrinfo",
+            _resolving_to("10.0.0.5"),
+            raising=False,
         )
         async with url_guard.guarded_client() as client:
             with pytest.raises(InvalidConnectorUrlError):
@@ -244,4 +259,5 @@ class TestSchemeEnforcedPerRequest:
 def _resolving_to(address: str):
     async def _getaddrinfo(self, host, port, **kwargs):
         return [(2, 1, 6, "", (address, port))]
+
     return _getaddrinfo

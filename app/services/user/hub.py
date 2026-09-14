@@ -119,7 +119,8 @@ class UserEventHub:
                 raise
             except Exception:
                 logger.warning(
-                    "user-event hub reader errored; resubscribing", exc_info=True,
+                    "user-event hub reader errored; resubscribing",
+                    exc_info=True,
                 )
                 await asyncio.sleep(1)
             finally:

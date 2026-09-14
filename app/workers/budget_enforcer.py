@@ -43,8 +43,8 @@ one costs one tick of extra burn, never a wrong charge.
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import NamedTuple
+from datetime import UTC, datetime
+from typing import NamedTuple, cast
 
 import redis.asyncio as aioredis
 from sqlalchemy import select, text
@@ -84,7 +84,10 @@ class RunningTurn(NamedTuple):
 
 
 def select_turn_to_stop(
-    turns: list[RunningTurn], *, balance_micro: int, buffer_micro: int,
+    turns: list[RunningTurn],
+    *,
+    balance_micro: int,
+    buffer_micro: int,
 ) -> RunningTurn | None:
     """Pick the turn to stop for one user, or ``None`` to leave all running.
 
@@ -110,7 +113,9 @@ def select_turn_to_stop(
 
 
 async def run_forever(
-    redis: aioredis.Redis, *, interval_seconds: int | None = None,
+    redis: aioredis.Redis,
+    *,
+    interval_seconds: int | None = None,
 ) -> None:
     """Periodic enforcement loop. Cancel-safe via :class:`asyncio.CancelledError`.
 
@@ -133,11 +138,7 @@ async def run_forever(
                 "budget enforcer tick failed (consecutive_failures=%d)",
                 consecutive_failures,
             )
-        delay = (
-            min(interval * (2 ** consecutive_failures), 600)
-            if consecutive_failures
-            else interval
-        )
+        delay = min(interval * (2**consecutive_failures), 600) if consecutive_failures else interval
         await asyncio.sleep(delay)
 
 
@@ -151,9 +152,7 @@ async def _tick(redis: aioredis.Redis) -> int:
     """
     async with AsyncSessionLocal() as db:
         got = (
-            await db.execute(
-                text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _LOCK_KEY}
-            )
+            await db.execute(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _LOCK_KEY})
         ).scalar()
         if not got:
             return 0
@@ -161,15 +160,12 @@ async def _tick(redis: aioredis.Redis) -> int:
         turns_by_user = await _priced_turns_by_user(db)
         if not turns_by_user:
             return 0
-        balances = dict(
-            (
-                await db.execute(
-                    select(User.id, User.credit_balance).where(
-                        User.id.in_(turns_by_user.keys())
-                    )
-                )
-            ).all()
+        rows = await db.execute(
+            select(User.id, User.credit_balance).where(User.id.in_(turns_by_user.keys()))
         )
+        # ``cast``: a ``Row`` is a tuple at runtime but not to a type checker,
+        # and ``dict()`` wants pairs.
+        balances: dict[int, int] = dict(cast("list[tuple[int, int]]", rows.all()))
 
     buffer_micro = micro_from_credits(settings.budget_enforcer_buffer_credits)
     stopped = 0
@@ -199,9 +195,11 @@ async def _tick(redis: aioredis.Redis) -> int:
             continue
         stopped += 1
         logger.warning(
-            "budget exhausted: stopping session %s (user=%s priced=%d "
-            "reserved=%d balance=%d)",
-            pick.session_id, user_id, pick.priced, pick.reserved,
+            "budget exhausted: stopping session %s (user=%s priced=%d reserved=%d balance=%d)",
+            pick.session_id,
+            user_id,
+            pick.priced,
+            pick.reserved,
             balances.get(user_id, 0),
         )
     return stopped
@@ -247,7 +245,7 @@ async def _priced_turns_by_user(
         )
     ).all()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     turns_by_user: dict[int, list[RunningTurn]] = {}
     for row in rows:
         priced = cost_micro_credits(

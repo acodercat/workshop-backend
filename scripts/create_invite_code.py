@@ -20,7 +20,7 @@ Usage:
 import argparse
 import asyncio
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.database import AsyncSessionLocal
 from app.models.invite_code import InviteCodeOrigin
@@ -29,7 +29,7 @@ from app.services.auth import create_invite_code
 
 async def main(args: argparse.Namespace) -> int:
     expires_at = (
-        datetime.now(timezone.utc) + timedelta(days=args.expires_days)
+        datetime.now(UTC) + timedelta(days=args.expires_days)
         if args.expires_days is not None
         else None
     )
@@ -54,15 +54,20 @@ async def main(args: argparse.Namespace) -> int:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
-        "--max-uses", type=int, default=None,
+        "--max-uses",
+        type=int,
+        default=None,
         help="Redemption cap. Omit for unlimited.",
     )
     parser.add_argument(
-        "--expires-days", type=int, default=None,
+        "--expires-days",
+        type=int,
+        default=None,
         help="Days until the code expires. Omit for no expiry.",
     )
     parser.add_argument(
-        "--note", default=None,
+        "--note",
+        default=None,
         help="Operator note stored on the row (e.g. 'beta wave 1').",
     )
     args = parser.parse_args()

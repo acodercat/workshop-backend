@@ -19,17 +19,13 @@ from app.schemas.admin.fields import Password
 
 
 class StaffCreate(BaseModel):
-    """A new operator account.
-
-    No ``reason`` — for a create, the payload *is* the record of what was
-    done.
-    """
+    """A new operator account."""
 
     username: str = Field(
         min_length=3,
         max_length=64,
-        # Login identifier, hand-provisioned, and it appears in log lines
-        # and audit rows. Kept to an unambiguous set so it can't be
+        # Login identifier, hand-provisioned, and it appears in log lines.
+        # Kept to an unambiguous set so it can't be
         # confused with a display name or carry look-alike characters.
         pattern=r"^[a-z0-9][a-z0-9_.-]*$",
     )
@@ -52,8 +48,7 @@ class StaffUpdate(BaseModel):
     def _at_least_one_change(self) -> "StaffUpdate":
         """Refuse a request that changes nothing.
 
-        An empty PATCH would otherwise write an audit row describing no
-        change, which is noise in exactly the place noise is expensive.
+        An empty PATCH is a client bug; answering 200 would hide it.
         """
         if self.name is None and self.status is None:
             raise ValueError("Provide at least one of name or status.")
@@ -75,7 +70,7 @@ class StaffPasswordChange(BaseModel):
     """An operator changing their own password.
 
     Sudo-gated on ``current_password``, mirroring the customer-facing
-    email/phone change flows: possession of a live token is not on its
+    email change flow: possession of a live token is not on its
     own enough to rotate the credential behind it.
     """
 

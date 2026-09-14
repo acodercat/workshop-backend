@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Enum as SAEnum, Index, Integer, String, TIMESTAMP, Uuid, text
+from sqlalchemy import TIMESTAMP, Enum as SAEnum, Index, Integer, String, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -77,10 +77,14 @@ class Sandbox(Base):
     )
     image: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     last_used_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     # The generation of the session's ``/workspace`` storage this container
     # mounted (``session.workspace_generation`` at the time). Worker-owned:

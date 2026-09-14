@@ -54,7 +54,9 @@ def test_generate_upload_url_uses_sanitized_basename_in_key():
     bucket.sign_url.return_value = "https://oss/upload"
 
     with patch("app.services.file_storage.get_bucket", return_value=bucket):
-        response = file_storage.generate_upload_url("report.pdf", 1, file_storage.SESSION_FILE_POLICY)
+        response = file_storage.generate_upload_url(
+            "report.pdf", 1, file_storage.SESSION_FILE_POLICY
+        )
 
     assert response.file_key.startswith("session-files/")
     assert response.file_key.endswith("/report.pdf")
@@ -67,7 +69,9 @@ def test_generate_upload_url_omits_tagging_when_feature_off(monkeypatch):
     bucket.sign_url.return_value = "https://oss/upload"
 
     with patch("app.services.file_storage.get_bucket", return_value=bucket):
-        response = file_storage.generate_upload_url("report.pdf", 1, file_storage.SESSION_FILE_POLICY)
+        response = file_storage.generate_upload_url(
+            "report.pdf", 1, file_storage.SESSION_FILE_POLICY
+        )
 
     assert response.tagging_header is None
     # The signed headers must NOT include x-oss-tagging (else the client,
@@ -82,7 +86,9 @@ def test_generate_upload_url_signs_tagging_when_feature_on(monkeypatch):
     bucket.sign_url.return_value = "https://oss/upload"
 
     with patch("app.services.file_storage.get_bucket", return_value=bucket):
-        response = file_storage.generate_upload_url("report.pdf", 1, file_storage.SESSION_FILE_POLICY)
+        response = file_storage.generate_upload_url(
+            "report.pdf", 1, file_storage.SESSION_FILE_POLICY
+        )
 
     # Response value and signed header must match exactly (signature contract).
     assert response.tagging_header == file_storage.ORPHAN_TAGGING_HEADER
@@ -119,15 +125,11 @@ def test_generate_inline_url_signs_against_custom_domain_when_set(monkeypatch):
     # ``*.aliyuncs.com`` endpoint force-downloads HTML in mainland regions.
     # When configured, the URL must be signed against it (via the CNAME
     # bucket — get_bucket(cname_domain=...)).
-    monkeypatch.setattr(
-        file_storage.settings, "oss_document_domain", "https://files.example.com"
-    )
+    monkeypatch.setattr(file_storage.settings, "oss_document_domain", "https://files.example.com")
     bucket = MagicMock()
     bucket.sign_url.return_value = "https://files.example.com/inline"
 
-    with patch(
-        "app.services.file_storage.get_bucket", return_value=bucket
-    ) as get:
+    with patch("app.services.file_storage.get_bucket", return_value=bucket) as get:
         url, _ = file_storage.generate_inline_url(
             file_storage.SESSION_FILE_POLICY, "session-files/x/page.html"
         )
@@ -137,9 +139,51 @@ def test_generate_inline_url_signs_against_custom_domain_when_set(monkeypatch):
         cname_domain="https://files.example.com",
     )
     assert url == "https://files.example.com/inline"
-    assert bucket.sign_url.call_args.kwargs["params"] == {
-        "response-content-disposition": "inline"
-    }
+    assert bucket.sign_url.call_args.kwargs["params"] == {"response-content-disposition": "inline"}
+
+
+def test_generate_upload_url_accepts_any_extension():
+    # Uploads are no longer gated on extension. An unknown one still mints a
+    # URL; it just carries the inert generic Content-Type, which is what
+    # later keeps a browser from rendering it.
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://oss/upload"
+
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        response = file_storage.generate_upload_url(
+            "notes.sqlite3", 1, file_storage.SESSION_FILE_POLICY
+        )
+
+    assert response.content_type == "application/octet-stream"
+    assert response.file_key.endswith("/notes.sqlite3")
+
+
+def test_generate_upload_url_keeps_known_content_type():
+    # The table is still consulted where it has an answer — the signed
+    # Content-Type becomes the stored one, and ``.html`` rendering in the
+    # preview iframe depends on it being ``text/html``.
+    bucket = MagicMock()
+    bucket.sign_url.return_value = "https://oss/upload"
+
+    with patch("app.services.file_storage.get_bucket", return_value=bucket):
+        response = file_storage.generate_upload_url(
+            "report.pdf", 1, file_storage.SESSION_FILE_POLICY
+        )
+
+    assert response.content_type == "application/pdf"
+
+
+def test_generate_inline_url_refuses_unvetted_extension():
+    # The inline gate is an allow-list precisely because uploads are open:
+    # anything nobody vetted downloads instead of rendering as active
+    # content on the document origin. A deny-list would need to predict
+    # every scriptable type a browser might execute.
+    with patch("app.services.file_storage.get_bucket") as get_bucket:
+        with pytest.raises(file_storage.InlinePreviewNotAllowedError):
+            file_storage.generate_inline_url(
+                file_storage.SESSION_FILE_POLICY, "session-files/x/page.xhtml"
+            )
+    get_bucket.assert_not_called()
 
 
 def test_generate_inline_url_refuses_svg():

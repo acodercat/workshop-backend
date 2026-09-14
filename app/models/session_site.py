@@ -18,12 +18,12 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     Uuid,
     text,
 )

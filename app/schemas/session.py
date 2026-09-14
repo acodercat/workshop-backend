@@ -9,7 +9,6 @@ from app.models.session import AgentType, SessionStatus, Tier
 from app.schemas.message_feedback import FeedbackResponse
 from config import settings
 
-
 # The cost is per configured Connector per turn — its tools enter the
 # model's catalog on every step.
 CONNECTORS_MAX = 20
@@ -35,6 +34,7 @@ class SessionUpdate(BaseModel):
 
 class SessionResponse(BaseModel):
     """Session metadata only — used by the list endpoint."""
+
     id: UUID
     user_id: int | None
     title: str | None
@@ -55,6 +55,7 @@ class FileRef(BaseModel):
     user's text block under ``files[]``; also forwarded to the worker,
     which pulls bytes from OSS into the sandbox before the agent runs.
     """
+
     file_key: str = Field(..., min_length=1, max_length=512)
     filename: str = Field(..., min_length=1, max_length=255)
     mime_type: str | None = None
@@ -74,13 +75,14 @@ class MessageCreate(BaseModel):
     # files). ``.strip()`` on the way in so whitespace-only isn't "content".
     content: str = Field(default="", max_length=100000)
     files: list[FileRef] = Field(
-        default_factory=list, max_length=settings.max_message_files,
+        default_factory=list,
+        max_length=settings.max_message_files,
     )
     # Per-turn composer picks. With the cap on *enabled* skills gone —
-    # turning one on lists it in the composer rather than loading it —
-    # this is the only bound a user can push on how much skill metadata
-    # a turn puts in the model's context. The rest of it is the
-    # agent-only SYSTEM set, which only an operator adds to.
+    # turning one on lists it in the composer rather than loading it — this
+    # is the only bound a user can push on how much skill metadata a turn
+    # puts in the model's context. The rest of it is the agent-only SYSTEM
+    # set, which only an operator adds to.
     skills: list[str] = Field(default_factory=list, max_length=20)
     # Optional recipe picked from the composer. The backend resolves it
     # to a pinned snapshot on ``session_turn.recipe``; its instructions
@@ -145,6 +147,7 @@ class MessageResponse(BaseModel):
     not that no feedback exists in the table from anyone, since this
     is owner-only and there's only ever one voter per session anyway.
     Always ``None`` for user messages."""
+
     id: int
     role: str
     blocks: list[dict[str, Any]]
@@ -156,6 +159,7 @@ class MessageResponse(BaseModel):
 
 class SessionDetailResponse(BaseModel):
     """Full session payload: metadata + status + structured message history."""
+
     id: UUID
     title: str | None
     status: SessionStatus
@@ -173,10 +177,12 @@ class SessionDetailResponse(BaseModel):
 class TitleGenerateRequest(BaseModel):
     """Body for ``POST /sessions/titles`` — content of the user's
     first message."""
+
     content: str = Field(..., min_length=1, max_length=200000)
 
 
 class TitleGenerateResponse(BaseModel):
     """Response for ``POST /sessions/titles`` — LLM-generated
     conversation title."""
+
     title: str

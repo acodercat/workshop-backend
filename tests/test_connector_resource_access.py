@@ -10,7 +10,7 @@ Everything here is about one property: **only the user turns it on.** Not a
 create body, not a probe, not a PATCH that was about something else.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import BackgroundTasks
@@ -18,7 +18,7 @@ from fastapi import BackgroundTasks
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.schemas.mcp_server import ConnectorCreate, ConnectorResponse, ConnectorUpdate
 
-_NOW = datetime(2026, 8, 14, tzinfo=timezone.utc)
+_NOW = datetime(2026, 8, 14, tzinfo=UTC)
 
 
 def _connector(**over) -> MCPServer:
@@ -79,9 +79,7 @@ async def _patch(monkeypatch, connector: MCPServer, body: ConnectorUpdate) -> No
         "probe",
         AsyncMock(return_value=ProbeResult(server_name="s", tools=[])),
     )
-    monkeypatch.setattr(
-        endpoint, "_get_owned_connector", AsyncMock(return_value=connector),
-    )
+    monkeypatch.setattr(endpoint, "_get_owned_connector", AsyncMock(return_value=connector))
     monkeypatch.setattr(endpoint, "_commit_or_conflict", AsyncMock())
     monkeypatch.setattr(endpoint, "open_secret", lambda sealed, **_: sealed)
 

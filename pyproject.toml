@@ -38,9 +38,99 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mypy>=2.3.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
+    "ruff>=0.16.2",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.ruff]
+# Not enforced as a limit — ``E501`` is deliberately not selected below. This
+# only tells the formatter what the house width is, and it is 100 rather than
+# 88 because that is where this code already sits.
+line-length = 100
+# ``target-version`` is intentionally absent: ruff reads it from
+# ``project.requires-python`` above, so there is one place to raise it.
+
+[tool.ruff.lint]
+# Deliberately narrow, and the narrowness is the point. ``F`` is pyflakes —
+# undefined names, unused imports, unused locals — which are bugs rather than
+# opinions, so a red run always means something is wrong. It is also the rule
+# that ``tests/test_undefined_names.py`` was hand-rolling: that check exists
+# because a missing ``session_connectors`` import passed 594 tests and raised
+# ``NameError`` on the first real turn in production. ``E9`` is the syntax and
+# IO errors that stop ruff parsing a file at all; without it a file that fails
+# to parse is reported as "no problems found".
+#
+# ``I`` (import order) and ``UP`` (syntax modernization) are consistency
+# rather than correctness — neither reports a bug — but both are settled:
+# applied over the whole tree in one pass, so from here they can only fire on
+# a line somebody just wrote.
+#
+# ``B`` stays off, and for this repo the measured cost is the reason rather
+# than caution: ``B008`` alone reports 159 times, every one of them FastAPI's
+# ``Depends()`` idiom. It therefore needs ``flake8-bugbear
+# .extend-immutable-calls`` listing Depends/Query/Path/Header/File/Form before
+# it says anything useful — after which it drops to ~21, most of them ``B904``
+# (``raise ... from`` inside ``except``), which is worth having. Add it in its
+# own commit.
+# ``E7`` reports nothing today across all three repos — it is here for the
+# next line somebody writes, not this tree. It covers the pycodestyle checks
+# that are bugs rather than layout: a bare ``except:``, ``== None``, ``l`` as
+# a name. Free to carry, which is the whole argument for it.
+select = ["F", "E7", "E9", "I", "UP"]
+
+# PEP 695 (``type X = ...`` and ``def f[T]()``) is a language-style decision,
+# not the mechanical modernization the rest of ``UP`` is — and enabling ``UP``
+# cannot make it a wholesale one. Of the six TypeVar/TypeAlias sites across the
+# three repos, ``UP047``/``UP040`` reach four: the other two are a
+# method-scoped TypeVar and a Pydantic ``Generic[T]`` model, neither of which
+# the rules flag. Taking the fixes would leave four sites in the new syntax and
+# two in the old, which is worse than either end. Consistent ``TypeVar`` until
+# somebody decides to migrate all six at once.
+ignore = ["UP047", "UP040"]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations are generated, then frozen. ``alembic revision`` writes them from
+# ``script.py.mako``, and once applied they are history rather than code
+# somebody maintains — so a style rule here has nothing to improve and two
+# ways to cost. It rewrote ninety-plus applied revisions for annotations that
+# never run, and it would fail every newly generated one until its scaffold
+# was hand-edited: the template's ``Union[...]`` header trips ``UP``, and its
+# ``op`` / ``sa`` imports are unused in any revision written by hand.
+#
+# ``F`` and ``E9`` still apply. An undefined name in a migration is a real bug,
+# and one that surfaces during a deploy.
+"alembic/versions/*" = ["I", "UP", "F401"]
+
+[tool.ruff.lint.isort]
+# The house style keeps aliased and plain names in one ``from`` block —
+# ``from redis.exceptions import (ConnectionError as RedisConnectionError,
+# RedisError, ...)``. isort's default splits every aliased name into a
+# statement of its own, which is three imports where the code had one.
+combine-as-imports = true
+
+[tool.mypy]
+# The app and its settings module — ``config.py`` sits outside ``app/`` but is
+# production code, imported by nearly every module and by ``alembic/env.py``.
+# ``tests/`` builds deliberately ill-typed fakes to drive failure paths, and
+# ``scripts/`` are hand-run one-offs; neither is checked.
+files = ["app", "config.py"]
+ignore_missing_imports = true
+# Without this, every ``Settings()`` and every model built with its field names
+# rather than its aliases reads as a call-argument error.
+plugins = ["pydantic.mypy"]
+
+[tool.ruff.format]
+# Same reasoning as the lint per-file-ignores above: applied revisions are
+# frozen history written by ``script.py.mako``, so reformatting a hundred of
+# them buys nothing and every newly generated one would arrive unformatted.
+exclude = [
+    "alembic/versions/*",
+    # ruff formats fenced Python inside Markdown too; see the note in the
+    # sibling repos — a doc example is prose, not code to normalize.
+    "*.md",
+]

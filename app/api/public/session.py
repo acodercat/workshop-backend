@@ -23,10 +23,10 @@ import secrets
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from openai import OpenAIError
 import redis.asyncio as aioredis
 import sqlalchemy as sa
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from openai import OpenAIError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -37,12 +37,11 @@ from app.auth import (
     authenticate_for_streaming,
     get_password_hash,
 )
-from app.database import AsyncSessionLocal
-from config import settings
 from app.common.file_kind import FILE_KINDS, file_kind_case
 from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
 from app.common.search import ilike_contains
+from app.database import AsyncSessionLocal
 from app.errors import (
     FileCountQuotaExceededError,
     FileSizeQuotaExceededError,
@@ -52,9 +51,9 @@ from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
-from app.models.session_turn import TerminationReason
 from app.models.session_share import SessionShare
 from app.models.session_site import SessionSite
+from app.models.session_turn import TerminationReason
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
@@ -66,17 +65,9 @@ from app.schemas.file import (
     UploadUrlResponse,
 )
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
-from app.schemas.site import SessionSiteResponse
-from app.services import file_storage
-from app.services.file_storage import (
-    SESSION_FILE_POLICY,
-    FileTooLargeError,
-    InlinePreviewNotAllowedError,
-    UnsupportedFileTypeError,
-)
 from app.schemas.session import (
-    MessageCreate,
     CancelAcceptedResponse,
+    MessageCreate,
     MessageQueuedResponse,
     MessageResponse,
     SessionCreate,
@@ -87,11 +78,17 @@ from app.schemas.session import (
     TitleGenerateResponse,
 )
 from app.schemas.session_share import ShareCreate, ShareResponse
-from app.services import credits
+from app.schemas.site import SessionSiteResponse
+from app.services import credits, file_storage
+from app.services.file_storage import (
+    SESSION_FILE_POLICY,
+    FileTooLargeError,
+    InlinePreviewNotAllowedError,
+)
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
-from app.services.session import connectors as session_connectors
 from app.services.session import (
     cancel_unclaimed_turn,
+    connectors as session_connectors,
     generate_title,
     queue_user_message,
     stream_events,
@@ -106,6 +103,7 @@ from app.services.session.exceptions import (
     SessionGoneError,
 )
 from app.services.session.files import assert_file_belongs_to_session
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -145,9 +143,7 @@ async def _get_or_404(
     return session
 
 
-async def _owned_mcp_server_ids(
-    db: AsyncSession, user_id: int, requested: list[int]
-) -> list[int]:
+async def _owned_mcp_server_ids(db: AsyncSession, user_id: int, requested: list[int]) -> list[int]:
     """Validate a Connector configuration, preserving the caller's order.
 
     Rejects rather than drops: an id the caller does not own is a client
@@ -180,9 +176,7 @@ async def _owned_mcp_server_ids(
     return unique_ids
 
 
-async def _owned_connector_or_404(
-    db: AsyncSession, connector_id: int, user_id: int
-) -> None:
+async def _owned_connector_or_404(db: AsyncSession, connector_id: int, user_id: int) -> None:
     """404 unless *connector_id* is one of this user's Connectors.
 
     404 rather than the 400 :func:`_owned_mcp_server_ids` raises: there the id
@@ -192,7 +186,8 @@ async def _owned_connector_or_404(
     """
     exists = await db.execute(
         select(MCPServer.id).where(
-            MCPServer.id == connector_id, MCPServer.user_id == user_id,
+            MCPServer.id == connector_id,
+            MCPServer.user_id == user_id,
         )
     )
     if exists.scalar_one_or_none() is None:
@@ -200,7 +195,9 @@ async def _owned_connector_or_404(
 
 
 async def _load_messages(
-    db: AsyncSession, session_id: uuid.UUID, user_id: int,
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    user_id: int,
 ) -> list[MessageResponse]:
     """Load a session's messages, projected into the response shape.
 
@@ -232,11 +229,7 @@ async def _load_messages(
             role=message.role.value,
             blocks=message.blocks,
             created_at=message.created_at,
-            feedback=(
-                FeedbackResponse.model_validate(feedback)
-                if feedback is not None
-                else None
-            ),
+            feedback=(FeedbackResponse.model_validate(feedback) if feedback is not None else None),
         )
         for message, feedback in rows
     ]
@@ -302,14 +295,8 @@ async def list_sessions(
     if search:
         conditions.append(ilike_contains(Session.title, search))
     filter_clause = sa.and_(*conditions)
-    base = (
-        select(Session)
-        .where(filter_clause)
-        .order_by(Session.updated_at.desc())
-    )
-    total = (
-        await db.execute(select(func.count(Session.id)).where(filter_clause))
-    ).scalar() or 0
+    base = select(Session).where(filter_clause).order_by(Session.updated_at.desc())
+    total = (await db.execute(select(func.count(Session.id)).where(filter_clause))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
         items=[SessionResponse.model_validate(s) for s in rows],
@@ -345,13 +332,16 @@ async def create_session_upload_url(
     await _enforce_session_file_quota(db, current_user.id, body.size_bytes)
     try:
         return file_storage.generate_upload_url(
-            body.filename, body.size_bytes, SESSION_FILE_POLICY,
+            body.filename,
+            body.size_bytes,
+            SESSION_FILE_POLICY,
         )
-    except (InvalidFilenameError, UnsupportedFileTypeError) as exc:
+    except InvalidFilenameError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except FileTooLargeError as exc:
         raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc),
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=str(exc),
         )
 
 
@@ -381,9 +371,7 @@ async def list_files(
     falls back to a key-derived name for any row not yet backfilled.
     """
     if kind != "all" and kind not in FILE_KINDS:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown kind: {kind!r}"
-        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown kind: {kind!r}")
 
     if origin == "upload":
         origin_clause = SessionFile.origin == SessionFileOrigin.UPLOAD
@@ -394,7 +382,12 @@ async def list_files(
             (SessionFileOrigin.UPLOAD, SessionFileOrigin.DELIVERABLE)
         )
 
-    kind_expr = file_kind_case(SessionFile.mime_type, SessionFile.filename)
+    # ``InstrumentedAttribute`` is a ``ColumnElement`` at runtime; SQLAlchemy's
+    # stubs model the two separately.
+    kind_expr = file_kind_case(
+        SessionFile.mime_type,  # type: ignore[arg-type]
+        SessionFile.filename,  # type: ignore[arg-type]
+    )
 
     conditions = [
         Session.user_id == current_user.id,
@@ -673,7 +666,10 @@ async def delete_session(
     and finds the session gone afterward — never a turn on a deleted row.
     """
     session = await _get_or_404(
-        db, session_id, current_user.id, for_update=True,
+        db,
+        session_id,
+        current_user.id,
+        for_update=True,
     )
     if session.status == SessionStatus.RUNNING:
         raise HTTPException(
@@ -721,36 +717,46 @@ async def create_message(
     session = await _get_or_404(db, session_id, current_user.id)
     try:
         await queue_user_message(
-            db, redis, session, content=body.content, files=body.files,
+            db,
+            redis,
+            session,
+            content=body.content,
+            files=body.files,
             skills=body.skills,
             recipe_id=body.recipe_id,
             agent_type=body.agent_type,
         )
     except GenerationInProgressError as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc),
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
         )
     except ConcurrentTaskLimitError as exc:
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc),
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
         )
     except SessionGoneError:
         raise HTTPException(status_code=404, detail="Session not found")
     except FileNotOwnedError as exc:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
         )
     except FileNotUploadedError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
         )
     except FileTooLargeError as exc:
         raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc),
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=str(exc),
         )
     except RecipeNotInvokableError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
         )
     return MessageQueuedResponse()
 
@@ -825,7 +831,8 @@ async def cancel_session(
         # ``agent.stopped`` follows this one either.
         return CancelAcceptedResponse(already_stopped=True)
     await redis.publish(
-        cancel_channel(str(session_id)), TerminationReason.USER_CANCELLED.value,
+        cancel_channel(str(session_id)),
+        TerminationReason.USER_CANCELLED.value,
     )
     return CancelAcceptedResponse()
 
@@ -857,9 +864,7 @@ async def stream_session(
     """
     async with AsyncSessionLocal() as db:
         await _get_or_404(db, session_id, current_user.id)
-    return EventSourceResponse(
-        stream_events(redis, str(session_id), last_event_id=last_event_id)
-    )
+    return EventSourceResponse(stream_events(redis, str(session_id), last_event_id=last_event_id))
 
 
 @router.get(
@@ -939,13 +944,9 @@ async def create_share(
     """
     session = await _get_or_404(db, session_id, current_user.id)
 
-    await db.execute(
-        delete(SessionShare).where(SessionShare.session_id == session.id)
-    )
+    await db.execute(delete(SessionShare).where(SessionShare.session_id == session.id))
 
-    password_hash = (
-        await get_password_hash(body.password) if body.password else None
-    )
+    password_hash = await get_password_hash(body.password) if body.password else None
     share = SessionShare(
         session_id=session.id,
         token=secrets.token_urlsafe(32),
@@ -987,9 +988,7 @@ async def delete_share(
     """Delete the session's share. No-op if none exists, so retries
     from a flaky client are safe."""
     await _get_or_404(db, session_id, current_user.id)
-    await db.execute(
-        delete(SessionShare).where(SessionShare.session_id == session_id)
-    )
+    await db.execute(delete(SessionShare).where(SessionShare.session_id == session_id))
     await db.commit()
 
 
@@ -1032,7 +1031,9 @@ async def get_download_url(
     session = await _get_or_404(db, session_id, current_user.id)
     try:
         await assert_file_belongs_to_session(
-            db, session_id=session.id, file_key=file_key,
+            db,
+            session_id=session.id,
+            file_key=file_key,
         )
     except FileNotInSessionError:
         raise HTTPException(
@@ -1040,10 +1041,14 @@ async def get_download_url(
             detail="File is not part of this session",
         )
     url, expires_in = file_storage.generate_download_url(
-        file_storage.SESSION_FILE_POLICY, file_key, filename,
+        file_storage.SESSION_FILE_POLICY,
+        file_key,
+        filename,
     )
     return DownloadUrlResponse(
-        download_url=url, file_key=file_key, expires_in=expires_in,
+        download_url=url,
+        file_key=file_key,
+        expires_in=expires_in,
     )
 
 
@@ -1075,7 +1080,9 @@ async def get_preview_url(
     session = await _get_or_404(db, session_id, current_user.id)
     try:
         await assert_file_belongs_to_session(
-            db, session_id=session.id, file_key=file_key,
+            db,
+            session_id=session.id,
+            file_key=file_key,
         )
     except FileNotInSessionError:
         raise HTTPException(
@@ -1084,14 +1091,18 @@ async def get_preview_url(
         )
     try:
         url, expires_in = file_storage.generate_inline_url(
-            file_storage.SESSION_FILE_POLICY, file_key,
+            file_storage.SESSION_FILE_POLICY,
+            file_key,
         )
     except InlinePreviewNotAllowedError as exc:
         raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc),
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
         )
     return PreviewUrlResponse(
-        preview_url=url, file_key=file_key, expires_in=expires_in,
+        preview_url=url,
+        file_key=file_key,
+        expires_in=expires_in,
     )
 
 
@@ -1104,16 +1115,16 @@ async def get_preview_url(
 
 
 async def _resolve_assistant_message(
-    db: AsyncSession, session_id: uuid.UUID, message_id: int, user_id: int,
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    message_id: int,
+    user_id: int,
 ) -> Message:
     """Verify session ownership + the message belongs to it AND is
     an assistant message. Two 404s and one 400 — the same shape we
     use elsewhere so we don't leak existence of unrelated rows."""
     await _get_or_404(db, session_id, user_id)
-    stmt = (
-        select(Message)
-        .where(Message.id == message_id, Message.session_id == session_id)
-    )
+    stmt = select(Message).where(Message.id == message_id, Message.session_id == session_id)
     message = (await db.execute(stmt)).scalar_one_or_none()
     if message is None:
         raise HTTPException(status_code=404, detail="Message not found")
@@ -1149,7 +1160,10 @@ async def upsert_feedback(
     been bypassed (impossible from our own UI).
     """
     await _resolve_assistant_message(
-        db, session_id, message_id, current_user.id,
+        db,
+        session_id,
+        message_id,
+        current_user.id,
     )
     # Schema validator already stripped + rejected blank — ``body.comment``
     # is either ``None`` or a non-empty trimmed string here.
@@ -1192,7 +1206,10 @@ async def delete_feedback(
 ):
     """Clear the caller's feedback. No-op if none exists."""
     await _resolve_assistant_message(
-        db, session_id, message_id, current_user.id,
+        db,
+        session_id,
+        message_id,
+        current_user.id,
     )
     await db.execute(
         delete(MessageFeedback).where(

@@ -7,7 +7,7 @@ so the registration flow works identically across providers.
 """
 
 import html
-from typing import Literal
+from typing import Literal, cast
 
 Locale = Literal["zh-CN", "en-US"]
 
@@ -57,23 +57,23 @@ def _render(
     body_map: dict[str, str],
     *,
     code: str,
-    locale: Locale,
+    locale: str,
 ) -> tuple[str, str]:
     """Format a (subject, body) pair from per-locale templates,
     falling back to ``zh-CN`` for unknown locales."""
-    resolved: Locale = locale if locale in subject_map else "zh-CN"
+    # ``cast`` because membership in the map is what makes it a ``Locale``,
+    # and an ``in`` test over a dict does not narrow a ``str``.
+    resolved: Locale = cast("Locale", locale) if locale in subject_map else "zh-CN"
     return (
         subject_map[resolved].format(code=code),
         body_map[resolved].format(code=code),
     )
 
 
-def render_register_verification(*, code: str, locale: Locale) -> tuple[str, str]:
+def render_register_verification(*, code: str, locale: str) -> tuple[str, str]:
     """Returns ``(subject, html_body)`` for the registration
     verification email in the requested locale."""
-    return _render(
-        _REGISTER_VERIFY_SUBJECT, _REGISTER_VERIFY_BODY, code=code, locale=locale
-    )
+    return _render(_REGISTER_VERIFY_SUBJECT, _REGISTER_VERIFY_BODY, code=code, locale=locale)
 
 
 _EMAIL_CHANGE_VERIFY_SUBJECT = {
@@ -116,9 +116,7 @@ _EMAIL_CHANGE_VERIFY_BODY = {
 }
 
 
-def render_email_change_verification(
-    *, code: str, locale: Locale
-) -> tuple[str, str]:
+def render_email_change_verification(*, code: str, locale: str) -> tuple[str, str]:
     """Returns ``(subject, html_body)`` for the email-change
     verification email in the requested locale. Copy emphasizes "you
     are changing your login email" so the recipient can spot a hijack
@@ -173,14 +171,14 @@ _ACCOUNT_ACTIVATED_BODY = {
 }
 
 
-def render_account_activated(*, name: str, locale: Locale) -> tuple[str, str]:
+def render_account_activated(*, name: str, locale: str) -> tuple[str, str]:
     """Returns ``(subject, html_body)`` for the account-activated notice.
 
     ``name`` is the user's display name, HTML-escaped before
     interpolation so a name containing ``<``/``&`` can't break or inject
     into the markup. Falls back to ``zh-CN`` for unknown locales.
     """
-    resolved: Locale = locale if locale in _ACCOUNT_ACTIVATED_SUBJECT else "zh-CN"
+    resolved: Locale = cast("Locale", locale) if locale in _ACCOUNT_ACTIVATED_SUBJECT else "zh-CN"
     safe_name = html.escape(name)
     return (
         _ACCOUNT_ACTIVATED_SUBJECT[resolved],
@@ -230,7 +228,7 @@ _CREDITS_TOPPED_UP_BODY = {
 
 
 def render_credits_topped_up(
-    *, name: str, credits_added: int, balance: int, locale: Locale
+    *, name: str, credits_added: int, balance: int, locale: str
 ) -> tuple[str, str]:
     """Returns ``(subject, html_body)`` for the credits top-up notice.
 
@@ -240,7 +238,7 @@ def render_credits_topped_up(
     integers, so they need no escaping. Falls back to ``zh-CN`` for
     unknown locales — same shape as :func:`render_account_activated`.
     """
-    resolved: Locale = locale if locale in _CREDITS_TOPPED_UP_SUBJECT else "zh-CN"
+    resolved: Locale = cast("Locale", locale) if locale in _CREDITS_TOPPED_UP_SUBJECT else "zh-CN"
     credits_str = f"{credits_added:,}"
     return (
         _CREDITS_TOPPED_UP_SUBJECT[resolved].format(credits=credits_str),

@@ -24,7 +24,10 @@ from app.services.session.exceptions import FileNotInSessionError, FileNotOwnedE
 
 
 async def assert_file_belongs_to_session(
-    db: AsyncSession, *, session_id: uuid.UUID, file_key: str,
+    db: AsyncSession,
+    *,
+    session_id: uuid.UUID,
+    file_key: str,
 ) -> None:
     """Raise :class:`FileNotInSessionError` if ``file_key`` is not
     bound to ``session_id``.
@@ -38,9 +41,7 @@ async def assert_file_belongs_to_session(
         .limit(1)
     )
     if (await db.execute(stmt)).first() is None:
-        raise FileNotInSessionError(
-            f"file_key {file_key!r} is not bound to session {session_id}"
-        )
+        raise FileNotInSessionError(f"file_key {file_key!r} is not bound to session {session_id}")
 
 
 async def assert_files_owned_by(

@@ -19,7 +19,7 @@ Everything in this module deals in **µ-credits** (the storage unit;
 """
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TypedDict
 
@@ -86,7 +86,7 @@ def snapshot_rate(model_id: str) -> RateSnapshot:
         model_fee_credits=float(card["model_fee_credits"]),
         per_second_credits=float(settings.credit_per_second_credits),
         reserve_max_output_tokens=int(card["reserve_max_output_tokens"]),
-        captured_at=datetime.now(timezone.utc).isoformat(),
+        captured_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -105,9 +105,7 @@ def reserve_est_input_tokens(model_id: str) -> int:
     ``reservation.reserved``, so settle never needs the estimate.
     """
     card = settings.credit_rates.get(model_id, {})
-    return int(
-        card.get("reserve_est_input_tokens", settings.credit_reserve_max_input_tokens)
-    )
+    return int(card.get("reserve_est_input_tokens", settings.credit_reserve_max_input_tokens))
 
 
 def normalize_rate_snapshot(raw: dict) -> RateSnapshot:
@@ -181,20 +179,22 @@ def cost_micro_credits(
     the operator's side — billing-safe rounding.
     """
     token_micro = (
-        (input_tokens / 1000.0) * rate["in_per_1k_usd"]
-        + (output_tokens / 1000.0) * rate["out_per_1k_usd"]
-    ) * rate["token_markup"] * _USD_TO_MICRO_CREDITS
-    duration_micro = (
-        max(0.0, turn_seconds)
-        * rate["per_second_credits"]
-        * _MICRO_PER_CREDIT
+        (
+            (input_tokens / 1000.0) * rate["in_per_1k_usd"]
+            + (output_tokens / 1000.0) * rate["out_per_1k_usd"]
+        )
+        * rate["token_markup"]
+        * _USD_TO_MICRO_CREDITS
     )
+    duration_micro = max(0.0, turn_seconds) * rate["per_second_credits"] * _MICRO_PER_CREDIT
     fee_micro = rate["model_fee_credits"] * _MICRO_PER_CREDIT
     return int(math.ceil(token_micro + duration_micro + fee_micro))
 
 
 def reserve_micro_credits(
-    rate: RateSnapshot, *, max_input_tokens: int,
+    rate: RateSnapshot,
+    *,
+    max_input_tokens: int,
 ) -> int:
     """Compute the upfront reserve amount in µ-credits.
 

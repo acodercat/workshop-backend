@@ -13,11 +13,11 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    TIMESTAMP,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     Uuid,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -49,9 +49,7 @@ class SessionShare(Base):
 
     # Postgres doesn't auto-index FK columns; without this CASCADE
     # delete on the parent session would seq-scan ``session_share``.
-    __table_args__ = (
-        Index("ix_session_share_session_id", "session_id"),
-    )
+    __table_args__ = (Index("ix_session_share_session_id", "session_id"),)
 
     @property
     def has_password(self) -> bool:

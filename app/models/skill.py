@@ -14,18 +14,17 @@ User-facing visibility is ``OFFICIAL`` + the caller's own ``CUSTOM``;
 platform-owned (``user_id IS NULL``). The worker stages all three into
 the sandbox so axon's ``use_skill`` tool can surface them to the LLM.
 
-Whether a skill is offered to a given user is two independent
-questions, answered in two places: :class:`SkillStatus` on this row says
-whether the listing is live at all, and ``user_skill_preference`` says
-whether that user keeps it in their composer picker. Neither column
-means something different depending on ``origin`` — the one exemption is
-that ``SYSTEM``, being agent-only, has no user side to consult, which
-only the worker ever has to account for since nothing user-facing lists
-one.
+Whether a skill is offered to a given user is two independent questions,
+answered in two places: :class:`SkillStatus` on this row says whether the
+listing is live at all, and ``user_skill_preference`` says whether that
+user keeps it in their composer picker. Neither column means something
+different depending on ``origin`` — the one exemption is that ``SYSTEM``,
+being agent-only, has no user side to consult, which only the worker ever
+has to account for since nothing user-facing lists one.
 
 Being offered is not being loaded. An ``OFFICIAL`` or ``CUSTOM`` skill
 reaches a turn only because the user picked it there; only ``SYSTEM``
-rides along unasked. The shared worker holds that rule in one place
+rides along unasked. The worker holds that rule in one place
 (``agent_worker.infra.skill_repository``).
 """
 
@@ -33,6 +32,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -42,7 +42,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    TIMESTAMP,
     UniqueConstraint,
     text,
 )
@@ -92,7 +91,9 @@ class Skill(Base):
     __tablename__ = "skill"
 
     id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True,
+        Integer,
+        primary_key=True,
+        autoincrement=True,
     )
     user_id: Mapped[int | None] = mapped_column(
         Integer,
@@ -121,7 +122,8 @@ class Skill(Base):
     # "no map" state) instead of a JSONB ``'null'`` literal, keeping
     # ``IS NULL`` filters honest.
     display_name_i18n: Mapped[dict[str, str] | None] = mapped_column(
-        JSONB(none_as_null=True), nullable=True,
+        JSONB(none_as_null=True),
+        nullable=True,
     )
     description: Mapped[str] = mapped_column(Text, nullable=False)
     bundle_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
@@ -132,29 +134,49 @@ class Skill(Base):
     # no one value a forgotten write should fall back to — and the column
     # this one replaces is the cautionary tale: its ``server_default`` of
     # ``true`` was the opposite of what uploads wanted, which is why the
-    # insert had to spell out the opposite.
+    # insert had to spell out the opposite and why rows predating that
+    # fix are still on.
     status: Mapped[SkillStatus] = mapped_column(
         SAEnum(
-            SkillStatus, name="skill_status",
+            SkillStatus,
+            name="skill_status",
             values_callable=lambda cls: [m.value for m in cls],
         ),
         nullable=False,
     )
     # TRANSITIONAL — dropped in the follow-up migration, do not read.
-    # ``core/agent-worker`` is shared by this deployment and metaseq's,
-    # and queries ``COALESCE(p.enabled, s.enabled)``; it cannot learn
-    # about ``status`` until both databases have the column. Until that
-    # worker ships, every write keeps this column at the value that makes
-    # the old formula agree with the new one — see ``skill_enablement``.
+    # ``core/agent-worker`` is shared by this deployment and metaseq's, and
+    # queries ``COALESCE(p.enabled, s.enabled)``; it cannot learn about
+    # ``status`` until both databases have the column. Until that worker
+    # ships, every write keeps this column at the value that makes the
+    # old formula agree with the new one — see ``skill_registration``.
     enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true"),
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    # Browsing taxonomy — a tab on the skills page. Only OFFICIAL rows are
+    # browsed that way: a CUSTOM upload lives behind 「个人」 and a SYSTEM
+    # skill is never listed at all, so both are left NULL. Not constrained
+    # to OFFICIAL, because a category on either is unread data rather than
+    # a row that could pass for something it is not. ``SET NULL`` rather
+    # than CASCADE, the same choice as ``mcp_server.catalog_id``: retiring
+    # a category must not take the skills in it with it.
+    category_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("skill_category.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
@@ -165,7 +187,8 @@ class Skill(Base):
         # SQL). This partial index enforces name uniqueness across the
         # whole platform-owned set.
         Index(
-            "uq_skill_platform_name", "name",
+            "uq_skill_platform_name",
+            "name",
             unique=True,
             postgresql_where=text("user_id IS NULL"),
         ),

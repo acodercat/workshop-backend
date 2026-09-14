@@ -43,8 +43,8 @@ from app.models.session_turn import SessionTurn
 from app.services.credits._internal import insert_ledger_and_bump_balance
 from app.services.credits.rates import (
     RateSnapshot,
-    normalize_rate_snapshot,
     cost_micro_credits,
+    normalize_rate_snapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,8 @@ def _is_session_terminal(status: SessionStatus | None) -> bool:
 
 
 async def _load_reservation_for_update(
-    db: AsyncSession, reservation_id: int,
+    db: AsyncSession,
+    reservation_id: int,
 ) -> CreditReservation | None:
     """Lock a reservation row by id and read its **current** state.
 
@@ -89,7 +90,8 @@ async def _load_reservation_for_update(
 
 
 async def _read_usage_and_duration_from_session_turn(
-    db: AsyncSession, turn_id: int,
+    db: AsyncSession,
+    turn_id: int,
 ) -> tuple[int, int, float] | None:
     """Pull settle inputs for ``turn_id``:
     ``(input_tokens, output_tokens, turn_seconds)``.
@@ -118,16 +120,14 @@ async def _read_usage_and_duration_from_session_turn(
             SessionTurn.output_tokens,
             SessionTurn.created_at,
             SessionTurn.terminated_at,
-        )
-        .where(SessionTurn.id == turn_id)
+        ).where(SessionTurn.id == turn_id)
     )
     row = result.one_or_none()
     if row is None or row[0] is None or row[1] is None:
         return None
     in_tokens, out_tokens, created_at, terminated_at = row
     turn_seconds = (
-        (terminated_at - created_at).total_seconds()
-        if terminated_at is not None else 0.0
+        (terminated_at - created_at).total_seconds() if terminated_at is not None else 0.0
     )
     return int(in_tokens), int(out_tokens), turn_seconds
 
@@ -162,7 +162,8 @@ async def settle_turn(
     if reservation.state is not CreditReservationState.OPEN:
         logger.info(
             "settle_turn: reservation %s already %s — no-op",
-            reservation_id, reservation.state.value,
+            reservation_id,
+            reservation.state.value,
         )
         return
 
@@ -206,8 +207,11 @@ async def settle_turn(
 
     logger.info(
         "credit settled: reservation=%s user=%s reserved=%s actual=%s delta=%s",
-        reservation.id, reservation.user_id, reservation.reserved,
-        actual, reservation.reserved - actual,
+        reservation.id,
+        reservation.user_id,
+        reservation.reserved,
+        actual,
+        reservation.reserved - actual,
     )
 
 
@@ -237,7 +241,8 @@ async def refund_reservation(
     if reservation.state is not CreditReservationState.OPEN:
         logger.info(
             "refund: reservation %s already %s — no-op",
-            reservation_id, reservation.state.value,
+            reservation_id,
+            reservation.state.value,
         )
         return
 
@@ -256,7 +261,10 @@ async def refund_reservation(
 
     logger.info(
         "credit refunded: reservation=%s user=%s reserved=%s reason=%s",
-        reservation.id, reservation.user_id, reservation.reserved, reason_payload,
+        reservation.id,
+        reservation.user_id,
+        reservation.reserved,
+        reason_payload,
     )
 
 
@@ -299,7 +307,8 @@ async def settle_open_for_session(
         return
 
     usage = await _read_usage_and_duration_from_session_turn(
-        db, reservation.turn_id,
+        db,
+        reservation.turn_id,
     )
     if usage is None:
         await refund_reservation(

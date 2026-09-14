@@ -3,9 +3,9 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from app.services import file_storage
 from app.models.session_files import SessionFile
 from app.schemas.session import FileRef
+from app.services import file_storage
 from app.services.session import enqueue
 from app.services.session.enqueue import _bind_session_files
 from app.services.session.exceptions import (
@@ -123,7 +123,10 @@ async def test_bind_persists_real_oss_size_not_client_declared(
     db = _Db()
 
     await _bind_session_files(
-        db, session_id=uuid4(), user_id=7, files=[_file("documents/a")],
+        db,
+        session_id=uuid4(),
+        user_id=7,
+        files=[_file("documents/a")],
     )
 
     assert db.added[0].size_bytes == 100
@@ -135,7 +138,10 @@ async def test_bind_rejects_object_over_per_file_cap(stub_head_size) -> None:
 
     with pytest.raises(file_storage.FileTooLargeError):
         await _bind_session_files(
-            db, session_id=uuid4(), user_id=7, files=[_file("documents/big")],
+            db,
+            session_id=uuid4(),
+            user_id=7,
+            files=[_file("documents/big")],
         )
 
     assert db.added == []  # nothing bound when a file overflows
@@ -147,7 +153,10 @@ async def test_bind_rejects_never_uploaded_object(stub_head_size) -> None:
 
     with pytest.raises(FileNotUploadedError, match="was not uploaded"):
         await _bind_session_files(
-            db, session_id=uuid4(), user_id=7, files=[_file("documents/ghost")],
+            db,
+            session_id=uuid4(),
+            user_id=7,
+            files=[_file("documents/ghost")],
         )
 
     assert db.added == []

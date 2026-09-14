@@ -20,12 +20,12 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Enum as SAEnum,
     ForeignKey,
     Integer,
     Text,
-    TIMESTAMP,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -42,9 +42,7 @@ class FeedbackRating(StrEnum):
 class MessageFeedback(Base):
     __tablename__ = "message_feedback"
 
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # BigInteger to match ``message.id`` (widened together in migration
     # ``d5b1f7c3a9e2``).
     message_id: Mapped[int] = mapped_column(
@@ -84,9 +82,7 @@ class MessageFeedback(Base):
         # message-scoped read — no separate single-column index needed
         # (the redundant ``ix_message_feedback_message_id`` was dropped
         # in migration ``e1c5a9d7b3f4``).
-        UniqueConstraint(
-            "message_id", "user_id", name="uq_message_feedback_user"
-        ),
+        UniqueConstraint("message_id", "user_id", name="uq_message_feedback_user"),
     )
 
     def __repr__(self) -> str:

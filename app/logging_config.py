@@ -4,9 +4,11 @@ App code uses stdlib ``logging`` (``logging.getLogger(__name__)``);
 the loguru-managed sinks (rotating files, colored stderr) ingest
 those records via :class:`InterceptHandler` configured below.
 """
-import sys
+
 import logging
+import sys
 from pathlib import Path
+from types import FrameType
 
 from loguru import logger
 
@@ -27,14 +29,13 @@ class InterceptHandler(logging.Handler):
         # covers the ``emit`` → ``Handler.handle`` →
         # ``Logger.callHandlers`` → ``Logger.handle`` →
         # ``Logger._log`` → ``Logger.<level>`` chain.
-        frame, depth = sys._getframe(6), 6
+        frame: FrameType | None = sys._getframe(6)
+        depth = 6
         while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
 
-        logger.opt(depth=depth, exception=record.exc_info).log(
-            level, record.getMessage()
-        )
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
 def setup_logging(log_dir: str = "logs", level: str = "INFO"):

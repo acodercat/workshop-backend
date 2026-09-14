@@ -3,16 +3,17 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Enum as SAEnum,
     ForeignKey,
     Integer,
     String,
-    TIMESTAMP,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
+
 from app.database import Base
 
 if TYPE_CHECKING:
@@ -114,18 +115,16 @@ class User(Base):
     # millions of rows). All writes go through
     # :mod:`app.services.credits._internal` so the invariant holds.
     credit_balance: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, default=0, server_default=text("0"),
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True),
-        server_default=func.now(),
-        nullable=False
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
     # App-level feedback the user submitted to the admin team.

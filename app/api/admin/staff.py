@@ -31,8 +31,7 @@ from app.schemas.admin.staff import (
     StaffUpdate,
 )
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.services.admin import AdminContext
-from app.services.admin import staff as staff_service
+from app.services.admin import AdminContext, staff as staff_service
 
 router = APIRouter(tags=["staff"])
 
@@ -63,9 +62,7 @@ async def list_staff(
     """
     total = await ctx.db.scalar(select(func.count()).select_from(Staff))
     rows = (
-        await ctx.db.scalars(
-            paginate(select(Staff).order_by(Staff.username), page, page_size)
-        )
+        await ctx.db.scalars(paginate(select(Staff).order_by(Staff.username), page, page_size))
     ).all()
     return PaginatedResponse(
         items=[StaffResponse.model_validate(row) for row in rows],
@@ -94,9 +91,7 @@ async def read_staff(ctx: StaffContext, staff_id: int) -> StaffResponse:
 
 
 @router.patch("/staff/{staff_id}", response_model=StaffResponse)
-async def update_staff(
-    ctx: StaffContext, staff_id: int, body: StaffUpdate
-) -> StaffResponse:
+async def update_staff(ctx: StaffContext, staff_id: int, body: StaffUpdate) -> StaffResponse:
     """Change an account's name or status.
 
     A status change that would leave no active account is refused by the

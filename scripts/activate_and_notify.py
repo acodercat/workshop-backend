@@ -58,10 +58,7 @@ def _list_pending(ids: list[int] | None) -> list[dict]:
     try:
         with engine.connect() as conn:
             rows = conn.execute(
-                text(
-                    f'SELECT id, name, email FROM "user" WHERE {clause} '
-                    "ORDER BY created_at"
-                ),
+                text(f'SELECT id, name, email FROM "user" WHERE {clause} ORDER BY created_at'),
                 params,
             ).all()
     finally:
@@ -81,7 +78,7 @@ def _activate(ids: list[int] | None) -> list[dict]:
         with engine.begin() as conn:  # commits on success, rolls back on error
             rows = conn.execute(
                 text(
-                    f'UPDATE "user" SET status=\'ACTIVE\', updated_at=now() '
+                    f"UPDATE \"user\" SET status='ACTIVE', updated_at=now() "
                     f"WHERE {clause} RETURNING id, name, email"
                 ),
                 params,
@@ -104,7 +101,9 @@ async def _email_activated(activated: list[dict], locale: str) -> tuple[int, int
         subject, html_body = render_account_activated(name=u["name"], locale=locale)
         try:
             rid = await send_html_email(
-                to=u["email"], subject=subject, html_body=html_body,
+                to=u["email"],
+                subject=subject,
+                html_body=html_body,
             )
             ok += 1
             print(f"  [sent]   id={u['id']} → {u['email']}  request_id={rid}")
@@ -122,22 +121,30 @@ def main() -> int:
         description="Find PENDING users, activate them, and email them."
     )
     parser.add_argument(
-        "--ids", type=int, nargs="+", default=None,
+        "--ids",
+        type=int,
+        nargs="+",
+        default=None,
         help="Restrict to these user ids (default: all PENDING users).",
     )
     parser.add_argument(
-        "--locale", choices=["zh-CN", "en-US"], default="zh-CN",
+        "--locale",
+        choices=["zh-CN", "en-US"],
+        default="zh-CN",
         help="Email locale (default: zh-CN).",
     )
     parser.add_argument(
-        "--send", action="store_true",
+        "--send",
+        action="store_true",
         help="Actually activate + email. Without it, preview only (dry-run).",
     )
     args = parser.parse_args()
 
     scope = f"ids={args.ids}" if args.ids else "全部 PENDING"
-    print(f"模式: {'执行（激活+发信）' if args.send else 'DRY-RUN（预览，不改不发）'} "
-          f"| 范围: {scope} | locale={args.locale}\n")
+    print(
+        f"模式: {'执行（激活+发信）' if args.send else 'DRY-RUN（预览，不改不发）'} "
+        f"| 范围: {scope} | locale={args.locale}\n"
+    )
 
     if not args.send:
         pending = _list_pending(args.ids)
@@ -146,8 +153,10 @@ def main() -> int:
             return 0
         print(f"将激活并发信 {len(pending)} 个（预览）:")
         for u in pending:
-            print(f"  id={u['id']}  name={u['name']!r}  "
-                  f"email={u['email'] or '（无邮箱→只激活不发信）'}")
+            print(
+                f"  id={u['id']}  name={u['name']!r}  "
+                f"email={u['email'] or '（无邮箱→只激活不发信）'}"
+            )
         print("\nDry-run 完成，未做任何改动。确认无误后加 --send 执行。")
         return 0
 
@@ -156,15 +165,19 @@ def main() -> int:
     if not activated:
         print("没有匹配的 PENDING 用户，未激活任何账号。")
         return 0
-    print(f"已激活 {len(activated)} 个: "
-          + ", ".join(f"id={u['id']}({u['name']})" for u in activated))
+    print(
+        f"已激活 {len(activated)} 个: " + ", ".join(f"id={u['id']}({u['name']})" for u in activated)
+    )
     print("\n发送激活通知:")
     ok, skipped, failed = asyncio.run(_email_activated(activated, args.locale))
-    print(f"\n完成: 激活 {len(activated)}，发信成功 {ok}，"
-          f"无邮箱跳过 {skipped}，发信失败 {failed}。")
+    print(
+        f"\n完成: 激活 {len(activated)}，发信成功 {ok}，无邮箱跳过 {skipped}，发信失败 {failed}。"
+    )
     if failed:
-        print("注意: 失败的仅是“通知邮件”，相关账号已激活成功，不需要重激活；"
-              "如需补发，可用 scripts/notify_activated_users.py --ids <id...> --send。")
+        print(
+            "注意: 失败的仅是“通知邮件”，相关账号已激活成功，不需要重激活；"
+            "如需补发，可用 scripts/notify_activated_users.py --ids <id...> --send。"
+        )
     return 1 if failed else 0
 
 

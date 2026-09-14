@@ -2,9 +2,9 @@
 
 The refactor these pin replaced a branch on ``origin`` with one path:
 whatever the skill, a user's answer goes to *their* preference row and
-never to the shared listing. The regression it guards against is the
-old shape creeping back — a ``CUSTOM`` toggle mutating ``skill`` again,
-which would work for the owner and be invisible to everyone else.
+never to the shared listing. The regression it guards against is the old
+shape creeping back — a ``CUSTOM`` toggle mutating ``skill`` again, which
+would work for the owner and be invisible to everyone else.
 
 What that answer now means is narrower: the composer offers the skill.
 It no longer decides whether the model sees it, so nothing here is
@@ -83,6 +83,7 @@ def _skill(**over) -> Skill:
             "bundle_key": "user_skills/7/x/notes.zip",
             "bundle_size": 10,
             "display_name_i18n": None,
+            "category_id": None,
             **over,
         }
     )
@@ -179,8 +180,8 @@ def test_turning_one_on_costs_nothing_and_so_is_not_counted() -> None:
 
     The cap this replaces bounded per-turn context: every enabled skill
     spent a metadata line in the ``use_skill`` listing. Enabling now only
-    lists the skill in the composer, so there is nothing to ration — and
-    a COUNT reappearing here would mean the budget came back with it.
+    lists the skill in the composer, so there is nothing to ration — and a
+    COUNT reappearing here would mean the budget came back with it.
     """
     for enabled in (True, False):
         db = _FakeDb(_skill())
@@ -188,4 +189,4 @@ def test_turning_one_on_costs_nothing_and_so_is_not_counted() -> None:
         response = _client(db).patch("/skills/5", json={"enabled": enabled})
 
         assert response.status_code == 200
-        assert all("count(" not in stmt for stmt in db.statements)
+        assert all("count(" not in statement for statement in db.statements)

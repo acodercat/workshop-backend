@@ -34,7 +34,7 @@ async def change_my_password(ctx: StaffContext, body: StaffPasswordChange) -> Re
     """Rotate the caller's own password.
 
     Sudo-gated on ``current_password``, mirroring the customer-facing
-    email/phone change flows: holding a live token is not on its own
+    email change flow: holding a live token is not on its own
     enough to rotate the credential behind it.
 
     **This signs the caller out**, here and everywhere else — the token

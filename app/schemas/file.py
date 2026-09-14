@@ -11,18 +11,22 @@ from config import settings
 
 class UploadUrlRequest(BaseModel):
     """Body for POST endpoints that mint presigned upload URLs."""
+
     filename: str = Field(..., description="Name of the file to upload")
     # Per-file cap enforced here too (not just on ``MessageCreate``), so the
     # mint path can't accept an oversized — or bogus, quota-tripping —
     # declared size. ``ge=0`` keeps empty files valid.
     size_bytes: int = Field(
-        ..., ge=0, le=settings.max_file_bytes,
+        ...,
+        ge=0,
+        le=settings.max_file_bytes,
         description="Declared file size in bytes",
     )
 
 
 class UploadUrlResponse(BaseModel):
     """Presigned URL for the frontend to PUT file bytes directly into OSS."""
+
     upload_url: str
     file_key: str
     content_type: str
@@ -36,6 +40,7 @@ class UploadUrlResponse(BaseModel):
 
 class DownloadUrlResponse(BaseModel):
     """Presigned URL the frontend uses to download a file the user previously uploaded."""
+
     download_url: str
     file_key: str
     expires_in: int
@@ -46,6 +51,7 @@ class PreviewUrlResponse(BaseModel):
     preview an HTML deliverable. Distinct from ``DownloadUrlResponse``
     because the disposition differs (inline vs attachment) and so does
     the intent — this URL renders, it doesn't save-as."""
+
     preview_url: str
     file_key: str
     expires_in: int
@@ -55,6 +61,7 @@ class SessionFileResponse(BaseModel):
     """A row in the cross-session file library. ``filename`` falls back to
     a key-derived name for rows whose stored metadata isn't backfilled.
     """
+
     file_key: str
     filename: str
     mime_type: str | None

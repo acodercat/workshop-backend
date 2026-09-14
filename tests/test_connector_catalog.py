@@ -7,14 +7,13 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.api.public import mcp_server as endpoint
-from app.errors import ConnectorCatalogEntryNotFoundError
+from app.errors import ConnectorCatalogCredentialError, ConnectorCatalogEntryNotFoundError
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.schemas.mcp_server import ConnectorCatalogEntryResponse
 from app.services import crypto
 from app.services.localized_text import DEFAULT_LOCALE
 from app.services.mcp import catalog
-from app.errors import ConnectorCatalogCredentialError
 from app.services.mcp.catalog import (
     CREDENTIAL_AUTH_TYPES,
     INSTANTIABLE_AUTH_TYPES,
@@ -24,10 +23,15 @@ from app.services.mcp.catalog import (
 
 def _entry(**over) -> MCPServerCatalogEntry:
     base = dict(
-        id=7, name="Notion", url="https://mcp.notion.com/mcp",
-        auth_type=MCPServerAuthType.OAUTH, oauth_scope="read",
-        description="Search your pages", icon_url=None,
-        published=True, sort_order=0,
+        id=7,
+        name="Notion",
+        url="https://mcp.notion.com/mcp",
+        auth_type=MCPServerAuthType.OAUTH,
+        oauth_scope="read",
+        description="Search your pages",
+        icon_url=None,
+        published=True,
+        sort_order=0,
     )
     base.update(over)
     return MCPServerCatalogEntry(**base)
@@ -67,26 +71,32 @@ class TestBuildConnector:
         with pytest.raises(ConnectorCatalogCredentialError):
             build_connector(
                 _entry(auth_type=MCPServerAuthType.BEARER, oauth_scope=None),
-                user_id=1, locale=DEFAULT_LOCALE,
+                user_id=1,
+                locale=DEFAULT_LOCALE,
             )
 
     def test_bearer_carries_the_users_credential_and_starts_connected(self):
         connector = build_connector(
             _entry(auth_type=MCPServerAuthType.BEARER, oauth_scope=None),
-            user_id=1, locale=DEFAULT_LOCALE, encrypted_credential="ciphertext",
+            user_id=1,
+            locale=DEFAULT_LOCALE,
+            encrypted_credential="ciphertext",
         )
         assert connector.encrypted_credential == "ciphertext"
         assert connector.connected is True
 
     @pytest.mark.parametrize(
-        "auth_type", [MCPServerAuthType.NONE, MCPServerAuthType.OAUTH],
+        "auth_type",
+        [MCPServerAuthType.NONE, MCPServerAuthType.OAUTH],
     )
     def test_credential_free_entries_refuse_a_credential(self, auth_type):
         # Sent to an entry that takes none it is rejected, not silently dropped —
         # the same footgun the create schema guards for the other fields.
         with pytest.raises(ConnectorCatalogCredentialError):
             build_connector(
-                _entry(auth_type=auth_type), user_id=1, locale=DEFAULT_LOCALE,
+                _entry(auth_type=auth_type),
+                user_id=1,
+                locale=DEFAULT_LOCALE,
                 encrypted_credential="ciphertext",
             )
 
@@ -125,9 +135,7 @@ class TestUnpublishedEntriesAreUnreachable:
     async def test_an_id_kept_from_an_earlier_listing_stops_working(self):
         # Without this predicate an unpublished entry stays addable by anyone
         # who wrote its id down, which is the whole thing unpublishing prevents.
-        sql = await self._statement(
-            lambda db: catalog.get_published_entry(db, 7)
-        )
+        sql = await self._statement(lambda db: catalog.get_published_entry(db, 7))
 
         assert "mcp_server_catalog.published IS true" in sql
         assert "mcp_server_catalog.id = " in sql
@@ -138,7 +146,9 @@ class TestInstantiableAuthTypes:
         # The operator CLI's --auth-type choices are derived from this set, so
         # widening it must be a deliberate edit, not a side effect.
         assert INSTANTIABLE_AUTH_TYPES == {
-            MCPServerAuthType.NONE, MCPServerAuthType.OAUTH, MCPServerAuthType.BEARER,
+            MCPServerAuthType.NONE,
+            MCPServerAuthType.OAUTH,
+            MCPServerAuthType.BEARER,
         }
 
     def test_which_of_those_take_the_users_credential(self):
@@ -215,9 +225,7 @@ class TestPreRegisteredClientPassThrough:
             registered.update(kwargs)
             return "sealed-client", {"issuer": "https://as.example.com"}
 
-        monkeypatch.setattr(
-            endpoint.catalog, "get_published_entry", AsyncMock(return_value=entry)
-        )
+        monkeypatch.setattr(endpoint.catalog, "get_published_entry", AsyncMock(return_value=entry))
         monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
         monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
         monkeypatch.setattr(endpoint, "_register_oauth_client", _capture)
@@ -226,9 +234,7 @@ class TestPreRegisteredClientPassThrough:
         )
         return registered
 
-    async def test_the_entrys_app_reaches_registration_decrypted(
-        self, monkeypatch, fernet_key
-    ):
+    async def test_the_entrys_app_reaches_registration_decrypted(self, monkeypatch, fernet_key):
         entry = _entry(
             oauth_client_id="app-id",
             oauth_client_secret_encrypted=crypto.encrypt_secret("app-secret"),
