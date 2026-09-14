@@ -12,6 +12,8 @@ Submodule responsibilities:
   ``Schedule`` row; no I/O.
 - :mod:`~app.services.schedule.lifecycle` — what an owner's edit does to a
   schedule's status and clock. Pure too; the caller holds the row lock.
+- :mod:`~app.services.schedule.briefing` — what the agent is told about the
+  scheduled task it is running. Pure too.
 - :mod:`~app.services.schedule.connectors` — reading and writing which
   Connectors a schedule hands to the sessions it creates.
 - :mod:`~app.services.schedule.files` — the same for its attachments.
@@ -22,9 +24,11 @@ which is how the session package's twins are used and what keeps each
 distinct from the session-level call sitting next to it in the dispatcher.
 """
 
+from app.services.schedule.briefing import render_run_reminder
 from app.services.schedule.recurrence import catch_up_grace, next_run_after
 
 __all__ = [
     "catch_up_grace",
     "next_run_after",
+    "render_run_reminder",
 ]
