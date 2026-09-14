@@ -14,8 +14,8 @@ buckets that must NOT be synced from master:
    and the dep is `aiosmtplib` (not `alibabacloud-dm*`). Templates carry the HKGAI brand
    ("HKGAI Agent", 香港生成式人工智能研发中心).
 2. **Model / tier config** (`config.py`) — `supported_session_model_ids` includes `glm-5.1`
-   and `fable` (master omits both); `session_tier_models` maps **FAST=HKGAI-V3,
-   STANDARD=kimi-k2, ADVANCED=glm-5.2** (master uses FAST=deepseek-v4-flash, etc.). Pricing in
+   and `fable` (master omits both); `session_tier_models` maps **FAST=deepseek-v4-flash,
+   STANDARD=glm-5.2, ADVANCED=deepseek-v4-pro** (master uses FAST=glm-5.2, etc.). Pricing in
    `credit_rates` must have an entry for every whitelisted model (incl. `glm-5.1`).
 3. **Brand + deploy** — "HKGAI Agent" / 香港生成式人工智能研发中心 wherever they appear;
    `scripts/deploy.sh` (hkgai uvicorn worker count), `scripts/seed_users.py` (hkgai dev seed).
@@ -47,7 +47,7 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | Email dep in lockfile | `grep -c 'name = "alibabacloud-dm' uv.lock` and `grep -c 'name = "aiosmtplib"' uv.lock` | 0 DirectMail, ≥1 aiosmtplib |
 | Email brand | `grep "HKGAI Agent\|香港生成式人工智能研发中心" app/services/email/templates.py` | present |
 | Model whitelist | `grep -E "glm-5.1\|fable" config.py` | both present |
-| Tier mapping | `grep -A4 session_tier_models config.py` | `FAST: "HKGAI-V3"` |
+| Tier mapping | `grep -A4 session_tier_models config.py` | `"FAST": "deepseek-v4-flash"` |
 | No phone / SMS channel | `grep -rniE "phone\|sms\|dysms" app/ config.py` | Only the comment in `models/user.py` saying the field is gone. The channel was removed in `5fcf505` and the column in `b7e2d9a4c1f5`; a `phone:` field reappearing on the model is a merge bringing back a column this database does not have |
 | SMS dep gone | `grep -c 'dysmsapi' pyproject.toml uv.lock` | 0 in both |
 | OAuth client name | `grep -A1 "mcp_client_name" config.py` and `grep -c _CLIENT_NAME app/services/mcp/oauth.py` | `default="HKGAI Connector"` in `config.py`, and **0** in `oauth.py`. This is the name an authorization server prints on its consent screen, so a wrong value is visible only to the user and to nothing else. It moved out of `oauth.py` precisely so the conflict lands in `config.py`, where the two branches diverge by design — master's default reads `PPIG Connector`, and taking master's side here is the mistake this row exists to catch. A `_CLIENT_NAME` constant reappearing in `oauth.py` means a merge undid the move |
@@ -68,7 +68,7 @@ If any probe fails, master's version leaked over a hkgai delta — fix before pu
 ### `config.py` (the biggest)
 Take master's **new** fields (e.g. `oss_preview_domain`, `max_session_files_*`, new model
 entries) BUT keep hkgai's: email (`smtp_*`, drop any `aliyun_dm_*`), model whitelist
-(`glm-5.1`/`fable`), and `session_tier_models` (FAST=HKGAI-V3 / ADVANCED=glm-5.2). For a
+(`glm-5.1`/`fable`), and `session_tier_models` (FAST=deepseek-v4-flash / STANDARD=glm-5.2 / ADVANCED=deepseek-v4-pro). For a
 **shared** model's price in `credit_rates`, master is canonical (converge); for a hkgai-only
 model (`glm-5.1`), keep hkgai's entry — every whitelisted model needs a rate or reserve raises.
 
@@ -344,8 +344,8 @@ git stash pop                      # restore the local-only edits
 
 ## Known inconsistency to watch
 
-Backend `session_tier_models` maps **ADVANCED → glm-5.2**, but the frontend hkgai labels the
-advanced tier "高级（Fable）". Pick one (set ADVANCED=fable backend-side, or relabel the
+Backend `session_tier_models` maps **ADVANCED → deepseek-v4-pro**, but the frontend hkgai labels
+the advanced tier "高级（Fable）". Pick one (map ADVANCED to fable backend-side, or relabel the
 frontend) so the UI label matches the model actually used — out of scope for a sync merge.
 
 ## When in doubt

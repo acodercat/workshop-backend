@@ -423,9 +423,9 @@ class Settings(BaseSettings):
     # ``credit_rates`` below — ``create_session`` re-checks the whitelist.
     session_tier_models: dict[str, str] = Field(
         default_factory=lambda: {
-            "FAST": "HKGAI-V3",
-            "STANDARD": "kimi-k2",
-            "ADVANCED": "glm-5.2",
+            "FAST": "deepseek-v4-flash",
+            "STANDARD": "glm-5.2",
+            "ADVANCED": "deepseek-v4-pro",
         },
         description="Maps the UI capability tier (FAST/STANDARD/ADVANCED) to the model_id stamped on the session. Values must be in supported_session_model_ids.",
     )
