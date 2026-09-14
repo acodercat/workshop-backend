@@ -46,7 +46,6 @@ Two of the four enum columns reuse types that already exist
 so this revision neither creates nor drops them. Only the two types this
 revision introduces are dropped on downgrade.
 
-Revision ID: c8b3e5f1a742
 **hkgai note — the parent differs from upstream on purpose.** Upstream this
 revision hangs off ``b7e2d4c8a915``, which alters ``payment_order`` — a table
 this branch dropped, so that revision was never taken here. Scheduled tasks
@@ -57,6 +56,7 @@ upstream **id** kept so the two chains stay comparable. Do not "correct"
 about databases that applied an early copy upstream; this branch's database
 never had any copy of it.
 
+Revision ID: c8b3e5f1a742
 Revises: f4c8a2b91d63
 Create Date: 2026-09-10
 

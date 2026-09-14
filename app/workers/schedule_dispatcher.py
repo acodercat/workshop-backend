@@ -6,9 +6,8 @@ endpoint makes — so by the time the worker claims the turn there is nothing
 left to distinguish it from one a user typed. That is why this feature
 needed no change in ``agent-worker`` or ``axon``.
 
-Sibling to the settle sweeper and the payment reconciler: same tick
-skeleton, its own advisory lock, every host runs it and exactly one wins
-each tick.
+Sibling to the settle sweeper: same tick skeleton, its own advisory lock,
+every host runs it and exactly one wins each tick.
 
 **Why the enqueue's own commit is allowed to carry our writes.**
 ``queue_user_message`` commits, and the session row, the ``schedule_run``
@@ -67,8 +66,7 @@ logger = logging.getLogger(__name__)
 
 # 64-bit key for the Postgres advisory lock. Bytes ``b"SCHEDULE"`` so
 # ``pg_locks`` rows are easy to spot, and distinct from the settle
-# sweeper's ``b"STLSWEEP"``, the reconciler's ``b"PAYRECON"`` and the
-# budget enforcer's ``b"BUDGETNF"``.
+# sweeper's ``b"STLSWEEP"`` and the budget enforcer's ``b"BUDGETNF"``.
 _LOCK_KEY = int.from_bytes(b"SCHEDULE", "big")
 
 # Max schedules dispatched per tick. Bounds how long one run can hold the

@@ -49,14 +49,12 @@ bash scripts/deploy.sh background start|stop|restart|status|logs   # the backgro
 uv run uvicorn app.public_main:app --host 0.0.0.0 --port 9090 --workers 1 \
   --ssl-certfile ./cert/<domain>.pem --ssl-keyfile ./cert/<domain>.key
 
-# Migrations. Master's chain applies here verbatim; this branch adds revisions
-# of its own only where its schema genuinely differs (today: `b7e2d9a4c1f5`,
-# which drops the money tables and `user.phone`). That makes master's head and this
-# branch's siblings, so after a sync that brought new master revisions:
-#   uv run alembic heads          # two? then:
-#   uv run alembic merge heads -m "sync"
-# Once per sync, not once per revision — master's new revisions form a chain and
-# only the first of them branches.
+# Migrations. This branch's chain is master's, with edits: revisions of its own
+# where the schema genuinely differs (e.g. `b7e2d9a4c1f5`, which drops the money
+# tables and `user.phone`), and upstream revisions re-pointed or edited in place
+# where their parent was never taken here. Every such file carries an "hkgai
+# note". After a sync, read "⚠️ Alembic migration chain" in HKGAI_MERGE.md, then:
+#   uv run alembic heads          # must be one
 uv run alembic upgrade head
 uv run alembic revision --autogenerate -m "description"
 
