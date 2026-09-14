@@ -42,6 +42,14 @@ class FileNotInSessionError(SessionServiceError):
     endpoint layer turns it into 403."""
 
 
+class FileNotOwnedError(SessionServiceError):
+    """A message referenced a ``file_key`` another user holds.
+
+    Distinct from :class:`FileNotInSessionError`, which is a *read* miss:
+    this is refused at bind time, before the key is stored on the caller's
+    behalf. The endpoint turns it into 403."""
+
+
 class FileNotUploadedError(SessionServiceError):
     """A message referenced a ``file_key`` with no object in OSS.
 

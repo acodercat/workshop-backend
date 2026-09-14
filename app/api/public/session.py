@@ -99,6 +99,7 @@ from app.services.session import (
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
     FileNotInSessionError,
+    FileNotOwnedError,
     FileNotUploadedError,
     GenerationInProgressError,
     RecipeNotInvokableError,
@@ -411,8 +412,9 @@ async def list_files(
         )
     filter_clause = sa.and_(*conditions)
 
-    base = (
+    deduped = (
         select(
+            SessionFile.id,
             SessionFile.file_key,
             SessionFile.filename,
             SessionFile.mime_type,
@@ -425,17 +427,33 @@ async def list_files(
         )
         .join(Session, Session.id == SessionFile.session_id)
         .where(filter_clause)
+        # One row per *file*, not per binding: the same upload can be bound
+        # to several of its owner's sessions, and a library lists objects.
+        # The most recent binding wins, so the entry is attributed to the
+        # session its owner is most likely looking for.
+        .distinct(SessionFile.file_key)
+        .order_by(
+            SessionFile.file_key,
+            SessionFile.created_at.desc(),
+            SessionFile.id.desc(),
+        )
+        .subquery()
+    )
+    # ``DISTINCT ON`` dictates its own leading sort, so the page's order has
+    # to be applied outside it.
+    listing = select(deduped).order_by(
+        deduped.c.created_at.desc(),
         # Secondary sort on id keeps paging stable when timestamps tie.
-        .order_by(SessionFile.created_at.desc(), SessionFile.id.desc())
+        deduped.c.id.desc(),
     )
     total = (
         await db.execute(
-            select(func.count(SessionFile.id))
+            select(func.count(func.distinct(SessionFile.file_key)))
             .join(Session, Session.id == SessionFile.session_id)
             .where(filter_clause)
         )
     ).scalar() or 0
-    rows = (await db.execute(paginate(base, page, page_size))).all()
+    rows = (await db.execute(paginate(listing, page, page_size))).all()
     return PaginatedResponse(
         items=[
             SessionFileResponse(
@@ -718,7 +736,7 @@ async def create_message(
         )
     except SessionGoneError:
         raise HTTPException(status_code=404, detail="Session not found")
-    except FileNotInSessionError as exc:
+    except FileNotOwnedError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
         )
@@ -1204,22 +1222,40 @@ async def _enforce_session_file_quota(
     no upload-time gate, so counting them here would let heavy agent use
     silently exhaust a user's upload headroom.
 
-    ``size_bytes`` is the client-declared size captured at mint time (the
-    same value the per-file cap trusts); pre-backfill rows with a null
-    size contribute 0 to the sum. Race-acceptable: two concurrent mints
-    at the boundary can both pass, leaving the user slightly over — not
-    worth a row lock for a soft policy limit.
+    Counted per *object*, not per binding. One upload can be bound to
+    several of its owner's sessions while occupying OSS exactly once, so
+    charging it per binding would be billing for storage nobody is using.
+
+    ``size_bytes`` on every row is the size OSS reported when the file was
+    bound (``_bind_session_files``), never a client's declaration;
+    pre-backfill rows with a null size contribute 0 to the sum.
+    Race-acceptable: two concurrent mints at the boundary can both pass,
+    leaving the user slightly over — not worth a row lock for a soft
+    policy limit.
     """
+    # ``max`` rather than ``any``: the same object is the same number of
+    # bytes wherever it is bound, so this picks that number deterministically
+    # instead of leaving it to the planner.
+    per_object = (
+        select(
+            SessionFile.file_key,
+            func.max(SessionFile.size_bytes).label("size_bytes"),
+        )
+        .join(Session, Session.id == SessionFile.session_id)
+        .where(
+            Session.user_id == user_id,
+            Session.deleted_at.is_(None),
+            SessionFile.origin == SessionFileOrigin.UPLOAD,
+        )
+        .group_by(SessionFile.file_key)
+        .subquery()
+    )
     count, used_bytes = (
         await db.execute(
             select(
-                func.count(SessionFile.id),
-                func.coalesce(func.sum(SessionFile.size_bytes), 0),
+                func.count(per_object.c.file_key),
+                func.coalesce(func.sum(per_object.c.size_bytes), 0),
             )
-            .join(Session, Session.id == SessionFile.session_id)
-            .where(Session.user_id == user_id)
-            .where(Session.deleted_at.is_(None))
-            .where(SessionFile.origin == SessionFileOrigin.UPLOAD)
         )
     ).one()
 

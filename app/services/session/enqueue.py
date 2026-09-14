@@ -60,9 +60,9 @@ from app.services.redis import (
 )
 from config import settings
 from app.services.session import connectors as session_connectors
+from app.services.session.files import assert_files_owned_by
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
-    FileNotInSessionError,
     FileNotUploadedError,
     GenerationInProgressError,
     RecipeNotInvokableError,
@@ -378,10 +378,18 @@ async def _bind_session_files(
     tag was cleared on first bind).
 
     Reusing a file already bound to this same session is idempotent.
-    Reusing a file bound to a different session is rejected: otherwise
-    a caller could reference someone else's ``file_key`` in a message
-    and rely on the JSONB copy even though download authorization would
-    later fail.
+    Reusing one held by a **different owner** is rejected; reusing one of
+    your own in another session is allowed.
+
+    That ownership test is load-bearing, and it is the whole reason it is
+    spelled out rather than left to the schema. Until ``d8a4f1c6e290`` the
+    column-level UNIQUE on ``file_key`` made *any* rebind fail, which
+    happened to shut a real door: a share viewer legitimately holds the
+    ``file_key`` of a file in the session shared with them (``share.py``
+    passes it as a query parameter), so without this they could bind it to
+    a session of their own and keep minting download URLs long after the
+    share was revoked. Widening the constraint without widening this check
+    would have re-opened exactly that.
     """
     # Keep the first FileRef per key — it carries the presentation metadata
     # (filename / mime_type / size_bytes) denormalized onto the row.
@@ -391,26 +399,19 @@ async def _bind_session_files(
     if not unique_files:
         return []
 
-    rows = await db.execute(
-        select(SessionFile.file_key, SessionFile.session_id)
-        .where(SessionFile.file_key.in_(unique_files.keys()))
-    )
-    existing = {
-        file_key: owner_session_id for file_key, owner_session_id in rows.all()
-    }
+    await assert_files_owned_by(db, user_id=user_id, file_keys=unique_files.keys())
 
-    # Classify first (reject cross-session rebinds, skip idempotent
-    # same-session ones), then insert only the genuinely new keys.
-    to_insert: list[FileRef] = []
-    for file_key, file_ref in unique_files.items():
-        owner_session_id = existing.get(file_key)
-        if owner_session_id is None:
-            to_insert.append(file_ref)
-        elif owner_session_id != session_id:
-            raise FileNotInSessionError(
-                f"file_key {file_key!r} is already bound to another session"
+    bound_here = set(
+        (
+            await db.execute(
+                select(SessionFile.file_key).where(
+                    SessionFile.session_id == session_id,
+                    SessionFile.file_key.in_(unique_files.keys()),
+                )
             )
-        # owner_session_id == session_id → idempotent rebind, skip.
+        ).scalars()
+    )
+    to_insert = [ref for key, ref in unique_files.items() if key not in bound_here]
     if not to_insert:
         return []
 
