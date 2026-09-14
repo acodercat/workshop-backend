@@ -11,9 +11,10 @@ clients still send ``Authorization`` because the frontend uses
 ``@microsoft/fetch-event-source``.
 
 DB queries live inline in the handlers. What sits at module top is what more
-than one handler needs (``_get_or_404``, ``_load_messages``) plus the two
-guards a single handler each needs but that are long enough to name —
-``_owned_mcp_server_ids`` and ``_owned_connector_or_404``.
+than one handler needs (``_get_or_404``, ``_load_messages``) plus a guard a
+single handler needs but that is long enough to name —
+``_owned_connector_or_404``. Validating a whole Connector selection is shared
+with the schedule endpoint, so it lives in :mod:`app.services.mcp.ownership`.
 Non-trivial logic — message enqueue with its ordering invariants and
 SSE streaming — lives in :mod:`app.services.session`.
 """
@@ -44,11 +45,13 @@ from app.common.search import ilike_contains
 from app.database import AsyncSessionLocal
 from app.errors import (
     FileCountQuotaExceededError,
+    FileNotInSessionError,
     FileSizeQuotaExceededError,
 )
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
+from app.models.schedule_file import ScheduleFile
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_share import SessionShare
@@ -82,11 +85,12 @@ from app.schemas.site import SessionSiteResponse
 from app.services import credits, file_storage
 from app.services.file_storage import (
     SESSION_FILE_POLICY,
-    FileTooLargeError,
     InlinePreviewNotAllowedError,
 )
+from app.services.mcp import ownership as mcp_ownership
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import (
+    build_session,
     cancel_unclaimed_turn,
     connectors as session_connectors,
     generate_title,
@@ -95,12 +99,10 @@ from app.services.session import (
 )
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
-    FileNotInSessionError,
-    FileNotOwnedError,
-    FileNotUploadedError,
     GenerationInProgressError,
     RecipeNotInvokableError,
     SessionGoneError,
+    UnconfiguredTierError,
 )
 from app.services.session.files import assert_file_belongs_to_session
 from config import settings
@@ -143,46 +145,14 @@ async def _get_or_404(
     return session
 
 
-async def _owned_mcp_server_ids(db: AsyncSession, user_id: int, requested: list[int]) -> list[int]:
-    """Validate a Connector configuration, preserving the caller's order.
-
-    Rejects rather than drops: an id the caller does not own is a client
-    bug, and storing it would leave a foreign id sitting in this user's
-    row. Deduplicated because the same Connector twice is one Connector.
-
-    Ownership only — not ``connected``. Configuration records intent, and
-    a Connector disconnected later must not retroactively invalidate it;
-    enqueue re-checks liveness every turn.
-    """
-    unique_ids = list(dict.fromkeys(requested))
-    if not unique_ids:
-        return []
-    owned = set(
-        (
-            await db.execute(
-                select(MCPServer.id).where(
-                    MCPServer.id.in_(unique_ids),
-                    MCPServer.user_id == user_id,
-                )
-            )
-        ).scalars()
-    )
-    unknown = [server_id for server_id in unique_ids if server_id not in owned]
-    if unknown:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown connector ids: {unknown}",
-        )
-    return unique_ids
-
-
 async def _owned_connector_or_404(db: AsyncSession, connector_id: int, user_id: int) -> None:
     """404 unless *connector_id* is one of this user's Connectors.
 
-    404 rather than the 400 :func:`_owned_mcp_server_ids` raises: there the id
-    is one of several in a body the client composed, and naming it back is the
-    useful answer; here it is the path, and a 404 keeps the existence of other
-    users' Connectors unsaid — the rule :func:`_get_or_404` already follows.
+    404 rather than the 400 a whole selection gets (``ConnectorNotOwnedError``):
+    there the id is one of several in a body the client composed, and naming
+    it back is the useful answer; here it is the path, and a 404 keeps the
+    existence of other users' Connectors unsaid — the rule :func:`_get_or_404`
+    already follows.
     """
     exists = await db.execute(
         select(MCPServer.id).where(
@@ -243,29 +213,24 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SessionResponse:
-    # The client picks a capability tier; resolve it to the concrete model
-    # the worker / credits use. ``model_id`` is never sent over the wire.
-    model_id = settings.session_tier_models.get(body.tier)
-    if model_id is None or model_id not in settings.supported_session_model_ids:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Unconfigured tier: {body.tier!r}",
-        )
-    session = Session(
-        title=body.title,
-        user_id=current_user.id,
-        model_id=model_id,
-        tier=body.tier,
-        agent_type=body.agent_type,
-        thinking_enabled=body.thinking_enabled,
-        status=SessionStatus.IDLE,
+    # Ownership-filter the requested Connectors here: they are this
+    # request's untrusted input, and the shared builder takes ids that have
+    # already been vetted.
+    configured = await mcp_ownership.require_owned_connectors(
+        db, user_id=current_user.id, ids=body.connectors
     )
-    configured = await _owned_mcp_server_ids(db, current_user.id, body.connectors)
-    db.add(session)
-    # The Connector rows key off ``session.id``, which a Python-side default
-    # only assigns at flush.
-    await db.flush()
-    await session_connectors.replace(db, session.id, configured)
+    try:
+        session = await build_session(
+            db,
+            user_id=current_user.id,
+            title=body.title,
+            tier=body.tier,
+            agent_type=body.agent_type,
+            thinking_enabled=body.thinking_enabled,
+            connector_ids=configured,
+        )
+    except UnconfiguredTierError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -338,11 +303,6 @@ async def create_session_upload_url(
         )
     except InvalidFilenameError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except FileTooLargeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=str(exc),
-        )
 
 
 @router.get("/sessions/files")
@@ -420,10 +380,11 @@ async def list_files(
         )
         .join(Session, Session.id == SessionFile.session_id)
         .where(filter_clause)
-        # One row per *file*, not per binding: the same upload can be bound
-        # to several of its owner's sessions, and a library lists objects.
-        # The most recent binding wins, so the entry is attributed to the
-        # session its owner is most likely looking for.
+        # One row per *file*, not per binding. A file can be bound to several
+        # sessions — a scheduled task re-attaches the same upload to every
+        # session it creates — and listing one object once a day is not a
+        # library. The most recent binding wins, so the entry is attributed
+        # to the run its owner is most likely looking for.
         .distinct(SessionFile.file_key)
         .order_by(
             SessionFile.file_key,
@@ -738,21 +699,6 @@ async def create_message(
         )
     except SessionGoneError:
         raise HTTPException(status_code=404, detail="Session not found")
-    except FileNotOwnedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(exc),
-        )
-    except FileNotUploadedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-    except FileTooLargeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=str(exc),
-        )
     except RecipeNotInvokableError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1239,32 +1185,42 @@ async def _enforce_session_file_quota(
     no upload-time gate, so counting them here would let heavy agent use
     silently exhaust a user's upload headroom.
 
-    Counted per *object*, not per binding. One upload can be bound to
-    several of its owner's sessions while occupying OSS exactly once, so
-    charging it per binding would be billing for storage nobody is using.
+    Counted per *object*, not per binding. One upload can be bound to many
+    sessions — a scheduled task re-attaches the same file to every session
+    it creates — while occupying OSS exactly once, so charging it once a day
+    would be billing for storage nobody is using. Schedule attachments are
+    folded in from ``schedule_file`` so that one still counts before its
+    first firing has bound it anywhere.
 
     ``size_bytes`` on every row is the size OSS reported when the file was
-    bound (``_bind_session_files``), never a client's declaration;
-    pre-backfill rows with a null size contribute 0 to the sum.
-    Race-acceptable: two concurrent mints at the boundary can both pass,
-    leaving the user slightly over — not worth a row lock for a soft
-    policy limit.
+    bound or attached (``file_storage.confirmed_sizes``), never a client's
+    declaration; pre-backfill rows with a null size contribute 0 to the
+    sum. Race-acceptable: two concurrent mints
+    at the boundary can both pass, leaving the user slightly over — not
+    worth a row lock for a soft policy limit.
     """
-    # ``max`` rather than ``any``: the same object is the same number of
-    # bytes wherever it is bound, so this picks that number deterministically
-    # instead of leaving it to the planner.
-    per_object = (
-        select(
-            SessionFile.file_key,
-            func.max(SessionFile.size_bytes).label("size_bytes"),
-        )
+    bound = (
+        select(SessionFile.file_key, SessionFile.size_bytes)
         .join(Session, Session.id == SessionFile.session_id)
         .where(
             Session.user_id == user_id,
             Session.deleted_at.is_(None),
             SessionFile.origin == SessionFileOrigin.UPLOAD,
         )
-        .group_by(SessionFile.file_key)
+    )
+    attached = select(ScheduleFile.file_key, ScheduleFile.size_bytes).where(
+        ScheduleFile.user_id == user_id
+    )
+    # ``max`` rather than ``any``: the same object is the same number of
+    # bytes wherever it is bound, so this picks that number deterministically
+    # instead of leaving it to the planner.
+    objects = bound.union_all(attached).subquery()
+    per_object = (
+        select(
+            objects.c.file_key,
+            func.max(objects.c.size_bytes).label("size_bytes"),
+        )
+        .group_by(objects.c.file_key)
         .subquery()
     )
     count, used_bytes = (

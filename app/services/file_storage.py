@@ -8,6 +8,8 @@ backend (multipart POST). Generic ops (``upload``, ``download``,
 bucket names.
 """
 
+import asyncio
+import logging
 import os
 import threading
 import uuid
@@ -17,17 +19,11 @@ from urllib.parse import quote
 import oss2
 
 from app.common.filenames import validate_input_filename
+from app.errors import FileNotUploadedError, FileRetentionFailedError, FileTooLargeError
 from app.schemas.file import UploadUrlResponse
 from config import settings
 
-
-class FileTooLargeError(ValueError):
-    """Declared size above the policy's cap → HTTP 413."""
-
-    def __init__(self, size_bytes: int, max_bytes: int) -> None:
-        self.size_bytes = size_bytes
-        self.max_bytes = max_bytes
-        super().__init__(f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap")
+logger = logging.getLogger(__name__)
 
 
 class FileObjectNotFoundError(ValueError):
@@ -276,6 +272,73 @@ def clear_orphan_tag(policy: UploadPolicy, file_key: str) -> None:
     get_bucket(policy.bucket_name).delete_object_tagging(file_key)
 
 
+async def confirmed_sizes(policy: UploadPolicy, file_keys: list[str]) -> list[int]:
+    """Each key's true size in OSS, in the order given.
+
+    The one place a persisted ``size_bytes`` becomes trustworthy. A client's
+    declared size is a claim, and a low one slips past both the per-file cap
+    and the per-user quota, which sums the column — so every write path that
+    stores a size reconciles it here rather than each re-deriving how.
+
+    Raises :class:`FileNotUploadedError` for a key with no object — the
+    presigned upload never completed — and :class:`FileTooLargeError` for one
+    over the policy's cap. Both are typed application errors, so every caller
+    can let them propagate: that "no object" means "not uploaded" is decided
+    once, here, rather than re-translated at each write path.
+
+    Blocking oss2, threaded and fanned out, so N keys cost about one HEAD's
+    latency rather than N serial ones. A single failure is raised rather than
+    collected: none of the callers can store a partial set.
+    """
+    if not file_keys:
+        return []
+    sizes = await asyncio.gather(
+        *(asyncio.to_thread(head_size, policy, key) for key in file_keys),
+        return_exceptions=True,
+    )
+    confirmed: list[int] = []
+    for size in sizes:
+        if isinstance(size, FileObjectNotFoundError):
+            raise FileNotUploadedError(f"file_key {size.file_key!r} was not uploaded") from size
+        if isinstance(size, BaseException):
+            raise size
+        if size > policy.max_bytes:
+            raise FileTooLargeError(size, policy.max_bytes)
+        confirmed.append(size)
+    return confirmed
+
+
+async def clear_orphan_tags(policy: UploadPolicy, file_keys: list[str]) -> None:
+    """Take uploads off the orphan-reaping rule, or raise
+    :class:`FileRetentionFailedError`.
+
+    Whether a failure may be ignored is the caller's call, not this
+    function's: a message's attachments are bound and read within the turn,
+    so its caller logs and moves on, while a scheduled task's must survive
+    until it fires, so its caller refuses the save. Raising lets both say so.
+
+    Every key is attempted before anything is raised, so a retry has only
+    what actually failed left to do — the call is idempotent. A no-op when
+    tagging is off, because then nothing was tagged. Blocking oss2, threaded
+    and fanned out, so N keys cost about one round trip.
+    """
+    if not settings.oss_orphan_tagging_enabled or not file_keys:
+        return
+    results = await asyncio.gather(
+        *(asyncio.to_thread(clear_orphan_tag, policy, key) for key in file_keys),
+        return_exceptions=True,
+    )
+    failed = [
+        (key, result) for key, result in zip(file_keys, results) if isinstance(result, Exception)
+    ]
+    if failed:
+        key, first = failed[0]
+        raise FileRetentionFailedError(
+            f"Could not clear the orphan tag on {len(failed)} of {len(file_keys)} "
+            f"file(s), starting with {key!r}"
+        ) from first
+
+
 def download(policy: UploadPolicy, file_key: str) -> bytes:
     """Read an object's bytes into memory."""
     return get_bucket(policy.bucket_name).get_object(file_key).read()
@@ -291,7 +354,15 @@ def head_size(policy: UploadPolicy, file_key: str) -> int:
     """
     try:
         head = get_bucket(policy.bucket_name).head_object(file_key)
-    except oss2.exceptions.NoSuchKey as exc:
+    except oss2.exceptions.NoSuchBucket:
+        # Also a ``NotFound``, and not the caller's to handle: a missing
+        # bucket is a deployment fault, not a missing upload.
+        raise
+    except oss2.exceptions.NotFound as exc:
+        # ``NotFound`` rather than only ``NoSuchKey``: a HEAD 404 arrives with
+        # no body, so oss2 can only name ``NoSuchKey`` when the ``x-oss-err``
+        # header is present — and it is not always. ``NoSuchKey`` is a
+        # subclass, so this catches both spellings of "no such object".
         raise FileObjectNotFoundError(file_key) from exc
     return int(head.content_length)
 

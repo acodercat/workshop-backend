@@ -23,6 +23,15 @@ from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
 from app.models.recipe import Recipe, RecipeOrigin
 from app.models.sandbox import Sandbox
+from app.models.schedule import (
+    Schedule,
+    ScheduleFrequency,
+    ScheduleRun,
+    ScheduleSkipReason,
+    ScheduleStatus,
+)
+from app.models.schedule_file import ScheduleFile
+from app.models.schedule_mcp_server import ScheduleMCPServer
 from app.models.session import Session
 from app.models.session_context import SessionContext
 from app.models.session_files import SessionFile
@@ -52,6 +61,13 @@ __all__ = [
     "Recipe",
     "RecipeOrigin",
     "Sandbox",
+    "Schedule",
+    "ScheduleFile",
+    "ScheduleFrequency",
+    "ScheduleMCPServer",
+    "ScheduleRun",
+    "ScheduleSkipReason",
+    "ScheduleStatus",
     "Session",
     "SessionContext",
     "SessionFile",

@@ -3,15 +3,12 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from app.errors import FileNotOwnedError, FileNotUploadedError
 from app.models.session_files import SessionFile
 from app.schemas.session import FileRef
 from app.services import file_storage
 from app.services.session import enqueue
 from app.services.session.enqueue import _bind_session_files
-from app.services.session.exceptions import (
-    FileNotOwnedError,
-    FileNotUploadedError,
-)
 from app.services.session.files import assert_files_owned_by
 
 
@@ -27,9 +24,9 @@ class _Rows:
 
 
 class _Db:
-    """Answers the binder's one own query: keys already bound here.
+    """Answers the binder's one remaining query: keys already bound here.
 
-    Ownership is not the binder's own query — it calls
+    Ownership is no longer the binder's own query — it calls
     ``assert_files_owned_by``, which the ``owned`` fixture stubs and
     ``TestOwnership`` below covers against real SQL.
     """
@@ -182,10 +179,11 @@ async def test_bind_session_files_skips_key_already_bound_to_same_session(
 async def test_bind_session_files_lets_an_owner_rebind_in_another_session(
     stub_head_size,
 ) -> None:
-    """What ``UNIQUE(session_id, file_key)`` made possible.
+    """The point of widening the constraint.
 
-    Under the old column-level UNIQUE the second session failed with a 403
-    even for the file's own uploader. The key being bound elsewhere is
+    A scheduled task creates a fresh session every firing and re-attaches
+    the same upload; under the old column-level UNIQUE the second firing
+    failed with a 403 and no way forward. The key being bound elsewhere is
     invisible to this session's lookup, so it inserts.
     """
     session_id = uuid4()
@@ -222,11 +220,11 @@ async def test_bind_session_files_rejects_a_key_owned_by_someone_else(
 
 
 class TestOwnership:
-    """``assert_files_owned_by`` — the rule that replaced the old UNIQUE.
+    """``assert_files_owned_by`` — the predicate every storing path shares.
 
-    Asserted on the compiled statement, not a stub's return: a test that
-    stubs the query away stays green when the predicate's column or
-    operator is mutated.
+    Asserted on the compiled statement, not a stub's return: the earlier
+    tests here stubbed the query away, and mutating the predicate's table,
+    column or operator left every one of them green.
     """
 
     async def _compiled(self, user_id, file_keys) -> str:
@@ -234,17 +232,25 @@ class TestOwnership:
         await assert_files_owned_by(db, user_id=user_id, file_keys=file_keys)
         return db.sql
 
+    async def test_checks_both_tables_that_can_hold_a_key(self):
+        # A schedule attachment reaches ``session_files`` only when the task
+        # first fires — possibly never. Reading one table would leave it
+        # unheld, and a stranger with the key could bind it first.
+        sql = await self._compiled(7, ["k"])
+        assert "FROM session_files" in sql
+        assert "FROM schedule_file" in sql
+        assert "UNION ALL" in sql
+
     async def test_a_null_owner_fails_closed_for_a_logged_in_caller(self):
         # The one thing ``IS DISTINCT FROM`` buys over ``!=``: a row whose
         # owner is NULL is *unknown* to ``!=`` and silently dropped.
         sql = await self._compiled(7, ["k"])
-        assert "FROM session_files" in sql
-        assert "user_id IS DISTINCT FROM 7" in sql
+        assert sql.count("user_id IS DISTINCT FROM 7") == 2
         assert "!= 7" not in sql
 
     async def test_only_the_requested_keys_are_consulted(self):
         sql = await self._compiled(7, ["a", "b"])
-        assert "file_key IN ('a', 'b')" in sql
+        assert sql.count("file_key IN ('a', 'b')") == 2
 
     async def test_any_foreign_row_makes_the_key_foreign(self):
         class _Foreign:

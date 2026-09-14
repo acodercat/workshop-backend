@@ -34,31 +34,6 @@ class SessionGoneError(SessionServiceError):
     into 404, matching how every other read treats a deleted session."""
 
 
-class FileNotInSessionError(SessionServiceError):
-    """A file_key was looked up against a session it doesn't belong to.
-
-    Surfaces both the owner-side (caller's own session) and share-side
-    (recipient's accessible share) authorization miss in one shape; the
-    endpoint layer turns it into 403."""
-
-
-class FileNotOwnedError(SessionServiceError):
-    """A message referenced a ``file_key`` another user holds.
-
-    Distinct from :class:`FileNotInSessionError`, which is a *read* miss:
-    this is refused at bind time, before the key is stored on the caller's
-    behalf. The endpoint turns it into 403."""
-
-
-class FileNotUploadedError(SessionServiceError):
-    """A message referenced a ``file_key`` with no object in OSS.
-
-    Raised at bind time when the real-size lookup (``head_size``) finds
-    the object missing — the presigned upload never completed. Binding a
-    phantom file would let a zero-size row through the quota, so the
-    endpoint turns this into 400."""
-
-
 class RecipeNotInvokableError(SessionServiceError):
     """A ``recipe_id`` was sent that the caller can't invoke.
 
@@ -67,3 +42,14 @@ class RecipeNotInvokableError(SessionServiceError):
     filtered so a stale toggle doesn't block a send — a recipe is an
     explicit single pick, so the endpoint turns this into 400 rather
     than dropping it silently."""
+
+
+class UnconfiguredTierError(SessionServiceError):
+    """A capability tier resolved to no usable ``model_id``.
+
+    Either ``settings.session_tier_models`` has no entry for it, or the
+    entry names a model missing from ``settings.supported_session_model_ids``
+    — a deployment-configuration fault, not a caller mistake, but it can
+    only be detected when someone asks for that tier. The endpoint turns it
+    into 400; the scheduled-task dispatcher logs it and skips the
+    occurrence, since no retry will fix a config file."""

@@ -1,16 +1,16 @@
-"""Authorization helpers for the ``session_files`` ownership table.
+"""Who may use an uploaded ``file_key``.
 
-Pure DB queries — no FastAPI / HTTP concerns. Two questions, asked at two
-moments:
+Two questions, both answered from the tables that record a binding:
+whether a key is bound to a given session (the download and preview
+endpoints ask), and whether anyone other than the caller holds a key they
+are about to store (every write path asks — a message attachment and a
+schedule attachment alike).
 
-- **May this session read this file?** (:func:`assert_file_belongs_to_session`)
-  Asked on download and preview. Both the owner-side and share-side
-  endpoints translate its error into their own 403.
-- **May this caller store this file?** (:func:`assert_files_owned_by`)
-  Asked when a message binds its attachments, before the key is written.
-
-Keeping both here keeps this module reusable from a worker / CLI / test
-that has no HTTP envelope to populate.
+Pure DB queries — no FastAPI / HTTP concerns. Both raise
+:class:`~app.errors.FileNotInSessionError` and
+:class:`~app.errors.FileNotOwnedError` respectively — typed application
+errors the shared handler renders as 403s — so the module works the same from a
+worker or a test with no HTTP envelope.
 """
 
 import uuid
@@ -19,8 +19,9 @@ from collections.abc import Collection
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import FileNotInSessionError, FileNotOwnedError
+from app.models.schedule_file import ScheduleFile
 from app.models.session_files import SessionFile
-from app.services.session.exceptions import FileNotInSessionError, FileNotOwnedError
 
 
 async def assert_file_belongs_to_session(
@@ -32,8 +33,8 @@ async def assert_file_belongs_to_session(
     """Raise :class:`FileNotInSessionError` if ``file_key`` is not
     bound to ``session_id``.
 
-    Single indexed lookup: ``UNIQUE(session_id, file_key)`` covers both
-    filters."""
+    Single indexed lookup: ``uq_session_files_session_id_file_key`` leads
+    with ``session_id`` and covers both columns."""
     stmt = (
         select(SessionFile.id)
         .where(SessionFile.session_id == session_id)
@@ -52,12 +53,19 @@ async def assert_files_owned_by(
 ) -> None:
     """Raise :class:`FileNotOwnedError` if any key is held by someone else.
 
-    The one definition of "may this caller reference this upload". It is
-    load-bearing: a share viewer legitimately holds the ``file_key`` of a
-    file in the session shared with them, and a path that let them store
-    it would let them keep minting download URLs after the share was
-    revoked. The same owner binding their own file to another of their
-    sessions is allowed.
+    The one definition of "may this caller reference this upload", read by
+    every path that stores a ``file_key`` on the caller's behalf — a message
+    attachment and a schedule attachment alike. It is load-bearing: a share
+    viewer legitimately holds the ``file_key`` of a file in the session
+    shared with them, and a path that let them store it would let them keep
+    minting download URLs after the share was revoked.
+
+    "Held" means either table. A schedule attachment lives in
+    ``schedule_file`` from the moment it is saved and only reaches
+    ``session_files`` when the task first fires, which may be never for a
+    paused one — so a check that read only ``session_files`` would treat it
+    as unbound indefinitely, and the first stranger to learn the key could
+    bind it and lock its real owner out of their own attachment.
 
     A key nobody holds passes. It is only knowable by whoever minted the
     presigned upload, and refusing it would refuse every fresh upload.
@@ -76,6 +84,12 @@ async def assert_files_owned_by(
         .where(
             SessionFile.file_key.in_(file_keys),
             SessionFile.user_id.is_distinct_from(user_id),
+        )
+        .union_all(
+            select(ScheduleFile.file_key).where(
+                ScheduleFile.file_key.in_(file_keys),
+                ScheduleFile.user_id.is_distinct_from(user_id),
+            )
         )
         .limit(1)
     )

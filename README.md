@@ -81,10 +81,11 @@ uv run uvicorn app.public_main:app --host 0.0.0.0 --port 8005 --workers 4
 uv run python -m app.workers.run          # standalone background process
 ```
 
-### Background process (settle sweeper + subscriber)
+### Background process (settle sweeper + subscriber + schedule dispatcher)
 
-One process, **two** always-on concurrent tasks (plus the flag-gated
-budget enforcer — see `app/workers/run.py`). Both are the push/pull
+One process, **three** always-on concurrent tasks (plus the flag-gated
+budget enforcer — see `app/workers/run.py`): the schedule dispatcher,
+which fires scheduled tasks that have come due, and the push/pull
 halves of **credit settle** — closing out reservations the user-facing
 lazy sweep didn't catch (the "user never came back" case: abandoned
 sessions, API-only clients, worker crashes between RESERVE and the

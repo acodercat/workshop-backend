@@ -4,7 +4,7 @@
 #  - uvicorn (web)        — the request/SSE tier on :PORT.
 #  - background (process) — the backend's background-jobs process
 #                           (``python -m app.workers.run``): credit-settle
-#                           sweeper + subscriber, plus the payment reconciler.
+#                           sweeper + subscriber, plus the schedule dispatcher.
 #
 # Top-level commands act on BOTH siblings, so one command manages the whole
 # backend. ``deploy.sh background SUBCMD`` is the escape hatch that drives the

@@ -79,12 +79,14 @@ class SessionFile(Base):
     # anonymous sessions carry no owner. ``ON DELETE CASCADE`` matches the
     # session-ownership family.
     #
-    # Read by ``assert_files_owned_by`` to keep one user's ``file_key`` out
-    # of another user's sessions. ``ix_session_files_user_id_created_at`` is
-    # still future-only: the per-user reads (the file library, the upload
-    # quota count) join ``session`` anyway for ``deleted_at IS NULL`` (a
-    # soft-deleted session's files must read as gone) and the library's
-    # title search, and pre-backfill rows may carry NULL here.
+    # Column + ``ix_session_files_user_id_created_at`` are **future-only**
+    # today: no read path filters it. The existing per-user reads (the
+    # file library, the upload quota count) can't simply switch — they
+    # join ``session`` anyway for ``deleted_at IS NULL`` (a soft-deleted
+    # session's files must read as gone) and the library's title search,
+    # and pre-backfill rows may carry NULL here. A future adopter (e.g.
+    # an admin all-files-by-user view) must either not care about
+    # soft-delete or keep the join alongside this filter.
     user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )
@@ -92,10 +94,12 @@ class SessionFile(Base):
     # use ``session-files/{uuid4}/...`` — older rows still have the legacy
     # ``documents/...`` prefix; tool outputs use
     # ``outputs/{session_uuid}/{tool_use_id}/{idx}_{filename}``), but a key
-    # is not unique *here*: one owner's object can be bound to several of
-    # their sessions. See ``uq_session_files_session_id_file_key`` below for
-    # the constraint that is, and ``assert_files_owned_by`` for the
-    # ownership rule that keeps a key from crossing to another user.
+    # is no longer unique *here*: one object can be bound to several
+    # sessions, which is how a scheduled task re-attaches the same file to
+    # every session it creates. See ``uq_session_files_session_id_file_key``
+    # below for what replaced the old column-level UNIQUE, and
+    # ``_bind_session_files`` for the ownership check that took over the
+    # protection it was incidentally providing.
     file_key: Mapped[str] = mapped_column(String, nullable=False)
     # Presentation metadata, denormalized from the message blocks so the
     # file library can render name / type / size without a JSONB scan.
@@ -129,8 +133,10 @@ class SessionFile(Base):
         # serves ``assert_file_belongs_to_session``, which filters on both.
         UniqueConstraint("session_id", "file_key", name="uq_session_files_session_id_file_key"),
         Index("ix_session_files_session_id", "session_id"),
-        # ``assert_files_owned_by`` looks a batch of keys up with no session
-        # filter, to find who already holds them.
+        # ``_bind_session_files`` looks a batch of keys up with no session
+        # filter, to find who already owns them. That read used to ride the
+        # column-level UNIQUE on ``file_key``; with that gone it needs an
+        # index of its own or it degrades to a sequential scan.
         Index("ix_session_files_file_key", "file_key"),
         # Per-user file library / quota counting: by owner, newest first.
         Index(

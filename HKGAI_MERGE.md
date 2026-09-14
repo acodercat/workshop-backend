@@ -58,7 +58,7 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | No 汇付 dep | `grep -c 'dg-sdk' pyproject.toml uv.lock` | 0 in both |
 | App imports | `uv run python -c "import app.public_main"` and `uv run python -c "from app.admin_main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'audit' in p])"` | clean, and `[]`. Both import since the 2026-09-14 sync (master committed the console's routers). `public_main` is what `deploy.sh` starts; the admin probe is what catches a payment or audit router coming back |
 | No audit funnel | `grep -rn "audit(\|AuditAction\|AdminAuditLog\|admin_audit_log" app/api app/services tests --include=*.py` | empty. See "Excluding the operator trail" below |
-| No scheduled tasks | `ls app/models/schedule*.py alembic/versions/*schedule* 2>&1` | no such files. See "Scheduled tasks are not on this branch" below |
+| Scheduled tasks carried whole | `grep -c schedule_dispatcher app/workers/run.py`, `grep -c payment_reconciler app/workers/run.py`, and `uv run alembic history -r f4c8a2b91d63:head` | ≥1, **0**, and the chain `f4c8a2b91d63 → c8b3e5f1a742 → d4a1e8b62f37 → b5e9d3f70a26 → e1c6a8d40b73 → a9e4c2d71f38` (or later on top of it). Master's `run.py` starts the payment reconciler next to the dispatcher, so that file conflicts every time the dispatcher's lines move — take the dispatcher, drop the reconciler. See "Scheduled tasks" below for the chain |
 | Tests | `uv run pytest tests/` | green |
 
 If any probe fails, master's version leaked over a hkgai delta — fix before pushing.
@@ -197,7 +197,7 @@ Then the edits deletion alone does not cover:
 | File | Edit |
 |---|---|
 | `app/main.py` | drop `commission`, `payment` from the import block and from `ROUTERS` |
-| `app/workers/run.py` | drop the `payment_reconciler` import, its `create_task`, its docstring bullet; task count **four → three**; startup log string |
+| `app/workers/run.py` | drop the `payment_reconciler` import, its `create_task`, its docstring bullet; task count **five → four** (settle sweeper, subscriber, schedule dispatcher, budget enforcer); startup log string |
 | `app/models/user.py` | drop `commission_balance_fen` (the DB column stays — see below) |
 | `app/errors.py` | drop the 8 payment/commission/withdrawal error classes; the domain list in the module docstring |
 | `config.py` | drop the `# ── Payments` and `# ── Referral commission` sections, and `credit_bonus_rate` (its only reader was order creation) |
@@ -246,7 +246,8 @@ the migration-head probe row above, which is the one that is right. As of 2026-0
 `b7e2d9a4c1f5` (drops the removed subsystems' schema), `a1c7f3e9d2b6` (the OAuth-catalog twin),
 `cd91a1a5179a` (a merge revision), `a3f9c1d7e2b4` (see below) and `c8f2a5e1d94b`
 (drops `admin_audit_log`). Since then: `b6c1e83f27d4` / `c5e1a8f3b92d` (twins, below) and
-`d8a4f1c6e290` (`session_files` unique per session — ahead of master).
+`d8a4f1c6e290` (`session_files` unique per session — ahead of master; master's
+`e1c6a8d40b73` does the same change and is edited here, see "Scheduled tasks").
 
 ### Revisions deliberately not taken, and re-points (2026-09-14 sync)
 
@@ -259,12 +260,11 @@ After that sync the chain reads
 | `a7d2f4b9c613` | backfill picked skills as preferences | **not taken** — identical twin of `c5e1a8f3b92d` |
 | `b6d2f8a04c17` | drops `admin_audit_log.reason` | **not taken** — the table is gone (`c8f2a5e1d94b`) |
 | `b7e2d4c8a915` | `payment_order.reconcile_attempted_at` | **not taken** — `payment_order` is gone (`b7e2d9a4c1f5`) |
-| `c8b3e5f1a742`, `d4a1e8b62f37` | `schedule` / `schedule_run` | **not taken** — scheduled tasks are not on this branch |
 | `a7c3f1d9e4b2` | `actor` table | taken, **re-pointed** onto this branch's head (upstream parent `a1f4c7e02b31` sits behind revisions this database may already stand on) |
 | `c2f8a41b7e60` | skill / connector categories | taken, **re-pointed** past `b6d2f8a04c17` |
 | `d5b1e93f7a48`, `f4c8a2b91d63` | two indexes | taken as-is (their parents came across) |
 
-Both re-pointed files carry an "hkgai note" in the docstring; do not
+Every re-pointed or edited file carries an "hkgai note" in the docstring; do not
 "correct" them back. The next sync will see master's children of
 `a7d2f4b9c613` (or later) — hang them off this branch's head the same way,
 after reading what each intervening master revision does.
@@ -274,13 +274,29 @@ not before this sync: `e2b7d4f9a1c6`'s guard inspects the live schema,
 which offline mode cannot. Verify offline from a real revision instead
 (`c5e1a8f3b92d:head --sql`), or against a throwaway database.
 
-### Scheduled tasks are not on this branch
+### Scheduled tasks (2026-09-14, second sync)
 
-Master's scheduled-task feature (`schedule`, `schedule_run`, the
-dispatcher) is excluded. Only its migrations had reached master when this
-was decided, and they are the two rows above. When the application code
-lands there, it arrives as pure additions — delete it the way payment is
-deleted, and keep the migrations out of the graph.
+Excluded at the first sync of that day, carried whole at the second. Their
+migrations did not come across as a clean run — upstream they hang off
+revisions this branch never took, and one of them repeats a change this
+branch made first. After the sync the chain reads
+`… f4c8a2b91d63 → c8b3e5f1a742 → d4a1e8b62f37 → b5e9d3f70a26 → e1c6a8d40b73 → a9e4c2d71f38`.
+
+| Master revision | What it does | On hkgai |
+|---|---|---|
+| `c8b3e5f1a742` | `schedule` + `schedule_run` | taken, **re-pointed** onto `f4c8a2b91d63` (upstream parent `b7e2d4c8a915` alters `payment_order`, never taken) |
+| `d4a1e8b62f37` | `schedule_run.user_id` index | taken as-is |
+| `b5e9d3f70a26` | `schedule.skills`, `schedule_mcp_server` | taken, **re-pointed** onto `d4a1e8b62f37` (upstream parent `a7d2f4b9c613` is the not-taken twin above) |
+| `e1c6a8d40b73` | upstream: the `session_files` constraint change **and** `schedule_file` | taken, **edited in place**: only `schedule_file` remains. The `session_files` half is this branch's `d8a4f1c6e290`, always an ancestor here, so upstream's body would fail on its first statement. Edited rather than guarded — the order is fixed, and a schema-inspecting guard would break offline `--sql` rendering |
+| `a9e4c2d71f38` | drops `schedule.last_run_at` | taken as-is |
+
+The application code converges to master, including the file errors: they
+are `AppError`s in `app/errors.py` now (`file_not_owned`, `file_not_uploaded`,
+`file_too_large`, `connector_not_owned`), which the dispatcher maps to skip
+reasons — keeping this branch's older `SessionServiceError` copies would leave
+it catching classes the binder no longer raises. The dispatcher is always on
+and spends credits through the ordinary enqueue; this deployment does not sell
+credits, so an owner's balance comes from invites and check-in only.
 
 ### Two heads is not the only way a sync breaks the chain
 
