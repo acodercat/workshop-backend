@@ -12,6 +12,13 @@ from config import settings
 # The cost is per configured Connector per turn — its tools enter the
 # model's catalog on every step.
 CONNECTORS_MAX = 20
+# With the cap on *enabled* skills gone — turning one on lists it in the
+# composer rather than loading it — an explicit pick is the only bound a
+# user can push on how much skill metadata a turn puts in the model's
+# context. The rest of it is the agent-only SYSTEM set, which only an
+# operator adds to. Scheduled tasks pick from the same pool and pay the
+# same per-turn cost, so ``app.schemas.schedule`` shares this bound.
+SKILLS_MAX = 20
 
 
 class SessionCreate(BaseModel):
@@ -78,12 +85,8 @@ class MessageCreate(BaseModel):
         default_factory=list,
         max_length=settings.max_message_files,
     )
-    # Per-turn composer picks. With the cap on *enabled* skills gone —
-    # turning one on lists it in the composer rather than loading it — this
-    # is the only bound a user can push on how much skill metadata a turn
-    # puts in the model's context. The rest of it is the agent-only SYSTEM
-    # set, which only an operator adds to.
-    skills: list[str] = Field(default_factory=list, max_length=20)
+    # Per-turn composer picks; see ``SKILLS_MAX`` for why this is bounded.
+    skills: list[str] = Field(default_factory=list, max_length=SKILLS_MAX)
     # Optional recipe picked from the composer. The backend resolves it
     # to a pinned snapshot on ``session_turn.recipe``; its instructions
     # ride to the worker as a system-reminder. ``None`` = no recipe.

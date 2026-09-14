@@ -1,37 +1,71 @@
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
+from app.errors import FileNotOwnedError, FileNotUploadedError
 from app.models.session_files import SessionFile
 from app.schemas.session import FileRef
 from app.services import file_storage
+from app.services.session import enqueue
 from app.services.session.enqueue import _bind_session_files
-from app.services.session.exceptions import (
-    FileNotInSessionError,
-    FileNotUploadedError,
-)
+from app.services.session.files import assert_files_owned_by
 
 
 class _Rows:
     def __init__(self, rows) -> None:
         self._rows = rows
 
-    def all(self):
-        return self._rows
+    def scalars(self):
+        return iter(self._rows)
+
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
 
 
 class _Db:
-    def __init__(self, rows=()) -> None:
-        self.rows = rows
+    """Answers the binder's one remaining query: keys already bound here.
+
+    Ownership is no longer the binder's own query — it calls
+    ``assert_files_owned_by``, which the ``owned`` fixture stubs and
+    ``TestOwnership`` below covers against real SQL.
+    """
+
+    def __init__(self, bound_here=()) -> None:
+        self.bound_here = list(bound_here)
         self.added = []
-        self.statement = None
 
     async def execute(self, statement):
-        self.statement = statement
-        return _Rows(self.rows)
+        return _Rows(self.bound_here)
 
     def add(self, obj) -> None:
         self.added.append(obj)
+
+
+class _CapturingDb:
+    """Records the one statement it is given, compiled with literal binds."""
+
+    sql = ""
+
+    async def execute(self, statement):
+        self.sql = str(
+            statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+        return _Rows([])
+
+
+@pytest.fixture(autouse=True)
+def owned(monkeypatch):
+    """Every key belongs to the caller unless a test says otherwise."""
+    state = {"foreign": set()}
+
+    async def _fake(_db, *, user_id, file_keys):
+        for key in file_keys:
+            if key in state["foreign"]:
+                raise FileNotOwnedError(f"file_key {key!r} belongs to another user")
+
+    monkeypatch.setattr(enqueue, "assert_files_owned_by", _fake)
+    return state
 
 
 def _file(file_key: str) -> FileRef:
@@ -128,12 +162,11 @@ async def test_bind_rejects_never_uploaded_object(stub_head_size) -> None:
 async def test_bind_session_files_skips_key_already_bound_to_same_session(
     stub_head_size,
 ) -> None:
-    session_id = uuid4()
-    db = _Db(rows=[("documents/a", session_id)])
+    db = _Db(bound_here=["documents/a"])
 
     newly_bound = await _bind_session_files(
         db,
-        session_id=session_id,
+        session_id=uuid4(),
         user_id=7,
         files=[_file("documents/a")],
     )
@@ -143,19 +176,101 @@ async def test_bind_session_files_skips_key_already_bound_to_same_session(
     assert newly_bound == []
 
 
-async def test_bind_session_files_rejects_key_bound_to_another_session(
+async def test_bind_session_files_lets_an_owner_rebind_in_another_session(
     stub_head_size,
 ) -> None:
-    session_id = uuid4()
-    other_session_id = uuid4()
-    db = _Db(rows=[("documents/a", other_session_id)])
+    """The point of widening the constraint.
 
-    with pytest.raises(FileNotInSessionError, match="already bound"):
+    A scheduled task creates a fresh session every firing and re-attaches
+    the same upload; under the old column-level UNIQUE the second firing
+    failed with a 403 and no way forward. The key being bound elsewhere is
+    invisible to this session's lookup, so it inserts.
+    """
+    session_id = uuid4()
+    db = _Db(bound_here=[])
+
+    newly_bound = await _bind_session_files(
+        db,
+        session_id=session_id,
+        user_id=7,
+        files=[_file("documents/a")],
+    )
+
+    assert [row.session_id for row in db.added] == [session_id]
+    assert newly_bound == ["documents/a"]
+
+
+async def test_bind_session_files_rejects_a_key_owned_by_someone_else(
+    stub_head_size, owned
+) -> None:
+    # Ownership is checked before anything is written, and before the OSS
+    # HEAD is spent on a key the caller could never have bound.
+    owned["foreign"] = {"documents/a"}
+    db = _Db()
+
+    with pytest.raises(FileNotOwnedError, match="another user"):
         await _bind_session_files(
             db,
-            session_id=session_id,
+            session_id=uuid4(),
             user_id=7,
             files=[_file("documents/a")],
         )
 
     assert db.added == []
+
+
+class TestOwnership:
+    """``assert_files_owned_by`` — the predicate every storing path shares.
+
+    Asserted on the compiled statement, not a stub's return: the earlier
+    tests here stubbed the query away, and mutating the predicate's table,
+    column or operator left every one of them green.
+    """
+
+    async def _compiled(self, user_id, file_keys) -> str:
+        db = _CapturingDb()
+        await assert_files_owned_by(db, user_id=user_id, file_keys=file_keys)
+        return db.sql
+
+    async def test_checks_both_tables_that_can_hold_a_key(self):
+        # A schedule attachment reaches ``session_files`` only when the task
+        # first fires — possibly never. Reading one table would leave it
+        # unheld, and a stranger with the key could bind it first.
+        sql = await self._compiled(7, ["k"])
+        assert "FROM session_files" in sql
+        assert "FROM schedule_file" in sql
+        assert "UNION ALL" in sql
+
+    async def test_a_null_owner_fails_closed_for_a_logged_in_caller(self):
+        # The one thing ``IS DISTINCT FROM`` buys over ``!=``: a row whose
+        # owner is NULL is *unknown* to ``!=`` and silently dropped.
+        sql = await self._compiled(7, ["k"])
+        assert sql.count("user_id IS DISTINCT FROM 7") == 2
+        assert "!= 7" not in sql
+
+    async def test_only_the_requested_keys_are_consulted(self):
+        sql = await self._compiled(7, ["a", "b"])
+        assert sql.count("file_key IN ('a', 'b')") == 2
+
+    async def test_any_foreign_row_makes_the_key_foreign(self):
+        class _Foreign:
+            async def execute(self, statement):
+                return _Rows(["documents/a"])
+
+        with pytest.raises(FileNotOwnedError, match="another user"):
+            await assert_files_owned_by(_Foreign(), user_id=7, file_keys=["documents/a"])
+
+    async def test_a_key_nobody_holds_passes(self):
+        # Only its minter can know it; refusing it would refuse every upload.
+        class _Unheld:
+            async def execute(self, statement):
+                return _Rows([])
+
+        await assert_files_owned_by(_Unheld(), user_id=7, file_keys=["fresh"])
+
+    async def test_no_keys_is_not_a_roundtrip(self):
+        class _Never:
+            async def execute(self, statement):
+                raise AssertionError("queried with nothing to check")
+
+        await assert_files_owned_by(_Never(), user_id=7, file_keys=[])

@@ -45,6 +45,7 @@ from app.auth import (
     decode_share_view_token,
     verify_password,
 )
+from app.errors import FileNotInSessionError
 from app.models.message import Message
 from app.models.session import Session
 from app.models.session_share import SessionShare
@@ -57,7 +58,6 @@ from app.schemas.session_share import (
     ShareDetailResponse,
 )
 from app.services import file_storage
-from app.services.session.exceptions import FileNotInSessionError
 from app.services.session.files import assert_file_belongs_to_session
 from config import settings
 

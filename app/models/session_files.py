@@ -37,6 +37,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
     Uuid,
     text,
 )
@@ -89,13 +90,17 @@ class SessionFile(Base):
     user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )
-    # OSS keys are globally unique by construction (user uploads use
-    # ``session-files/{uuid4}/...`` — older rows still have the
-    # legacy ``documents/...`` prefix; tool outputs use
-    # ``outputs/{session_uuid}/{tool_use_id}/{idx}_{filename}``). The
-    # UNIQUE constraint enforces that and gives us the read-path index
-    # for free.
-    file_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # The OSS object. Keys are globally unique by construction (user uploads
+    # use ``session-files/{uuid4}/...`` — older rows still have the legacy
+    # ``documents/...`` prefix; tool outputs use
+    # ``outputs/{session_uuid}/{tool_use_id}/{idx}_{filename}``), but a key
+    # is no longer unique *here*: one object can be bound to several
+    # sessions, which is how a scheduled task re-attaches the same file to
+    # every session it creates. See ``uq_session_files_session_id_file_key``
+    # below for what replaced the old column-level UNIQUE, and
+    # ``_bind_session_files`` for the ownership check that took over the
+    # protection it was incidentally providing.
+    file_key: Mapped[str] = mapped_column(String, nullable=False)
     # Presentation metadata, denormalized from the message blocks so the
     # file library can render name / type / size without a JSONB scan.
     # Nullable: pre-backfill rows (and any producer that omits them) leave
@@ -122,7 +127,17 @@ class SessionFile(Base):
     # Postgres doesn't auto-index FK columns; without this CASCADE
     # delete on the parent session would seq-scan ``session_files``.
     __table_args__ = (
+        # One binding per (session, file): re-sending a message with the same
+        # attachment is idempotent, and the worker's ``ON CONFLICT DO
+        # NOTHING`` replay lands here. Leads with ``session_id`` so it also
+        # serves ``assert_file_belongs_to_session``, which filters on both.
+        UniqueConstraint("session_id", "file_key", name="uq_session_files_session_id_file_key"),
         Index("ix_session_files_session_id", "session_id"),
+        # ``_bind_session_files`` looks a batch of keys up with no session
+        # filter, to find who already owns them. That read used to ride the
+        # column-level UNIQUE on ``file_key``; with that gone it needs an
+        # index of its own or it degrades to a sequential scan.
+        Index("ix_session_files_file_key", "file_key"),
         # Per-user file library / quota counting: by owner, newest first.
         Index(
             "ix_session_files_user_id_created_at",

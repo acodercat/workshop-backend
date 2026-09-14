@@ -6,6 +6,8 @@ generate_title`` without knowing which submodule the function lives in.
 
 Submodule responsibilities:
 
+- :mod:`~app.services.session.creation` — building a session row (shared
+  by the create endpoint and the scheduled-task dispatcher).
 - :mod:`~app.services.session.enqueue` — user-message persist + enqueue.
 - :mod:`~app.services.session.streaming` — SSE replay-then-follow generator.
 - :mod:`~app.services.session.title` — LLM-backed title generation.
@@ -20,6 +22,7 @@ endpoint file itself — they build HTTP concerns (``HTTPException``,
 Pydantic response models) and have no callers outside the endpoint layer.
 """
 
+from app.services.session.creation import build_session
 from app.services.session.enqueue import queue_user_message
 from app.services.session.recovery import cancel_unclaimed_turn
 from app.services.session.stats import (
@@ -35,6 +38,7 @@ from app.services.session.title import generate_title
 __all__ = [
     "NO_TURN_USAGE",
     "TurnUsage",
+    "build_session",
     "cancel_unclaimed_turn",
     "count_opened_since",
     "count_tokens_since",

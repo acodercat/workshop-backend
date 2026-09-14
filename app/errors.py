@@ -679,3 +679,163 @@ class AdjustmentAlreadyAppliedError(AppError):
 
     status_code = status.HTTP_409_CONFLICT
     error_type = "adjustment_already_applied"
+
+
+class ScheduleActiveLimitError(AppError):
+    """The caller is at the per-account cap on *active* schedules.
+
+    Its own kind rather than a bare 403 because what the reader must do
+    next is specific and not "try again": pause or delete one of the
+    schedules they already have. A status-derived ``forbidden`` falls
+    through the frontend catalog to "something went wrong, try again
+    later", which is advice that can never work here."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "schedule_active_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} schedules may be active at once.",
+            details={"limit": limit},
+        )
+
+
+class ScheduleLimitError(AppError):
+    """The caller is at the per-account cap on schedules of any status.
+
+    Distinct from the active cap because the remedy differs: this one is
+    cleared only by deleting, not by pausing. A one-shot frees its active
+    slot the moment it fires, so a user can be far from the active cap and
+    still be at this one."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "schedule_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} schedules per account; delete some to make room.",
+            details={"limit": limit},
+        )
+
+
+class ScheduleRunTimePastError(AppError):
+    """The recurrence names an instant that has already gone.
+
+    Reachable only for a one-shot (a recurring schedule always has a next
+    occurrence), and by far the likeliest mistake in the create form:
+    today's date with a time earlier than now. Worth saying so rather than
+    "the request was invalid"."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "schedule_run_time_past"
+
+
+class ScheduleTimezoneUnavailableError(AppError):
+    """The schedule's stored timezone is not in this deployment's tz data.
+
+    Stored zones are validated on the way in, so reaching this means the two
+    sides disagree — the row was written against a tz database that has
+    since been rolled back, or the API and the background process run
+    different images. The remedy belongs to an operator (align the images)
+    or to the owner (pick a zone both sides know), and a 500 would hide
+    which."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "schedule_timezone_unavailable"
+
+    def __init__(self, timezone: str) -> None:
+        super().__init__(
+            f"Timezone {timezone!r} is not available on this deployment.",
+            details={"timezone": timezone},
+        )
+
+
+class ScheduleCompletedError(AppError):
+    """A completed schedule was asked to pause.
+
+    ``COMPLETED`` is terminal: a one-shot that has had its turn, with
+    ``next_run_at`` NULL to say there is nothing left. Pausing it would
+    strand the row in a state the model does not describe — PAUSED and
+    NULL — which no resume can leave, and would replace the "this already
+    ran" the owner was reading with nothing. Editing the recurrence is what
+    brings such a schedule back, because that gives it something to do."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "schedule_completed"
+
+    def __init__(self) -> None:
+        super().__init__("This schedule has already completed; edit its schedule to run it again.")
+
+
+class FileNotInSessionError(AppError):
+    """A ``file_key`` was requested against a session it is not bound to.
+
+    Raised by the download and preview paths. 403 rather than 404: the
+    caller knows the key exists, and a different answer for "no such file"
+    would let the endpoint probe which keys do."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_not_in_session"
+
+
+class FileNotOwnedError(AppError):
+    """A ``file_key`` the caller tried to store is held by another user.
+
+    The guard that keeps a share viewer — who legitimately sees the keys of
+    a shared session's files — from binding one to a session or schedule of
+    their own, and so from minting download URLs after the share ends."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_not_owned"
+
+
+class FileNotUploadedError(AppError):
+    """A ``file_key`` with no object behind it — the presigned upload never
+    completed. Raised where the real size is looked up, which is the one
+    moment the object provably exists or does not."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "file_not_uploaded"
+
+
+class FileTooLargeError(AppError):
+    """An object over the policy's per-file cap, whether declared at mint
+    time or measured at bind time. Carries both numbers: the sentence the
+    client renders has to say how far over."""
+
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    error_type = "file_too_large"
+
+    def __init__(self, size_bytes: int, max_bytes: int) -> None:
+        self.size_bytes = size_bytes
+        self.max_bytes = max_bytes
+        super().__init__(
+            f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap",
+            details={"size_bytes": size_bytes, "max_bytes": max_bytes},
+        )
+
+
+class FileRetentionFailedError(AppError):
+    """Object storage would not take an upload off the orphan-reaping rule.
+
+    Raised only where keeping the file is a precondition of the save: a
+    scheduled task may not fire for days, and an attachment still tagged when
+    the ~1-day lifecycle rule runs is deleted underneath a task that reports
+    it saved. 502 — the storage service failed, and the same request can
+    simply be sent again."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "file_retention_failed"
+
+
+class ConnectorNotOwnedError(AppError):
+    """A Connector selection named an id the caller does not own.
+
+    Refused rather than dropped: an unknown id is a client bug, and storing
+    it would leave a foreign id bound to this user's session or schedule.
+    400 rather than the 404 a single-Connector path gives, because the id is
+    one of several in a body the client composed and naming the refusal is
+    the useful answer."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "connector_not_owned"

@@ -25,6 +25,7 @@ from app.api.public import (
     mcp_server,
     payment,
     recipe,
+    schedule,
     session,
     share,
     skill,
@@ -42,6 +43,7 @@ public_router.include_router(feedback.router)
 public_router.include_router(mcp_server.router)
 public_router.include_router(payment.router)
 public_router.include_router(recipe.router)
+public_router.include_router(schedule.router)
 public_router.include_router(session.router)
 public_router.include_router(share.router)
 public_router.include_router(skill.router)
