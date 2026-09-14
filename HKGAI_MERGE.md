@@ -56,7 +56,9 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | No payment code | `grep -rn "services.payment\|services.commission\|dg_sdk" app/ scripts/ tests/` | empty |
 | No payment routes | `uv run python -c "from app.public_main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'commission' in p])"` | `[]` |
 | No 汇付 dep | `grep -c 'dg-sdk' pyproject.toml uv.lock` | 0 in both |
-| App imports | `uv run python -c "import app.public_main"` | clean. `app/main.py` was split into `public_main` + `admin_main`; **the public one is what `deploy.sh` starts and the only one this row covers.** `app.admin_main` does not import — on master either — because nine of `app/api/admin/`'s routers are still uncommitted there, so `router.py` names modules no checkout has. Inherited, not caused by a merge; it becomes this branch's problem only when master commits them |
+| App imports | `uv run python -c "import app.public_main"` and `uv run python -c "from app.admin_main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'audit' in p])"` | clean, and `[]`. Both import since the 2026-09-14 sync (master committed the console's routers). `public_main` is what `deploy.sh` starts; the admin probe is what catches a payment or audit router coming back |
+| No audit funnel | `grep -rn "audit(\|AuditAction\|AdminAuditLog\|admin_audit_log" app/api app/services tests --include=*.py` | empty. See "Excluding the operator trail" below |
+| No scheduled tasks | `ls app/models/schedule*.py alembic/versions/*schedule* 2>&1` | no such files. See "Scheduled tasks are not on this branch" below |
 | Tests | `uv run pytest tests/` | green |
 
 If any probe fails, master's version leaked over a hkgai delta — fix before pushing.
@@ -99,15 +101,10 @@ resolve** — the same silence the payment files themselves used to arrive in.
 Strip the imports and the `include_router` lines by hand after every merge
 that touches either file; `import app.public_main` is what catches a miss.
 
-**This has not actually been done for `app/api/admin/router.py`** (checked
-2026-09-07): it still imports `payment` and calls
-`admin_router.include_router(payment.router)`. It is masked today because
-nine of that file's thirteen imports name modules no checkout has, so
-`import app.admin_main` fails before it gets that far — inherited from
-master, not caused by a merge. The moment those modules arrive the payment
-router comes back live unless someone catches it. `import app.public_main`
-cannot see this one; the admin router needs `import app.admin_main`, which
-only becomes a usable probe once the other nine exist.
+Done for `app/api/admin/router.py` at the 2026-09-14 sync, when master
+committed the console's routers and `import app.admin_main` started to
+work: `payment` is gone from its imports and its `include_router`. The
+admin-import probe in the table is what catches it coming back.
 
 ### `scripts/seed_users.py`, `scripts/deploy.sh`
 Keep hkgai's (`--ours`).
@@ -115,6 +112,33 @@ Keep hkgai's (`--ours`).
 ### `CLAUDE.md`
 Take master's flow description, but swap the email transport back to SMTP / Lark Suite
 (`aiosmtplib`) and keep the SMTP creds / Lark-cap notes.
+
+## Excluding the operator trail — `audit()` on the console
+
+This deployment keeps no `admin_audit_log` (`b460116`, revision
+`c8f2a5e1d94b`). Master's console writes every mutation through
+`async with audit(ctx, action=AuditAction.…) as draft:`, which also owns
+the commit. **New admin endpoints arrive as pure additions carrying it**,
+so nothing conflicts and the first request fails on a missing module.
+
+After every merge that touches `app/api/admin/`:
+
+1. `git rm` master's `app/api/admin/audit.py`, `app/schemas/admin/audit.py`,
+   `app/services/admin/{audit,actions}.py`, `app/models/admin_audit_log.py`,
+   `tests/test_admin_audit.py` (modify/delete conflicts once deleted).
+2. In each endpoint, replace the `async with audit(...)` block with its
+   body and end the write with `await ctx.db.commit()`; drop the
+   `draft.*` lines and the `AuditAction, audit` import. A change set built
+   only to fill `draft.payload` becomes a set of changed field names.
+   Keep `app/services/admin/__init__.py`, `app/services/admin/context.py`
+   and `app/api/admin/dependencies.py` at this branch's versions (no
+   `request_id` / `ip_address`, no `build_context`).
+3. If the payload was the *only* record of something, log it instead —
+   the skill upload's displaced `bundle_key` is logged at INFO.
+4. Tests: drop assertions on audit rows / payloads, keep the behavioural
+   ones and assert `db.commits`. `tests/test_admin_mutations_commit.py`
+   is this branch's own and stays.
+5. Docs: `docs/admin-console.md` route tables have no `Audit` column here.
 
 ## Excluding the phone channel — the second thing a plain merge gets wrong
 
@@ -133,6 +157,7 @@ because it is *addition*, not conflict.
 | `app/errors.py` | no `PhoneTakenError` / `SamePhoneError` / `SmsSendFailedError` |
 | `app/services/redis.py` | no `phone_verify` / `phone_change` prefixes or key builders |
 | `config.py` | no `aliyun_sms_*` block — note master's default `SignName` is the **水杉智算** brand |
+| `app/api/admin/user.py`, `app/schemas/admin/user.py` | the directory row has no `phone`, and `q` matches username / email only. **Arrives without a conflict** (new files) and fails only at runtime, on the first `GET /users` |
 | deleted outright | `app/services/sms/`, `app/common/phone.py`, `app/services/auth/phone_change.py`, `scripts/test_send_verify_sms.py`, `tests/test_phone_normalization.py` |
 
 `user.phone` **goes too**, in `b7e2d9a4c1f5` — along with its partial
@@ -158,9 +183,14 @@ app/api/endpoints/payment.py     app/api/endpoints/commission.py
 app/schemas/payment.py           app/schemas/commission.py
 app/models/{payment_order,commission_ledger,withdrawal_request}.py
 app/workers/payment_reconciler.py
+app/api/admin/payment.py         app/schemas/admin/payment.py
+app/services/payment/analytics.py
 scripts/{process_withdrawals,recover_paid_orders}.py   scripts/gen_huifu_keys.sh
 tests/test_payment_*.py  tests/test_commission_*.py  tests/test_huifu_adapter.py
 ```
+
+The three admin-side files arrived at the 2026-09-14 sync as **pure
+additions** (no conflict): the same silent shape as the first exclusion.
 
 Then the edits deletion alone does not cover:
 
@@ -215,7 +245,42 @@ divergent DAG, not a merge conflict.)
 the migration-head probe row above, which is the one that is right. As of 2026-09-07 they are
 `b7e2d9a4c1f5` (drops the removed subsystems' schema), `a1c7f3e9d2b6` (the OAuth-catalog twin),
 `cd91a1a5179a` (a merge revision), `a3f9c1d7e2b4` (see below) and `c8f2a5e1d94b`
-(drops `admin_audit_log`).
+(drops `admin_audit_log`). Since then: `b6c1e83f27d4` / `c5e1a8f3b92d` (twins, below) and
+`d8a4f1c6e290` (`session_files` unique per session — ahead of master).
+
+### Revisions deliberately not taken, and re-points (2026-09-14 sync)
+
+After that sync the chain reads
+`… c5e1a8f3b92d → d8a4f1c6e290 → a7c3f1d9e4b2 → c2f8a41b7e60 → d5b1e93f7a48 → f4c8a2b91d63`.
+
+| Master revision | What it does | On hkgai |
+|---|---|---|
+| `f3a7c9e15d82` | `skill.status` | **not taken** — byte-identical `upgrade()`/`downgrade()` to this branch's `b6c1e83f27d4`, applied here first. Taking both adds the columns twice |
+| `a7d2f4b9c613` | backfill picked skills as preferences | **not taken** — identical twin of `c5e1a8f3b92d` |
+| `b6d2f8a04c17` | drops `admin_audit_log.reason` | **not taken** — the table is gone (`c8f2a5e1d94b`) |
+| `b7e2d4c8a915` | `payment_order.reconcile_attempted_at` | **not taken** — `payment_order` is gone (`b7e2d9a4c1f5`) |
+| `c8b3e5f1a742`, `d4a1e8b62f37` | `schedule` / `schedule_run` | **not taken** — scheduled tasks are not on this branch |
+| `a7c3f1d9e4b2` | `actor` table | taken, **re-pointed** onto this branch's head (upstream parent `a1f4c7e02b31` sits behind revisions this database may already stand on) |
+| `c2f8a41b7e60` | skill / connector categories | taken, **re-pointed** past `b6d2f8a04c17` |
+| `d5b1e93f7a48`, `f4c8a2b91d63` | two indexes | taken as-is (their parents came across) |
+
+Both re-pointed files carry an "hkgai note" in the docstring; do not
+"correct" them back. The next sync will see master's children of
+`a7d2f4b9c613` (or later) — hang them off this branch's head the same way,
+after reading what each intervening master revision does.
+
+`alembic upgrade base:head --sql` does not render on this branch and did
+not before this sync: `e2b7d4f9a1c6`'s guard inspects the live schema,
+which offline mode cannot. Verify offline from a real revision instead
+(`c5e1a8f3b92d:head --sql`), or against a throwaway database.
+
+### Scheduled tasks are not on this branch
+
+Master's scheduled-task feature (`schedule`, `schedule_run`, the
+dispatcher) is excluded. Only its migrations had reached master when this
+was decided, and they are the two rows above. When the application code
+lands there, it arrives as pure additions — delete it the way payment is
+deleted, and keep the migrations out of the graph.
 
 ### Two heads is not the only way a sync breaks the chain
 
