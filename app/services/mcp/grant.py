@@ -14,7 +14,7 @@ them first is a copy waiting to be made.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from mcp.shared.auth import (
     OAuthClientInformationFull,
@@ -104,12 +104,10 @@ def _deadline_for(tokens: OAuthToken) -> datetime | None:
     itself refuses it.
     """
     if tokens.expires_in is not None:
-        return datetime.now(timezone.utc) + timedelta(
-            seconds=max(tokens.expires_in, 0)
-        )
+        return datetime.now(UTC) + timedelta(seconds=max(tokens.expires_in, 0))
     if not tokens.refresh_token:
         return None
-    return datetime.now(timezone.utc) + timedelta(seconds=ASSUMED_TOKEN_LIFETIME)
+    return datetime.now(UTC) + timedelta(seconds=ASSUMED_TOKEN_LIFETIME)
 
 
 def stored_tokens(connector: MCPServer) -> OAuthToken | None:

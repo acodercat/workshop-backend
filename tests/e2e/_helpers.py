@@ -10,7 +10,6 @@ import json
 import httpx
 import pytest
 
-
 # Backend-synthesised SSE events that aren't part of the agent's
 # event stream — ``session.ready`` fires once per connection,
 # ``session.live`` marks the Phase-1 → Phase-2 boundary. Tests strip
@@ -52,22 +51,17 @@ async def consume_sse_until_stopped(
     current_data: list[str] = []
 
     async with client.stream(
-        "GET", f"/sessions/{session_id}/stream", timeout=timeout,
+        "GET",
+        f"/sessions/{session_id}/stream",
+        timeout=timeout,
     ) as response:
         assert response.status_code == 200, (
-            f"SSE open failed: {response.status_code} "
-            f"{await response.aread()!r}"
+            f"SSE open failed: {response.status_code} {await response.aread()!r}"
         )
         async for line in response.aiter_lines():
             if not line:
-                if (
-                    current_event is not None
-                    and current_event not in _TRANSPORT_HANDSHAKES
-                ):
-                    payload = (
-                        json.loads("\n".join(current_data))
-                        if current_data else {}
-                    )
+                if current_event is not None and current_event not in _TRANSPORT_HANDSHAKES:
+                    payload = json.loads("\n".join(current_data)) if current_data else {}
                     events.append((current_event, payload))
                     if current_event == "agent.stopped":
                         return events
@@ -77,9 +71,9 @@ async def consume_sse_until_stopped(
             if line.startswith(":"):
                 continue
             if line.startswith("event:"):
-                current_event = line[len("event:"):].strip()
+                current_event = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                current_data.append(line[len("data:"):].lstrip())
+                current_data.append(line[len("data:") :].lstrip())
 
     pytest.fail(
         f"SSE stream closed without an agent.stopped event "
@@ -109,9 +103,7 @@ def assert_event_envelope_clean(events: list[tuple[str, dict]]) -> None:
     """
     assert events, "no events collected"
 
-    worker_events = [
-        (t, p) for t, p in events if t not in _TRANSPORT_HANDSHAKES
-    ]
+    worker_events = [(t, p) for t, p in events if t not in _TRANSPORT_HANDSHAKES]
     assert worker_events, "no worker-side events collected (only handshakes)"
 
     first_type, first_payload = worker_events[0]
@@ -123,12 +115,8 @@ def assert_event_envelope_clean(events: list[tuple[str, dict]]) -> None:
     )
 
     last_type, last_payload = worker_events[-1]
-    assert last_type == "agent.stopped", (
-        f"last event must be agent.stopped, got {last_type}"
-    )
-    assert last_payload.get("stop_reason") != "error", (
-        f"agent stopped with error: {last_payload}"
-    )
+    assert last_type == "agent.stopped", f"last event must be agent.stopped, got {last_type}"
+    assert last_payload.get("stop_reason") != "error", f"agent stopped with error: {last_payload}"
 
 
 def assert_tool_calls_paired(events: list[tuple[str, dict]]) -> None:
@@ -141,20 +129,12 @@ def assert_tool_calls_paired(events: list[tuple[str, dict]]) -> None:
     consumer dropped events — both regressions worth catching.
     """
     tool_use_ids = {
-        payload["tool_use_id"]
-        for type_, payload in events
-        if type_ == "agent.tool_use"
+        payload["tool_use_id"] for type_, payload in events if type_ == "agent.tool_use"
     }
     tool_result_ids = {
-        payload["tool_use_id"]
-        for type_, payload in events
-        if type_ == "agent.tool_result"
+        payload["tool_use_id"] for type_, payload in events if type_ == "agent.tool_result"
     }
     orphan_uses = tool_use_ids - tool_result_ids
     orphan_results = tool_result_ids - tool_use_ids
-    assert not orphan_uses, (
-        f"agent.tool_use without matching tool_result: {orphan_uses}"
-    )
-    assert not orphan_results, (
-        f"agent.tool_result without matching tool_use: {orphan_results}"
-    )
+    assert not orphan_uses, f"agent.tool_use without matching tool_result: {orphan_uses}"
+    assert not orphan_results, f"agent.tool_result without matching tool_use: {orphan_results}"

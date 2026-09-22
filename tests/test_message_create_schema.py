@@ -13,7 +13,9 @@ from app.schemas.session import FileRef, MessageCreate
 
 def _file() -> FileRef:
     return FileRef(
-        file_key="k", filename="pasted_text1.txt", size_bytes=1,
+        file_key="k",
+        filename="pasted_text1.txt",
+        size_bytes=1,
     )
 
 

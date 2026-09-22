@@ -41,9 +41,7 @@ __all__ = [
 _MAX_DISPLAY_NAME_CHARS = 128
 
 
-def parse_display_name(
-    value: Any, fallback: str
-) -> tuple[str, dict[str, str] | None]:
+def parse_display_name(value: Any, fallback: str) -> tuple[str, dict[str, str] | None]:
     """Split a frontmatter ``display_name`` into ``(default, per-locale map)``.
 
     *fallback* is the caller's slug, used when the frontmatter carries nothing
@@ -52,9 +50,7 @@ def parse_display_name(
     return parse(value, fallback, max_chars=_MAX_DISPLAY_NAME_CHARS)
 
 
-def resolve_display_name(
-    display_name: str, i18n: dict[str, str] | None, locale: str
-) -> str:
+def resolve_display_name(display_name: str, i18n: dict[str, str] | None, locale: str) -> str:
     """Pick the name for *locale*, falling back to the default language then
     the canonical ``display_name``."""
     return resolve(display_name, i18n, locale)

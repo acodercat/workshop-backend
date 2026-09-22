@@ -59,14 +59,10 @@ _BACKFILL = text(
 
 async def main() -> None:
     async with AsyncSessionLocal() as db:
-        before = (
-            await db.execute(text("SELECT count(*) FROM session_site"))
-        ).scalar()
+        before = (await db.execute(text("SELECT count(*) FROM session_site"))).scalar()
         result = await db.execute(_BACKFILL)
         await db.commit()
-        after = (
-            await db.execute(text("SELECT count(*) FROM session_site"))
-        ).scalar()
+        after = (await db.execute(text("SELECT count(*) FROM session_site"))).scalar()
         print(
             f"session_site: {before} -> {after} rows "
             f"(+{after - before} backfilled; INSERT reported {result.rowcount})"

@@ -1,4 +1,4 @@
-"""Connectors as session configuration (``_owned_mcp_server_ids``).
+"""Connectors as session configuration (``mcp_ownership.require_owned_connectors``).
 
 They used to ride in on every message. A Switch means "from now on", so
 they live on the session now — written once, applied to every turn.
@@ -13,7 +13,7 @@ visible from the endpoint that calls it:
 No live database, so the query is pinned by its compiled text.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -21,8 +21,8 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.api.public.session import _owned_connector_or_404, _owned_mcp_server_ids
-from app.services.session import connectors as session_connectors
+from app.api.public.session import _owned_connector_or_404
+from app.errors import ConnectorNotOwnedError
 from app.models.session import SessionStatus
 from app.models.session_mcp_server import SessionMCPServer
 from app.schemas.session import (
@@ -34,6 +34,8 @@ from app.schemas.session import (
     SessionUpdate,
     Tier,
 )
+from app.services.mcp.ownership import require_owned_connectors
+from app.services.session import connectors as session_connectors
 
 
 def _db_owning(*ids: int):
@@ -49,19 +51,19 @@ class TestWhatIsAccepted:
     async def test_an_empty_configuration_does_not_query(self):
         db = _db_owning()
 
-        assert await _owned_mcp_server_ids(db, user_id=42, requested=[]) == []
+        assert await require_owned_connectors(db, user_id=42, ids=[]) == []
 
         db.execute.assert_not_awaited()
 
     async def test_owned_ids_are_kept_in_the_order_given(self):
         db = _db_owning(3, 7)
 
-        assert await _owned_mcp_server_ids(db, 42, [7, 3]) == [7, 3]
+        assert await require_owned_connectors(db, user_id=42, ids=[7, 3]) == [7, 3]
 
     async def test_the_same_connector_twice_is_one_connector(self):
         db = _db_owning(7)
 
-        assert await _owned_mcp_server_ids(db, 42, [7, 7]) == [7]
+        assert await require_owned_connectors(db, user_id=42, ids=[7, 7]) == [7]
 
 
 class TestWhatIsRejected:
@@ -71,11 +73,11 @@ class TestWhatIsRejected:
         # a foreign row in this user's session.
         db = _db_owning(7)
 
-        with pytest.raises(HTTPException) as excinfo:
-            await _owned_mcp_server_ids(db, 42, [7, 99])
+        with pytest.raises(ConnectorNotOwnedError) as excinfo:
+            await require_owned_connectors(db, user_id=42, ids=[7, 99])
 
         assert excinfo.value.status_code == 400
-        assert "99" in str(excinfo.value.detail)
+        assert "99" in excinfo.value.message
 
     async def test_ownership_is_checked_but_connected_is_not(self):
         # Configuration records intent. A Connector disconnected after it was
@@ -84,7 +86,7 @@ class TestWhatIsRejected:
         # user having to re-pick.
         db = _db_owning(7)
 
-        await _owned_mcp_server_ids(db, 42, [7])
+        await require_owned_connectors(db, user_id=42, ids=[7])
 
         compiled = str(db.execute.await_args.args[0])
         assert "mcp_server.id IN " in compiled
@@ -116,23 +118,31 @@ class TestTheWireCarriesItOnTheSession:
         # and the handler passes it explicitly — nothing else in the suite
         # constructs either, and the first cut of this shipped a detail response
         # that could not be built at all.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         row = SimpleNamespace(
-            id=uuid4(), user_id=1, title="t", status=SessionStatus.IDLE,
-            tier=list(Tier)[0], agent_type=list(AgentType)[0],
-            created_at=now, updated_at=now,
+            id=uuid4(),
+            user_id=1,
+            title="t",
+            status=SessionStatus.IDLE,
+            tier=list(Tier)[0],
+            agent_type=list(AgentType)[0],
+            created_at=now,
+            updated_at=now,
         )
 
         assert "connectors" not in SessionResponse.model_fields
         SessionResponse.model_validate(row)
-        assert (
-            SessionDetailResponse(
-                id=row.id, title=row.title, status=row.status, tier=row.tier,
-                agent_type=row.agent_type, connectors=[3, 7],
-                created_at=now, updated_at=now, messages=[],
-            ).connectors
-            == [3, 7]
-        )
+        assert SessionDetailResponse(
+            id=row.id,
+            title=row.title,
+            status=row.status,
+            tier=row.tier,
+            agent_type=row.agent_type,
+            connectors=[3, 7],
+            created_at=now,
+            updated_at=now,
+            messages=[],
+        ).connectors == [3, 7]
 
 
 class TestWhyItIsATableAndNotAnArray:
@@ -154,10 +164,11 @@ class TestWhyItIsATableAndNotAnArray:
         assert foreign_key.ondelete == "CASCADE"
 
     def test_the_same_connector_cannot_be_configured_twice(self):
-        # Deduplication happens in ``_owned_mcp_server_ids`` too; this is the
+        # Deduplication happens in ``require_owned_connectors`` too; this is the
         # backstop that does not depend on remembering to call it.
         assert [c.name for c in SessionMCPServer.__table__.primary_key] == [
-            "session_id", "mcp_server_id",
+            "session_id",
+            "mcp_server_id",
         ]
 
     def test_the_cascade_from_mcp_server_has_an_index(self):

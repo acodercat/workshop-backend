@@ -25,6 +25,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     Boolean,
     CheckConstraint,
     Enum as SAEnum,
@@ -33,7 +34,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    TIMESTAMP,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -51,7 +51,9 @@ class InviteCode(Base):
     __tablename__ = "invite_code"
 
     id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True,
+        Integer,
+        primary_key=True,
+        autoincrement=True,
     )
     # High-entropy random string so codes can't be enumerated. ``UNIQUE``
     # is the redemption lookup key.
@@ -78,24 +80,33 @@ class InviteCode(Base):
     # NULL ⇒ unlimited uses.
     max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
     used_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     # NULL ⇒ never expires.
     expires_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true"),
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
     )
     # Free-text operator note, e.g. "beta wave 1". Only meaningful for
     # SYSTEM codes.
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
@@ -120,14 +131,12 @@ class InviteCode(Base):
         # are exempt — NULL ≠ NULL means the partial predicate skips
         # them. Doubles as the "fetch my referral code" lookup index.
         Index(
-            "uq_invite_code_referral_owner", "owner_user_id",
+            "uq_invite_code_referral_owner",
+            "owner_user_id",
             unique=True,
             postgresql_where=text("origin = 'REFERRAL'"),
         ),
     )
 
     def __repr__(self) -> str:
-        return (
-            f"<InviteCode(id={self.id}, origin={self.origin.value}, "
-            f"code={self.code!r})>"
-        )
+        return f"<InviteCode(id={self.id}, origin={self.origin.value}, code={self.code!r})>"

@@ -33,11 +33,11 @@ out from under it (same posture as ``credit_ledger`` /
 from datetime import date, datetime
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Date,
     ForeignKey,
     Integer,
-    TIMESTAMP,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -50,7 +50,9 @@ class CheckIn(Base):
     __tablename__ = "check_in"
 
     id: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True,
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
     )
     user_id: Mapped[int] = mapped_column(
         Integer,
@@ -69,7 +71,9 @@ class CheckIn(Base):
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
 
     __table_args__ = (
@@ -79,7 +83,9 @@ class CheckIn(Base):
         # so no separate index is needed (unlike ``invite_redemption``,
         # whose UNIQUE is on a single column).
         UniqueConstraint(
-            "user_id", "check_in_date", name="uq_check_in_user_date",
+            "user_id",
+            "check_in_date",
+            name="uq_check_in_user_date",
         ),
     )
 

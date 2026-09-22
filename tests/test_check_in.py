@@ -48,5 +48,9 @@ async def test_apply_check_in_reward_rejects_nonpositive():
     # ``None`` db is never used.
     with pytest.raises(ValueError):
         await apply_check_in_reward(
-            None, user_id=1, amount_micro=0, check_in_date=_TODAY, streak_day=1,
+            None,
+            user_id=1,
+            amount_micro=0,
+            check_in_date=_TODAY,
+            streak_day=1,
         )

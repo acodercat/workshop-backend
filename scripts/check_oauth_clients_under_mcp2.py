@@ -81,32 +81,24 @@ def main() -> int:
         # three are refused: absent, explicitly null, and empty string.
         if not client.get("client_id"):
             failing.append(
-                f"  id={connector_id} {name!r}: "
-                f"client_id is {client.get('client_id')!r}"
+                f"  id={connector_id} {name!r}: client_id is {client.get('client_id')!r}"
             )
 
     if unreadable:
-        print(
-            f"\nCould not decrypt {len(unreadable)} row(s) — "
-            f"a rotated key, unrelated to this:"
-        )
+        print(f"\nCould not decrypt {len(unreadable)} row(s) — a rotated key, unrelated to this:")
         print("\n".join(unreadable))
 
     if failing:
         print(f"\nWOULD FAIL under mcp 2.x — {len(failing)} row(s):")
         print("\n".join(failing))
         print(
-            "\nEach of these loses grant rotation the moment 2.x reads it. "
-            "Re-authorize "
+            "\nEach of these loses grant rotation the moment 2.x reads it. Re-authorize "
             "the Connector (which registers a client afresh) before deploying, or hold "
             "the deploy for this database."
         )
         return 1
 
-    print(
-        "\nEvery readable row carries a client_id. "
-        "The bump is safe for this database."
-    )
+    print("\nEvery readable row carries a client_id. The bump is safe for this database.")
     return 0
 
 

@@ -6,8 +6,8 @@ keeping unused endpoints invites scope creep and security regressions
 admin UI, ideally with a dedicated search index instead of ``ilike``.
 """
 
-from fastapi import APIRouter, Depends, Request, status
 import redis.asyncio as aioredis
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -182,13 +182,12 @@ async def update_email(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> UserResponse:
     """Step 2: verify the code and apply the new email."""
-    return await change_email(
-        db,
-        redis,
-        user=current_user,
-        new_email=body.new_email,
-        code=body.code,
+    return UserResponse.model_validate(
+        await change_email(
+            db,
+            redis,
+            user=current_user,
+            new_email=body.new_email,
+            code=body.code,
+        )
     )
-
-
-#

@@ -18,13 +18,13 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    TIMESTAMP,
     Boolean,
     Enum as SAEnum,
     ForeignKey,
     Integer,
     String,
     Text,
-    TIMESTAMP,
     UniqueConstraint,
     text,
 )
@@ -46,7 +46,9 @@ class MCPServer(Base):
     __tablename__ = "mcp_server"
 
     id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True,
+        Integer,
+        primary_key=True,
+        autoincrement=True,
     )
     user_id: Mapped[int] = mapped_column(
         Integer,
@@ -99,7 +101,8 @@ class MCPServer(Base):
     # does move an endpoint makes the rotation fail, which asks the user to
     # reauthorize and rewrites this. Not encrypted — public discovery documents.
     oauth_metadata: Mapped[dict | None] = mapped_column(
-        JSONB(none_as_null=True), nullable=True,
+        JSONB(none_as_null=True),
+        nullable=True,
     )
     # When the stored access token stops being valid. Absolute, because
     # ``OAuthToken.expires_in`` is relative to an issuance moment the token
@@ -110,7 +113,8 @@ class MCPServer(Base):
     # grant that states no lifetime gets an assumed one instead; see
     # ``services.mcp.grant._deadline_for``.
     oauth_tokens_expires_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     # The earliest this grant may be renewed again, and the thing that makes a
     # single-use refresh token safe to spend: a renewal writes a near-future
@@ -121,16 +125,20 @@ class MCPServer(Base):
     # "when may we act" are different questions. NULL means no opinion: judge by
     # expiry alone.
     oauth_refresh_after: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     # Cached at create / re-probe so the UI can show "connected · N tools"
     # without a live round-trip. The worker re-lists tools live each turn —
     # this is display-only and may lag the server.
     tool_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     tools_preview: Mapped[list[dict[str, str]] | None] = mapped_column(
-        JSONB(none_as_null=True), nullable=True,
+        JSONB(none_as_null=True),
+        nullable=True,
     )
     # ``serverInfo.description`` (MCP) captured at the last probe: the server's
     # own human-readable description. What the UI shows for a custom Connector,
@@ -143,7 +151,10 @@ class MCPServer(Base):
     # make. The UI prefers a curated catalog icon over these, and falls back to
     # the built-in glyph when neither exists.
     advertised_icons: Mapped[list[dict]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     # Bare server-side names of the tools the user switched off; everything else
     # the server exposes stays available. Exceptions rather than a selection, so
@@ -151,7 +162,10 @@ class MCPServer(Base):
     # an inert entry. Not folded into ``tools_preview`` — that is overwritten
     # wholesale on every re-probe and would erase the switches.
     disabled_tools: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     # Whether the agent may browse and read what this server holds at a URI —
     # the MCP ``resources`` half. Its own switch because ``disabled_tools``
@@ -169,7 +183,9 @@ class MCPServer(Base):
     # per turn, so a flip takes effect from the next turn, like
     # ``disabled_tools``.
     resources_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"),
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
     )
     # Whether the user currently has this Connector connected — i.e. whether its
     # tools are handed to the agent each turn. For OAuth it moves with the grant
@@ -186,7 +202,9 @@ class MCPServer(Base):
     # theirs and not ours to throw away, so for those this is exactly the plain
     # switch it always was.
     connected: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true"),
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
     )
     # Set when the authorization server refuses the refresh token itself —
     # revoked at the provider, expired, or a rotated one rejected. Only a renewal
@@ -199,7 +217,9 @@ class MCPServer(Base):
     # connect: those prove the *server* answers, not that this grant revived.
     # ``oauth_``-prefixed like its siblings — only the OAuth path can set it.
     oauth_reauthorization_required: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"),
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
     )
     # Set by the worker when the most recent turn that tried could not reach
     # this Connector at all — DNS gone, TLS refused, 502, handshake timeout.
@@ -210,14 +230,20 @@ class MCPServer(Base):
     # The reason stays in the worker log rather than a free-text column that
     # would leak an upstream server's internals.
     last_connect_failed: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"),
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (

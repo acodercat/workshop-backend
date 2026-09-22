@@ -46,9 +46,7 @@ async def apply_topup(
     different operation (call :func:`app.services.credits.adjust.apply_adjust`).
     """
     if amount_micro <= 0:
-        raise ValueError(
-            "Top-up amount must be positive; use apply_adjust for corrections"
-        )
+        raise ValueError("Top-up amount must be positive; use apply_adjust for corrections")
 
     try:
         return await insert_ledger_and_bump_balance(
@@ -66,7 +64,8 @@ async def apply_topup(
         await db.rollback()
         logger.info(
             "topup duplicate idempotency_key=%s user_id=%s (treated as success)",
-            idempotency_key, user_id,
+            idempotency_key,
+            user_id,
         )
         raise TopupAlreadyApplied(
             f"Top-up with idempotency_key={idempotency_key!r} already applied"

@@ -25,9 +25,7 @@ class FeedbackSubmitRequest(BaseModel):
     issue at admin-display time, not a security boundary)."""
 
     message: str = Field(..., min_length=1, max_length=_MESSAGE_MAX_LENGTH)
-    image_keys: list[str] = Field(
-        default_factory=list, max_length=_MAX_IMAGES
-    )
+    image_keys: list[str] = Field(default_factory=list, max_length=_MAX_IMAGES)
 
     @field_validator("message")
     @classmethod
@@ -42,9 +40,7 @@ class FeedbackSubmitRequest(BaseModel):
     def _validate_image_keys(cls, value: list[str]) -> list[str]:
         for key in value:
             if not key or len(key) > _FILE_KEY_MAX_LENGTH:
-                raise ValueError(
-                    f"Image key length must be 1..{_FILE_KEY_MAX_LENGTH}."
-                )
+                raise ValueError(f"Image key length must be 1..{_FILE_KEY_MAX_LENGTH}.")
         return value
 
 

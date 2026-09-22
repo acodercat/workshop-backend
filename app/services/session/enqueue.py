@@ -35,7 +35,6 @@ Conversation history is **not** sent — the worker keeps its own
 compacted context file.
 """
 
-import asyncio
 import logging
 from uuid import UUID
 
@@ -43,7 +42,7 @@ import redis.asyncio as aioredis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors import AgentTypeDowngradeError
+from app.errors import AgentTypeDowngradeError, FileRetentionFailedError
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.recipe import Recipe, RecipeOrigin
@@ -58,16 +57,15 @@ from app.services.redis import (
     publish_wake,
     stream_key,
 )
-from config import settings
 from app.services.session import connectors as session_connectors
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
-    FileNotInSessionError,
-    FileNotUploadedError,
     GenerationInProgressError,
     RecipeNotInvokableError,
     SessionGoneError,
 )
+from app.services.session.files import assert_files_owned_by
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +80,7 @@ async def queue_user_message(
     skills: list[str] | None = None,
     recipe_id: int | None = None,
     agent_type: AgentType | None = None,
+    reminders: list[str] | None = None,
 ) -> None:
     """Persist the user message + session_turn, flip status, wake worker.
 
@@ -123,6 +122,10 @@ async def queue_user_message(
     row at step 3 and rides along to the worker through the claim
     query — no separate binding needed (skill rows are already
     user-scoped, the worker re-checks ownership at lookup time).
+    ``reminders`` are model-facing context strings a server-side caller
+    rendered (a scheduled run's briefing); they are stored on the turn as
+    given and the worker appends them to the run's system reminders. Never
+    pass client-supplied text here.
 
     Sandbox ownership lives on ``sandbox.session_id``. The worker
     resumes the latest non-TERMINATED sandbox for this session, or
@@ -140,9 +143,7 @@ async def queue_user_message(
     """
     session = await _lock_session(db, session.id)
     if session.status == SessionStatus.RUNNING:
-        raise GenerationInProgressError(
-            "A completion is already in progress for this session"
-        )
+        raise GenerationInProgressError("A completion is already in progress for this session")
     _apply_agent_type_upgrade(session, agent_type)
 
     # Lazy sweep: settle any of this user's reservations from prior
@@ -167,7 +168,9 @@ async def queue_user_message(
     # the composer offers, and an explicit per-turn pick is its own
     # authorization however the request came by the name.
     accepted_skills = await _filter_invokable_skills(
-        db, session.user_id, skills or [],
+        db,
+        session.user_id,
+        skills or [],
     )
 
     # Snapshot what the session's standing configuration resolves to right now
@@ -176,7 +179,9 @@ async def queue_user_message(
     # Credentials are NOT snapshotted; the worker resolves url + decrypted
     # credential live by id.
     accepted_connectors = await _resolve_mcp_servers(
-        db, session.user_id, await session_connectors.configured_ids(db, session.id),
+        db,
+        session.user_id,
+        await session_connectors.configured_ids(db, session.id),
     )
 
     # Resolve the picked recipe server-side into a pinned snapshot — the
@@ -184,7 +189,9 @@ async def queue_user_message(
     # id (missing / not visible / disabled) raises rather than silently
     # dropping, since a recipe is a single explicit pick.
     recipe_snapshot = await _resolve_recipe_snapshot(
-        db, session.user_id, recipe_id,
+        db,
+        session.user_id,
+        recipe_id,
     )
 
     file_dicts = [f.model_dump() for f in files]
@@ -198,6 +205,7 @@ async def queue_user_message(
         skills=accepted_skills,
         mcp_servers=accepted_connectors,
         recipe=recipe_snapshot,
+        reminders=reminders or [],
         status=SessionTurnStatus.PENDING,
     )
     db.add(session_turn)
@@ -226,7 +234,10 @@ async def queue_user_message(
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
     newly_bound_keys = await _bind_session_files(
-        db, session_id=session.id, user_id=session.user_id, files=files,
+        db,
+        session_id=session.id,
+        user_id=session.user_id,
+        files=files,
     )
 
     # Clear the prior turn's output stream (it lingers post-``agent.stopped``
@@ -247,7 +258,8 @@ async def queue_user_message(
     except Exception:
         logger.warning(
             "publish_wake failed for session %s — worker poll fallback will catch it",
-            session.id, exc_info=True,
+            session.id,
+            exc_info=True,
         )
 
     # Clear the orphan-reaping tag on files this turn just bound (M5), so the
@@ -255,36 +267,19 @@ async def queue_user_message(
     # the binding is already durable, so a tag-clear blip must not fail the
     # send (mirrors publish_wake / stream-delete). A genuinely stuck clear is
     # logged loudly — the ~1-day lifecycle window leaves room to react.
-    if settings.oss_orphan_tagging_enabled and newly_bound_keys:
-        await _clear_orphan_tags(newly_bound_keys)
-
-
-async def _clear_orphan_tags(file_keys: list[str]) -> None:
-    """Best-effort clear of the orphan tag on newly-bound uploads.
-
-    Runs the sync OSS calls off the event loop, concurrently. Per-key
-    failures are logged, never raised — see the call site.
-    """
-    results = await asyncio.gather(
-        *(
-            asyncio.to_thread(
-                file_storage.clear_orphan_tag, file_storage.SESSION_FILE_POLICY, key,
-            )
-            for key in file_keys
-        ),
-        return_exceptions=True,
-    )
-    for key, result in zip(file_keys, results):
-        if isinstance(result, Exception):
-            logger.error(
-                "failed to clear orphan tag on %s — it may be reaped by the "
-                "lifecycle rule; re-clear within the window",
-                key, exc_info=result,
-            )
+    try:
+        await file_storage.clear_orphan_tags(file_storage.SESSION_FILE_POLICY, newly_bound_keys)
+    except FileRetentionFailedError:
+        logger.error(
+            "session %s: files bound but still tagged for reaping; re-clear within the window",
+            session.id,
+            exc_info=True,
+        )
 
 
 def _apply_agent_type_upgrade(
-    session: Session, requested: AgentType | None,
+    session: Session,
+    requested: AgentType | None,
 ) -> None:
     """Apply the send's one-way LITE → FULL mode upgrade, if any.
 
@@ -298,9 +293,7 @@ def _apply_agent_type_upgrade(
     if requested is None or requested == session.agent_type:
         return
     if requested is not AgentType.FULL:
-        raise AgentTypeDowngradeError(
-            "A session can only switch from LITE to FULL"
-        )
+        raise AgentTypeDowngradeError("A session can only switch from LITE to FULL")
     session.agent_type = requested
 
 
@@ -324,14 +317,16 @@ async def _enforce_concurrent_task_limit(db: AsyncSession, user_id: int) -> None
             Session.deleted_at.is_(None),
         )
     )
-    if running_count >= settings.max_concurrent_running_tasks:
+    # ``or 0``: ``COUNT`` never answers NULL, but ``scalar`` is typed as if
+    # any query might return nothing.
+    if (running_count or 0) >= settings.max_concurrent_running_tasks:
         raise ConcurrentTaskLimitError(
             f"user {user_id} already has {running_count} running task(s) "
             f"(max {settings.max_concurrent_running_tasks})"
         )
 
 
-async def _lock_session(db: AsyncSession, session_id: str) -> Session:
+async def _lock_session(db: AsyncSession, session_id: UUID) -> Session:
     """Re-fetch the live session under a row-level lock.
 
     Returns the locked row whose ``status`` is the authoritative answer
@@ -378,10 +373,19 @@ async def _bind_session_files(
     tag was cleared on first bind).
 
     Reusing a file already bound to this same session is idempotent.
-    Reusing a file bound to a different session is rejected: otherwise
-    a caller could reference someone else's ``file_key`` in a message
-    and rely on the JSONB copy even though download authorization would
-    later fail.
+    Reusing one bound to a **different owner** is rejected; reusing one of
+    your own in another session is allowed, and is how a scheduled task
+    re-attaches the same upload to every session it creates.
+
+    That ownership test is load-bearing, and it is the whole reason it is
+    spelled out rather than left to the schema. Until ``d8a4f1c6e290`` the
+    column-level UNIQUE on ``file_key`` made *any* rebind fail, which
+    happened to shut a real door: a share viewer legitimately holds the
+    ``file_key`` of a file in the session shared with them (``share.py``
+    passes it as a query parameter), so without this they could bind it to
+    a session of their own and keep minting download URLs long after the
+    share was revoked. Widening the constraint without widening this check
+    would have re-opened exactly that.
     """
     # Keep the first FileRef per key — it carries the presentation metadata
     # (filename / mime_type / size_bytes) denormalized onto the row.
@@ -391,26 +395,19 @@ async def _bind_session_files(
     if not unique_files:
         return []
 
-    rows = await db.execute(
-        select(SessionFile.file_key, SessionFile.session_id)
-        .where(SessionFile.file_key.in_(unique_files.keys()))
-    )
-    existing = {
-        file_key: owner_session_id for file_key, owner_session_id in rows.all()
-    }
+    await assert_files_owned_by(db, user_id=user_id, file_keys=unique_files.keys())
 
-    # Classify first (reject cross-session rebinds, skip idempotent
-    # same-session ones), then insert only the genuinely new keys.
-    to_insert: list[FileRef] = []
-    for file_key, file_ref in unique_files.items():
-        owner_session_id = existing.get(file_key)
-        if owner_session_id is None:
-            to_insert.append(file_ref)
-        elif owner_session_id != session_id:
-            raise FileNotInSessionError(
-                f"file_key {file_key!r} is already bound to another session"
+    bound_here = set(
+        (
+            await db.execute(
+                select(SessionFile.file_key).where(
+                    SessionFile.session_id == session_id,
+                    SessionFile.file_key.in_(unique_files.keys()),
+                )
             )
-        # owner_session_id == session_id → idempotent rebind, skip.
+        ).scalars()
+    )
+    to_insert = [ref for key, ref in unique_files.items() if key not in bound_here]
     if not to_insert:
         return []
 
@@ -420,29 +417,12 @@ async def _bind_session_files(
     # reconcile against its true size here — the one place the persisted
     # value becomes trustworthy. ``head_size`` is blocking oss2; thread it
     # and fan out so N attachments cost ~one HEAD's latency, not N serial.
-    sizes = await asyncio.gather(
-        *(
-            asyncio.to_thread(
-                file_storage.head_size, file_storage.SESSION_FILE_POLICY,
-                file_ref.file_key,
-            )
-            for file_ref in to_insert
-        ),
-        return_exceptions=True,
+    sizes = await file_storage.confirmed_sizes(
+        file_storage.SESSION_FILE_POLICY, [f.file_key for f in to_insert]
     )
 
     newly_bound: list[str] = []
     for file_ref, size in zip(to_insert, sizes):
-        if isinstance(size, file_storage.FileObjectNotFoundError):
-            raise FileNotUploadedError(
-                f"file_key {file_ref.file_key!r} was not uploaded"
-            )
-        if isinstance(size, BaseException):
-            raise size  # unexpected OSS/other error — surface as 500
-        if size > file_storage.SESSION_FILE_POLICY.max_bytes:
-            raise file_storage.FileTooLargeError(
-                size, file_storage.SESSION_FILE_POLICY.max_bytes
-            )
         db.add(
             SessionFile(
                 session_id=session_id,
@@ -459,7 +439,9 @@ async def _bind_session_files(
 
 
 async def _filter_invokable_skills(
-    db: AsyncSession, user_id: int | None, requested: list[str],
+    db: AsyncSession,
+    user_id: int | None,
+    requested: list[str],
 ) -> list[dict[str, str | int]]:
     """Return immutable snapshots of the skills the user can invoke this turn.
 
@@ -473,14 +455,8 @@ async def _filter_invokable_skills(
 
     A skill is invokable when it is live and visible to the user: their
     own CUSTOM, or any OFFICIAL skill, and ``PUBLISHED`` either way. The
-    listing's ``status`` is checked because retiring a skill has to close
-    this route too, or it closes none that matter; retirement therefore
-    takes effect here rather than in the worker, since a turn whose
-    snapshot already names a skill keeps running against the pinned
-    ``bundle_key``.
-
-    The user's own toggle is deliberately **not** checked — it governs
-    which skills the composer *offers* (see
+    user's own toggle is deliberately **not** checked — it governs which
+    skills the composer *offers* (see
     :mod:`app.models.user_skill_preference`), which is a convenience for
     finding them, not an authorization boundary. An explicit pick is its
     own authorization, so naming a skill that was never turned on still
@@ -489,7 +465,15 @@ async def _filter_invokable_skills(
 
     This route is now the **only** way an OFFICIAL or CUSTOM skill reaches
     the model — the worker's listing carries the agent-only SYSTEM set and
-    these picks, nothing else.
+    these picks, nothing else. The listing's ``status`` *is* therefore
+    checked here, and it is the one place it can be: retiring a skill has
+    to close this route or it closes none that matter.
+
+    Retirement therefore takes effect here rather than in the worker. A
+    turn whose snapshot already names a skill keeps running against the
+    ``bundle_key`` pinned here — mid-turn consistency is worth more than
+    an immediate stop — so barring the name from *new* snapshots is what
+    makes ``RETIRED`` a kill switch.
 
     Unknown / hidden names are silently dropped rather than raising; the
     user's intent (a free-text composer prompt) is still useful even if
@@ -525,7 +509,9 @@ async def _filter_invokable_skills(
 
 
 async def _resolve_mcp_servers(
-    db: AsyncSession, user_id: int | None, requested: list[int],
+    db: AsyncSession,
+    user_id: int | None,
+    requested: list[int],
 ) -> list[dict[str, str | int]]:
     """Snapshot ``{"id", "name"}`` for each of the session's live Connectors.
 
@@ -561,7 +547,9 @@ async def _resolve_mcp_servers(
 
 
 async def _resolve_recipe_snapshot(
-    db: AsyncSession, user_id: int | None, recipe_id: int | None,
+    db: AsyncSession,
+    user_id: int | None,
+    recipe_id: int | None,
 ) -> dict[str, str | int] | None:
     """Resolve a picked recipe id into a pinned per-turn snapshot.
 
@@ -587,9 +575,7 @@ async def _resolve_recipe_snapshot(
     )
     row = (await db.execute(stmt)).first()
     if row is None:
-        raise RecipeNotInvokableError(
-            f"recipe {recipe_id} is not available"
-        )
+        raise RecipeNotInvokableError(f"recipe {recipe_id} is not available")
     return {
         "id": row.id,
         "display_name": row.display_name,

@@ -9,10 +9,16 @@ from app.models.session import AgentType, SessionStatus, Tier
 from app.schemas.message_feedback import FeedbackResponse
 from config import settings
 
-
 # The cost is per configured Connector per turn — its tools enter the
 # model's catalog on every step.
 CONNECTORS_MAX = 20
+# With the cap on *enabled* skills gone — turning one on lists it in the
+# composer rather than loading it — an explicit pick is the only bound a
+# user can push on how much skill metadata a turn puts in the model's
+# context. The rest of it is the agent-only SYSTEM set, which only an
+# operator adds to. Scheduled tasks pick from the same pool and pay the
+# same per-turn cost, so ``app.schemas.schedule`` shares this bound.
+SKILLS_MAX = 20
 
 
 class SessionCreate(BaseModel):
@@ -35,6 +41,7 @@ class SessionUpdate(BaseModel):
 
 class SessionResponse(BaseModel):
     """Session metadata only — used by the list endpoint."""
+
     id: UUID
     user_id: int | None
     title: str | None
@@ -55,6 +62,7 @@ class FileRef(BaseModel):
     user's text block under ``files[]``; also forwarded to the worker,
     which pulls bytes from OSS into the sandbox before the agent runs.
     """
+
     file_key: str = Field(..., min_length=1, max_length=512)
     filename: str = Field(..., min_length=1, max_length=255)
     mime_type: str | None = None
@@ -74,14 +82,11 @@ class MessageCreate(BaseModel):
     # files). ``.strip()`` on the way in so whitespace-only isn't "content".
     content: str = Field(default="", max_length=100000)
     files: list[FileRef] = Field(
-        default_factory=list, max_length=settings.max_message_files,
+        default_factory=list,
+        max_length=settings.max_message_files,
     )
-    # Per-turn composer picks. With the cap on *enabled* skills gone —
-    # turning one on lists it in the composer rather than loading it —
-    # this is the only bound a user can push on how much skill metadata
-    # a turn puts in the model's context. The rest of it is the
-    # agent-only SYSTEM set, which only an operator adds to.
-    skills: list[str] = Field(default_factory=list, max_length=20)
+    # Per-turn composer picks; see ``SKILLS_MAX`` for why this is bounded.
+    skills: list[str] = Field(default_factory=list, max_length=SKILLS_MAX)
     # Optional recipe picked from the composer. The backend resolves it
     # to a pinned snapshot on ``session_turn.recipe``; its instructions
     # ride to the worker as a system-reminder. ``None`` = no recipe.
@@ -145,6 +150,7 @@ class MessageResponse(BaseModel):
     not that no feedback exists in the table from anyone, since this
     is owner-only and there's only ever one voter per session anyway.
     Always ``None`` for user messages."""
+
     id: int
     role: str
     blocks: list[dict[str, Any]]
@@ -156,6 +162,7 @@ class MessageResponse(BaseModel):
 
 class SessionDetailResponse(BaseModel):
     """Full session payload: metadata + status + structured message history."""
+
     id: UUID
     title: str | None
     status: SessionStatus
@@ -166,17 +173,34 @@ class SessionDetailResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     messages: list[MessageResponse]
+    # Older messages exist above ``messages[0]``. Always False unless the
+    # caller asked for a page: without ``turn_limit`` the payload is the
+    # whole history and there is nothing above it.
+    has_more_messages: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class MessagePageResponse(BaseModel):
+    """One page of older messages, for scrolling back through a session.
+
+    Same row shape as the detail payload so the client folds both through
+    one path; ``has_more_messages`` reports whether the scroll can go
+    further still."""
+
+    messages: list[MessageResponse]
+    has_more_messages: bool
 
 
 class TitleGenerateRequest(BaseModel):
     """Body for ``POST /sessions/titles`` — content of the user's
     first message."""
+
     content: str = Field(..., min_length=1, max_length=200000)
 
 
 class TitleGenerateResponse(BaseModel):
     """Response for ``POST /sessions/titles`` — LLM-generated
     conversation title."""
+
     title: str

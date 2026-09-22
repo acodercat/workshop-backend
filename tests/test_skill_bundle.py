@@ -29,7 +29,6 @@ from app.services.skill_bundle import (
     validate_zip_structure,
 )
 
-
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -64,44 +63,52 @@ def _skill_md(frontmatter: dict[str, str] | None, body: str) -> str:
 
 class TestHappyPath:
     def test_skill_md_at_root_with_full_frontmatter(self):
-        data = _zip({
-            "SKILL.md": _skill_md(
-                {"name": "translate", "description": "Translate text."},
-                "# body",
-            ),
-        })
+        data = _zip(
+            {
+                "SKILL.md": _skill_md(
+                    {"name": "translate", "description": "Translate text."},
+                    "# body",
+                ),
+            }
+        )
         parsed = parse_bundle(data)
         assert parsed.name == "translate"
         assert parsed.description == "Translate text."
 
     def test_skill_md_in_single_wrapper_dir(self):
         """GitHub-download pattern: everything under one top-level dir."""
-        data = _zip({
-            "my-skill-main/SKILL.md": _skill_md(
-                {"name": "wrapped", "description": "Wrapped variant."},
-                "body",
-            ),
-            "my-skill-main/scripts/run.sh": "echo hi",
-        })
+        data = _zip(
+            {
+                "my-skill-main/SKILL.md": _skill_md(
+                    {"name": "wrapped", "description": "Wrapped variant."},
+                    "body",
+                ),
+                "my-skill-main/scripts/run.sh": "echo hi",
+            }
+        )
         parsed = parse_bundle(data)
         assert parsed.name == "wrapped"
         assert parsed.description == "Wrapped variant."
 
     def test_fallback_description_from_first_body_line(self):
-        data = _zip({
-            "SKILL.md": _skill_md(
-                {"name": "x"},
-                "\n  first real line  \nsecond line\n",
-            ),
-        })
+        data = _zip(
+            {
+                "SKILL.md": _skill_md(
+                    {"name": "x"},
+                    "\n  first real line  \nsecond line\n",
+                ),
+            }
+        )
         parsed = parse_bundle(data)
         assert parsed.description == "first real line"
 
     def test_description_clipped_to_spec_limit(self):
         long = "x" * 1200
-        data = _zip({
-            "SKILL.md": _skill_md({"name": "n", "description": long}, "body"),
-        })
+        data = _zip(
+            {
+                "SKILL.md": _skill_md({"name": "n", "description": long}, "body"),
+            }
+        )
         parsed = parse_bundle(data)
         assert len(parsed.description) <= 1024
         assert parsed.description.endswith("…")
@@ -121,18 +128,22 @@ class TestNameValidation:
         ],
     )
     def test_invalid_frontmatter_name_rejected(self, name):
-        data = _zip({
-            "SKILL.md": _skill_md({"name": name, "description": "d"}, "body"),
-        })
+        data = _zip(
+            {
+                "SKILL.md": _skill_md({"name": name, "description": "d"}, "body"),
+            }
+        )
         with pytest.raises(InvalidSkillNameError):
             parse_bundle(data)
 
     def test_wrapper_dir_without_frontmatter_name_rejected(self):
         """Wrapper dir accepted for locating SKILL.md, but name validation
         still applies — a missing frontmatter name is rejected."""
-        data = _zip({
-            "Bad Skill/SKILL.md": _skill_md(None, "# body"),
-        })
+        data = _zip(
+            {
+                "Bad Skill/SKILL.md": _skill_md(None, "# body"),
+            }
+        )
         with pytest.raises(SkillFrontmatterInvalidError):
             parse_bundle(data)
 
@@ -152,10 +163,12 @@ class TestStructureRejections:
 
     def test_multiple_top_level_dirs_rejected(self):
         """Multiple top-level dirs → not a single-wrapper layout, rejected."""
-        data = _zip({
-            "a/SKILL.md": _skill_md({"name": "a"}, "."),
-            "b/SKILL.md": _skill_md({"name": "b"}, "."),
-        })
+        data = _zip(
+            {
+                "a/SKILL.md": _skill_md({"name": "a"}, "."),
+                "b/SKILL.md": _skill_md({"name": "b"}, "."),
+            }
+        )
         with pytest.raises(SkillMdMissingError):
             parse_bundle(data)
 
@@ -174,10 +187,12 @@ class TestSafetyRejections:
         ],
     )
     def test_unsafe_paths(self, evil_name):
-        data = _zip({
-            evil_name: "x",
-            "SKILL.md": _skill_md({"name": "n"}, "body"),
-        })
+        data = _zip(
+            {
+                evil_name: "x",
+                "SKILL.md": _skill_md({"name": "n"}, "body"),
+            }
+        )
         with pytest.raises(InvalidSkillBundleError, match="refused"):
             validate_zip_structure(data)
 
@@ -202,11 +217,14 @@ class TestZipBombRejections:
     def test_per_entry_uncompressed_size_too_large(self):
         # Highly compressible single entry past the per-entry cap.
         from app.services.skill_bundle import _MAX_UNCOMPRESSED_PER_ENTRY
+
         oversized = b"A" * (_MAX_UNCOMPRESSED_PER_ENTRY + 1)
-        data = _zip({
-            "SKILL.md": _skill_md({"name": "n"}, "body"),
-            "huge.txt": oversized,
-        })
+        data = _zip(
+            {
+                "SKILL.md": _skill_md({"name": "n"}, "body"),
+                "huge.txt": oversized,
+            }
+        )
         with pytest.raises(SkillBundleTooLargeError):
             validate_zip_structure(data)
 
@@ -214,6 +232,7 @@ class TestZipBombRejections:
         # File count past the Agent Skills 500-file cap. Tiny files — the
         # count check fires regardless of their size.
         from app.services.skill_bundle import _MAX_ENTRY_COUNT
+
         entries = {"SKILL.md": _skill_md({"name": "n"}, "body")}
         entries.update({f"f{i}.txt": "x" for i in range(_MAX_ENTRY_COUNT)})
         data = _zip(entries)
@@ -230,6 +249,7 @@ class TestZipBombRejections:
             _MAX_TOTAL_UNCOMPRESSED,
             _MAX_UNCOMPRESSED_PER_ENTRY,
         )
+
         entry = b"\x00" * _MAX_UNCOMPRESSED_PER_ENTRY
         # One more entry than the cap allows at max per-entry size.
         count = (_MAX_TOTAL_UNCOMPRESSED // _MAX_UNCOMPRESSED_PER_ENTRY) + 1
@@ -257,10 +277,12 @@ class TestZipBombRejections:
         # A realistic SKILL.md with prose body — compresses ~3-5×, well
         # under any cap. Regression guard so the ratio check stays
         # tolerant of normal content.
-        body = ("Sales report instructions. " * 200)
-        data = _zip({
-            "SKILL.md": _skill_md({"name": "ok"}, body),
-        })
+        body = "Sales report instructions. " * 200
+        data = _zip(
+            {
+                "SKILL.md": _skill_md({"name": "ok"}, body),
+            }
+        )
         validate_zip_structure(data)  # does not raise
         assert parse_bundle(data).name == "ok"
 

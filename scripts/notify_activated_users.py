@@ -45,17 +45,12 @@ def _fetch_recipients(ids: list[int]) -> list[dict]:
     try:
         with engine.connect() as conn:
             rows = conn.execute(
-                text(
-                    'SELECT id, name, email, status FROM "user" '
-                    "WHERE id = ANY(:ids) ORDER BY id"
-                ),
+                text('SELECT id, name, email, status FROM "user" WHERE id = ANY(:ids) ORDER BY id'),
                 {"ids": ids},
             ).all()
     finally:
         engine.dispose()
-    return [
-        {"id": r[0], "name": r[1], "email": r[2], "status": r[3]} for r in rows
-    ]
+    return [{"id": r[0], "name": r[1], "email": r[2], "status": r[3]} for r in rows]
 
 
 def _partition(recipients: list[dict], requested_ids: list[int]) -> tuple[list[dict], list[str]]:
@@ -83,14 +78,13 @@ async def _send_all(sendable: list[dict], locale: str, do_send: bool) -> int:
     for r in sendable:
         subject, html_body = render_account_activated(name=r["name"], locale=locale)
         if not do_send:
-            print(
-                f"  [dry-run] → {r['email']}  |  {subject}  "
-                f"(html {len(html_body)} 字符)"
-            )
+            print(f"  [dry-run] → {r['email']}  |  {subject}  (html {len(html_body)} 字符)")
             continue
         try:
             request_id = await send_html_email(
-                to=r["email"], subject=subject, html_body=html_body,
+                to=r["email"],
+                subject=subject,
+                html_body=html_body,
             )
             print(f"  [sent]    → {r['email']}  request_id={request_id}")
         except EmailSendError as exc:
@@ -105,15 +99,21 @@ async def _send_all(sendable: list[dict], locale: str, do_send: bool) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Email activated users.")
     parser.add_argument(
-        "--ids", type=int, nargs="+", default=DEFAULT_IDS,
+        "--ids",
+        type=int,
+        nargs="+",
+        default=DEFAULT_IDS,
         help=f"User ids to notify (default: {DEFAULT_IDS})",
     )
     parser.add_argument(
-        "--locale", choices=["zh-CN", "en-US"], default="zh-CN",
+        "--locale",
+        choices=["zh-CN", "en-US"],
+        default="zh-CN",
         help="Email locale (default: zh-CN)",
     )
     parser.add_argument(
-        "--send", action="store_true",
+        "--send",
+        action="store_true",
         help="Actually send. Without this flag the script only previews (dry-run).",
     )
     args = parser.parse_args()

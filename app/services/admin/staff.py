@@ -37,13 +37,10 @@ the customer-facing one. Shared with the request schemas and
 """
 
 
-async def create(
-    db: AsyncSession, *, username: str, name: str, password: str
-) -> Staff:
+async def create(db: AsyncSession, *, username: str, name: str, password: str) -> Staff:
     """Create an operator account and flush it, so the caller has its id.
 
-    Does **not** commit — the caller's :func:`~app.services.admin.audit`
-    block does, together with the audit row.
+    Does **not** commit — the calling endpoint does, as its last statement.
 
     The username pre-check is for the typed 409; the table's UNIQUE
     constraint is what actually guarantees it, and a lost race there
@@ -109,9 +106,7 @@ async def _assert_active_staff_remains(db: AsyncSession) -> None:
     """
     active_ids = (
         await db.scalars(
-            select(Staff.id)
-            .where(Staff.status == StaffStatus.ACTIVE)
-            .with_for_update()
+            select(Staff.id).where(Staff.status == StaffStatus.ACTIVE).with_for_update()
         )
     ).all()
     if not active_ids:

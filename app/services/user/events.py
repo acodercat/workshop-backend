@@ -14,7 +14,7 @@ sync regardless of which page the user is on.
 """
 
 import time
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import orjson
 

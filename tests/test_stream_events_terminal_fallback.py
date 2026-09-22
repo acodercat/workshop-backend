@@ -42,12 +42,10 @@ def _disable_turn_filter(monkeypatch):
     ``None`` (filter disabled) is the correct baseline. The turn-filter
     tests override this with a concrete current turn id."""
     monkeypatch.setattr(
-        streaming, "_current_turn_id", AsyncMock(return_value=None),
+        streaming,
+        "_current_turn_id",
+        AsyncMock(return_value=None),
     )
-
-
-def _terminals(events: list[dict]) -> list[dict]:
-    return [e for e in events if e["event"] == EventType.AGENT_STOPPED.value]
 
 
 async def _collect(gen, limit: int = 20) -> list[dict]:
@@ -59,6 +57,10 @@ async def _collect(gen, limit: int = 20) -> list[dict]:
         if len(out) >= limit:
             break
     return out
+
+
+def _terminals(events: list[dict]) -> list[dict]:
+    return [e for e in events if e["event"] == EventType.AGENT_STOPPED.value]
 
 
 async def test_idle_stream_with_terminal_db_synthesizes_stopped(monkeypatch):
@@ -73,7 +75,8 @@ async def test_idle_stream_with_terminal_db_synthesizes_stopped(monkeypatch):
     redis.xrange = AsyncMock(return_value=[])  # no replay history
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))  # idle block
     monkeypatch.setattr(
-        streaming, "_session_liveness",
+        streaming,
+        "_session_liveness",
         AsyncMock(return_value=_Liveness.terminal(SessionStatus.COMPLETE)),
     )
 
@@ -98,13 +101,15 @@ async def test_connect_does_not_answer_from_the_db_before_following(monkeypatch)
     Redis first and let those win."""
     redis = AsyncMock()
     redis.xrange = AsyncMock(return_value=[])  # backlog not yet written
-    real = [(
-        "k",
-        [
-            ("7-0", {"type": "agent.message_chunk", "content": "tail", "ts": "1"}),
-            ("8-0", {"type": "agent.stopped", "content": "", "ts": "1"}),
-        ],
-    )]
+    real = [
+        (
+            "k",
+            [
+                ("7-0", {"type": "agent.message_chunk", "content": "tail", "ts": "1"}),
+                ("8-0", {"type": "agent.stopped", "content": "", "ts": "1"}),
+            ],
+        )
+    ]
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=real))
     liveness = AsyncMock(return_value=_Liveness.terminal(SessionStatus.FAILED))
     monkeypatch.setattr(streaming, "_session_liveness", liveness)
@@ -114,9 +119,7 @@ async def test_connect_does_not_answer_from_the_db_before_following(monkeypatch)
     liveness.assert_not_awaited()  # never consulted: Redis had data
     # The turn's real tail survived, and nothing synthetic was injected.
     chunks = [
-        json.loads(e["data"])["content"]
-        for e in events
-        if e["event"] == "agent.message_chunk"
+        json.loads(e["data"])["content"] for e in events if e["event"] == "agent.message_chunk"
     ]
     assert chunks == ["tail"]
     assert len(_terminals(events)) == 1
@@ -130,15 +133,14 @@ async def test_synthetic_terminal_for_a_cancelled_row_says_so(monkeypatch):
     redis.xrange = AsyncMock(return_value=[])
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))
     monkeypatch.setattr(
-        streaming, "_session_liveness",
+        streaming,
+        "_session_liveness",
         AsyncMock(return_value=_Liveness.terminal(SessionStatus.CANCELLED)),
     )
 
     events = await _collect(streaming.stream_events(redis, "sess-1"))
 
-    assert json.loads(events[-1]["data"]) == {
-        "content": "", "stop_reason": "cancelled",
-    }
+    assert json.loads(events[-1]["data"]) == {"content": "", "stop_reason": "cancelled"}
     assert all(e["event"] != EventType.AGENT_ERROR.value for e in events)
 
 
@@ -154,14 +156,16 @@ async def test_synthetic_terminal_for_a_failed_row_is_the_error_alone(monkeypatc
     redis.xrange = AsyncMock(return_value=[])
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))
     monkeypatch.setattr(
-        streaming, "_session_liveness",
+        streaming,
+        "_session_liveness",
         AsyncMock(return_value=_Liveness.terminal(SessionStatus.FAILED)),
     )
 
     events = await _collect(streaming.stream_events(redis, "sess-1"))
 
     assert (events[-1]["event"], json.loads(events[-1]["data"])) == (
-        EventType.AGENT_ERROR.value, {"content": "agent_unavailable"},
+        EventType.AGENT_ERROR.value,
+        {"content": "agent_unavailable"},
     )
     assert _terminals(events) == []  # no stop to overwrite the failure
 
@@ -173,7 +177,8 @@ async def test_synthetic_terminal_for_a_deleted_row_is_bare(monkeypatch):
     redis.xrange = AsyncMock(return_value=[])
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))
     monkeypatch.setattr(
-        streaming, "_session_liveness",
+        streaming,
+        "_session_liveness",
         AsyncMock(return_value=_Liveness.terminal(None)),
     )
 
@@ -189,13 +194,17 @@ async def test_idle_stream_still_running_does_not_false_close(monkeypatch):
     redis = AsyncMock()
     redis.xrange = AsyncMock(return_value=[])
 
-    real_terminal = [(
-        "stream-key",
-        [("5-0", {"type": "agent.stopped", "content": "done"})],
-    )]
+    real_terminal = [
+        (
+            "stream-key",
+            [("5-0", {"type": "agent.stopped", "content": "done"})],
+        )
+    ]
     # First follow read: idle (empty). Second: the real terminal arrives.
     monkeypatch.setattr(
-        streaming, "read_stream", AsyncMock(side_effect=[[], real_terminal]),
+        streaming,
+        "read_stream",
+        AsyncMock(side_effect=[[], real_terminal]),
     )
     liveness = AsyncMock(return_value=_RUNNING)  # still RUNNING at the idle check
     monkeypatch.setattr(streaming, "_session_liveness", liveness)
@@ -222,10 +231,7 @@ async def test_blind_dual_outage_trips_the_fuse(monkeypatch):
     redis = AsyncMock()
     redis.xrange = AsyncMock(return_value=[])
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))  # always idle
-    monkeypatch.setattr(
-        streaming, "_session_liveness",
-        AsyncMock(return_value=_UNKNOWN),
-    )
+    monkeypatch.setattr(streaming, "_session_liveness", AsyncMock(return_value=_UNKNOWN))
     # Deterministic monotonic clock: the first blind cycle records the start,
     # the second reads past the fuse window and trips it.
     ticks = iter([1.0, _BLIND_FUSE_SECONDS + 2.0] + [9_999.0] * 50)
@@ -270,16 +276,16 @@ async def test_replay_spans_multiple_pages_in_order(monkeypatch):
     # Phase 2 closes the stream straight away so the test targets replay only.
     terminal = [("k", [("9-0", {"type": "agent.stopped", "content": "done"})])]
     monkeypatch.setattr(
-        streaming, "read_stream", AsyncMock(return_value=terminal),
+        streaming,
+        "read_stream",
+        AsyncMock(return_value=terminal),
     )
 
     events = await _collect(streaming.stream_events(redis, "sess-1"))
 
     # All five replayed chunks, in order.
     contents = [
-        json.loads(e["data"])["content"]
-        for e in events
-        if e["event"] == "agent.message_chunk"
+        json.loads(e["data"])["content"] for e in events if e["event"] == "agent.message_chunk"
     ]
     assert contents == ["c1", "c2", "c3", "c4", "c5"]
     # Three pages read; the short final page skipped a fourth (empty) call.
@@ -304,36 +310,40 @@ async def test_replay_drops_stale_turn_entries(monkeypatch):
     are dropped, the stale ``agent.stopped`` does NOT close the stream, and
     the internal ``turn_id`` stamp never reaches the client."""
     monkeypatch.setattr(
-        streaming, "_current_turn_id", AsyncMock(return_value="20"),
+        streaming,
+        "_current_turn_id",
+        AsyncMock(return_value="20"),
     )
     redis = AsyncMock()
-    redis.xrange = AsyncMock(side_effect=[[
-        ("1-0", {"type": "agent.message_chunk", "content": "ghost",
-                 "ts": "1", "turn_id": "19"}),
-        ("2-0", {"type": "agent.message_chunk", "content": "real",
-                 "ts": "1", "turn_id": "20"}),
-        ("3-0", {"type": "agent.stopped", "content": "stale",
-                 "ts": "1", "turn_id": "19"}),
-        ("4-0", {"type": "agent.stopped", "content": "done",
-                 "ts": "1", "turn_id": "20"}),
-    ]])
+    redis.xrange = AsyncMock(
+        side_effect=[
+            [
+                (
+                    "1-0",
+                    {"type": "agent.message_chunk", "content": "ghost", "ts": "1", "turn_id": "19"},
+                ),
+                (
+                    "2-0",
+                    {"type": "agent.message_chunk", "content": "real", "ts": "1", "turn_id": "20"},
+                ),
+                ("3-0", {"type": "agent.stopped", "content": "stale", "ts": "1", "turn_id": "19"}),
+                ("4-0", {"type": "agent.stopped", "content": "done", "ts": "1", "turn_id": "20"}),
+            ]
+        ]
+    )
     monkeypatch.setattr(streaming, "read_stream", AsyncMock(return_value=[]))
 
     events = await _collect(streaming.stream_events(redis, "sess-1"))
 
     contents = [
-        json.loads(e["data"])["content"]
-        for e in events if e["event"] == "agent.message_chunk"
+        json.loads(e["data"])["content"] for e in events if e["event"] == "agent.message_chunk"
     ]
     assert contents == ["real"]  # turn-19 ghost dropped
     terminals = [e for e in events if e["event"] == EventType.AGENT_STOPPED.value]
     assert len(terminals) == 1  # stale terminal didn't close us
     assert json.loads(terminals[0]["data"])["content"] == "done"
     # The routing stamp is stripped from every forwarded payload.
-    assert all(
-        "turn_id" not in json.loads(e["data"])
-        for e in events if e.get("data")
-    )
+    assert all("turn_id" not in json.loads(e["data"]) for e in events if e.get("data"))
 
 
 async def test_replay_terminal_returns_before_paging_on(monkeypatch):

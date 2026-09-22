@@ -29,6 +29,7 @@ import orjson
 
 class _EventBase(TypedDict):
     """Fields every wire event has."""
+
     ts: str
 
 
@@ -38,11 +39,13 @@ class SessionReadyEvent(_EventBase):
     reconnect); never persisted to Redis. Lets the client distinguish
     "connected, waiting for worker" from "connection broken".
     """
+
     type: Literal["session.ready"]
 
 
 class AgentMessageChunkEvent(_EventBase):
     """``agent.message_chunk`` — one streamed text chunk of the agent's reply."""
+
     type: Literal["agent.message_chunk"]
     content: str
 
@@ -56,6 +59,7 @@ class AgentThinkingChunkEvent(_EventBase):
     separate UI channel from the final answer — typically a
     collapsible "reasoning" region.
     """
+
     type: Literal["agent.thinking_chunk"]
     content: str
 
@@ -68,6 +72,7 @@ class AgentThinkingEvent(_EventBase):
     frontend displays it directly instead of diffing event timestamps,
     which over-counts across recovery gaps / stalls / tool execution.
     """
+
     type: Literal["agent.thinking"]
     duration_ms: int
 
@@ -80,6 +85,7 @@ class AgentMessageEvent(_EventBase):
     :class:`~axon.events.StopReason` (which appears on ``agent.stopped``).
     ``usage`` is a JSON-encoded ``TokenUsage`` dict or ``"null"``.
     """
+
     type: Literal["agent.message"]
     content: str
     stop_reason: str
@@ -93,6 +99,7 @@ class AgentToolUseStartedEvent(_EventBase):
     ``tool_use_id``. Orphan-allowed: a truncated stream may not
     produce a matching ``agent.tool_use``.
     """
+
     type: Literal["agent.tool_use_started"]
     tool: str
     tool_use_id: str
@@ -107,6 +114,7 @@ class AgentToolUseArgsChunkEvent(_EventBase):
     (``'{"command":"ec'``) does not parse on its own. Same
     orphan-allowed contract as ``agent.tool_use_started``.
     """
+
     type: Literal["agent.tool_use_args_chunk"]
     tool_use_id: str
     delta: str
@@ -124,6 +132,7 @@ class AgentToolUseEvent(_EventBase):
     the optional axon field, and pre-rollout sessions in Redis won't
     carry it.
     """
+
     type: Literal["agent.tool_use"]
     tool: str
     tool_use_id: str
@@ -137,6 +146,7 @@ class AgentToolProgressEvent(_EventBase):
     ``elapsed`` is a stringified float (seconds). ``output`` is the
     tool's partial stdout/stderr so far, or ``"null"`` if unavailable.
     """
+
     type: Literal["agent.tool_progress"]
     tool: str
     tool_use_id: str
@@ -156,6 +166,7 @@ class AgentToolResultEvent(_EventBase):
     the error message). The worker omits the field on success to keep
     payloads lean.
     """
+
     type: Literal["agent.tool_result"]
     tool: str
     tool_use_id: str
@@ -177,6 +188,7 @@ class AgentStatusEvent(_EventBase):
       optional ``int | None`` fields land on the wire as the literal
       string ``"null"`` when unset.
     """
+
     type: Literal["agent.status"]
     status: str
     before: NotRequired[str]
@@ -193,6 +205,7 @@ class AgentErrorEvent(_EventBase):
     class, upstream body, stack trace — in the worker log, never on the
     wire, so a browser-visible event can't leak internals.
     """
+
     type: Literal["agent.error"]
     content: str
 
@@ -219,6 +232,7 @@ class AgentStoppedEvent(_EventBase):
 
     Everything except ``content`` is ``NotRequired``.
     """
+
     type: Literal["agent.stopped"]
     content: str
     turns: NotRequired[str]
@@ -268,6 +282,7 @@ _INTERNAL_FIELDS = frozenset({"type", "turn_id"})
 
 class SSEMessage(TypedDict, total=False):
     """Dict accepted by sse-starlette's EventSourceResponse."""
+
     event: str
     data: str
     id: str

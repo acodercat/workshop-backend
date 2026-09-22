@@ -13,7 +13,6 @@ description) and the enable toggle.
 
 import asyncio
 import logging
-import os
 
 from fastapi import (
     APIRouter,
@@ -33,13 +32,15 @@ from app.api.dependencies import get_db
 from app.api.uploads import read_capped
 from app.auth import authenticate_and_get_user
 from app.models.skill import Skill, SkillOrigin, SkillStatus
+from app.models.skill_category import SkillCategory
 from app.models.user import User
 from app.models.user_skill_preference import UserSkillPreference
 from app.rate_limit import limiter
 from app.schemas.file import DownloadUrlResponse
-from app.schemas.skill import SkillResponse, SkillUpdate
-from app.services import file_storage
+from app.schemas.skill import SkillCategoryResponse, SkillResponse, SkillUpdate
+from app.services import file_storage, localized_text
 from app.services.file_storage import SKILL_POLICY
+from app.services.skill_download import skill_download_url
 from app.services.skill_enablement import preference_join
 from app.services.skill_i18n import (
     DEFAULT_LOCALE,
@@ -53,14 +54,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["skills"])
 
 
-def _to_response(
-    skill: Skill, *, enabled: bool, display_name: str | None = None,
-) -> SkillResponse:
+def _to_response(skill: Skill, *, enabled: bool, display_name: str | None = None) -> SkillResponse:
     """One skill as a user sees it — list, upload and PATCH replies alike.
 
     ``enabled`` is required rather than read off the row: it lives in
     ``user_skill_preference``, so it is the caller's to supply and a
-    route that forgot would otherwise report a plausible lie.
+    route that forgot would otherwise report a plausible lie. Mirrors
+    ``api.admin.skill._to_skill_response``, which builds the console's
+    view of the same row for the same reason.
 
     ``display_name`` overrides the stored default where the caller has
     already resolved it for a locale.
@@ -73,6 +74,7 @@ def _to_response(
         description=skill.description,
         bundle_size=skill.bundle_size,
         enabled=enabled,
+        category_id=skill.category_id,
         created_at=skill.created_at,
         updated_at=skill.updated_at,
     )
@@ -132,12 +134,12 @@ async def list_skills(
     yet published is gone from here for everyone, including the users
     who had turned it on.
 
-    ``enabled`` is this user's own answer — their
-    ``user_skill_preference`` row, or ``false`` where they have never
-    said. It is what the toggle on the skills page shows, and what
-    decides whether the skill is offered in the composer's picker. It
-    does **not** load the skill: what reaches the model is the agent-only
-    ``SYSTEM`` set plus whatever the user picked for that turn.
+    ``enabled`` is this user's own answer — their ``user_skill_preference``
+    row, or ``false`` where they have never said. It is what the toggle on
+    the skills page shows, and what decides whether the skill is offered
+    in the composer's picker. It does **not** load the skill: what reaches
+    the model is the agent-only ``SYSTEM`` set plus whatever the user
+    picked for that turn.
 
     Every row is returned whatever that answer is — the skills page is
     where the answer gets given, so filtering by it here would hide the
@@ -150,8 +152,7 @@ async def list_skills(
         .outerjoin(UserSkillPreference, preference_join(current_user.id))
         .where(
             Skill.status == SkillStatus.PUBLISHED,
-            (Skill.user_id == current_user.id)
-            | (Skill.origin == SkillOrigin.OFFICIAL),
+            (Skill.user_id == current_user.id) | (Skill.origin == SkillOrigin.OFFICIAL),
         )
         .order_by(Skill.created_at.desc())
     )
@@ -166,6 +167,49 @@ async def list_skills(
         )
         for skill, preference_enabled in result.all()
     ]
+
+
+@router.get("/skills/categories")
+async def list_skill_categories(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+    locale: str = Query(default=DEFAULT_LOCALE),
+) -> list[SkillCategoryResponse]:
+    """The tabs the skills page groups OFFICIAL skills under.
+
+    Declared before the parameterized ``/skills/{skill_id}`` routes, as
+    literal segments are throughout this codebase.
+
+    **The array order is the tab order** — rendered as given, not sorted
+    by name, which would undo the ordering the operator set.
+
+    Two things the client owns rather than this endpoint. A
+    ``category_id`` it cannot resolve here reads as uncategorised: an
+    unpublished category keeps its rows, so the tab returns intact when
+    it is republished. And an empty category renders an empty tab the
+    client drops on its own — it holds both lists already, where
+    filtering here would mean a subquery on every request.
+    """
+    resolved_locale = normalize_locale(locale)
+    rows = (
+        await db.scalars(
+            select(SkillCategory)
+            .where(SkillCategory.published.is_(True))
+            .order_by(SkillCategory.sort_order, SkillCategory.id)
+        )
+    ).all()
+    return [_localized_category_response(row, resolved_locale) for row in rows]
+
+
+def _localized_category_response(category: SkillCategory, locale: str) -> SkillCategoryResponse:
+    """One tab as the client sees it, in *locale*.
+
+    A module-level named function, not an inline comprehension: it is
+    what lets the resolution be tested without a database.
+    """
+    response = SkillCategoryResponse.model_validate(category)
+    response.name = localized_text.resolve(category.name, category.name_i18n, locale)
+    return response
 
 
 @router.patch("/skills/{skill_id}")
@@ -184,12 +228,11 @@ async def update_skill(
       ``user_skill_preference`` row, whatever the skill's origin. An
       ``OFFICIAL`` row is shared, and a ``CUSTOM`` one has an audience of
       one; neither is a reason for the toggle to live anywhere else. It
-      decides whether the composer offers the skill, not whether the
-      model loads it, so there is no quota on it — nothing per-turn is
-      spent.
+      decides whether the composer offers the skill, not whether the model
+      loads it, so there is no quota on it — nothing per-turn is spent.
     - ``display_name`` / ``description`` are the listing's own metadata.
       Only its owner may edit them, so on an ``OFFICIAL`` skill they are
-      403 — the platform owns that row.
+      403 — the console owns that row.
 
     A skill the caller cannot see, or one that is not live, is 404 via
     :func:`_get_visible_skill`. The bundle itself is immutable here —
@@ -207,18 +250,15 @@ async def update_skill(
         # One UPDATE rather than ORM mutation: avoids the
         # read-modify-write race where two concurrent PATCHes each load
         # the row, mutate one field, and the second commit wipes the
-        # first. An explicit rename must also win over a bundle-shipped
-        # locale map — the list endpoint resolves ``display_name_i18n``
-        # first, so a stale map would silently shadow the edit.
+        # first. Clearing the locale map is not optional — see the
+        # invalidation rule in ``app.services.localized_text``.
         updates: dict[str, object] = {}
         if body.display_name is not None:
             updates["display_name"] = body.display_name
             updates["display_name_i18n"] = None
         if body.description is not None:
             updates["description"] = body.description
-        await db.execute(
-            sql_update(Skill).where(Skill.id == skill.id).values(**updates)
-        )
+        await db.execute(sql_update(Skill).where(Skill.id == skill.id).values(**updates))
 
     if body.enabled is not None:
         await _upsert_preference(db, current_user.id, skill.id, body.enabled)
@@ -252,7 +292,9 @@ async def delete_skill(
     await db.commit()
     logger.info(
         "skill deleted: id=%s user_id=%s name=%r",
-        skill_id, current_user.id, skill_name,
+        skill_id,
+        current_user.id,
+        skill_name,
     )
 
     try:
@@ -262,7 +304,9 @@ async def delete_skill(
         # user-visible state. Leftover OSS object is cleanup-cron's job.
         logger.warning(
             "skill delete: OSS cleanup failed for %s (skill id=%s): %s",
-            bundle_key, skill_id, exc,
+            bundle_key,
+            skill_id,
+            exc,
         )
 
 
@@ -282,48 +326,44 @@ async def get_skill_download_url(
     own CUSTOM skills — mirrors the visibility of ``GET /skills``.
     """
     skill = await _get_visible_skill(db, skill_id, current_user.id)
-    # ``skill.name`` is the kebab-case identifier — file-system friendly
-    # and stable. The original upload's filename (and the UUID-suffixed
-    # OSS key) are meaningless to the user; reuse only its extension.
-    extension = os.path.splitext(skill.bundle_key)[1] or ".zip"
-    filename = f"{skill.name}{extension}"
-    url, expires_in = file_storage.generate_download_url(
-        SKILL_POLICY, skill.bundle_key, filename,
-    )
-    return DownloadUrlResponse(
-        download_url=url, file_key=skill.bundle_key, expires_in=expires_in,
-    )
+    return skill_download_url(skill)
 
 
 async def _get_owned_skill(
-    db: AsyncSession, skill_id: int, user_id: int,
+    db: AsyncSession,
+    skill_id: int,
+    user_id: int,
 ) -> Skill:
     """Fetch a CUSTOM skill that belongs to ``user_id``.
 
     Used by DELETE — only the owner can drop their CUSTOM bundle.
     """
     stmt = select(Skill).where(
-        Skill.id == skill_id, Skill.user_id == user_id,
+        Skill.id == skill_id,
+        Skill.user_id == user_id,
     )
     result = await db.execute(stmt)
     skill = result.scalar_one_or_none()
     if skill is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="skill not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="skill not found",
         )
     return skill
 
 
 async def _get_visible_skill(
-    db: AsyncSession, skill_id: int, user_id: int,
+    db: AsyncSession,
+    skill_id: int,
+    user_id: int,
 ) -> Skill:
-    """Fetch a live skill visible to ``user_id`` (own CUSTOM or OFFICIAL).
+    """Fetch a live skill visible to ``user_id`` (own CUSTOM or any OFFICIAL).
 
-    Used by PATCH and GET /skills/{id}/download-url — both operate on
-    the wider "visible" set than the owner-only ``_get_owned_skill``.
-    SYSTEM skills are agent-only, so they resolve to 404 here just like
-    a stranger's CUSTOM — and so does anything an operator has retired
-    or not yet published: a listing that is not live is not addressable.
+    Used by PATCH and GET /skills/{id}/download-url — both operate on the
+    wider "visible" set than the owner-only ``_get_owned_skill``. SYSTEM
+    skills are agent-only, so they resolve to 404 here just like a
+    stranger's CUSTOM — and so does anything an operator has retired or
+    not yet published: a listing that is not live is not addressable.
     """
     stmt = select(Skill).where(
         Skill.id == skill_id,
@@ -334,14 +374,13 @@ async def _get_visible_skill(
     skill = result.scalar_one_or_none()
     if skill is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="skill not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="skill not found",
         )
     return skill
 
 
-async def _preference_enabled(
-    db: AsyncSession, user_id: int, skill_id: int,
-) -> bool:
+async def _preference_enabled(db: AsyncSession, user_id: int, skill_id: int) -> bool:
     """This user's answer for one skill; ``False`` where they never gave one."""
     return bool(
         await db.scalar(
@@ -354,7 +393,10 @@ async def _preference_enabled(
 
 
 async def _upsert_preference(
-    db: AsyncSession, user_id: int, skill_id: int, enabled: bool,
+    db: AsyncSession,
+    user_id: int,
+    skill_id: int,
+    enabled: bool,
 ) -> None:
     """Idempotent ``INSERT ... ON CONFLICT`` for the override row.
 
@@ -367,7 +409,8 @@ async def _upsert_preference(
         .values(user_id=user_id, skill_id=skill_id, enabled=enabled)
         .on_conflict_do_update(
             index_elements=[
-                UserSkillPreference.user_id, UserSkillPreference.skill_id,
+                UserSkillPreference.user_id,
+                UserSkillPreference.skill_id,
             ],
             set_={"enabled": enabled, "updated_at": func.now()},
         )

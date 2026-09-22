@@ -72,9 +72,7 @@ def env() -> _Env:
 
 
 async def test_create_staff_commits(env, monkeypatch) -> None:
-    monkeypatch.setattr(
-        admin_staff.staff_service, "create", AsyncMock(return_value=env.account)
-    )
+    monkeypatch.setattr(admin_staff.staff_service, "create", AsyncMock(return_value=env.account))
 
     await admin_staff.create_staff(
         env.ctx, StaffCreate(username="new", name="New", password="a" * 12)

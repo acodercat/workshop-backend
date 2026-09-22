@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -30,7 +30,7 @@ class _Db:
 
 
 async def test_read_usage_returns_tokens_and_turn_seconds() -> None:
-    created_at = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    created_at = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
     terminated_at = created_at + timedelta(seconds=42.5)
     db = _Db((123, 456, created_at, terminated_at))
 
@@ -40,7 +40,7 @@ async def test_read_usage_returns_tokens_and_turn_seconds() -> None:
 
 
 async def test_read_usage_uses_zero_duration_for_legacy_rows() -> None:
-    created_at = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    created_at = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
     db = _Db((123, 456, created_at, None))
 
     usage = await settle._read_usage_and_duration_from_session_turn(db, 99)
@@ -49,7 +49,7 @@ async def test_read_usage_uses_zero_duration_for_legacy_rows() -> None:
 
 
 async def test_read_usage_returns_none_when_tokens_are_missing() -> None:
-    created_at = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    created_at = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
     terminated_at = created_at + timedelta(seconds=42.5)
     db = _Db((None, 456, created_at, terminated_at))
 

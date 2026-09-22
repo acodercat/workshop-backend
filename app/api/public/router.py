@@ -16,12 +16,14 @@ OpenAPI schema byte-identical to what it was before the table existed.
 from fastapi import APIRouter
 
 from app.api.public import (
+    actor,
     auth,
     check_in,
     credits,
     feedback,
     mcp_server,
     recipe,
+    schedule,
     session,
     share,
     skill,
@@ -30,12 +32,14 @@ from app.api.public import (
 
 public_router = APIRouter()
 
+public_router.include_router(actor.router)
 public_router.include_router(auth.router)
 public_router.include_router(check_in.router)
 public_router.include_router(credits.router)
 public_router.include_router(feedback.router)
 public_router.include_router(mcp_server.router)
 public_router.include_router(recipe.router)
+public_router.include_router(schedule.router)
 public_router.include_router(session.router)
 public_router.include_router(share.router)
 public_router.include_router(skill.router)

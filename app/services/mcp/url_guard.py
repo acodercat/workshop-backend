@@ -14,8 +14,8 @@ Two layers of defense:
   host **once**, rejects non-public IPs, and **pins** the connection to that IP,
   so a second DNS lookup can't rebind to an internal address between check and
   connect (the TOCTOU window a pre-flight check alone leaves open). It also never
-  follows redirects, so a public URL can't 3xx-bounce onto an internal one. Pass
-  it as the MCP SDK's ``httpx_client_factory`` (probe) or use it directly (OAuth).
+  follows redirects, so a public URL can't 3xx-bounce onto an internal one. Build
+  one and hand it to the MCP SDK (probe) or send through it directly (OAuth).
 """
 
 import asyncio
@@ -52,9 +52,7 @@ def validate_public_url(url: str) -> None:
         raise InvalidConnectorUrlError("Connector URL has no host.")
 
     try:
-        addr_infos = socket.getaddrinfo(
-            host, parsed.port or 443, proto=socket.IPPROTO_TCP
-        )
+        addr_infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.") from exc
 
@@ -82,8 +80,8 @@ def validate_public_url(url: str) -> None:
 # the prefix outright would leave no reachable Connector at all — and it is the
 # inner address that gets dialled, so it is the one the question is about.
 _EMBEDDED_IPV4_PREFIXES = (
-    ipaddress.ip_network("64:ff9b::/96"),   # NAT64 well-known (RFC 6052 §2.1)
-    ipaddress.ip_network("::/96"),          # IPv4-compatible, deprecated (RFC 4291)
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64 well-known (RFC 6052 §2.1)
+    ipaddress.ip_network("::/96"),  # IPv4-compatible, deprecated (RFC 4291)
 )
 
 
@@ -144,8 +142,15 @@ class _PinnedResolveTransport(httpx2.AsyncHTTPTransport):
     request origin, which now holds the IP — so a client reused across
     *hostnames* that share an IP could reuse a TLS connection whose
     certificate was verified for the other name. Give each client one
-    hostname, or send ``Connection: close`` where several must share one
-    (as OAuth discovery does).
+    hostname, or send ``Connection: close`` where several must share one.
+
+    OAuth discovery sets that header on its client, but the mitigation does not
+    reach every request it makes: the authorization-server metadata GET is built
+    by the SDK (``create_oauth_metadata_request``) and sent as-is, never through
+    ``client.build_request``, so it carries no client-level headers. Discovery is
+    also the one client here that crosses hostnames. Left as it is — both hosts
+    are the same untrusted server's to name — but the header is not the guarantee
+    it reads as.
     """
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
@@ -155,9 +160,7 @@ class _PinnedResolveTransport(httpx2.AsyncHTTPTransport):
         # would carry the PKCE verifier, client secret, or refresh token in the
         # clear. MCP requires authorization-server endpoints to be HTTPS.
         if request.url.scheme != "https":
-            raise InvalidConnectorUrlError(
-                f"Refusing a non-https request to {request.url.host!r}."
-            )
+            raise InvalidConnectorUrlError(f"Refusing a non-https request to {request.url.host!r}.")
         host = request.url.host
         if not host:
             raise InvalidConnectorUrlError("Request URL has no host.")
@@ -174,12 +177,16 @@ class _PinnedResolveTransport(httpx2.AsyncHTTPTransport):
         # picking a public one out of it would be doing the attacker's sorting.
         candidates: list[str] = []
         for *_, sockaddr in infos:
-            ip = ipaddress.ip_address(sockaddr[0])
+            # Bound once. ``sockaddr[0]`` is the address for every family this
+            # can return (AF_INET / AF_INET6); the stdlib types the tuple
+            # loosely because other families put a number in that slot.
+            address = str(sockaddr[0])
+            ip = ipaddress.ip_address(address)
             if not _is_public(ip):
                 raise InvalidConnectorUrlError(
                     f"Connector URL resolves to a non-public address ({ip})."
                 )
-            candidates.append(sockaddr[0])
+            candidates.append(address)
         if not candidates:
             raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.")
 
@@ -216,6 +223,10 @@ class _PinnedResolveTransport(httpx2.AsyncHTTPTransport):
             request.url = original
         # Never with an empty ``last``: the candidate list is non-empty by the
         # check above, so the loop either returned or recorded a failure.
+        if last is None:
+            raise AssertionError(
+                "unreachable: a non-empty candidate list returns or records a failure"
+            )
         raise last
 
 

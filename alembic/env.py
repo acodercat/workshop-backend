@@ -1,18 +1,19 @@
-from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-from pathlib import Path
-from alembic import context
 import sys
+from logging.config import fileConfig
+from pathlib import Path
+
+from sqlalchemy import engine_from_config, pool
+
+from alembic import context
 
 # Add parent directory to path to import app modules
 sys.path.append(str(Path(__file__).parent.parent))
 
-from config import settings
 from app.database import Base
+
 # Import all models to ensure they're registered with metadata
 from app.models import *  # noqa
+from config import settings
 
 # this is the Alembic Config object
 config = context.config
@@ -69,9 +70,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()

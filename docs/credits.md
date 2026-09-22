@@ -603,7 +603,10 @@ Trigger: same paths as settle. Routes when:
 ### 6.6 Adjust (manual correction)
 
 Service-only path (`credits.apply_adjust`). Same shape as TOPUP but
-allows signed amounts and requires a non-empty `reason`. Used for:
+allows signed amounts and requires a non-empty `reason`. The CLI passes
+an operator-typed `--reason`; the admin console stopped asking for one
+and passes the fixed `"admin console adjustment"` instead, so on that
+path `admin_id` is what identifies the correction. Used for:
 
 - Clawing back from a misconfigured rate card
 - Crediting users affected by an incident

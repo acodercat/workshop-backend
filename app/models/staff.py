@@ -29,7 +29,7 @@ place.
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Enum as SAEnum, Integer, String, TIMESTAMP
+from sqlalchemy import TIMESTAMP, Enum as SAEnum, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -71,15 +71,20 @@ class Staff(Base):
     # "sign out everywhere", suspected credential leak. Mirrors
     # ``user.token_version``; the staff decoder compares against it.
     token_version: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0",
+        Integer,
+        nullable=False,
+        server_default="0",
     )
     # Stamped by the login endpoint. Nullable: an account provisioned but
     # never used has no sensible zero value, and NULL reads as "never".
     last_login_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True,
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False,
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -89,7 +94,4 @@ class Staff(Base):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"<Staff(id={self.id}, username={self.username!r}, "
-            f"status={self.status.value})>"
-        )
+        return f"<Staff(id={self.id}, username={self.username!r}, status={self.status.value})>"

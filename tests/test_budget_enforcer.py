@@ -9,7 +9,7 @@ asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.workers.budget_enforcer import (
     RunningTurn,
@@ -22,7 +22,9 @@ _SID = uuid.uuid4()
 
 def _turn(reserved: int, priced: int, session_id=None) -> RunningTurn:
     return RunningTurn(
-        session_id=session_id or uuid.uuid4(), reserved=reserved, priced=priced,
+        session_id=session_id or uuid.uuid4(),
+        reserved=reserved,
+        priced=priced,
     )
 
 
@@ -61,8 +63,8 @@ def test_under_hold_turns_offset_the_projection() -> None:
     """A turn running under its hold contributes surplus (signed sum, not
     max(0)): the same overrun that would trip alone survives when a
     sibling's unused hold covers it."""
-    over = _turn(reserved=100, priced=200)     # overrun +100
-    under = _turn(reserved=100, priced=20)     # surplus  -80
+    over = _turn(reserved=100, priced=200)  # overrun +100
+    under = _turn(reserved=100, priced=20)  # surplus  -80
 
     # projected = 30 - (100 - 80) = 10 > 0 → keep running
     assert select_turn_to_stop([over, under], balance_micro=30, buffer_micro=0) is None
@@ -125,19 +127,39 @@ _SNAPSHOT = {
 
 
 async def test_priced_turns_grouped_per_user_with_frozen_snapshot() -> None:
-    created_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+    created_at = datetime.now(UTC) - timedelta(seconds=30)
     sid_a, sid_b = uuid.uuid4(), uuid.uuid4()
-    db = _Db([
-        _Row(user_id=1, session_id=sid_a, reserved=500, rate_snapshot=_SNAPSHOT,
-             interim_input_tokens=1000, interim_output_tokens=200,
-             created_at=created_at),
-        _Row(user_id=1, session_id=sid_b, reserved=500, rate_snapshot=_SNAPSHOT,
-             interim_input_tokens=2000, interim_output_tokens=0,
-             created_at=created_at),
-        _Row(user_id=2, session_id=uuid.uuid4(), reserved=500,
-             rate_snapshot=_SNAPSHOT, interim_input_tokens=0,
-             interim_output_tokens=0, created_at=created_at),
-    ])
+    db = _Db(
+        [
+            _Row(
+                user_id=1,
+                session_id=sid_a,
+                reserved=500,
+                rate_snapshot=_SNAPSHOT,
+                interim_input_tokens=1000,
+                interim_output_tokens=200,
+                created_at=created_at,
+            ),
+            _Row(
+                user_id=1,
+                session_id=sid_b,
+                reserved=500,
+                rate_snapshot=_SNAPSHOT,
+                interim_input_tokens=2000,
+                interim_output_tokens=0,
+                created_at=created_at,
+            ),
+            _Row(
+                user_id=2,
+                session_id=uuid.uuid4(),
+                reserved=500,
+                rate_snapshot=_SNAPSHOT,
+                interim_input_tokens=0,
+                interim_output_tokens=0,
+                created_at=created_at,
+            ),
+        ]
+    )
 
     by_user = await _priced_turns_by_user(db)
 

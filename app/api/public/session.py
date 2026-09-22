@@ -11,9 +11,10 @@ clients still send ``Authorization`` because the frontend uses
 ``@microsoft/fetch-event-source``.
 
 DB queries live inline in the handlers. What sits at module top is what more
-than one handler needs (``_get_or_404``, ``_load_messages``) plus the two
-guards a single handler each needs but that are long enough to name —
-``_owned_mcp_server_ids`` and ``_owned_connector_or_404``.
+than one handler needs (``_get_or_404``, ``_load_messages``) plus a guard a
+single handler needs but that is long enough to name —
+``_owned_connector_or_404``. Validating a whole Connector selection is shared
+with the schedule endpoint, so it lives in :mod:`app.services.mcp.ownership`.
 Non-trivial logic — message enqueue with its ordering invariants and
 SSE streaming — lives in :mod:`app.services.session`.
 """
@@ -23,10 +24,10 @@ import secrets
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from openai import OpenAIError
 import redis.asyncio as aioredis
 import sqlalchemy as sa
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from openai import OpenAIError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -37,24 +38,25 @@ from app.auth import (
     authenticate_for_streaming,
     get_password_hash,
 )
-from app.database import AsyncSessionLocal
-from config import settings
 from app.common.file_kind import FILE_KINDS, file_kind_case
 from app.common.filenames import InvalidFilenameError, filename_from_key
 from app.common.pagination import paginate
 from app.common.search import ilike_contains
+from app.database import AsyncSessionLocal
 from app.errors import (
     FileCountQuotaExceededError,
+    FileNotInSessionError,
     FileSizeQuotaExceededError,
 )
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
+from app.models.schedule_file import ScheduleFile
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
-from app.models.session_turn import TerminationReason
 from app.models.session_share import SessionShare
 from app.models.session_site import SessionSite
+from app.models.session_turn import TerminationReason
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
@@ -66,17 +68,10 @@ from app.schemas.file import (
     UploadUrlResponse,
 )
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
-from app.schemas.site import SessionSiteResponse
-from app.services import file_storage
-from app.services.file_storage import (
-    SESSION_FILE_POLICY,
-    FileTooLargeError,
-    InlinePreviewNotAllowedError,
-    UnsupportedFileTypeError,
-)
 from app.schemas.session import (
-    MessageCreate,
     CancelAcceptedResponse,
+    MessageCreate,
+    MessagePageResponse,
     MessageQueuedResponse,
     MessageResponse,
     SessionCreate,
@@ -87,26 +82,43 @@ from app.schemas.session import (
     TitleGenerateResponse,
 )
 from app.schemas.session_share import ShareCreate, ShareResponse
-from app.services import credits
+from app.schemas.site import SessionSiteResponse
+from app.services import credits, file_storage
+from app.services.file_storage import (
+    SESSION_FILE_POLICY,
+    InlinePreviewNotAllowedError,
+)
+from app.services.mcp import ownership as mcp_ownership
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
-from app.services.session import connectors as session_connectors
 from app.services.session import (
+    build_session,
     cancel_unclaimed_turn,
+    connectors as session_connectors,
     generate_title,
     queue_user_message,
     stream_events,
 )
 from app.services.session.exceptions import (
     ConcurrentTaskLimitError,
-    FileNotInSessionError,
-    FileNotUploadedError,
     GenerationInProgressError,
     RecipeNotInvokableError,
     SessionGoneError,
+    UnconfiguredTierError,
 )
 from app.services.session.files import assert_file_belongs_to_session
+from config import settings
 
 logger = logging.getLogger(__name__)
+
+#: Most turns one scroll-back request may ask for. A page is the next
+#: screenful, and an unbounded one hands back the whole-history payload that
+#: paging exists to avoid.
+MAX_TURN_LIMIT = 50
+
+#: Turns a scroll-back page carries when the caller does not say. Larger than
+#: the handful a session opens on: by the time someone is scrolling back they
+#: are looking for something, and one exchange per request is a grind.
+DEFAULT_HISTORY_TURNS = 5
 
 router = APIRouter(tags=["sessions"])
 
@@ -144,71 +156,102 @@ async def _get_or_404(
     return session
 
 
-async def _owned_mcp_server_ids(
-    db: AsyncSession, user_id: int, requested: list[int]
-) -> list[int]:
-    """Validate a Connector configuration, preserving the caller's order.
-
-    Rejects rather than drops: an id the caller does not own is a client
-    bug, and storing it would leave a foreign id sitting in this user's
-    row. Deduplicated because the same Connector twice is one Connector.
-
-    Ownership only — not ``connected``. Configuration records intent, and
-    a Connector disconnected later must not retroactively invalidate it;
-    enqueue re-checks liveness every turn.
-    """
-    unique_ids = list(dict.fromkeys(requested))
-    if not unique_ids:
-        return []
-    owned = set(
-        (
-            await db.execute(
-                select(MCPServer.id).where(
-                    MCPServer.id.in_(unique_ids),
-                    MCPServer.user_id == user_id,
-                )
-            )
-        ).scalars()
-    )
-    unknown = [server_id for server_id in unique_ids if server_id not in owned]
-    if unknown:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown connector ids: {unknown}",
-        )
-    return unique_ids
-
-
-async def _owned_connector_or_404(
-    db: AsyncSession, connector_id: int, user_id: int
-) -> None:
+async def _owned_connector_or_404(db: AsyncSession, connector_id: int, user_id: int) -> None:
     """404 unless *connector_id* is one of this user's Connectors.
 
-    404 rather than the 400 :func:`_owned_mcp_server_ids` raises: there the id
-    is one of several in a body the client composed, and naming it back is the
-    useful answer; here it is the path, and a 404 keeps the existence of other
-    users' Connectors unsaid — the rule :func:`_get_or_404` already follows.
+    404 rather than the 400 a whole selection gets (``ConnectorNotOwnedError``):
+    there the id is one of several in a body the client composed, and naming
+    it back is the useful answer; here it is the path, and a 404 keeps the
+    existence of other users' Connectors unsaid — the rule :func:`_get_or_404`
+    already follows.
     """
     exists = await db.execute(
         select(MCPServer.id).where(
-            MCPServer.id == connector_id, MCPServer.user_id == user_id,
+            MCPServer.id == connector_id,
+            MCPServer.user_id == user_id,
         )
     )
     if exists.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Connector not found")
 
 
+async def _turn_start_id(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    turn_limit: int,
+    before: int | None,
+) -> int | None:
+    """Id of the USER message that opens the oldest turn of a page.
+
+    A turn is a USER message plus every ASSISTANT message answering it, so
+    the page boundary is the ``turn_limit``-th USER row counting back from
+    ``before`` (or from the end). ``None`` means the session does not have
+    that many turns left and the page therefore runs to its start.
+
+    Paging by turn rather than by row is what keeps a page from opening on
+    half an answer: a row-counted window lands mid-turn as often as not,
+    and the question that produced the visible reply is then the first thing
+    the reader has to go fetch.
+
+    Ordered by id alone though the detail sort is ``(created_at, id)``. The
+    two agree — ids are handed out in insert order and ``created_at`` is
+    transaction-scoped, which is exactly why id is already the tiebreaker —
+    and only a single scalar can serve as a cursor.
+    """
+    stmt = (
+        select(Message.id)
+        .where(Message.session_id == session_id, Message.role == MessageRole.USER)
+        .order_by(Message.id.desc())
+        .limit(1)
+        .offset(turn_limit - 1)
+    )
+    if before is not None:
+        stmt = stmt.where(Message.id < before)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _has_messages_before(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    message_id: int,
+) -> bool:
+    stmt = (
+        select(Message.id).where(Message.session_id == session_id, Message.id < message_id).limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none() is not None
+
+
 async def _load_messages(
-    db: AsyncSession, session_id: uuid.UUID, user_id: int,
-) -> list[MessageResponse]:
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    user_id: int,
+    *,
+    turn_limit: int | None = None,
+    before: int | None = None,
+) -> tuple[list[MessageResponse], bool]:
     """Load a session's messages, projected into the response shape.
+
+    Returns the rows and whether older ones exist above them.
 
     LEFT JOINs ``message_feedback`` filtered by ``user_id`` so each
     message ships with the current user's feedback (or ``None`` if
     they haven't voted). The filter goes *into* the join condition,
     not a WHERE clause — otherwise messages without a feedback row
     would be dropped from the result.
+
+    ``turn_limit`` is opt-in and absent means the whole history, which is
+    what every client got before paging existed and what the ones that have
+    not asked for it still get.
     """
+    start_id: int | None = None
+    if turn_limit is not None:
+        start_id = await _turn_start_id(db, session_id, turn_limit, before)
+        # Fewer turns left than asked for: the page runs to the start of the
+        # session. Assistant rows preceding the first USER row come with it —
+        # they belong to no turn and would otherwise be unreachable.
+        if start_id is None and before is None:
+            turn_limit = None
+
     stmt = (
         select(Message, MessageFeedback)
         .outerjoin(
@@ -224,21 +267,28 @@ async def _load_messages(
         # share a ``created_at`` — id breaks the tie in insert order.
         .order_by(Message.created_at.asc(), Message.id.asc())
     )
+    if start_id is not None:
+        stmt = stmt.where(Message.id >= start_id)
+    if before is not None:
+        stmt = stmt.where(Message.id < before)
+
     rows = (await db.execute(stmt)).all()
-    return [
+    messages = [
         MessageResponse(
             id=message.id,
             role=message.role.value,
             blocks=message.blocks,
             created_at=message.created_at,
-            feedback=(
-                FeedbackResponse.model_validate(feedback)
-                if feedback is not None
-                else None
-            ),
+            feedback=(FeedbackResponse.model_validate(feedback) if feedback is not None else None),
         )
         for message, feedback in rows
     ]
+    has_more = (
+        await _has_messages_before(db, session_id, messages[0].id)
+        if messages and (start_id is not None or before is not None)
+        else False
+    )
+    return messages, has_more
 
 
 @router.post("/sessions", status_code=status.HTTP_201_CREATED)
@@ -249,29 +299,24 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SessionResponse:
-    # The client picks a capability tier; resolve it to the concrete model
-    # the worker / credits use. ``model_id`` is never sent over the wire.
-    model_id = settings.session_tier_models.get(body.tier)
-    if model_id is None or model_id not in settings.supported_session_model_ids:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Unconfigured tier: {body.tier!r}",
-        )
-    session = Session(
-        title=body.title,
-        user_id=current_user.id,
-        model_id=model_id,
-        tier=body.tier,
-        agent_type=body.agent_type,
-        thinking_enabled=body.thinking_enabled,
-        status=SessionStatus.IDLE,
+    # Ownership-filter the requested Connectors here: they are this
+    # request's untrusted input, and the shared builder takes ids that have
+    # already been vetted.
+    configured = await mcp_ownership.require_owned_connectors(
+        db, user_id=current_user.id, ids=body.connectors
     )
-    configured = await _owned_mcp_server_ids(db, current_user.id, body.connectors)
-    db.add(session)
-    # The Connector rows key off ``session.id``, which a Python-side default
-    # only assigns at flush.
-    await db.flush()
-    await session_connectors.replace(db, session.id, configured)
+    try:
+        session = await build_session(
+            db,
+            user_id=current_user.id,
+            title=body.title,
+            tier=body.tier,
+            agent_type=body.agent_type,
+            thinking_enabled=body.thinking_enabled,
+            connector_ids=configured,
+        )
+    except UnconfiguredTierError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -301,14 +346,8 @@ async def list_sessions(
     if search:
         conditions.append(ilike_contains(Session.title, search))
     filter_clause = sa.and_(*conditions)
-    base = (
-        select(Session)
-        .where(filter_clause)
-        .order_by(Session.updated_at.desc())
-    )
-    total = (
-        await db.execute(select(func.count(Session.id)).where(filter_clause))
-    ).scalar() or 0
+    base = select(Session).where(filter_clause).order_by(Session.updated_at.desc())
+    total = (await db.execute(select(func.count(Session.id)).where(filter_clause))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
         items=[SessionResponse.model_validate(s) for s in rows],
@@ -344,14 +383,12 @@ async def create_session_upload_url(
     await _enforce_session_file_quota(db, current_user.id, body.size_bytes)
     try:
         return file_storage.generate_upload_url(
-            body.filename, body.size_bytes, SESSION_FILE_POLICY,
+            body.filename,
+            body.size_bytes,
+            SESSION_FILE_POLICY,
         )
-    except (InvalidFilenameError, UnsupportedFileTypeError) as exc:
+    except InvalidFilenameError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except FileTooLargeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc),
-        )
 
 
 @router.get("/sessions/files")
@@ -380,9 +417,7 @@ async def list_files(
     falls back to a key-derived name for any row not yet backfilled.
     """
     if kind != "all" and kind not in FILE_KINDS:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown kind: {kind!r}"
-        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown kind: {kind!r}")
 
     if origin == "upload":
         origin_clause = SessionFile.origin == SessionFileOrigin.UPLOAD
@@ -393,7 +428,12 @@ async def list_files(
             (SessionFileOrigin.UPLOAD, SessionFileOrigin.DELIVERABLE)
         )
 
-    kind_expr = file_kind_case(SessionFile.mime_type, SessionFile.filename)
+    # ``InstrumentedAttribute`` is a ``ColumnElement`` at runtime; SQLAlchemy's
+    # stubs model the two separately.
+    kind_expr = file_kind_case(
+        SessionFile.mime_type,  # type: ignore[arg-type]
+        SessionFile.filename,  # type: ignore[arg-type]
+    )
 
     conditions = [
         Session.user_id == current_user.id,
@@ -411,8 +451,9 @@ async def list_files(
         )
     filter_clause = sa.and_(*conditions)
 
-    base = (
+    deduped = (
         select(
+            SessionFile.id,
             SessionFile.file_key,
             SessionFile.filename,
             SessionFile.mime_type,
@@ -425,17 +466,34 @@ async def list_files(
         )
         .join(Session, Session.id == SessionFile.session_id)
         .where(filter_clause)
+        # One row per *file*, not per binding. A file can be bound to several
+        # sessions — a scheduled task re-attaches the same upload to every
+        # session it creates — and listing one object once a day is not a
+        # library. The most recent binding wins, so the entry is attributed
+        # to the run its owner is most likely looking for.
+        .distinct(SessionFile.file_key)
+        .order_by(
+            SessionFile.file_key,
+            SessionFile.created_at.desc(),
+            SessionFile.id.desc(),
+        )
+        .subquery()
+    )
+    # ``DISTINCT ON`` dictates its own leading sort, so the page's order has
+    # to be applied outside it.
+    listing = select(deduped).order_by(
+        deduped.c.created_at.desc(),
         # Secondary sort on id keeps paging stable when timestamps tie.
-        .order_by(SessionFile.created_at.desc(), SessionFile.id.desc())
+        deduped.c.id.desc(),
     )
     total = (
         await db.execute(
-            select(func.count(SessionFile.id))
+            select(func.count(func.distinct(SessionFile.file_key)))
             .join(Session, Session.id == SessionFile.session_id)
             .where(filter_clause)
         )
     ).scalar() or 0
-    rows = (await db.execute(paginate(base, page, page_size))).all()
+    rows = (await db.execute(paginate(listing, page, page_size))).all()
     return PaginatedResponse(
         items=[
             SessionFileResponse(
@@ -526,21 +584,56 @@ async def list_sites(
     )
 
 
-@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
-async def get_session(
+@router.get("/sessions/{session_id}/history", response_model=MessagePageResponse)
+async def get_session_history(
     session_id: uuid.UUID,
+    before: Annotated[int, Query(gt=0)],
+    turn_limit: Annotated[int, Query(ge=1, le=MAX_TURN_LIMIT)] = DEFAULT_HISTORY_TURNS,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
-    """Return the full session payload: metadata + status + structured messages.
+    """Return the ``turn_limit`` turns immediately before message ``before``.
+
+    The scroll-back half of ``GET /sessions/{id}?turn_limit=…``: that one
+    opens a session on its last turns, this one walks further up. Ownership
+    is re-checked per page — the cursor is client-supplied and names nothing
+    the caller has been shown to own.
+
+    Not ``/messages``: that path is held by the deprecated whole-list route
+    below, and two GETs on one path resolve by registration order rather than
+    by intent — the loser disappears from the API with nothing to say so.
+    """
+    await _get_or_404(db, session_id, current_user.id)
+    messages, has_more = await _load_messages(
+        db, session_id, current_user.id, turn_limit=turn_limit, before=before
+    )
+    return MessagePageResponse(messages=messages, has_more_messages=has_more)
+
+
+@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
+async def get_session(
+    session_id: uuid.UUID,
+    turn_limit: Annotated[int | None, Query(ge=1, le=MAX_TURN_LIMIT)] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Return the session payload: metadata + status + structured messages.
 
     Single endpoint the frontend uses to render a session on open. If the
     response's ``status == "RUNNING"``, the client should additionally
     open ``/sessions/{id}/stream`` to watch the in-flight turn; otherwise
     the detail response is complete on its own.
+
+    ``turn_limit`` returns only that many trailing turns, for sessions long
+    enough that shipping the whole transcript to paint the last exchange is
+    the wrong trade; ``has_more_messages`` then says whether
+    ``GET /sessions/{id}/history`` has more above. Omitting it returns the
+    whole history, which is what callers that have not adopted paging get.
     """
     session = await _get_or_404(db, session_id, current_user.id)
-    messages = await _load_messages(db, session_id, current_user.id)
+    messages, has_more = await _load_messages(
+        db, session_id, current_user.id, turn_limit=turn_limit
+    )
     return SessionDetailResponse(
         id=session.id,
         title=session.title,
@@ -551,6 +644,7 @@ async def get_session(
         created_at=session.created_at,
         updated_at=session.updated_at,
         messages=messages,
+        has_more_messages=has_more,
     )
 
 
@@ -655,7 +749,10 @@ async def delete_session(
     and finds the session gone afterward — never a turn on a deleted row.
     """
     session = await _get_or_404(
-        db, session_id, current_user.id, for_update=True,
+        db,
+        session_id,
+        current_user.id,
+        for_update=True,
     )
     if session.status == SessionStatus.RUNNING:
         raise HTTPException(
@@ -703,36 +800,31 @@ async def create_message(
     session = await _get_or_404(db, session_id, current_user.id)
     try:
         await queue_user_message(
-            db, redis, session, content=body.content, files=body.files,
+            db,
+            redis,
+            session,
+            content=body.content,
+            files=body.files,
             skills=body.skills,
             recipe_id=body.recipe_id,
             agent_type=body.agent_type,
         )
     except GenerationInProgressError as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc),
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
         )
     except ConcurrentTaskLimitError as exc:
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc),
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
         )
     except SessionGoneError:
         raise HTTPException(status_code=404, detail="Session not found")
-    except FileNotInSessionError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail=str(exc),
-        )
-    except FileNotUploadedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
-        )
-    except FileTooLargeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc),
-        )
     except RecipeNotInvokableError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
         )
     return MessageQueuedResponse()
 
@@ -807,7 +899,8 @@ async def cancel_session(
         # ``agent.stopped`` follows this one either.
         return CancelAcceptedResponse(already_stopped=True)
     await redis.publish(
-        cancel_channel(str(session_id)), TerminationReason.USER_CANCELLED.value,
+        cancel_channel(str(session_id)),
+        TerminationReason.USER_CANCELLED.value,
     )
     return CancelAcceptedResponse()
 
@@ -839,9 +932,7 @@ async def stream_session(
     """
     async with AsyncSessionLocal() as db:
         await _get_or_404(db, session_id, current_user.id)
-    return EventSourceResponse(
-        stream_events(redis, str(session_id), last_event_id=last_event_id)
-    )
+    return EventSourceResponse(stream_events(redis, str(session_id), last_event_id=last_event_id))
 
 
 @router.get(
@@ -854,9 +945,11 @@ async def list_messages(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
-    """Deprecated — use ``GET /sessions/{id}`` for the structured payload."""
+    """Deprecated — use ``GET /sessions/{id}`` for the structured payload,
+    or ``GET /sessions/{id}/history`` to page back through a long one."""
     await _get_or_404(db, session_id, current_user.id)
-    return await _load_messages(db, session_id, current_user.id)
+    messages, _ = await _load_messages(db, session_id, current_user.id)
+    return messages
 
 
 @router.post("/sessions/titles", response_model=TitleGenerateResponse)
@@ -921,13 +1014,9 @@ async def create_share(
     """
     session = await _get_or_404(db, session_id, current_user.id)
 
-    await db.execute(
-        delete(SessionShare).where(SessionShare.session_id == session.id)
-    )
+    await db.execute(delete(SessionShare).where(SessionShare.session_id == session.id))
 
-    password_hash = (
-        await get_password_hash(body.password) if body.password else None
-    )
+    password_hash = await get_password_hash(body.password) if body.password else None
     share = SessionShare(
         session_id=session.id,
         token=secrets.token_urlsafe(32),
@@ -969,9 +1058,7 @@ async def delete_share(
     """Delete the session's share. No-op if none exists, so retries
     from a flaky client are safe."""
     await _get_or_404(db, session_id, current_user.id)
-    await db.execute(
-        delete(SessionShare).where(SessionShare.session_id == session_id)
-    )
+    await db.execute(delete(SessionShare).where(SessionShare.session_id == session_id))
     await db.commit()
 
 
@@ -1014,7 +1101,9 @@ async def get_download_url(
     session = await _get_or_404(db, session_id, current_user.id)
     try:
         await assert_file_belongs_to_session(
-            db, session_id=session.id, file_key=file_key,
+            db,
+            session_id=session.id,
+            file_key=file_key,
         )
     except FileNotInSessionError:
         raise HTTPException(
@@ -1022,10 +1111,14 @@ async def get_download_url(
             detail="File is not part of this session",
         )
     url, expires_in = file_storage.generate_download_url(
-        file_storage.SESSION_FILE_POLICY, file_key, filename,
+        file_storage.SESSION_FILE_POLICY,
+        file_key,
+        filename,
     )
     return DownloadUrlResponse(
-        download_url=url, file_key=file_key, expires_in=expires_in,
+        download_url=url,
+        file_key=file_key,
+        expires_in=expires_in,
     )
 
 
@@ -1057,7 +1150,9 @@ async def get_preview_url(
     session = await _get_or_404(db, session_id, current_user.id)
     try:
         await assert_file_belongs_to_session(
-            db, session_id=session.id, file_key=file_key,
+            db,
+            session_id=session.id,
+            file_key=file_key,
         )
     except FileNotInSessionError:
         raise HTTPException(
@@ -1066,14 +1161,18 @@ async def get_preview_url(
         )
     try:
         url, expires_in = file_storage.generate_inline_url(
-            file_storage.SESSION_FILE_POLICY, file_key,
+            file_storage.SESSION_FILE_POLICY,
+            file_key,
         )
     except InlinePreviewNotAllowedError as exc:
         raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc),
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
         )
     return PreviewUrlResponse(
-        preview_url=url, file_key=file_key, expires_in=expires_in,
+        preview_url=url,
+        file_key=file_key,
+        expires_in=expires_in,
     )
 
 
@@ -1086,16 +1185,16 @@ async def get_preview_url(
 
 
 async def _resolve_assistant_message(
-    db: AsyncSession, session_id: uuid.UUID, message_id: int, user_id: int,
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    message_id: int,
+    user_id: int,
 ) -> Message:
     """Verify session ownership + the message belongs to it AND is
     an assistant message. Two 404s and one 400 — the same shape we
     use elsewhere so we don't leak existence of unrelated rows."""
     await _get_or_404(db, session_id, user_id)
-    stmt = (
-        select(Message)
-        .where(Message.id == message_id, Message.session_id == session_id)
-    )
+    stmt = select(Message).where(Message.id == message_id, Message.session_id == session_id)
     message = (await db.execute(stmt)).scalar_one_or_none()
     if message is None:
         raise HTTPException(status_code=404, detail="Message not found")
@@ -1131,7 +1230,10 @@ async def upsert_feedback(
     been bypassed (impossible from our own UI).
     """
     await _resolve_assistant_message(
-        db, session_id, message_id, current_user.id,
+        db,
+        session_id,
+        message_id,
+        current_user.id,
     )
     # Schema validator already stripped + rejected blank — ``body.comment``
     # is either ``None`` or a non-empty trimmed string here.
@@ -1174,7 +1276,10 @@ async def delete_feedback(
 ):
     """Clear the caller's feedback. No-op if none exists."""
     await _resolve_assistant_message(
-        db, session_id, message_id, current_user.id,
+        db,
+        session_id,
+        message_id,
+        current_user.id,
     )
     await db.execute(
         delete(MessageFeedback).where(
@@ -1204,22 +1309,50 @@ async def _enforce_session_file_quota(
     no upload-time gate, so counting them here would let heavy agent use
     silently exhaust a user's upload headroom.
 
-    ``size_bytes`` is the client-declared size captured at mint time (the
-    same value the per-file cap trusts); pre-backfill rows with a null
-    size contribute 0 to the sum. Race-acceptable: two concurrent mints
+    Counted per *object*, not per binding. One upload can be bound to many
+    sessions — a scheduled task re-attaches the same file to every session
+    it creates — while occupying OSS exactly once, so charging it once a day
+    would be billing for storage nobody is using. Schedule attachments are
+    folded in from ``schedule_file`` so that one still counts before its
+    first firing has bound it anywhere.
+
+    ``size_bytes`` on every row is the size OSS reported when the file was
+    bound or attached (``file_storage.confirmed_sizes``), never a client's
+    declaration; pre-backfill rows with a null size contribute 0 to the
+    sum. Race-acceptable: two concurrent mints
     at the boundary can both pass, leaving the user slightly over — not
     worth a row lock for a soft policy limit.
     """
+    bound = (
+        select(SessionFile.file_key, SessionFile.size_bytes)
+        .join(Session, Session.id == SessionFile.session_id)
+        .where(
+            Session.user_id == user_id,
+            Session.deleted_at.is_(None),
+            SessionFile.origin == SessionFileOrigin.UPLOAD,
+        )
+    )
+    attached = select(ScheduleFile.file_key, ScheduleFile.size_bytes).where(
+        ScheduleFile.user_id == user_id
+    )
+    # ``max`` rather than ``any``: the same object is the same number of
+    # bytes wherever it is bound, so this picks that number deterministically
+    # instead of leaving it to the planner.
+    objects = bound.union_all(attached).subquery()
+    per_object = (
+        select(
+            objects.c.file_key,
+            func.max(objects.c.size_bytes).label("size_bytes"),
+        )
+        .group_by(objects.c.file_key)
+        .subquery()
+    )
     count, used_bytes = (
         await db.execute(
             select(
-                func.count(SessionFile.id),
-                func.coalesce(func.sum(SessionFile.size_bytes), 0),
+                func.count(per_object.c.file_key),
+                func.coalesce(func.sum(per_object.c.size_bytes), 0),
             )
-            .join(Session, Session.id == SessionFile.session_id)
-            .where(Session.user_id == user_id)
-            .where(Session.deleted_at.is_(None))
-            .where(SessionFile.origin == SessionFileOrigin.UPLOAD)
         )
     ).one()
 

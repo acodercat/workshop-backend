@@ -17,7 +17,7 @@ reservation rolls back — no half-applied state.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -81,7 +81,8 @@ async def reserve_for_turn(
     balance = await lock_user_balance(db, user_id)
     rate = snapshot_rate(model_id)
     reserved = reserve_micro_credits(
-        rate, max_input_tokens=reserve_est_input_tokens(model_id),
+        rate,
+        max_input_tokens=reserve_est_input_tokens(model_id),
     )
     if balance < reserved:
         # The exception message is dev-facing only; the wire payload
@@ -99,9 +100,7 @@ async def reserve_for_turn(
     # ``expires_at`` is derived (see ``_EXPIRY_TO_MAX_TURN_RATIO``); defaults
     # to 1860s × 8 ≈ 4.1h. A heartbeat-based passive cancel
     # (docs/credits-future.md) is the real fix and removes the fixed timeout.
-    expiry_seconds = (
-        settings.credit_reserve_max_turn_seconds * _EXPIRY_TO_MAX_TURN_RATIO
-    )
+    expiry_seconds = settings.credit_reserve_max_turn_seconds * _EXPIRY_TO_MAX_TURN_RATIO
     reservation = CreditReservation(
         user_id=user_id,
         session_id=session_id,
@@ -109,7 +108,7 @@ async def reserve_for_turn(
         reserved=reserved,
         rate_snapshot=dict(rate),  # JSONB stores the dict copy
         state=CreditReservationState.OPEN,
-        expires_at=datetime.now(timezone.utc) + timedelta(seconds=expiry_seconds),
+        expires_at=datetime.now(UTC) + timedelta(seconds=expiry_seconds),
     )
     db.add(reservation)
     await db.flush()  # populate reservation.id for the ledger FK + callers
@@ -129,6 +128,10 @@ async def reserve_for_turn(
 
     logger.info(
         "credit reserved: user=%s session=%s turn=%s reservation=%s reserved=%s",
-        user_id, session_id, turn_id, reservation.id, reserved,
+        user_id,
+        session_id,
+        turn_id,
+        reservation.id,
+        reserved,
     )
     return reservation

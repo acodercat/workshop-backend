@@ -8,6 +8,13 @@ Base project template with async SQLAlchemy, JWT auth, and Alembic migrations.
 # Install dependencies
 uv sync
 
+# Let `git blame` look through the whole-tree formatting commits listed in
+# .git-blame-ignore-revs rather than at them, so a line reads back to whoever
+# wrote it instead of to a formatter. Once per clone: GitHub reads that file on
+# its own, but a local checkout has to opt in, because a repository may not
+# decide on its own which commits your `blame` skips.
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+
 # Configure environment variables
 cp .env.example .env
 # Edit .env with your database URI and secret key
@@ -74,10 +81,11 @@ uv run uvicorn app.public_main:app --host 0.0.0.0 --port 8005 --workers 4
 uv run python -m app.workers.run          # standalone background process
 ```
 
-### Background process (settle sweeper + subscriber)
+### Background process (settle sweeper + subscriber + schedule dispatcher)
 
-One process, **two** always-on concurrent tasks (plus the flag-gated
-budget enforcer — see `app/workers/run.py`). Both are the push/pull
+One process, **three** always-on concurrent tasks (plus the flag-gated
+budget enforcer — see `app/workers/run.py`): the schedule dispatcher,
+which fires scheduled tasks that have come due, and the push/pull
 halves of **credit settle** — closing out reservations the user-facing
 lazy sweep didn't catch (the "user never came back" case: abandoned
 sessions, API-only clients, worker crashes between RESERVE and the

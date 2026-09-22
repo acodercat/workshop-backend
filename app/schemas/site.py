@@ -16,6 +16,7 @@ class SessionSiteResponse(BaseModel):
     a domain change can't strand a column. ``slug`` is the row's stable
     identity (mirrors how ``SessionFileResponse`` keys on ``file_key``).
     """
+
     url: str
     slug: str
     title: str | None

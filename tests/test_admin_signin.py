@@ -75,9 +75,7 @@ class _CommitCountingDb:
         self.commits += 1
 
 
-def test_a_refused_attempt_is_uniform_outside_and_specific_inside(
-    monkeypatch, caplog
-) -> None:
+def test_a_refused_attempt_is_uniform_outside_and_specific_inside(monkeypatch, caplog) -> None:
     client = _client()
     refusals = []
 
@@ -105,9 +103,7 @@ def test_a_refused_attempt_is_uniform_outside_and_specific_inside(
     # Inside: one warning per attempt, naming the target and the cause
     # the response withheld. Brute-forcing the console's front door must
     # not be silent — this is the trace incident review greps for.
-    lines = [
-        r.getMessage() for r in caplog.records if "sign-in refused" in r.getMessage()
-    ]
+    lines = [r.getMessage() for r in caplog.records if "sign-in refused" in r.getMessage()]
     assert len(lines) == 2
     assert all("'mallory'" in line for line in lines)
     assert "unknown account or wrong password" in lines[0]

@@ -41,9 +41,7 @@ async def configured_ids(db: AsyncSession, session_id: uuid.UUID) -> list[int]:
     return list(rows.scalars())
 
 
-async def replace(
-    db: AsyncSession, session_id: uuid.UUID, mcp_server_ids: list[int]
-) -> None:
+async def replace(db: AsyncSession, session_id: uuid.UUID, mcp_server_ids: list[int]) -> None:
     """Make *mcp_server_ids* the session's whole configuration.
 
     Replace rather than diff: the client sends the set it wants, and the set is
@@ -57,9 +55,7 @@ async def replace(
     Does not commit: the caller owns the transaction, so the two land together
     or not at all.
     """
-    await db.execute(
-        delete(SessionMCPServer).where(SessionMCPServer.session_id == session_id)
-    )
+    await db.execute(delete(SessionMCPServer).where(SessionMCPServer.session_id == session_id))
     if mcp_server_ids:
         await db.execute(
             insert(SessionMCPServer),
@@ -86,9 +82,7 @@ async def add(db: AsyncSession, session_id: uuid.UUID, mcp_server_id: int) -> No
     )
 
 
-async def remove(
-    db: AsyncSession, session_id: uuid.UUID, mcp_server_id: int
-) -> None:
+async def remove(db: AsyncSession, session_id: uuid.UUID, mcp_server_id: int) -> None:
     """Unconfigure one Connector. Idempotent — a no-op when it was not on.
 
     Does not commit — the caller owns the transaction.

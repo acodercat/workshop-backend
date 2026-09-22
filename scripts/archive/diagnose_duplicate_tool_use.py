@@ -59,7 +59,6 @@ import psycopg
 
 from config import settings
 
-
 # SQL — read-only. The ``%(filter_sql)s`` placeholder gets replaced with the
 # WHERE-clause fragment built by ``_build_filter`` below; psycopg parameters
 # (``%(param)s``) are passed via the ``params`` dict.
@@ -174,9 +173,7 @@ def _run_intra_message(cur: psycopg.Cursor, args: argparse.Namespace) -> int:
     filter_sql, params = _build_filter(args)
     cur.execute(SQL_INTRA_MESSAGE_DUPLICATES.format(filter_sql=filter_sql), params)
     rows = cur.fetchall()
-    _print_header(
-        f"PASS 1 — duplicate tool_use_id within a single message  (top {args.limit})"
-    )
+    _print_header(f"PASS 1 — duplicate tool_use_id within a single message  (top {args.limit})")
     if not rows:
         print("  No intra-message duplicates found in the chosen window. ✓")
         return 0
@@ -185,7 +182,13 @@ def _run_intra_message(cur: psycopg.Cursor, args: argparse.Namespace) -> int:
         f"{'occ':>3}  array_idx                created_at         session_id"
     )
     for (
-        message_id, session_id, created_at, tool, tool_use_id, occ, idx,
+        message_id,
+        session_id,
+        created_at,
+        tool,
+        tool_use_id,
+        occ,
+        idx,
     ) in rows:
         idx_str = ",".join(str(i) for i in idx)
         print(
@@ -204,18 +207,18 @@ def _run_cross_message(cur: psycopg.Cursor, args: argparse.Namespace) -> int:
     cur.execute(SQL_CROSS_MESSAGE_DUPLICATES.format(filter_sql=filter_sql), params)
     rows = cur.fetchall()
     _print_header(
-        f"PASS 2 — same tool_use_id across multiple messages of one session  "
-        f"(top {args.limit})"
+        f"PASS 2 — same tool_use_id across multiple messages of one session  (top {args.limit})"
     )
     if not rows:
         print("  No cross-message duplicates found in the chosen window. ✓")
         return 0
-    print(
-        f"  {'session_id':<38}  {'tool_use_id':<32}  msgs  "
-        f"first_seen           last_seen"
-    )
+    print(f"  {'session_id':<38}  {'tool_use_id':<32}  msgs  first_seen           last_seen")
     for (
-        session_id, tool_use_id, messages_with_id, message_ids, first_seen,
+        session_id,
+        tool_use_id,
+        messages_with_id,
+        message_ids,
+        first_seen,
         last_seen,
     ) in rows:
         ids = ",".join(str(i) for i in message_ids)
@@ -257,9 +260,7 @@ def _run_message_detail(cur: psycopg.Cursor, message_id: int) -> int:
         print(f"\n  ── duplicate tool_use_id={tid!r} ({len(items)} blocks) ──")
         for arr_idx, block in items:
             print(f"\n    [block #{arr_idx}]")
-            print("    " + json.dumps(block, indent=2, ensure_ascii=False).replace(
-                "\n", "\n    "
-            ))
+            print("    " + json.dumps(block, indent=2, ensure_ascii=False).replace("\n", "\n    "))
     return len(dupes)
 
 
@@ -271,7 +272,8 @@ def _print_context(cur: psycopg.Cursor, args: argparse.Namespace) -> None:
         "m.created_at", "created_at"
     )
     cur.execute(
-        SQL_TOTAL_ASSISTANT_MESSAGES.format(filter_sql=bare_filter), params,
+        SQL_TOTAL_ASSISTANT_MESSAGES.format(filter_sql=bare_filter),
+        params,
     )
     (total,) = cur.fetchone()
     print(f"  Assistant messages in window: {total:,}")

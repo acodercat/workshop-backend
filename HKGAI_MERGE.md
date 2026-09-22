@@ -14,8 +14,8 @@ buckets that must NOT be synced from master:
    and the dep is `aiosmtplib` (not `alibabacloud-dm*`). Templates carry the HKGAI brand
    ("HKGAI Agent", 香港生成式人工智能研发中心).
 2. **Model / tier config** (`config.py`) — `supported_session_model_ids` includes `glm-5.1`
-   and `fable` (master omits both); `session_tier_models` maps **FAST=HKGAI-V3,
-   STANDARD=kimi-k2, ADVANCED=glm-5.2** (master uses FAST=deepseek-v4-flash, etc.). Pricing in
+   and `fable` (master omits both); `session_tier_models` maps **FAST=deepseek-v4-flash,
+   STANDARD=glm-5.2, ADVANCED=deepseek-v4-pro** (master uses FAST=glm-5.2, etc.). Pricing in
    `credit_rates` must have an entry for every whitelisted model (incl. `glm-5.1`).
 3. **Brand + deploy** — "HKGAI Agent" / 香港生成式人工智能研发中心 wherever they appear;
    `scripts/deploy.sh` (hkgai uvicorn worker count), `scripts/seed_users.py` (hkgai dev seed).
@@ -47,7 +47,7 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | Email dep in lockfile | `grep -c 'name = "alibabacloud-dm' uv.lock` and `grep -c 'name = "aiosmtplib"' uv.lock` | 0 DirectMail, ≥1 aiosmtplib |
 | Email brand | `grep "HKGAI Agent\|香港生成式人工智能研发中心" app/services/email/templates.py` | present |
 | Model whitelist | `grep -E "glm-5.1\|fable" config.py` | both present |
-| Tier mapping | `grep -A4 session_tier_models config.py` | `FAST: "HKGAI-V3"` |
+| Tier mapping | `grep -A4 session_tier_models config.py` | `"FAST": "deepseek-v4-flash"` |
 | No phone / SMS channel | `grep -rniE "phone\|sms\|dysms" app/ config.py` | Only the comment in `models/user.py` saying the field is gone. The channel was removed in `5fcf505` and the column in `b7e2d9a4c1f5`; a `phone:` field reappearing on the model is a merge bringing back a column this database does not have |
 | SMS dep gone | `grep -c 'dysmsapi' pyproject.toml uv.lock` | 0 in both |
 | OAuth client name | `grep -A1 "mcp_client_name" config.py` and `grep -c _CLIENT_NAME app/services/mcp/oauth.py` | `default="HKGAI Connector"` in `config.py`, and **0** in `oauth.py`. This is the name an authorization server prints on its consent screen, so a wrong value is visible only to the user and to nothing else. It moved out of `oauth.py` precisely so the conflict lands in `config.py`, where the two branches diverge by design — master's default reads `PPIG Connector`, and taking master's side here is the mistake this row exists to catch. A `_CLIENT_NAME` constant reappearing in `oauth.py` means a merge undid the move |
@@ -56,7 +56,9 @@ Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkg
 | No payment code | `grep -rn "services.payment\|services.commission\|dg_sdk" app/ scripts/ tests/` | empty |
 | No payment routes | `uv run python -c "from app.public_main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'commission' in p])"` | `[]` |
 | No 汇付 dep | `grep -c 'dg-sdk' pyproject.toml uv.lock` | 0 in both |
-| App imports | `uv run python -c "import app.public_main"` | clean. `app/main.py` was split into `public_main` + `admin_main`; **the public one is what `deploy.sh` starts and the only one this row covers.** `app.admin_main` does not import — on master either — because nine of `app/api/admin/`'s routers are still uncommitted there, so `router.py` names modules no checkout has. Inherited, not caused by a merge; it becomes this branch's problem only when master commits them |
+| App imports | `uv run python -c "import app.public_main"` and `uv run python -c "from app.admin_main import app; print([p for p in app.openapi()['paths'] if 'payment' in p or 'audit' in p])"` | clean, and `[]`. Both import since the 2026-09-14 sync (master committed the console's routers). `public_main` is what `deploy.sh` starts; the admin probe is what catches a payment or audit router coming back |
+| No audit funnel | `grep -rn "audit(\|AuditAction\|AdminAuditLog\|admin_audit_log" app/api app/services tests --include=*.py` | empty. See "Excluding the operator trail" below |
+| Scheduled tasks carried whole | `grep -c schedule_dispatcher app/workers/run.py`, `grep -c payment_reconciler app/workers/run.py`, and `uv run alembic history -r f4c8a2b91d63:head` | ≥1, **0**, and the chain `f4c8a2b91d63 → c8b3e5f1a742 → d4a1e8b62f37 → b5e9d3f70a26 → e1c6a8d40b73 → a9e4c2d71f38` (or later on top of it). Master's `run.py` starts the payment reconciler next to the dispatcher, so that file conflicts every time the dispatcher's lines move — take the dispatcher, drop the reconciler. Also `grep -rn PAYRECON app/` → 0: master's `schedule_dispatcher.py` names the reconciler's lock key beside its own. See "Scheduled tasks" below for the chain |
 | Tests | `uv run pytest tests/` | green |
 
 If any probe fails, master's version leaked over a hkgai delta — fix before pushing.
@@ -66,7 +68,7 @@ If any probe fails, master's version leaked over a hkgai delta — fix before pu
 ### `config.py` (the biggest)
 Take master's **new** fields (e.g. `oss_preview_domain`, `max_session_files_*`, new model
 entries) BUT keep hkgai's: email (`smtp_*`, drop any `aliyun_dm_*`), model whitelist
-(`glm-5.1`/`fable`), and `session_tier_models` (FAST=HKGAI-V3 / ADVANCED=glm-5.2). For a
+(`glm-5.1`/`fable`), and `session_tier_models` (FAST=deepseek-v4-flash / STANDARD=glm-5.2 / ADVANCED=deepseek-v4-pro). For a
 **shared** model's price in `credit_rates`, master is canonical (converge); for a hkgai-only
 model (`glm-5.1`), keep hkgai's entry — every whitelisted model needs a rate or reserve raises.
 
@@ -99,15 +101,10 @@ resolve** — the same silence the payment files themselves used to arrive in.
 Strip the imports and the `include_router` lines by hand after every merge
 that touches either file; `import app.public_main` is what catches a miss.
 
-**This has not actually been done for `app/api/admin/router.py`** (checked
-2026-09-07): it still imports `payment` and calls
-`admin_router.include_router(payment.router)`. It is masked today because
-nine of that file's thirteen imports name modules no checkout has, so
-`import app.admin_main` fails before it gets that far — inherited from
-master, not caused by a merge. The moment those modules arrive the payment
-router comes back live unless someone catches it. `import app.public_main`
-cannot see this one; the admin router needs `import app.admin_main`, which
-only becomes a usable probe once the other nine exist.
+Done for `app/api/admin/router.py` at the 2026-09-14 sync, when master
+committed the console's routers and `import app.admin_main` started to
+work: `payment` is gone from its imports and its `include_router`. The
+admin-import probe in the table is what catches it coming back.
 
 ### `scripts/seed_users.py`, `scripts/deploy.sh`
 Keep hkgai's (`--ours`).
@@ -115,6 +112,33 @@ Keep hkgai's (`--ours`).
 ### `CLAUDE.md`
 Take master's flow description, but swap the email transport back to SMTP / Lark Suite
 (`aiosmtplib`) and keep the SMTP creds / Lark-cap notes.
+
+## Excluding the operator trail — `audit()` on the console
+
+This deployment keeps no `admin_audit_log` (`b460116`, revision
+`c8f2a5e1d94b`). Master's console writes every mutation through
+`async with audit(ctx, action=AuditAction.…) as draft:`, which also owns
+the commit. **New admin endpoints arrive as pure additions carrying it**,
+so nothing conflicts and the first request fails on a missing module.
+
+After every merge that touches `app/api/admin/`:
+
+1. `git rm` master's `app/api/admin/audit.py`, `app/schemas/admin/audit.py`,
+   `app/services/admin/{audit,actions}.py`, `app/models/admin_audit_log.py`,
+   `tests/test_admin_audit.py` (modify/delete conflicts once deleted).
+2. In each endpoint, replace the `async with audit(...)` block with its
+   body and end the write with `await ctx.db.commit()`; drop the
+   `draft.*` lines and the `AuditAction, audit` import. A change set built
+   only to fill `draft.payload` becomes a set of changed field names.
+   Keep `app/services/admin/__init__.py`, `app/services/admin/context.py`
+   and `app/api/admin/dependencies.py` at this branch's versions (no
+   `request_id` / `ip_address`, no `build_context`).
+3. If the payload was the *only* record of something, log it instead —
+   the skill upload's displaced `bundle_key` is logged at INFO.
+4. Tests: drop assertions on audit rows / payloads, keep the behavioural
+   ones and assert `db.commits`. `tests/test_admin_mutations_commit.py`
+   is this branch's own and stays.
+5. Docs: `docs/admin-console.md` route tables have no `Audit` column here.
 
 ## Excluding the phone channel — the second thing a plain merge gets wrong
 
@@ -133,6 +157,7 @@ because it is *addition*, not conflict.
 | `app/errors.py` | no `PhoneTakenError` / `SamePhoneError` / `SmsSendFailedError` |
 | `app/services/redis.py` | no `phone_verify` / `phone_change` prefixes or key builders |
 | `config.py` | no `aliyun_sms_*` block — note master's default `SignName` is the **水杉智算** brand |
+| `app/api/admin/user.py`, `app/schemas/admin/user.py` | the directory row has no `phone`, and `q` matches username / email only. **Arrives without a conflict** (new files) and fails only at runtime, on the first `GET /users` |
 | deleted outright | `app/services/sms/`, `app/common/phone.py`, `app/services/auth/phone_change.py`, `scripts/test_send_verify_sms.py`, `tests/test_phone_normalization.py` |
 
 `user.phone` **goes too**, in `b7e2d9a4c1f5` — along with its partial
@@ -158,16 +183,21 @@ app/api/endpoints/payment.py     app/api/endpoints/commission.py
 app/schemas/payment.py           app/schemas/commission.py
 app/models/{payment_order,commission_ledger,withdrawal_request}.py
 app/workers/payment_reconciler.py
+app/api/admin/payment.py         app/schemas/admin/payment.py
+app/services/payment/analytics.py
 scripts/{process_withdrawals,recover_paid_orders}.py   scripts/gen_huifu_keys.sh
 tests/test_payment_*.py  tests/test_commission_*.py  tests/test_huifu_adapter.py
 ```
+
+The three admin-side files arrived at the 2026-09-14 sync as **pure
+additions** (no conflict): the same silent shape as the first exclusion.
 
 Then the edits deletion alone does not cover:
 
 | File | Edit |
 |---|---|
 | `app/main.py` | drop `commission`, `payment` from the import block and from `ROUTERS` |
-| `app/workers/run.py` | drop the `payment_reconciler` import, its `create_task`, its docstring bullet; task count **four → three**; startup log string |
+| `app/workers/run.py` | drop the `payment_reconciler` import, its `create_task`, its docstring bullet; task count **five → four** (settle sweeper, subscriber, schedule dispatcher, budget enforcer); startup log string |
 | `app/models/user.py` | drop `commission_balance_fen` (the DB column stays — see below) |
 | `app/errors.py` | drop the 8 payment/commission/withdrawal error classes; the domain list in the module docstring |
 | `config.py` | drop the `# ── Payments` and `# ── Referral commission` sections, and `credit_bonus_rate` (its only reader was order creation) |
@@ -215,7 +245,58 @@ divergent DAG, not a merge conflict.)
 the migration-head probe row above, which is the one that is right. As of 2026-09-07 they are
 `b7e2d9a4c1f5` (drops the removed subsystems' schema), `a1c7f3e9d2b6` (the OAuth-catalog twin),
 `cd91a1a5179a` (a merge revision), `a3f9c1d7e2b4` (see below) and `c8f2a5e1d94b`
-(drops `admin_audit_log`).
+(drops `admin_audit_log`). Since then: `b6c1e83f27d4` / `c5e1a8f3b92d` (twins, below) and
+`d8a4f1c6e290` (`session_files` unique per session — ahead of master; master's
+`e1c6a8d40b73` does the same change and is edited here, see "Scheduled tasks").
+
+### Revisions deliberately not taken, and re-points (2026-09-14 sync)
+
+After that sync the chain reads
+`… c5e1a8f3b92d → d8a4f1c6e290 → a7c3f1d9e4b2 → c2f8a41b7e60 → d5b1e93f7a48 → f4c8a2b91d63`.
+
+| Master revision | What it does | On hkgai |
+|---|---|---|
+| `f3a7c9e15d82` | `skill.status` | **not taken** — byte-identical `upgrade()`/`downgrade()` to this branch's `b6c1e83f27d4`, applied here first. Taking both adds the columns twice |
+| `a7d2f4b9c613` | backfill picked skills as preferences | **not taken** — identical twin of `c5e1a8f3b92d` |
+| `b6d2f8a04c17` | drops `admin_audit_log.reason` | **not taken** — the table is gone (`c8f2a5e1d94b`) |
+| `b7e2d4c8a915` | `payment_order.reconcile_attempted_at` | **not taken** — `payment_order` is gone (`b7e2d9a4c1f5`) |
+| `a7c3f1d9e4b2` | `actor` table | taken, **re-pointed** onto this branch's head (upstream parent `a1f4c7e02b31` sits behind revisions this database may already stand on) |
+| `c2f8a41b7e60` | skill / connector categories | taken, **re-pointed** past `b6d2f8a04c17` |
+| `d5b1e93f7a48`, `f4c8a2b91d63` | two indexes | taken as-is (their parents came across) |
+
+Every re-pointed or edited file carries an "hkgai note" in the docstring; do not
+"correct" them back. The next sync will see master's children of
+`a7d2f4b9c613` (or later) — hang them off this branch's head the same way,
+after reading what each intervening master revision does.
+
+`alembic upgrade base:head --sql` does not render on this branch and did
+not before this sync: `e2b7d4f9a1c6`'s guard inspects the live schema,
+which offline mode cannot. Verify offline from a real revision instead
+(`c5e1a8f3b92d:head --sql`), or against a throwaway database.
+
+### Scheduled tasks (2026-09-14, second sync)
+
+Excluded at the first sync of that day, carried whole at the second. Their
+migrations did not come across as a clean run — upstream they hang off
+revisions this branch never took, and one of them repeats a change this
+branch made first. After the sync the chain reads
+`… f4c8a2b91d63 → c8b3e5f1a742 → d4a1e8b62f37 → b5e9d3f70a26 → e1c6a8d40b73 → a9e4c2d71f38`.
+
+| Master revision | What it does | On hkgai |
+|---|---|---|
+| `c8b3e5f1a742` | `schedule` + `schedule_run` | taken, **re-pointed** onto `f4c8a2b91d63` (upstream parent `b7e2d4c8a915` alters `payment_order`, never taken) |
+| `d4a1e8b62f37` | `schedule_run.user_id` index | taken as-is |
+| `b5e9d3f70a26` | `schedule.skills`, `schedule_mcp_server` | taken, **re-pointed** onto `d4a1e8b62f37` (upstream parent `a7d2f4b9c613` is the not-taken twin above) |
+| `e1c6a8d40b73` | upstream: the `session_files` constraint change **and** `schedule_file` | taken, **edited in place**: only `schedule_file` remains. The `session_files` half is this branch's `d8a4f1c6e290`, always an ancestor here, so upstream's body would fail on its first statement. Edited rather than guarded — the order is fixed, and a schema-inspecting guard would break offline `--sql` rendering |
+| `a9e4c2d71f38` | drops `schedule.last_run_at` | taken as-is |
+
+The application code converges to master, including the file errors: they
+are `AppError`s in `app/errors.py` now (`file_not_owned`, `file_not_uploaded`,
+`file_too_large`, `connector_not_owned`), which the dispatcher maps to skip
+reasons — keeping this branch's older `SessionServiceError` copies would leave
+it catching classes the binder no longer raises. The dispatcher is always on
+and spends credits through the ordinary enqueue; this deployment does not sell
+credits, so an owner's balance comes from invites and check-in only.
 
 ### Two heads is not the only way a sync breaks the chain
 
@@ -277,11 +358,14 @@ git stash pop                      # restore the local-only edits
 6. Anything under `app/services/payment/` or `app/services/commission/` on master — arrives as a
    modify/delete conflict; resolve `git rm`
 
-## Known inconsistency to watch
+## Tier labels name no model
 
-Backend `session_tier_models` maps **ADVANCED → glm-5.2**, but the frontend hkgai labels the
-advanced tier "高级（Fable）". Pick one (set ADVANCED=fable backend-side, or relabel the
-frontend) so the UI label matches the model actually used — out of scope for a sync merge.
+The frontend labels the tiers `快速 / 标准 / 高级` (`Fast / Standard / Advanced`) with no model
+name — the same as share. It used to read "高级（Fable）" while this file mapped ADVANCED to a
+different model; the frontend dropped the name (project-mars `ecd6ef5`) rather than chase it.
+Which model a tier runs is decided here, in `session_tier_models`, and nowhere else — so a change
+to that mapping needs no frontend edit. The frontend guide carries a probe that fails if a model
+name comes back into a tier label.
 
 ## When in doubt
 

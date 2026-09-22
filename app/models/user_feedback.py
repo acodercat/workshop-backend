@@ -13,12 +13,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    TIMESTAMP,
     Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
     String,
-    TIMESTAMP,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -52,9 +52,7 @@ class FeedbackStatus(StrEnum):
 class UserFeedback(Base):
     __tablename__ = "user_feedback"
 
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # ``ON DELETE SET NULL`` keeps the row after a user is deleted so
     # admins still have an audit trail; the relationship simply
     # becomes ``None`` on the orphaned row.
@@ -99,9 +97,7 @@ class UserFeedback(Base):
         nullable=False,
     )
 
-    user: Mapped["User | None"] = relationship(
-        back_populates="feedback_submissions"
-    )
+    user: Mapped["User | None"] = relationship(back_populates="feedback_submissions")
 
     __table_args__ = (
         # Admin "review queue" query: filter status, sort newest first.
@@ -112,7 +108,4 @@ class UserFeedback(Base):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"<UserFeedback(id={self.id}, "
-            f"user_id={self.user_id}, status={self.status.value})>"
-        )
+        return f"<UserFeedback(id={self.id}, user_id={self.user_id}, status={self.status.value})>"

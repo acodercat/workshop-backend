@@ -44,7 +44,10 @@ WELCOME_CREDITS = 5000
 
 
 def _create_user_with_personal_org(
-    cur: psycopg.Cursor, *, username: str, password_hash: str,
+    cur: psycopg.Cursor,
+    *,
+    username: str,
+    password_hash: str,
 ) -> int:
     """INSERT a user + their personal org + OWNER membership, link
     them, return the new user id. All in the caller's transaction.
@@ -69,8 +72,7 @@ def _create_user_with_personal_org(
     organization_id = cur.fetchone()[0]
 
     cur.execute(
-        "INSERT INTO organization_member (organization_id, user_id, role) "
-        "VALUES (%s, %s, 'OWNER')",
+        "INSERT INTO organization_member (organization_id, user_id, role) VALUES (%s, %s, 'OWNER')",
         (organization_id, user_id),
     )
     cur.execute(

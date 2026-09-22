@@ -87,7 +87,7 @@ async def test_handle_message_decodes_bytes_payload(monkeypatch) -> None:
         "not-a-uuid",
         "",
         "00000000-0000",  # truncated
-        b"\xff\xfe",      # non-UTF8-ish bytes that still decode but aren't a UUID
+        b"\xff\xfe",  # non-UTF8-ish bytes that still decode but aren't a UUID
     ],
 )
 async def test_handle_message_skips_invalid_payload(monkeypatch, bad_payload) -> None:

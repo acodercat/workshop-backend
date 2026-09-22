@@ -66,9 +66,6 @@ def test_the_alias_is_what_those_test_modules_actually_use():
     # on its own it would also pass if someone deleted the alias and left the
     # ~30 ``httpx.`` call sites resolving to nothing. Assert the substitution
     # is really in place.
-    for relative in (
-        "tests/test_connector_url_guard.py",
-        "tests/test_connector_oauth.py",
-    ):
+    for relative in ("tests/test_connector_url_guard.py", "tests/test_connector_oauth.py"):
         source = (_ROOT / relative).read_text()
         assert "import httpx2 as httpx" in source, f"{relative} lost the httpx2 alias"

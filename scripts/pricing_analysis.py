@@ -49,7 +49,7 @@ Read-only: issues a single SELECT, writes nothing.
 
 import argparse
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -186,9 +186,7 @@ def _print_model_table(model_id: str, s: dict) -> None:
         f"   duration (s)   : p50 {s['dur_p50']:5.0f}   "
         f"p90 {s['dur_p90']:6.0f}   p99 {s['dur_p99']:6.0f}"
     )
-    print(
-        f"   tokens/turn    : p50 {s['tok_p50']:,.0f}   p90 {s['tok_p90']:,.0f}"
-    )
+    print(f"   tokens/turn    : p50 {s['tok_p50']:,.0f}   p90 {s['tok_p90']:,.0f}")
     flag = "  ⚠️ SELLING BELOW COST" if s["loss_share"] > 0.05 else ""
     print(f"   loss-making    : {s['loss_share'] * 100:5.1f}% of turns{flag}")
 
@@ -249,7 +247,7 @@ def _recommend(totals: dict, target_margin: float, sandbox_usd_per_hour: float) 
 
 
 async def main(args: argparse.Namespace) -> int:
-    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+    since = datetime.now(UTC) - timedelta(days=args.days)
 
     async with AsyncSessionLocal() as db:
         rows = await _load_turns(db, since)
@@ -278,20 +276,18 @@ async def main(args: argparse.Namespace) -> int:
         duration_s = max(0.0, (terminated_at - created_at).total_seconds())
 
         token_cogs = (
-            in_tok / 1000.0 * rate["in_per_1k_usd"]
-            + out_tok / 1000.0 * rate["out_per_1k_usd"]
+            in_tok / 1000.0 * rate["in_per_1k_usd"] + out_tok / 1000.0 * rate["out_per_1k_usd"]
         )
         sandbox_cogs = duration_s / 3600.0 * args.sandbox_usd_per_hour
         # ``--beta`` lets you preview a per-second price that isn't yet
         # in config (e.g. "what if β=0.1?"). Default None → use the
         # snapshot's real ``per_second_credits`` (today 0.0).
-        priced_rate = (
-            {**rate, "per_second_credits": args.beta}
-            if args.beta is not None else rate
-        )
+        priced_rate = {**rate, "per_second_credits": args.beta} if args.beta is not None else rate
         revenue = (
             cost_micro_credits(
-                priced_rate, input_tokens=in_tok, output_tokens=out_tok,
+                priced_rate,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
                 turn_seconds=duration_s,
             )
             / _MICRO_PER_USD
@@ -333,8 +329,7 @@ async def main(args: argparse.Namespace) -> int:
     )
     if unpriced:
         print(
-            "  skipped (no rate-card entry): "
-            + ", ".join(f"{m}×{n}" for m, n in unpriced.items())
+            "  skipped (no rate-card entry): " + ", ".join(f"{m}×{n}" for m, n in unpriced.items())
         )
 
     tot["dur_p90_global"] = _percentile(sorted(all_dur), 0.90)
@@ -346,15 +341,21 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--days", type=int, default=30, help="Look-back window (default 30).")
     p.add_argument(
-        "--sandbox-usd-per-hour", type=float, default=0.0,
+        "--sandbox-usd-per-hour",
+        type=float,
+        default=0.0,
         help="Real infra cost of one sandbox-hour (USD). 0 = token-cost only.",
     )
     p.add_argument(
-        "--target-margin", type=float, default=0.65,
+        "--target-margin",
+        type=float,
+        default=0.65,
         help="Target blended gross margin (0..1) for the recommendation.",
     )
     p.add_argument(
-        "--beta", type=float, default=None,
+        "--beta",
+        type=float,
+        default=None,
         help="Preview a per-second price (credits/sec) instead of the "
         "configured one. e.g. --beta=0.1",
     )

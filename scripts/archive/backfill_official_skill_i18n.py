@@ -47,11 +47,7 @@ OFFICIAL_SKILL_NAMES: dict[str, dict[str, str]] = {
 
 async def _backfill(db: AsyncSession, *, apply: bool) -> None:
     present = set(
-        (
-            await db.execute(
-                select(Skill.name).where(Skill.origin == SkillOrigin.OFFICIAL)
-            )
-        )
+        (await db.execute(select(Skill.name).where(Skill.origin == SkillOrigin.OFFICIAL)))
         .scalars()
         .all()
     )

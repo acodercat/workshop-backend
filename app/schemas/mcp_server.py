@@ -1,7 +1,6 @@
 """Schemas for the /api/connectors surface (user-created MCP Connectors)."""
 
 from datetime import datetime
-
 from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
@@ -11,7 +10,9 @@ from app.services.mcp.url_identity import normalize_connector_url
 
 
 def _require_auth_credentials(
-    auth_type: MCPServerAuthType, credential: str | None, header_name: str | None,
+    auth_type: MCPServerAuthType,
+    credential: str | None,
+    header_name: str | None,
 ) -> None:
     """Enforce the credential a given auth type needs.
 
@@ -134,6 +135,26 @@ class ConnectorCatalogEntryResponse(BaseModel):
     auth_type: str
     description: str | None
     icon_url: str | None
+    # The tab this entry browses under; ``None`` is uncategorised, and so
+    # is an id the client cannot resolve. The id alone, never the name —
+    # ``list_skill_categories`` explains why.
+    category_id: int | None
+
+
+class ConnectorCategoryResponse(BaseModel):
+    """One tab on the connectors page, already localized.
+
+    Its own class rather than one shared with the skills taxonomy's, for
+    the reason the tables are separate: a generated client should not be
+    able to hand an id from one to an endpoint expecting the other.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    #: Resolved for the request locale. ``name_i18n`` never leaves the
+    #: backend — the client renders this string as-is.
+    name: str
 
 
 class _ConnectorAuthFields(BaseModel):
@@ -173,6 +194,19 @@ class ConnectorCreate(_ConnectorAuthFields):
     oauth_client_secret: str | None = Field(default=None, max_length=2048)
     oauth_scope: str | None = Field(default=None, max_length=1024)
 
+    def require_url(self) -> str:
+        """The URL, which :meth:`_exactly_one_source` guarantees without a catalog.
+
+        A method rather than a bare attribute read, so the guarantee the
+        validator establishes travels with the value instead of being
+        re-derived — or quietly assumed — at each call site.
+        """
+        if self.url is None:
+            raise AssertionError(
+                "unreachable: _exactly_one_source requires a url without a catalog_id"
+            )
+        return self.url
+
     @model_validator(mode="after")
     def _exactly_one_source(self) -> "ConnectorCreate":
         if self.catalog_id is None:
@@ -199,9 +233,7 @@ class ConnectorCreate(_ConnectorAuthFields):
             conflicting.append("auth_type")
         if conflicting:
             raise ValueError(
-                "catalog_id defines the connector; remove "
-                + ", ".join(sorted(conflicting))
-                + "."
+                "catalog_id defines the connector; remove " + ", ".join(sorted(conflicting)) + "."
             )
         return self
 
@@ -247,7 +279,8 @@ class ConnectorUpdate(BaseModel):
     # list, so a merge would only add a way for two tabs to disagree. Names the
     # server no longer exposes are accepted and simply never match.
     disabled_tools: list[ToolName] | None = Field(
-        default=None, max_length=MAX_DISABLED_TOOLS,
+        default=None,
+        max_length=MAX_DISABLED_TOOLS,
     )
     # Only ever set from here. Creating a Connector cannot: ``ConnectorCreate``
     # does not declare it, so turning resource access on is always a second,
@@ -261,9 +294,7 @@ class ConnectorUpdate(BaseModel):
         # endpoint only re-encrypts when auth_type changes). Reject that footgun.
         if self.auth_type is None:
             if self.credential is not None or self.header_name is not None:
-                raise ValueError(
-                    "To change credentials, include auth_type."
-                )
+                raise ValueError("To change credentials, include auth_type.")
             return self
         _require_auth_credentials(self.auth_type, self.credential, self.header_name)
         return self

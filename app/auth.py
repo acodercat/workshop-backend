@@ -1,13 +1,13 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
-from jwt.exceptions import InvalidTokenError
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
+from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,9 +57,7 @@ async def get_user_by_username(db: AsyncSession, username: str) -> models.User |
     return result.scalar()
 
 
-async def authenticate_user(
-    db: AsyncSession, username: str, password: str
-) -> models.User | None:
+async def authenticate_user(db: AsyncSession, username: str, password: str) -> models.User | None:
     """Return the user iff the credentials are valid, regardless of
     status.
 
@@ -99,7 +97,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     to_encode = data.copy()
     if expires_delta is None:
         expires_delta = timedelta(minutes=settings.access_token_expire_minutes)
-    to_encode["exp"] = datetime.now(timezone.utc) + expires_delta
+    to_encode["exp"] = datetime.now(UTC) + expires_delta
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 
@@ -127,9 +125,7 @@ def create_share_view_token(share_token: str) -> tuple[str, datetime]:
     (the unlock endpoint) can hand both to the client without
     decoding the JWT a second time to read ``exp``.
     """
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.share_view_token_expire_minutes
-    )
+    expires_at = datetime.now(UTC) + timedelta(minutes=settings.share_view_token_expire_minutes)
     payload = {
         "sub": share_token,
         "scope": SHARE_VIEW_SCOPE,
@@ -149,9 +145,7 @@ def decode_share_view_token(token: str) -> str | None:
     just "no token presented."
     """
     try:
-        payload = jwt.decode(
-            token, settings.secret_key, algorithms=[settings.algorithm]
-        )
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except InvalidTokenError as exc:
         logger.info("Rejected share-view token: %s: %s", type(exc).__name__, exc)
         return None
@@ -174,9 +168,7 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(
-            token, settings.secret_key, algorithms=[settings.algorithm]
-        )
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except InvalidTokenError as exc:
         logger.info("Rejected token: %s: %s", type(exc).__name__, exc)
         raise credentials_exception
@@ -317,9 +309,7 @@ def create_staff_access_token(staff: models.Staff) -> tuple[str, datetime]:
     endpoint doesn't have to decode what it just encoded (same shape as
     :func:`create_share_view_token`).
     """
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.admin_access_token_expire_minutes
-    )
+    expires_at = datetime.now(UTC) + timedelta(minutes=settings.admin_access_token_expire_minutes)
     payload = {
         "sub": staff.username,
         "scope": STAFF_SCOPE,
@@ -339,9 +329,7 @@ def decode_staff_token(token: str) -> StaffTokenClaims | None:
     failed.
     """
     try:
-        payload = jwt.decode(
-            token, settings.secret_key, algorithms=[settings.algorithm]
-        )
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except InvalidTokenError as exc:
         logger.info("Rejected staff token: %s: %s", type(exc).__name__, exc)
         return None
@@ -359,18 +347,14 @@ def decode_staff_token(token: str) -> StaffTokenClaims | None:
     return StaffTokenClaims(username=username, token_version=token_version)
 
 
-async def get_staff_by_username(
-    db: AsyncSession, username: str
-) -> models.Staff | None:
+async def get_staff_by_username(db: AsyncSession, username: str) -> models.Staff | None:
     """Look up a staff account by its login identifier."""
     stmt = select(models.Staff).where(models.Staff.username == username)
     result = await db.execute(stmt)
     return result.scalar()
 
 
-async def authenticate_staff(
-    db: AsyncSession, username: str, password: str
-) -> models.Staff | None:
+async def authenticate_staff(db: AsyncSession, username: str, password: str) -> models.Staff | None:
     """Return the staff row iff the credentials are valid, regardless of
     status.
 

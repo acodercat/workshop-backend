@@ -2,8 +2,8 @@
 
 ``Annotated`` aliases — the idiomatic way to reuse a constraint across
 models. They live here rather than in whichever resource module used
-them first, so ``from app.schemas.admin.fields import Password`` names
-the actual owner.
+them first, so ``from app.schemas.admin.fields import Password`` names the
+actual owner.
 """
 
 from typing import Annotated

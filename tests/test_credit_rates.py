@@ -88,14 +88,16 @@ def test_normalize_legacy_snapshot_uses_real_production_shape() -> None:
     ``max_output_tokens`` (not ``reserve_max_output_tokens``). β/γ
     fields are absent. Confirmed against production DB snapshots.
     """
-    snapshot = rates.normalize_rate_snapshot({
-        "model_id": "legacy-model",
-        "in_per_1k_usd": 0.001,
-        "out_per_1k_usd": 0.005,
-        "margin": 1.3,
-        "max_output_tokens": 4096,
-        "captured_at": "2026-05-01T00:00:00+00:00",
-    })
+    snapshot = rates.normalize_rate_snapshot(
+        {
+            "model_id": "legacy-model",
+            "in_per_1k_usd": 0.001,
+            "out_per_1k_usd": 0.005,
+            "margin": 1.3,
+            "max_output_tokens": 4096,
+            "captured_at": "2026-05-01T00:00:00+00:00",
+        }
+    )
 
     assert snapshot["token_markup"] == 1.3
     assert snapshot["reserve_max_output_tokens"] == 4096
@@ -105,24 +107,28 @@ def test_normalize_legacy_snapshot_uses_real_production_shape() -> None:
 
 def test_normalize_snapshot_requires_markup_or_legacy_margin() -> None:
     with pytest.raises(KeyError, match="token_markup"):
-        rates.normalize_rate_snapshot({
-            "model_id": "broken",
-            "in_per_1k_usd": 0.001,
-            "out_per_1k_usd": 0.005,
-            "reserve_max_output_tokens": 4096,
-            "captured_at": "2026-05-01T00:00:00+00:00",
-        })
+        rates.normalize_rate_snapshot(
+            {
+                "model_id": "broken",
+                "in_per_1k_usd": 0.001,
+                "out_per_1k_usd": 0.005,
+                "reserve_max_output_tokens": 4096,
+                "captured_at": "2026-05-01T00:00:00+00:00",
+            }
+        )
 
 
 def test_normalize_snapshot_requires_reserve_max_output_or_legacy() -> None:
     with pytest.raises(KeyError, match="reserve_max_output_tokens"):
-        rates.normalize_rate_snapshot({
-            "model_id": "broken",
-            "in_per_1k_usd": 0.001,
-            "out_per_1k_usd": 0.005,
-            "token_markup": 1.3,
-            "captured_at": "2026-05-01T00:00:00+00:00",
-        })
+        rates.normalize_rate_snapshot(
+            {
+                "model_id": "broken",
+                "in_per_1k_usd": 0.001,
+                "out_per_1k_usd": 0.005,
+                "token_markup": 1.3,
+                "captured_at": "2026-05-01T00:00:00+00:00",
+            }
+        )
 
 
 def test_snapshot_rate_unpriced_model_raises_typed_503() -> None:
@@ -139,7 +145,7 @@ def test_snapshot_rate_unpriced_model_raises_typed_503() -> None:
 def test_credits_from_cny_uses_sale_price(monkeypatch) -> None:
     monkeypatch.setattr(rates.settings, "credit_price_cny", 0.1)
 
-    assert rates.credits_from_cny(100) == 1000   # ¥100 → 1000 credits
+    assert rates.credits_from_cny(100) == 1000  # ¥100 → 1000 credits
     assert rates.credits_from_cny(50) == 500
     assert rates.credits_from_cny(0.1) == 1
     # Decimal path: naive float ``100 / 0.1`` can be 999.999… and floor
@@ -151,7 +157,7 @@ def test_credits_from_cny_uses_sale_price(monkeypatch) -> None:
 
 def test_credits_from_cny_respects_configured_price(monkeypatch) -> None:
     monkeypatch.setattr(rates.settings, "credit_price_cny", 0.05)
-    assert rates.credits_from_cny(100) == 2000   # ¥0.05/credit → ¥100 = 2000
+    assert rates.credits_from_cny(100) == 2000  # ¥0.05/credit → ¥100 = 2000
 
 
 # ── reserve_est_input_tokens: per-model reserve sizing ───────────────────────
@@ -161,7 +167,8 @@ def test_reserve_est_input_tokens_reads_per_model_value(monkeypatch) -> None:
     """A model whose rate-card entry carries ``reserve_est_input_tokens``
     sizes its hold from that per-model figure."""
     monkeypatch.setattr(
-        rates.settings, "credit_rates",
+        rates.settings,
+        "credit_rates",
         {"m": {"reserve_est_input_tokens": 425_000}},
     )
 

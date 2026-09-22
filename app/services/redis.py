@@ -16,6 +16,8 @@ input-queue concepts. Redis still owns:
 
 import asyncio
 import uuid
+from typing import Any, cast
+from uuid import UUID
 
 import redis.asyncio as aioredis
 
@@ -87,7 +89,7 @@ EMAIL_CHANGE_PREFIX = "email_change"
 OAUTH_STATE_PREFIX = "connector_oauth_state"
 
 
-def stream_key(prefix: str, entity_id: str) -> str:
+def stream_key(prefix: str, entity_id: str | UUID) -> str:
     return f"{prefix}:{entity_id}"
 
 
@@ -180,7 +182,10 @@ async def read_stream(
     still-running session resumes streaming once Redis recovers.
     """
     try:
-        return await redis.xread({key: cursor}, count=count, block=block_ms) or []
+        # ``xread`` is typed as a union over every decode / grouping mode;
+        # this client's is the list form.
+        entries = await redis.xread({key: cursor}, count=count, block=block_ms)
+        return cast("list[Any]", entries) or []
     except aioredis.TimeoutError:
         return []
     except aioredis.ConnectionError:

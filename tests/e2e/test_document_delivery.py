@@ -46,7 +46,6 @@ from tests.e2e._helpers import (
     consume_sse_until_stopped,
 )
 
-
 # (extension, magic-byte prefix, prompt)
 # Magic bytes:
 #  - PPTX/DOCX are ZIP containers → ``PK\x03\x04``
@@ -119,7 +118,8 @@ async def test_document_generation_and_delivery(
 ) -> None:
     # 1. Session + message
     resp = await http_client.post(
-        "/sessions", json={"title": f"E2E {ext} delivery"},
+        "/sessions",
+        json={"title": f"E2E {ext} delivery"},
     )
     assert resp.status_code == 201, resp.text
     session_id = resp.json()["id"]
@@ -132,7 +132,9 @@ async def test_document_generation_and_delivery(
 
     # 2. Drain SSE until terminal
     events = await consume_sse_until_stopped(
-        http_client, session_id, timeout=_DOC_SSE_TIMEOUT_SECONDS,
+        http_client,
+        session_id,
+        timeout=_DOC_SSE_TIMEOUT_SECONDS,
     )
 
     # 3. Wire-shape contracts that hold for every well-formed turn.
@@ -141,22 +143,16 @@ async def test_document_generation_and_delivery(
 
     # 4. The agent must have called deliver_file at least once.
     deliver_calls = [
-        payload for type_, payload in events
+        payload
+        for type_, payload in events
         if type_ == "agent.tool_use" and payload.get("tool") == "deliver_file"
     ]
-    called_tools = [
-        p.get("tool") for t, p in events if t == "agent.tool_use"
-    ]
-    assert deliver_calls, (
-        f"agent did not invoke deliver_file; tools called: {called_tools}"
-    )
+    called_tools = [p.get("tool") for t, p in events if t == "agent.tool_use"]
+    assert deliver_calls, f"agent did not invoke deliver_file; tools called: {called_tools}"
 
     # 5. At least one delivered file matches the requested extension.
     delivered_files = _flatten_delivered_files(events)
-    matching = [
-        f for f in delivered_files
-        if f.get("filename", "").lower().endswith(f".{ext}")
-    ]
+    matching = [f for f in delivered_files if f.get("filename", "").lower().endswith(f".{ext}")]
     assert matching, (
         f"no delivered .{ext} file found; "
         f"delivered={[f.get('filename') for f in delivered_files]}, "
@@ -184,7 +180,8 @@ async def test_document_generation_and_delivery(
     # request validation.
     async with httpx.AsyncClient(timeout=30.0) as raw:
         head_resp = await raw.get(
-            download_url, headers={"Range": "bytes=0-15"},
+            download_url,
+            headers={"Range": "bytes=0-15"},
         )
     # OSS returns 206 for a successful Range request, 200 for a full
     # GET on a small object — either is fine here.

@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 
 import httpx2
 from mcp import Client, MCPError
-from mcp.types import INTERNAL_ERROR, METHOD_NOT_FOUND, Implementation, Tool
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import INTERNAL_ERROR, METHOD_NOT_FOUND, Implementation, Tool
 
 from app.errors import (
     ConnectorAuthRejectedError,
@@ -33,8 +33,8 @@ from app.services.mcp.url_guard import guard_public_url, guarded_client
 
 logger = logging.getLogger(__name__)
 
-# Per JSON-RPC request: the handshake — which ``mode="auto"`` may spend twice
-# — and each ``tools/list`` page get this much each.
+# Per JSON-RPC request: the handshake — which ``mode="auto"`` may spend twice —
+# and each ``tools/list`` page get this much each.
 _CONNECT_TIMEOUT = 20.0
 # Per read on the wire. The successor of two v1 knobs — the transport's
 # ``sse_read_timeout`` and a deadline shared across list pages — folded into
@@ -108,7 +108,8 @@ class ProbeResult:
 
 
 def build_auth_headers(
-    auth_type: MCPServerAuthType, credential: str | None,
+    auth_type: MCPServerAuthType,
+    credential: str | None,
 ) -> dict[str, str]:
     """Turn a Connector's auth config into HTTP headers.
 
@@ -128,13 +129,13 @@ def build_auth_headers(
 async def _list_all_tools(session: Client) -> list[dict[str, str]]:
     """Every tool the server exposes, following ``tools/list`` pagination.
 
-    One page is not the catalog: the worker paginates, so stopping at page
-    one would cache a subset the user can neither see nor switch off while
-    the agent still gets the rest. A page cap stops a server that paginates
-    forever; each page's request is bounded by
-    ``Client(read_timeout_seconds)`` and the whole probe by
-    ``_PROBE_TIMEOUT``. Nothing is shared across pages — a single deadline
-    used to be, and page ten inherited whatever page one had left.
+    One page is not the catalog: the worker paginates, so stopping at page one
+    would cache a subset the user can neither see nor switch off while the
+    agent still gets the rest. A page cap stops a server that paginates
+    forever; each page's request is bounded by ``Client(read_timeout_seconds)``
+    and the whole probe by ``_PROBE_TIMEOUT``. Nothing is shared across pages —
+    a single deadline used to be, and page ten inherited whatever page one had
+    left.
 
     Bounded by what the user can act on, too — this listing exists to be
     rendered and switched off, so an entry outside ``disabled_tools``' own
@@ -158,8 +159,7 @@ async def _list_all_tools(session: Client) -> list[dict[str, str]]:
             )
         seen_cursors.add(cursor)
     raise ConnectorUnreachableError(
-        f"The MCP server did not finish listing its tools within "
-        f"{_MAX_LIST_PAGES} pages."
+        f"The MCP server did not finish listing its tools within {_MAX_LIST_PAGES} pages."
     )
 
 
@@ -187,18 +187,23 @@ def _admit_page(tools: list[dict[str, str]], page: list[Tool]) -> bool:
             logger.warning(
                 "Dropping MCP tool %r...: its %d-character name is outside what "
                 "``disabled_tools`` accepts, so it could never be switched off",
-                tool.name[:64], len(tool.name),
+                tool.name[:64],
+                len(tool.name),
             )
             continue
-        tools.append({
-            "name": tool.name,
-            "description": (tool.description or "")[:_MAX_DESCRIPTION_CHARS],
-        })
+        tools.append(
+            {
+                "name": tool.name,
+                "description": (tool.description or "")[:_MAX_DESCRIPTION_CHARS],
+            }
+        )
     return False
 
 
 async def probe(
-    url: str, auth_type: MCPServerAuthType, credential: str | None,
+    url: str,
+    auth_type: MCPServerAuthType,
+    credential: str | None,
 ) -> ProbeResult:
     """Connect to *url*, complete the MCP handshake, and list its tools.
 
@@ -219,13 +224,13 @@ async def probe(
             "MCP probe failed (%s): probe deadline exceeded",
             ConnectorUnreachableError.error_type,
         )
-        raise ConnectorUnreachableError(
-            "The MCP server took too long to answer."
-        ) from exc
+        raise ConnectorUnreachableError("The MCP server took too long to answer.") from exc
 
 
 async def _probe(
-    url: str, auth_type: MCPServerAuthType, credential: str | None,
+    url: str,
+    auth_type: MCPServerAuthType,
+    credential: str | None,
 ) -> ProbeResult:
     """The probe itself, run under its caller's deadline."""
     # Raises InvalidConnectorUrlError — deliberately outside the try below so it
@@ -259,9 +264,9 @@ async def _probe(
         # fail that teardown against every server that honours termination.
         async with guarded_client(
             headers=headers,
-            # One object where v1 took two arguments: the transport no
-            # longer has an ``sse_read_timeout`` of its own, so the connect
-            # bound and the stream-read bound travel together here.
+            # One object where v1 took two arguments: the transport no longer
+            # has an ``sse_read_timeout`` of its own, so the connect bound and
+            # the stream-read bound travel together here.
             timeout=httpx2.Timeout(_CONNECT_TIMEOUT, read=_READ_TIMEOUT),
         ) as http_client:
             # Hooked here rather than in ``guarded_client``: that helper is
@@ -273,18 +278,18 @@ async def _probe(
             async with Client(
                 streamable_http_client(url, http_client=http_client),
                 # Probes ``server/discover`` and falls back to ``initialize``,
-                # which is the point of the SDK bump: a server speaking only
-                # the 2026-07-28 stateless protocol refuses ``initialize``
-                # outright, and used to be unaddable for it.
+                # which is the point of the SDK bump: a server speaking only the
+                # 2026-07-28 stateless protocol refuses ``initialize`` outright,
+                # and used to be unaddable for it.
                 mode="auto",
-                # Bounds each JSON-RPC request rather than the whole handshake
-                # — ``mode="auto"`` may send two, and one shared deadline
-                # around both would halve what each gets.
+                # Bounds each JSON-RPC request rather than the whole handshake —
+                # ``mode="auto"`` may send two, and one shared deadline around
+                # both would halve what each gets.
                 read_timeout_seconds=_CONNECT_TIMEOUT,
-                # A probe exists to answer "what is there *now*". Each one
-                # builds its own client, so the SDK's per-client cache could
-                # never serve a stale answer anyway — but off is one less thing
-                # between the user's refresh button and the server.
+                # A probe exists to answer "what is there *now*". Each one builds
+                # its own client, so the SDK's per-client cache could never serve
+                # a stale answer anyway — but off is one less thing between the
+                # user's refresh button and the server.
                 cache=None,
             ) as session:
                 handshook = True
@@ -306,9 +311,9 @@ async def _probe(
     except Exception as exc:
         raise _unreachable(exc, handshook=handshook, refused=refused) from exc
 
-    # ``None`` where v1 always had a value: a 2026-era server stamps its
-    # identity optionally, so an anonymous one is named after its URL and shows
-    # no artwork. Its tools still arrive, and the name is the user's to edit.
+    # ``None`` where v1 always had a value: a 2026-era server stamps its identity
+    # optionally, so an anonymous one is named after its URL and shows no
+    # artwork. Its tools still arrive, and the name is the user's to edit.
     server_name = server_info.name if server_info else url
     # ``description`` is optional in ``Implementation``; read it defensively so a
     # server (or SDK shape) without one is not an error.
@@ -521,6 +526,13 @@ def _usable_icons(server_info: Implementation | None) -> list[dict]:
     would rather clients required same-origin, but hosting icons on a CDN is
     both common and encouraged for reachability, so the cost is taken instead
     and the fetch carries no credentials or referrer (see ``ConnectorIcon``).
+
+    One thing this function can no longer soften: ``theme`` is now typed
+    ``Literal["light", "dark"]``, and it is validated when the *handshake*
+    result is parsed — long before anything here runs. A server advertising
+    ``theme: "auto"`` therefore fails to connect at all rather than losing one
+    icon. SEP-973 defines only those two values, so such a server is out of
+    spec; under the 1.x models it was merely carried through as an extra.
     """
     if server_info is None:
         return []
@@ -533,13 +545,15 @@ def _usable_icons(server_info: Implementation | None) -> list[dict]:
             continue
         if not (src.startswith("https://") or src.startswith("data:image/")):
             continue
-        usable.append({
-            "src": src,
-            "mime_type": icon.mime_type,
-            "sizes": icon.sizes,
-            # Modelled by the SDK since 2.x, where it used to arrive as an
-            # extra field read off ``model_extra``. Worth carrying: it is what
-            # lets the client offer a dark variant.
-            "theme": icon.theme,
-        })
+        usable.append(
+            {
+                "src": src,
+                "mime_type": icon.mime_type,
+                "sizes": icon.sizes,
+                # Modelled by the SDK since 2.x, where it used to arrive as an
+                # extra field read off ``model_extra``. Worth carrying: it is
+                # what lets the client offer a dark variant.
+                "theme": icon.theme,
+            }
+        )
     return usable

@@ -42,8 +42,10 @@ async def _send(to: str, locale: str, code: str) -> None:
     print(f"   code     : {code}")
     print(f"   to       : {to}")
     print(f"   locale   : {locale}")
-    print(f"   host     : {settings.smtp_host}:{settings.smtp_port} "
-          f"({'SSL' if settings.smtp_use_ssl else 'STARTTLS'})")
+    print(
+        f"   host     : {settings.smtp_host}:{settings.smtp_port} "
+        f"({'SSL' if settings.smtp_use_ssl else 'STARTTLS'})"
+    )
     print(f"   from     : {settings.smtp_from_address}")
     print(f"   alias    : {settings.smtp_from_alias}")
 

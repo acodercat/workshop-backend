@@ -8,6 +8,8 @@ backend (multipart POST). Generic ops (``upload``, ``download``,
 bucket names.
 """
 
+import asyncio
+import logging
 import os
 import threading
 import uuid
@@ -17,30 +19,11 @@ from urllib.parse import quote
 import oss2
 
 from app.common.filenames import validate_input_filename
+from app.errors import FileNotUploadedError, FileRetentionFailedError, FileTooLargeError
 from app.schemas.file import UploadUrlResponse
 from config import settings
 
-
-class UnsupportedFileTypeError(ValueError):
-    """Extension outside the policy's whitelist → HTTP 400."""
-
-    def __init__(self, ext: str, allowed: list[str]) -> None:
-        self.ext = ext
-        self.allowed = allowed
-        super().__init__(
-            f"Unsupported file extension {ext!r}. Allowed: {', '.join(allowed)}"
-        )
-
-
-class FileTooLargeError(ValueError):
-    """Declared size above the policy's cap → HTTP 413."""
-
-    def __init__(self, size_bytes: int, max_bytes: int) -> None:
-        self.size_bytes = size_bytes
-        self.max_bytes = max_bytes
-        super().__init__(
-            f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap"
-        )
+logger = logging.getLogger(__name__)
 
 
 class FileObjectNotFoundError(ValueError):
@@ -67,11 +50,24 @@ class InlinePreviewNotAllowedError(ValueError):
         super().__init__(f"{ext!r} cannot be previewed inline; download it instead")
 
 
-# Extensions that must never be served inline (they execute script on the
-# document origin). SVG is the only scriptable type in the image
-# allow-list — raster images are inert, HTML deliverables are the intended
-# inline payload.
-_INLINE_FORBIDDEN_EXTENSIONS = frozenset({".svg"})
+# The only extensions that may be served with an ``inline`` disposition.
+#
+# An allow-list, and it has to be: uploads accept any extension now, so a
+# deny-list would have to enumerate every scriptable type the browser
+# might ever execute on the document origin (``.html``, ``.svg``,
+# ``.xhtml``, ``.xml``, ``.mjs``, whatever ships next) and would be one
+# omission away from stored XSS on our own domain. Inverting it means a
+# type nobody vetted downloads instead of rendering — the safe default,
+# and the only thing that changes for the user is one click.
+#
+# ``.html`` is here because it *is* the intended payload: agent-produced
+# web deliverables render in an iframe, which is what this whole path
+# exists for. It is also the reason the list can't simply be "images":
+# raster images are inert, but HTML is not, and it is trusted here
+# because the worker wrote it — not because someone uploaded it.
+_INLINE_ALLOWED_EXTENSIONS = frozenset(
+    {".html", ".htm", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+)
 
 
 UPLOAD_URL_TTL_SECONDS = 15 * 60
@@ -91,10 +87,15 @@ ORPHAN_TAGGING_HEADER = f"{_ORPHAN_TAG_KEY}={_ORPHAN_TAG_VALUE}"
 @dataclass(frozen=True)
 class UploadPolicy:
     """Per-asset-type config scoping all OSS operations."""
+
     bucket_name: str
     key_prefix: str
     max_bytes: int
-    allowed_types: dict[str, str]   # extension → content-type
+    # extension → content-type. For session files this is a *lookup table*,
+    # not a gate: an extension missing from it uploads as
+    # ``application/octet-stream``. ``SKILL_POLICY`` still treats it as an
+    # allow-list — see ``skill_registration.validate_skill_filename``.
+    allowed_types: dict[str, str]
 
 
 # Session file uploads (any whitelisted type, 100 MiB cap). The OSS
@@ -225,9 +226,15 @@ def generate_upload_url(
         raise FileTooLargeError(size_bytes, policy.max_bytes)
     filename = validate_input_filename(filename)
     ext = os.path.splitext(filename)[1].lower()
-    content_type = policy.allowed_types.get(ext)
-    if content_type is None:
-        raise UnsupportedFileTypeError(ext, sorted(policy.allowed_types))
+    # Any extension uploads. The table still supplies a precise
+    # Content-Type where we know one — it is signed into the URL and
+    # becomes the object's stored type, which is what later decides
+    # whether a browser renders or downloads it — and everything else
+    # gets the inert generic. Nothing about "can this be uploaded"
+    # depends on the extension any more; what a file is *allowed to do*
+    # afterwards is decided at the point of use (see
+    # ``_INLINE_ALLOWED_EXTENSIONS`` for the inline-preview gate).
+    content_type = policy.allowed_types.get(ext, "application/octet-stream")
 
     file_key = f"{policy.key_prefix}/{key_extra}{uuid.uuid4()}/{filename}"
     # Tag the object orphan at upload (M5) so a never-bound upload is reaped
@@ -265,6 +272,73 @@ def clear_orphan_tag(policy: UploadPolicy, file_key: str) -> None:
     get_bucket(policy.bucket_name).delete_object_tagging(file_key)
 
 
+async def confirmed_sizes(policy: UploadPolicy, file_keys: list[str]) -> list[int]:
+    """Each key's true size in OSS, in the order given.
+
+    The one place a persisted ``size_bytes`` becomes trustworthy. A client's
+    declared size is a claim, and a low one slips past both the per-file cap
+    and the per-user quota, which sums the column — so every write path that
+    stores a size reconciles it here rather than each re-deriving how.
+
+    Raises :class:`FileNotUploadedError` for a key with no object — the
+    presigned upload never completed — and :class:`FileTooLargeError` for one
+    over the policy's cap. Both are typed application errors, so every caller
+    can let them propagate: that "no object" means "not uploaded" is decided
+    once, here, rather than re-translated at each write path.
+
+    Blocking oss2, threaded and fanned out, so N keys cost about one HEAD's
+    latency rather than N serial ones. A single failure is raised rather than
+    collected: none of the callers can store a partial set.
+    """
+    if not file_keys:
+        return []
+    sizes = await asyncio.gather(
+        *(asyncio.to_thread(head_size, policy, key) for key in file_keys),
+        return_exceptions=True,
+    )
+    confirmed: list[int] = []
+    for size in sizes:
+        if isinstance(size, FileObjectNotFoundError):
+            raise FileNotUploadedError(f"file_key {size.file_key!r} was not uploaded") from size
+        if isinstance(size, BaseException):
+            raise size
+        if size > policy.max_bytes:
+            raise FileTooLargeError(size, policy.max_bytes)
+        confirmed.append(size)
+    return confirmed
+
+
+async def clear_orphan_tags(policy: UploadPolicy, file_keys: list[str]) -> None:
+    """Take uploads off the orphan-reaping rule, or raise
+    :class:`FileRetentionFailedError`.
+
+    Whether a failure may be ignored is the caller's call, not this
+    function's: a message's attachments are bound and read within the turn,
+    so its caller logs and moves on, while a scheduled task's must survive
+    until it fires, so its caller refuses the save. Raising lets both say so.
+
+    Every key is attempted before anything is raised, so a retry has only
+    what actually failed left to do — the call is idempotent. A no-op when
+    tagging is off, because then nothing was tagged. Blocking oss2, threaded
+    and fanned out, so N keys cost about one round trip.
+    """
+    if not settings.oss_orphan_tagging_enabled or not file_keys:
+        return
+    results = await asyncio.gather(
+        *(asyncio.to_thread(clear_orphan_tag, policy, key) for key in file_keys),
+        return_exceptions=True,
+    )
+    failed = [
+        (key, result) for key, result in zip(file_keys, results) if isinstance(result, Exception)
+    ]
+    if failed:
+        key, first = failed[0]
+        raise FileRetentionFailedError(
+            f"Could not clear the orphan tag on {len(failed)} of {len(file_keys)} "
+            f"file(s), starting with {key!r}"
+        ) from first
+
+
 def download(policy: UploadPolicy, file_key: str) -> bytes:
     """Read an object's bytes into memory."""
     return get_bucket(policy.bucket_name).get_object(file_key).read()
@@ -280,7 +354,15 @@ def head_size(policy: UploadPolicy, file_key: str) -> int:
     """
     try:
         head = get_bucket(policy.bucket_name).head_object(file_key)
-    except oss2.exceptions.NoSuchKey as exc:
+    except oss2.exceptions.NoSuchBucket:
+        # Also a ``NotFound``, and not the caller's to handle: a missing
+        # bucket is a deployment fault, not a missing upload.
+        raise
+    except oss2.exceptions.NotFound as exc:
+        # ``NotFound`` rather than only ``NoSuchKey``: a HEAD 404 arrives with
+        # no body, so oss2 can only name ``NoSuchKey`` when the ``x-oss-err``
+        # header is present — and it is not always. ``NoSuchKey`` is a
+        # subclass, so this catches both spellings of "no such object".
         raise FileObjectNotFoundError(file_key) from exc
     return int(head.content_length)
 
@@ -296,7 +378,9 @@ def delete(policy: UploadPolicy, file_key: str) -> None:
 
 
 def generate_download_url(
-    policy: UploadPolicy, file_key: str, filename: str,
+    policy: UploadPolicy,
+    file_key: str,
+    filename: str,
 ) -> tuple[str, int]:
     """Presigned GET URL with Content-Disposition for browser save-as.
 
@@ -342,17 +426,16 @@ def generate_inline_url(policy: UploadPolicy, file_key: str) -> tuple[str, int]:
     disposition. Falls back to the default endpoint when unset (the URL
     then downloads, but nothing breaks).
 
-    Raises :class:`InlinePreviewNotAllowedError` for a scriptable type
-    (``.svg``): serving it inline on the document origin would be stored
-    XSS. The single choke point for both the session and share preview
-    endpoints, so neither can mint an inline URL for one.
+    Raises :class:`InlinePreviewNotAllowedError` for anything outside
+    ``_INLINE_ALLOWED_EXTENSIONS`` — serving an unvetted type inline on the
+    document origin would be stored XSS. The single choke point for both
+    the session and share preview endpoints, so neither can mint an inline
+    URL for one.
     """
     ext = os.path.splitext(file_key)[1].lower()
-    if ext in _INLINE_FORBIDDEN_EXTENSIONS:
+    if ext not in _INLINE_ALLOWED_EXTENSIONS:
         raise InlinePreviewNotAllowedError(ext)
-    url = get_bucket(
-        policy.bucket_name, cname_domain=settings.oss_document_domain
-    ).sign_url(
+    url = get_bucket(policy.bucket_name, cname_domain=settings.oss_document_domain).sign_url(
         "GET",
         file_key,
         expires=_DOWNLOAD_URL_TTL_SECONDS,

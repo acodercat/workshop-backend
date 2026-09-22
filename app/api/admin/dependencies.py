@@ -34,8 +34,8 @@ async def _authenticated_context(
 
 
 StaffContext = Annotated[AdminContext, Depends(_authenticated_context)]
-"""A signed-in, active operator plus the session and request metadata
-their actions are recorded against. The only way into an admin endpoint."""
+"""A signed-in, active operator plus the session their writes run in. The
+only way into an admin endpoint."""
 
 
 def caller_ip(request: Request) -> str | None:

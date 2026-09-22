@@ -41,9 +41,7 @@ def _resolve_mime(content_type: str | None, filename: str) -> str | None:
     if content_type and content_type != "application/octet-stream":
         return content_type
     ext = os.path.splitext(filename)[1].lower()
-    return SESSION_FILE_POLICY.allowed_types.get(ext) or mimetypes.guess_type(
-        filename
-    )[0]
+    return SESSION_FILE_POLICY.allowed_types.get(ext) or mimetypes.guess_type(filename)[0]
 
 
 async def main() -> None:

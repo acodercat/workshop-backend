@@ -29,9 +29,7 @@ async def main(args: argparse.Namespace) -> int:
     amount_micro = micro_from_credits(args.credits)
 
     async with AsyncSessionLocal() as db:
-        user_ids = list(
-            (await db.execute(text('SELECT id FROM "user" ORDER BY id'))).scalars()
-        )
+        user_ids = list((await db.execute(text('SELECT id FROM "user" ORDER BY id'))).scalars())
 
     total = len(user_ids)
     print(f"bulk top-up: {total} users, +{args.credits} credits each, tag={args.tag}")
@@ -51,8 +49,7 @@ async def main(args: argparse.Namespace) -> int:
                 balance_micro = await credits.get_balance(db, user_id)
                 granted += 1
                 print(
-                    f"  ok    user_id={user_id} "
-                    f"balance={credits_from_micro(balance_micro)} credits"
+                    f"  ok    user_id={user_id} balance={credits_from_micro(balance_micro)} credits"
                 )
             except TopupAlreadyApplied:
                 already += 1
@@ -61,25 +58,27 @@ async def main(args: argparse.Namespace) -> int:
                 failed += 1
                 print(f"  FAIL  user_id={user_id} ({exc!r})")
 
-    print(
-        f"done: granted={granted} already={already} failed={failed} total={total}"
-    )
+    print(f"done: granted={granted} already={already} failed={failed} total={total}")
     return 1 if failed else 0
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
-        "--credits", type=int, required=True,
+        "--credits",
+        type=int,
+        required=True,
         help="Whole credits to add to every user. Must be positive.",
     )
     parser.add_argument(
-        "--tag", required=True,
+        "--tag",
+        required=True,
         help="Batch tag baked into the per-user idempotency key. "
-             "Reuse the same tag to safely resume; change it for a new round.",
+        "Reuse the same tag to safely resume; change it for a new round.",
     )
     parser.add_argument(
-        "--reason", required=True,
+        "--reason",
+        required=True,
         help="Audited on every ledger row.",
     )
     args = parser.parse_args()

@@ -8,7 +8,7 @@ auto-creating. The endpoint is a thin adapter over :func:`login_by_code`.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 from sqlalchemy import select
@@ -41,13 +41,9 @@ async def login_by_code(
     """
     # Peek mode — validates the code, increments attempts on mismatch
     # (brute-force stays rate-limited), but doesn't delete on success.
-    await verify_verification_code(
-        redis, identifier=identifier, code=code, consume=False
-    )
+    await verify_verification_code(redis, identifier=identifier, code=code, consume=False)
 
-    existing = (
-        await db.execute(select(User).where(User.email == identifier))
-    ).scalar_one_or_none()
+    existing = (await db.execute(select(User).where(User.email == identifier))).scalar_one_or_none()
     if existing is None:
         raise NotRegisteredError("No account for this identifier")
 
@@ -56,11 +52,9 @@ async def login_by_code(
     # Existing ACTIVE user: consume the code now and issue the JWT. If the
     # code vanished between the peek and now, ``verify_verification_code``
     # raises ``InvalidVerificationCodeError`` for the global handler.
-    await verify_verification_code(
-        redis, identifier=identifier, code=code, consume=True
-    )
+    await verify_verification_code(redis, identifier=identifier, code=code, consume=True)
 
-    existing.last_login_at = datetime.now(timezone.utc)
+    existing.last_login_at = datetime.now(UTC)
     access_token = create_access_token(
         data={"sub": existing.username, "token_version": existing.token_version},
     )

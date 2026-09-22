@@ -4,7 +4,7 @@
 #  - uvicorn (web)        — the request/SSE tier on :PORT.
 #  - background (process) — the backend's background-jobs process
 #                           (``python -m app.workers.run``): credit-settle
-#                           sweeper + subscriber, plus the payment reconciler.
+#                           sweeper + subscriber, plus the schedule dispatcher.
 #
 # Top-level commands act on BOTH siblings, so one command manages the whole
 # backend. ``deploy.sh background SUBCMD`` is the escape hatch that drives the
@@ -70,9 +70,10 @@ BACKGROUND_LOG="$LOG_DIR/background.log"
 BACKGROUND_PATTERN='app\.workers\.run'
 
 # Health-check budget: total seconds we wait for the new uvicorn to
-# bind the port. Covers ``uv`` re-resolving the lockfile + uvicorn's
-# own startup. Polled at 1s — fine-grained enough for a manual deploy,
-# integer-only so we don't depend on ``bc``.
+# bind the port. Covers uvicorn's own startup and nothing else — the
+# start commands run ``uv run --no-sync``, so no resolution or install
+# happens inside this window. Polled at 1s — fine-grained enough for a
+# manual deploy, integer-only so we don't depend on ``bc``.
 HEALTH_TIMEOUT_SECONDS=10
 
 # Graceful-shutdown budget: seconds we wait for SIGTERM'd workers to
@@ -108,7 +109,7 @@ cmd_start() {
     return 0
   fi
   log "starting uvicorn on :$PORT (workers=$WORKERS)"
-  nohup uv run uvicorn app.public_main:app \
+  nohup uv run --no-sync uvicorn app.public_main:app \
     --host 0.0.0.0 \
     --port "$PORT" \
     --workers "$WORKERS" \
@@ -168,7 +169,7 @@ cmd_background_start() {
     return 0
   fi
   log "starting background process"
-  nohup uv run python -m app.workers.run \
+  nohup uv run --no-sync python -m app.workers.run \
     >> "$BACKGROUND_LOG" 2>&1 &
   disown
 
@@ -275,11 +276,34 @@ cmd_deploy() {
   # through the same combined helpers the top-level commands use — web
   # fail-hard, background best-effort (a background startup hiccup must
   # not block the web deploy).
+  # Pre-flight the lockfile *before* anything stops. ``--locked`` below turns
+  # a stale uv.lock into a hard failure, and under ``set -e`` that failure
+  # after ``cmd_stop_all`` would leave both services down with no path back
+  # up — an outage from the one deploy error that is purely a bookkeeping
+  # mistake and costs nothing to catch early. ``uv lock --check`` reads and
+  # asserts; it installs nothing, so it is safe to run against a live box.
+  log "checking uv.lock"
+  uv lock --check
   cmd_stop_all
+  # ``--locked`` asserts uv.lock matches pyproject.toml rather than quietly
+  # re-resolving on a production box — a lockfile somebody forgot to commit
+  # should fail the deploy, not become whatever resolves today. It is checked
+  # twice on purpose: once above where a failure is free, and again here as
+  # the flag that governs the install itself.
+  #
+  # ``--no-dev``: production needs the app's dependencies, not the test and
+  # lint tooling. Without it a deploy also downloads ruff and mypy, which is
+  # tens of megabytes of nothing this box runs — and long enough that the
+  # start below can time out waiting for a port that is still being unpacked.
+  #
+  # The start commands then use ``--no-sync``, not ``--no-dev``: ``uv run``
+  # syncs before executing unless told not to, and a start that installs is
+  # a start that can change what is installed. Installing is this step's
+  # job; ``start`` runs what it left.
   log "uv sync"
-  uv sync --quiet
+  uv sync --locked --no-dev --quiet
   log "alembic upgrade head"
-  uv run alembic upgrade head
+  uv run --no-sync alembic upgrade head
   cmd_start_all
 }
 

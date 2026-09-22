@@ -12,6 +12,19 @@ locales of display text do not need.
 
 The skills catalog reached this shape first (``skill_i18n``, which now spells
 its domain in terms of this module); the Connector catalog uses it too.
+
+**Editing the canonical column invalidates the map.** :func:`resolve` reads the
+map's default-locale entry *before* falling back to the column, so a map left
+behind shadows the new text for every locale — not only the ones it lists. Any
+write path that changes a canonical column must therefore clear its map in the
+same breath. It is a rule rather than a helper because the sites that apply it
+differ in mechanism: ``api/public/skill.py`` builds a dict for one UPDATE,
+``api/admin/skill.py`` assigns on the ORM row, ``api/admin/connector.py``
+does that and records the discarded map in its audit payload, and
+``api/admin/category.py::_name_fields`` is the one that can *keep* a map —
+the category console can show and edit the translations, so a rename that
+supplies new ones replaces rather than discards. What they share is the
+reason, which is written here so none of them has to re-derive it.
 """
 
 from __future__ import annotations
@@ -38,9 +51,7 @@ def resolve(default: str, i18n: dict[str, str] | None, locale: str) -> str:
     return default
 
 
-def resolve_optional(
-    default: str | None, i18n: dict[str, str] | None, locale: str
-) -> str | None:
+def resolve_optional(default: str | None, i18n: dict[str, str] | None, locale: str) -> str | None:
     """:func:`resolve` for a column that may itself be NULL — a description
     nobody wrote stays absent rather than becoming an empty string."""
     if default is None and not i18n:

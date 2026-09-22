@@ -6,10 +6,6 @@ there is no per-turn budget left to ration. What remains is the join
 every read of that answer goes through — easy to get subtly wrong, and
 wrong in a way that reads as plausible: a join missing its ``user_id``
 predicate would show one user another's choices.
-
-What the agent may invoke — which needs the ``SYSTEM`` exemption this
-side never does — is pinned in the shared worker's
-``test_skill_repository``.
 """
 
 from sqlalchemy import select
@@ -29,12 +25,7 @@ def _join_sql(user_id: int) -> str:
         .select_from(Skill)
         .outerjoin(UserSkillPreference, preference_join(user_id))
     )
-    return str(
-        stmt.compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
+    return str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
 
 
 class TestPreferenceJoin:

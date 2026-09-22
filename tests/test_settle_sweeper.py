@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy.dialects import postgresql
@@ -46,7 +46,7 @@ async def test_list_candidates_filters_before_limit() -> None:
 # ── _process_one routes on the FRESH status, not the candidate snapshot ──
 
 
-_PAST = datetime(2000, 1, 1, tzinfo=timezone.utc)  # always < now() → "expired"
+_PAST = datetime(2000, 1, 1, tzinfo=UTC)  # always < now() → "expired"
 
 
 class _FakeDb:
@@ -114,7 +114,9 @@ async def test_process_one_refunds_expired_dead_worker(monkeypatch) -> None:
     # refund.
     session_id = uuid4()
     calls = _patch_process_one(
-        monkeypatch, live_status=SessionStatus.RUNNING, fail_returns=True,
+        monkeypatch,
+        live_status=SessionStatus.RUNNING,
+        fail_returns=True,
     )
 
     touched = await settle_sweeper._process_one((2, session_id, _PAST))
@@ -130,7 +132,9 @@ async def test_process_one_leaves_open_when_worker_still_alive(monkeypatch) -> N
     # (fail_abandoned_turn → False) → no refund, left OPEN.
     session_id = uuid4()
     calls = _patch_process_one(
-        monkeypatch, live_status=SessionStatus.RUNNING, fail_returns=False,
+        monkeypatch,
+        live_status=SessionStatus.RUNNING,
+        fail_returns=False,
     )
 
     touched = await settle_sweeper._process_one((3, session_id, _PAST))
