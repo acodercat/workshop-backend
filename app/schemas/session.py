@@ -173,8 +173,23 @@ class SessionDetailResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     messages: list[MessageResponse]
+    # Older messages exist above ``messages[0]``. Always False unless the
+    # caller asked for a page: without ``turn_limit`` the payload is the
+    # whole history and there is nothing above it.
+    has_more_messages: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class MessagePageResponse(BaseModel):
+    """One page of older messages, for scrolling back through a session.
+
+    Same row shape as the detail payload so the client folds both through
+    one path; ``has_more_messages`` reports whether the scroll can go
+    further still."""
+
+    messages: list[MessageResponse]
+    has_more_messages: bool
 
 
 class TitleGenerateRequest(BaseModel):
