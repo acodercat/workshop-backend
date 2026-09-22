@@ -282,12 +282,60 @@ class InvalidConnectorUrlError(AppError):
 
 
 class ConnectorUnreachableError(AppError):
-    """Couldn't complete the MCP handshake with the remote server (connect /
-    initialize / list-tools failed or timed out, or auth was rejected). 502 —
-    reads as an upstream failure the user can retry after fixing the server."""
+    """Couldn't complete the MCP handshake with the remote server. 502 — reads
+    as an upstream failure the user can retry after fixing the server.
+
+    The catch-all of a small family: the subclasses below name the failures a
+    user would *do something different* about, and this one keeps the rest
+    (timed out, DNS, connection refused). Splitting by remedy rather than by
+    cause is deliberate — every one of these used to arrive as this single
+    type, so the UI had one sentence for all of them and a report of "it says
+    it cannot connect" was unactionable.
+
+    Subclasses, not siblings, so the several ``except
+    ConnectorUnreachableError`` sites keep catching the whole family without
+    being told about each new member.
+    """
 
     status_code = status.HTTP_502_BAD_GATEWAY
     error_type = "connector_unreachable"
+
+
+class ConnectorTlsFailedError(ConnectorUnreachableError):
+    """TLS would not verify. Its own type because the remedy is unlike every
+    other connection failure: the address and the port are right, and what has
+    to change is a certificate — typically one that is self-signed, or issued
+    by an authority this host does not trust."""
+
+    error_type = "connector_tls_failed"
+
+
+class ConnectorAuthRejectedError(ConnectorUnreachableError):
+    """The server answered 401/403. The one failure here the user fixes by
+    editing a credential rather than an address, which is why the generic
+    wording used to name both and help with neither."""
+
+    error_type = "connector_auth_rejected"
+
+
+class ConnectorHttpStatusError(ConnectorUnreachableError):
+    """The server answered HTTP, but not successfully (404, 500, …).
+
+    Distinct from being unreachable because something *is* listening and did
+    reply — so the network and the port are fine, and the next move is the
+    path or the server itself. The status is in ``message``, which reaches the
+    log rather than the UI."""
+
+    error_type = "connector_http_error"
+
+
+class ConnectorNotMcpEndpointError(ConnectorUnreachableError):
+    """The server answered, but not with MCP — usually the legacy ``/sse``
+    path rather than the Streamable HTTP endpoint. Only raised before the
+    session opens; after that the endpoint has proved itself and a parse
+    failure is the server misbehaving mid-catalogue."""
+
+    error_type = "connector_not_mcp_endpoint"
 
 
 class ConnectorUrlConflictError(AppError):

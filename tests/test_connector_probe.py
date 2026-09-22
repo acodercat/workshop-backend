@@ -4,11 +4,40 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from anyio import EndOfStream
+from mcp.types import INTERNAL_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND
 
-from app.errors import ConnectorUnreachableError, InvalidConnectorUrlError
+from app.errors import (
+    ConnectorAuthRejectedError,
+    ConnectorHttpStatusError,
+    ConnectorNotMcpEndpointError,
+    ConnectorTlsFailedError,
+    ConnectorUnreachableError,
+    InvalidConnectorUrlError,
+)
 from app.models.mcp_server import MCPServerAuthType
 from app.services.mcp import probe as probe_mod
-from app.services.mcp.probe import build_auth_headers, probe
+from app.services.mcp.probe import _describe, _unreachable, build_auth_headers, probe
+
+
+def _mcp_error(code: int, message: str) -> BaseException:
+    """A failure shaped the way the SDK delivers a non-MCP answer: not an HTTP
+    exception, but an MCP-level error raised by the session."""
+    from mcp.shared.exceptions import MCPError
+
+    return ExceptionGroup("g", [MCPError(code=code, message=message)])
+
+
+def _with_status(status_code: int) -> BaseException:
+    """A failure carrying an HTTP response, shaped the way httpx's is."""
+
+    class _Response:
+        def __init__(self, code: int) -> None:
+            self.status_code = code
+
+    error = RuntimeError(f"Server returned {status_code}")
+    error.response = _Response(status_code)  # type: ignore[attr-defined]
+    return ExceptionGroup("g", [error])
 
 
 class TestBuildAuthHeaders:
@@ -147,6 +176,236 @@ class TestProbe:
         monkeypatch.setattr(probe_mod, "streamable_http_client", boom)
         with pytest.raises(ConnectorUnreachableError):
             await probe("https://mcp.example.com/x", MCPServerAuthType.NONE, None)
+
+
+class TestTheFailureSaysWhatFailed:
+    """anyio runs the SDK's transport in a task group, so every failure inside
+    it used to reach the user as ``str(ExceptionGroup)`` — "unhandled errors in
+    a TaskGroup (1 sub-exception)" — identically for a rejected credential, a
+    timeout, and a server that is not MCP at all. A real report of the last one
+    was unreadable because of it."""
+
+    def test_a_group_reports_its_leaf_not_the_group(self):
+        leaf = RuntimeError("All connection attempts failed")
+        group = ExceptionGroup("unhandled errors in a TaskGroup", [leaf])
+        assert _describe(group) == "All connection attempts failed"
+
+    def test_nested_groups_are_flattened(self):
+        # The SDK wraps twice: a group inside a group is what the real trace had.
+        leaf = RuntimeError("Server returned an error response")
+        nested = ExceptionGroup("outer", [ExceptionGroup("inner", [leaf])])
+        assert _describe(nested) == "Server returned an error response"
+
+    def test_a_cause_chain_is_followed(self):
+        inner = RuntimeError("the real reason")
+        outer = RuntimeError("")
+        outer.__cause__ = inner
+        assert _describe(ExceptionGroup("g", [outer])) == "the real reason"
+
+    def test_only_the_first_line_survives(self):
+        # A pydantic ValidationError is eleven stanzas naming every member of
+        # the JSON-RPC union; none of them says more than the first line.
+        leaf = RuntimeError(
+            "Failed to parse JSON response: 11 validation errors\nJSONRPC.jsonrpc\n  ..."
+        )
+        assert _describe(leaf) == "Failed to parse JSON response: 11 validation errors"
+
+    def test_a_self_referential_context_terminates(self):
+        # The message has to be empty, or ``_describe`` returns on this leaf
+        # before the cycle is ever walked and the guard goes untested.
+        exc = RuntimeError("")
+        exc.__context__ = exc
+        assert _describe(exc) == "RuntimeError"
+
+    def test_a_leaf_with_no_message_falls_back_to_its_type(self):
+        # anyio's stream exceptions all stringify to "" and this transport
+        # traffics in them; returning str() of the group for those put the
+        # TaskGroup sentence straight back.
+        group = ExceptionGroup("unhandled errors in a TaskGroup", [EndOfStream()])
+        assert _describe(group) == "EndOfStream"
+
+    def test_a_group_context_is_followed(self):
+        # Raising a group from __aexit__ while another exception is in flight
+        # leaves that one in the group's __context__.
+        group = ExceptionGroup("g", [EndOfStream()])
+        group.__context__ = RuntimeError("the real reason")
+        assert _describe(group) == "the real reason"
+
+    def test_siblings_are_preferred_over_contexts(self):
+        # Breadth-first: an unrelated in-flight exception must not outrank a
+        # direct member that has something to say.
+        sibling = RuntimeError("what actually failed")
+        group = ExceptionGroup("g", [sibling])
+        group.__context__ = RuntimeError("unrelated, merely in flight")
+        assert _describe(group) == "what actually failed"
+
+    def test_a_non_mcp_answer_names_the_endpoint_to_check(self):
+        # The reported failure: the server answered 200 with its own
+        # {"code":404,"msg":"请求地址不存在:sse"} envelope, which is not JSON-RPC.
+        group = ExceptionGroup(
+            "g", [RuntimeError("Failed to parse JSON response: ...")]
+        )
+        error = _unreachable(group, handshook=False)
+        assert "/mcp" in str(error)
+        assert "/sse" in str(error)
+
+    def test_the_endpoint_hint_stops_once_the_session_is_open(self):
+        # Same failure, but during tools/list: the endpoint already proved it
+        # speaks Streamable HTTP, so telling the user to change the URL would
+        # send them the wrong way.
+        group = ExceptionGroup(
+            "g", [RuntimeError("Failed to parse JSON response: ...")]
+        )
+        error = _unreachable(group, handshook=True)
+        assert "/mcp" not in str(error)
+        assert str(error).startswith("Could not reach the MCP server:")
+
+    def test_tls_failure_is_its_own_type(self):
+        # The address and the port are right; a certificate has to change.
+        # The generic "check the URL and authentication" sends people to look
+        # at the two things that are not the problem.
+        #
+        # Nested the way it actually arrives — the transport raises its own
+        # connect error and the SSL failure is its ``__cause__``, inside the
+        # anyio group. A bare leaf would pass without proving the classifier
+        # reaches through the cause chain, which is the only thing that makes
+        # this branch fire in production.
+        import ssl
+
+        connect_error = RuntimeError("All connection attempts failed")
+        connect_error.__cause__ = ssl.SSLCertVerificationError(
+            "self signed certificate"
+        )
+        error = _unreachable(ExceptionGroup("g", [connect_error]), handshook=False)
+        assert isinstance(error, ConnectorTlsFailedError)
+        assert error.error_type == "connector_tls_failed"
+
+    def test_a_rejected_credential_is_not_a_connection_problem(self):
+        # 401/403 is the one failure here fixed by editing a credential rather
+        # than an address.
+        for status_code in (401, 403):
+            error = _unreachable(_with_status(status_code), handshook=False)
+            assert isinstance(error, ConnectorAuthRejectedError)
+            assert str(status_code) in str(error)
+
+    def test_a_refused_status_outranks_the_sdk_stand_in(self):
+        # How a 401 actually arrives: the transport does not raise for it, it
+        # answers with INTERNAL_ERROR and the sentence "Server returned an
+        # error response" — the same thing a 500 produces, status dropped.
+        # Without the status recorded off the wire, a wrong key reads as a
+        # broken server and the advice is to go check the address.
+        for status_code in (401, 403):
+            error = _unreachable(
+                _mcp_error(INTERNAL_ERROR, "Server returned an error response"),
+                handshook=False,
+                refused=[status_code],
+            )
+            assert isinstance(error, ConnectorAuthRejectedError)
+            assert str(status_code) in str(error)
+
+    def test_a_refused_5xx_is_still_the_server_failing(self):
+        error = _unreachable(
+            _mcp_error(INTERNAL_ERROR, "Server returned an error response"),
+            handshook=False,
+            refused=[500],
+        )
+        assert isinstance(error, ConnectorHttpStatusError)
+
+    def test_an_http_error_says_something_answered(self):
+        # Something is listening and did reply, so the network and the port are
+        # fine — which is the opposite of what "unreachable" tells the user.
+        error = _unreachable(_with_status(404), handshook=False)
+        assert isinstance(error, ConnectorHttpStatusError)
+        assert "404" in str(error)
+
+    def test_a_non_mcp_answer_has_its_own_type(self):
+        group = ExceptionGroup(
+            "g", [RuntimeError("Failed to parse JSON response: ...")]
+        )
+        assert isinstance(
+            _unreachable(group, handshook=False), ConnectorNotMcpEndpointError
+        )
+
+    def test_a_server_that_answers_html_is_a_wrong_endpoint(self):
+        # The reported case: a reachable address without its /mcp suffix. The
+        # transport raises nothing for it — it turns the answer into a JSON-RPC
+        # error and the session raises *that* — so none of the HTTP-exception
+        # checks see it, and it arrived as the generic "cannot connect" while
+        # the fix was one word in the URL.
+        error = _unreachable(
+            _mcp_error(INVALID_REQUEST, "Unexpected content type: text/html"),
+            handshook=False,
+        )
+        assert isinstance(error, ConnectorNotMcpEndpointError)
+        assert "/mcp" in str(error)
+
+    def test_a_404_reads_as_a_wrong_endpoint_not_a_server_fault(self):
+        # The SDK spells a 404-with-no-session as METHOD_NOT_FOUND: a gateway
+        # or a web root that never heard of this method. Matched on the code,
+        # which is the protocol's, rather than on the SDK's wording.
+        error = _unreachable(_mcp_error(METHOD_NOT_FOUND, "Not Found"), handshook=False)
+        assert isinstance(error, ConnectorNotMcpEndpointError)
+
+    def test_a_server_error_stays_a_server_error(self):
+        error = _unreachable(
+            _mcp_error(INTERNAL_ERROR, "Server returned an error response"),
+            handshook=False,
+        )
+        assert isinstance(error, ConnectorHttpStatusError)
+
+    def test_the_same_codes_after_the_handshake_are_not_a_wrong_endpoint(self):
+        # Once the session is open the endpoint has proved it speaks Streamable
+        # HTTP; the same codes then mean a server misbehaving mid-catalogue, and
+        # sending the user to edit a correct URL is the wrong advice.
+        for code, message in (
+            (INVALID_REQUEST, "Unexpected content type: text/html"),
+            (METHOD_NOT_FOUND, "Not Found"),
+            (INTERNAL_ERROR, "Server returned an error response"),
+        ):
+            error = _unreachable(_mcp_error(code, message), handshook=True)
+            assert type(error) is ConnectorUnreachableError
+
+    def test_every_subclass_is_still_caught_as_unreachable(self):
+        # ``example_drafts`` and the probe's own re-raise catch the base class.
+        # Siblings rather than subclasses would have slipped past both.
+        import ssl
+
+        for exc in (
+            ExceptionGroup("g", [ssl.SSLError("x")]),
+            _with_status(401),
+            _with_status(500),
+            ExceptionGroup("g", [RuntimeError("Failed to parse JSON response")]),
+        ):
+            assert isinstance(
+                _unreachable(exc, handshook=False), ConnectorUnreachableError
+            )
+
+    def test_the_raw_detail_reaches_the_log(self, caplog):
+        # The client is shown a sentence built from the error *type* and never
+        # this string, so without the log line the only description of what
+        # actually happened is discarded at the browser.
+        with caplog.at_level("WARNING"):
+            _unreachable(
+                ExceptionGroup("g", [RuntimeError("connection refused")]),
+                handshook=False,
+            )
+        assert "connection refused" in caplog.text
+        assert "connector_unreachable" in caplog.text
+
+    def test_other_failures_keep_the_plain_wording(self):
+        error = _unreachable(
+            ExceptionGroup("g", [RuntimeError("timed out")]), handshook=False
+        )
+        assert str(error) == "Could not reach the MCP server: timed out"
+
+    def test_no_failure_ever_reports_an_empty_reason(self):
+        # A dangling "Could not reach the MCP server: " is the same unusable
+        # message in a different costume.
+        for exc in (RuntimeError(""), ExceptionGroup("g", [EndOfStream()])):
+            assert (
+                str(_unreachable(exc, handshook=False)).strip().endswith((":",))
+                is False
+            )
 
 
 class TestServerIcons:
@@ -395,8 +654,13 @@ async def _fake_transport(*args, **kwargs):
 
 @asynccontextmanager
 async def _fake_http_client(*args, **kwargs):
-    """The guarded client ``probe`` now builds and owns itself."""
-    yield SimpleNamespace()
+    """The guarded client ``probe`` now builds and owns itself.
+
+    ``event_hooks`` because the real one has it and ``probe`` appends its
+    refused-status recorder to it — a fake missing the attribute fails every
+    probe with an ``AttributeError`` dressed up as an unreachable server.
+    """
+    yield SimpleNamespace(event_hooks={"request": [], "response": []})
 
 
 def _install(monkeypatch, session):
