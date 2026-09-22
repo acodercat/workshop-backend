@@ -71,6 +71,7 @@ from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
 from app.schemas.session import (
     CancelAcceptedResponse,
     MessageCreate,
+    MessagePageResponse,
     MessageQueuedResponse,
     MessageResponse,
     SessionCreate,
@@ -108,6 +109,16 @@ from app.services.session.files import assert_file_belongs_to_session
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+#: Most turns one scroll-back request may ask for. A page is the next
+#: screenful, and an unbounded one hands back the whole-history payload that
+#: paging exists to avoid.
+MAX_TURN_LIMIT = 50
+
+#: Turns a scroll-back page carries when the caller does not say. Larger than
+#: the handful a session opens on: by the time someone is scrolling back they
+#: are looking for something, and one exchange per request is a grind.
+DEFAULT_HISTORY_TURNS = 5
 
 router = APIRouter(tags=["sessions"])
 
@@ -164,19 +175,83 @@ async def _owned_connector_or_404(db: AsyncSession, connector_id: int, user_id: 
         raise HTTPException(status_code=404, detail="Connector not found")
 
 
+async def _turn_start_id(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    turn_limit: int,
+    before: int | None,
+) -> int | None:
+    """Id of the USER message that opens the oldest turn of a page.
+
+    A turn is a USER message plus every ASSISTANT message answering it, so
+    the page boundary is the ``turn_limit``-th USER row counting back from
+    ``before`` (or from the end). ``None`` means the session does not have
+    that many turns left and the page therefore runs to its start.
+
+    Paging by turn rather than by row is what keeps a page from opening on
+    half an answer: a row-counted window lands mid-turn as often as not,
+    and the question that produced the visible reply is then the first thing
+    the reader has to go fetch.
+
+    Ordered by id alone though the detail sort is ``(created_at, id)``. The
+    two agree — ids are handed out in insert order and ``created_at`` is
+    transaction-scoped, which is exactly why id is already the tiebreaker —
+    and only a single scalar can serve as a cursor.
+    """
+    stmt = (
+        select(Message.id)
+        .where(Message.session_id == session_id, Message.role == MessageRole.USER)
+        .order_by(Message.id.desc())
+        .limit(1)
+        .offset(turn_limit - 1)
+    )
+    if before is not None:
+        stmt = stmt.where(Message.id < before)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _has_messages_before(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    message_id: int,
+) -> bool:
+    stmt = (
+        select(Message.id).where(Message.session_id == session_id, Message.id < message_id).limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none() is not None
+
+
 async def _load_messages(
     db: AsyncSession,
     session_id: uuid.UUID,
     user_id: int,
-) -> list[MessageResponse]:
+    *,
+    turn_limit: int | None = None,
+    before: int | None = None,
+) -> tuple[list[MessageResponse], bool]:
     """Load a session's messages, projected into the response shape.
+
+    Returns the rows and whether older ones exist above them.
 
     LEFT JOINs ``message_feedback`` filtered by ``user_id`` so each
     message ships with the current user's feedback (or ``None`` if
     they haven't voted). The filter goes *into* the join condition,
     not a WHERE clause — otherwise messages without a feedback row
     would be dropped from the result.
+
+    ``turn_limit`` is opt-in and absent means the whole history, which is
+    what every client got before paging existed and what the ones that have
+    not asked for it still get.
     """
+    start_id: int | None = None
+    if turn_limit is not None:
+        start_id = await _turn_start_id(db, session_id, turn_limit, before)
+        # Fewer turns left than asked for: the page runs to the start of the
+        # session. Assistant rows preceding the first USER row come with it —
+        # they belong to no turn and would otherwise be unreachable.
+        if start_id is None and before is None:
+            turn_limit = None
+
     stmt = (
         select(Message, MessageFeedback)
         .outerjoin(
@@ -192,8 +267,13 @@ async def _load_messages(
         # share a ``created_at`` — id breaks the tie in insert order.
         .order_by(Message.created_at.asc(), Message.id.asc())
     )
+    if start_id is not None:
+        stmt = stmt.where(Message.id >= start_id)
+    if before is not None:
+        stmt = stmt.where(Message.id < before)
+
     rows = (await db.execute(stmt)).all()
-    return [
+    messages = [
         MessageResponse(
             id=message.id,
             role=message.role.value,
@@ -203,6 +283,12 @@ async def _load_messages(
         )
         for message, feedback in rows
     ]
+    has_more = (
+        await _has_messages_before(db, session_id, messages[0].id)
+        if messages and (start_id is not None or before is not None)
+        else False
+    )
+    return messages, has_more
 
 
 @router.post("/sessions", status_code=status.HTTP_201_CREATED)
@@ -498,21 +584,56 @@ async def list_sites(
     )
 
 
-@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
-async def get_session(
+@router.get("/sessions/{session_id}/history", response_model=MessagePageResponse)
+async def get_session_history(
     session_id: uuid.UUID,
+    before: Annotated[int, Query(gt=0)],
+    turn_limit: Annotated[int, Query(ge=1, le=MAX_TURN_LIMIT)] = DEFAULT_HISTORY_TURNS,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
-    """Return the full session payload: metadata + status + structured messages.
+    """Return the ``turn_limit`` turns immediately before message ``before``.
+
+    The scroll-back half of ``GET /sessions/{id}?turn_limit=…``: that one
+    opens a session on its last turns, this one walks further up. Ownership
+    is re-checked per page — the cursor is client-supplied and names nothing
+    the caller has been shown to own.
+
+    Not ``/messages``: that path is held by the deprecated whole-list route
+    below, and two GETs on one path resolve by registration order rather than
+    by intent — the loser disappears from the API with nothing to say so.
+    """
+    await _get_or_404(db, session_id, current_user.id)
+    messages, has_more = await _load_messages(
+        db, session_id, current_user.id, turn_limit=turn_limit, before=before
+    )
+    return MessagePageResponse(messages=messages, has_more_messages=has_more)
+
+
+@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
+async def get_session(
+    session_id: uuid.UUID,
+    turn_limit: Annotated[int | None, Query(ge=1, le=MAX_TURN_LIMIT)] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Return the session payload: metadata + status + structured messages.
 
     Single endpoint the frontend uses to render a session on open. If the
     response's ``status == "RUNNING"``, the client should additionally
     open ``/sessions/{id}/stream`` to watch the in-flight turn; otherwise
     the detail response is complete on its own.
+
+    ``turn_limit`` returns only that many trailing turns, for sessions long
+    enough that shipping the whole transcript to paint the last exchange is
+    the wrong trade; ``has_more_messages`` then says whether
+    ``GET /sessions/{id}/history`` has more above. Omitting it returns the
+    whole history, which is what callers that have not adopted paging get.
     """
     session = await _get_or_404(db, session_id, current_user.id)
-    messages = await _load_messages(db, session_id, current_user.id)
+    messages, has_more = await _load_messages(
+        db, session_id, current_user.id, turn_limit=turn_limit
+    )
     return SessionDetailResponse(
         id=session.id,
         title=session.title,
@@ -523,6 +644,7 @@ async def get_session(
         created_at=session.created_at,
         updated_at=session.updated_at,
         messages=messages,
+        has_more_messages=has_more,
     )
 
 
@@ -823,9 +945,11 @@ async def list_messages(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
-    """Deprecated — use ``GET /sessions/{id}`` for the structured payload."""
+    """Deprecated — use ``GET /sessions/{id}`` for the structured payload,
+    or ``GET /sessions/{id}/history`` to page back through a long one."""
     await _get_or_404(db, session_id, current_user.id)
-    return await _load_messages(db, session_id, current_user.id)
+    messages, _ = await _load_messages(db, session_id, current_user.id)
+    return messages
 
 
 @router.post("/sessions/titles", response_model=TitleGenerateResponse)
