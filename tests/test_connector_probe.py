@@ -232,9 +232,7 @@ class TestTheFailureSaysWhatFailed:
     def test_a_non_mcp_answer_names_the_endpoint_to_check(self):
         # The reported failure: the server answered 200 with its own
         # {"code":404,"msg":"请求地址不存在:sse"} envelope, which is not JSON-RPC.
-        group = ExceptionGroup(
-            "g", [RuntimeError("Failed to parse JSON response: ...")]
-        )
+        group = ExceptionGroup("g", [RuntimeError("Failed to parse JSON response: ...")])
         error = _unreachable(group, handshook=False)
         assert "/mcp" in str(error)
         assert "/sse" in str(error)
@@ -243,9 +241,7 @@ class TestTheFailureSaysWhatFailed:
         # Same failure, but during tools/list: the endpoint already proved it
         # speaks Streamable HTTP, so telling the user to change the URL would
         # send them the wrong way.
-        group = ExceptionGroup(
-            "g", [RuntimeError("Failed to parse JSON response: ...")]
-        )
+        group = ExceptionGroup("g", [RuntimeError("Failed to parse JSON response: ...")])
         error = _unreachable(group, handshook=True)
         assert "/mcp" not in str(error)
         assert str(error).startswith("Could not reach the MCP server:")
@@ -263,9 +259,7 @@ class TestTheFailureSaysWhatFailed:
         import ssl
 
         connect_error = RuntimeError("All connection attempts failed")
-        connect_error.__cause__ = ssl.SSLCertVerificationError(
-            "self signed certificate"
-        )
+        connect_error.__cause__ = ssl.SSLCertVerificationError("self signed certificate")
         error = _unreachable(ExceptionGroup("g", [connect_error]), handshook=False)
         assert isinstance(error, ConnectorTlsFailedError)
         assert error.error_type == "connector_tls_failed"
@@ -309,12 +303,8 @@ class TestTheFailureSaysWhatFailed:
         assert "404" in str(error)
 
     def test_a_non_mcp_answer_has_its_own_type(self):
-        group = ExceptionGroup(
-            "g", [RuntimeError("Failed to parse JSON response: ...")]
-        )
-        assert isinstance(
-            _unreachable(group, handshook=False), ConnectorNotMcpEndpointError
-        )
+        group = ExceptionGroup("g", [RuntimeError("Failed to parse JSON response: ...")])
+        assert isinstance(_unreachable(group, handshook=False), ConnectorNotMcpEndpointError)
 
     def test_a_server_that_answers_html_is_a_wrong_endpoint(self):
         # The reported case: a reachable address without its /mcp suffix. The
@@ -366,9 +356,7 @@ class TestTheFailureSaysWhatFailed:
             _with_status(500),
             ExceptionGroup("g", [RuntimeError("Failed to parse JSON response")]),
         ):
-            assert isinstance(
-                _unreachable(exc, handshook=False), ConnectorUnreachableError
-            )
+            assert isinstance(_unreachable(exc, handshook=False), ConnectorUnreachableError)
 
     def test_the_raw_detail_reaches_the_log(self, caplog):
         # The client is shown a sentence built from the error *type* and never
@@ -383,19 +371,14 @@ class TestTheFailureSaysWhatFailed:
         assert "connector_unreachable" in caplog.text
 
     def test_other_failures_keep_the_plain_wording(self):
-        error = _unreachable(
-            ExceptionGroup("g", [RuntimeError("timed out")]), handshook=False
-        )
+        error = _unreachable(ExceptionGroup("g", [RuntimeError("timed out")]), handshook=False)
         assert str(error) == "Could not reach the MCP server: timed out"
 
     def test_no_failure_ever_reports_an_empty_reason(self):
         # A dangling "Could not reach the MCP server: " is the same unusable
         # message in a different costume.
         for exc in (RuntimeError(""), ExceptionGroup("g", [EndOfStream()])):
-            assert (
-                str(_unreachable(exc, handshook=False)).strip().endswith((":",))
-                is False
-            )
+            assert str(_unreachable(exc, handshook=False)).strip().endswith((":",)) is False
 
 
 class TestServerIcons:

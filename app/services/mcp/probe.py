@@ -352,9 +352,7 @@ def _leaves(exc: BaseException) -> Iterator[BaseException]:
             queue.extend(current.exceptions)
         else:
             yield current
-        queue.extend(
-            e for e in (current.__cause__, current.__context__) if e is not None
-        )
+        queue.extend(e for e in (current.__cause__, current.__context__) if e is not None)
 
 
 def _describe(exc: BaseException) -> str:
@@ -483,13 +481,9 @@ def _classify(
         if mcp_error.code == METHOD_NOT_FOUND or mcp_error.message.lower().startswith(
             _NOT_MCP_CONTENT_TYPE
         ):
-            return ConnectorNotMcpEndpointError(
-                f"{_WRONG_ENDPOINT_HINT} (detail: {detail})"
-            )
+            return ConnectorNotMcpEndpointError(f"{_WRONG_ENDPOINT_HINT} (detail: {detail})")
         if mcp_error.code == INTERNAL_ERROR:
-            return ConnectorHttpStatusError(
-                "The MCP server answered with an error response."
-            )
+            return ConnectorHttpStatusError("The MCP server answered with an error response.")
 
     status_code = _http_status(exc)
     if status_code in (401, 403):
@@ -500,9 +494,7 @@ def _classify(
         return ConnectorHttpStatusError(f"The MCP server answered HTTP {status_code}.")
 
     if not handshook and _NOT_JSONRPC in detail.lower():
-        return ConnectorNotMcpEndpointError(
-            f"{_WRONG_ENDPOINT_HINT} (detail: {detail})"
-        )
+        return ConnectorNotMcpEndpointError(f"{_WRONG_ENDPOINT_HINT} (detail: {detail})")
     return ConnectorUnreachableError(f"Could not reach the MCP server: {detail}")
 
 
