@@ -2,21 +2,31 @@
 
 Used to validate a Connector before saving it (and on re-probe when its URL /
 auth changes). Talks the MCP Streamable HTTP transport via the official ``mcp``
-SDK directly — the backend does not depend on axon. All failures collapse to
-:class:`ConnectorUnreachableError` so the endpoint layer needs no translation.
+SDK directly — the backend does not depend on axon. Failures are raised as
+:class:`ConnectorUnreachableError` or one of its subclasses, so the endpoint
+layer needs no translation.
 """
 
 import asyncio
 import json
 import logging
+import ssl
+from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import httpx2
-from mcp import Client
+from mcp import Client, MCPError
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import Implementation, Tool
+from mcp.types import INTERNAL_ERROR, METHOD_NOT_FOUND, Implementation, Tool
 
-from app.errors import ConnectorUnreachableError
+from app.errors import (
+    ConnectorAuthRejectedError,
+    ConnectorHttpStatusError,
+    ConnectorNotMcpEndpointError,
+    ConnectorTlsFailedError,
+    ConnectorUnreachableError,
+)
 from app.models.mcp_server import MCPServerAuthType
 from app.schemas.mcp_server import MAX_DISABLED_TOOLS, MAX_TOOL_NAME_LEN
 from app.services.mcp.url_guard import guard_public_url, guarded_client
@@ -56,6 +66,28 @@ _MAX_ICON_SRC_LEN = 4096
 # two themes times a few resolutions. Past that it is a server handing us a list
 # to store and re-serialize on every request.
 _MAX_ICONS = 8
+
+# The SDK's wording when a response body will not parse as JSON-RPC. Matched to
+# *add* a sentence, never to decide anything: if a future SDK renames it, the
+# hint disappears and the message stays correct.
+_NOT_JSONRPC = "failed to parse"
+
+# The SDK's wording when a response arrives with a content type that is neither
+# JSON nor an event stream — an HTML page, which is what a web root serves to a
+# URL that forgot its ``/mcp``. Same discipline as ``_NOT_JSONRPC``: matched to
+# refine the error, never to decide anything. A rename costs the refinement and
+# leaves the generic error correct.
+_NOT_MCP_CONTENT_TYPE = "unexpected content type"
+
+# What that failure almost always means here. A server that answers HTTP but
+# not JSON-RPC is usually the wrong path: ``/sse`` belongs to MCP's legacy
+# HTTP+SSE transport, which this client does not speak — it speaks Streamable
+# HTTP, conventionally served at ``/mcp``.
+_WRONG_ENDPOINT_HINT = (
+    "The server answered, but not with MCP. Check the URL points at its "
+    "Streamable HTTP endpoint — commonly one ending in /mcp. The legacy /sse "
+    "transport is not supported."
+)
 
 
 @dataclass(frozen=True)
@@ -183,6 +215,14 @@ async def probe(
         async with asyncio.timeout(_PROBE_TIMEOUT):
             return await _probe(url, auth_type, credential)
     except TimeoutError as exc:
+        # Logged here rather than in ``_unreachable``: the whole-probe deadline
+        # fires outside the try that feeds it, and a timeout that left no trace
+        # in the log is the same dead end as the failures that one exists to
+        # record.
+        logger.warning(
+            "MCP probe failed (%s): probe deadline exceeded",
+            ConnectorUnreachableError.error_type,
+        )
         raise ConnectorUnreachableError("The MCP server took too long to answer.") from exc
 
 
@@ -197,6 +237,24 @@ async def _probe(
     await guard_public_url(url)
     headers = build_auth_headers(auth_type, credential)
 
+    # Set once the session is open, which is what separates "this URL is not an
+    # MCP endpoint" from "this MCP server went wrong later" — see ``_unreachable``.
+    handshook = False
+
+    # The refused statuses, recorded as they go past.
+    #
+    # The SDK does not leave them anywhere else: a non-2xx POST becomes a
+    # JSON-RPC error carrying ``INTERNAL_ERROR`` and the sentence "Server
+    # returned an error response", with the status dropped — so 401 and 500
+    # reach us identically, and "check your credential" and "the server is
+    # broken" are not the same advice. Only ``raise_for_status`` on the SSE
+    # paths preserves one, which the handshake does not take.
+    refused: list[int] = []
+
+    async def _record_refusal(response: httpx2.Response) -> None:
+        if response.status_code >= 400:
+            refused.append(response.status_code)
+
     try:
         # The client is entered *outside* the transport, and the order is not
         # cosmetic: the SDK does not close what it did not open, and it sends a
@@ -209,6 +267,10 @@ async def _probe(
             # the stream-read bound travel together here.
             timeout=httpx2.Timeout(_CONNECT_TIMEOUT, read=_READ_TIMEOUT),
         ) as http_client:
+            # Hooked here rather than in ``guarded_client``: that helper is
+            # shared with the OAuth flow, which has no use for this and should
+            # not grow a parameter for it.
+            http_client.event_hooks["response"].append(_record_refusal)
             # The transport is handed over unentered: ``Client`` takes an async
             # context manager yielding the stream pair and enters it itself.
             async with Client(
@@ -228,6 +290,7 @@ async def _probe(
                 # user's refresh button and the server.
                 cache=None,
             ) as session:
+                handshook = True
                 # Asking a server that never advertised ``tools`` produces
                 # ``-32601``, which this function would report as the server
                 # being unreachable rather than as the absence it is.
@@ -237,8 +300,14 @@ async def _probe(
                     else []
                 )
                 server_info = session.server_info
+    except ConnectorUnreachableError:
+        # Already a sentence about what went wrong — ``_list_all_tools`` raises
+        # these for a repeated cursor or a runaway page count, and re-wrapping
+        # them prefixed "Could not reach" onto a server that was reached,
+        # handshook and paginated.
+        raise
     except Exception as exc:
-        raise ConnectorUnreachableError(f"Could not reach the MCP server: {exc}") from exc
+        raise _unreachable(exc, handshook=handshook, refused=refused) from exc
 
     # ``None`` where v1 always had a value: a 2026-era server stamps its identity
     # optionally, so an anonymous one is named after its URL and shows no
@@ -254,6 +323,177 @@ async def _probe(
         icons=_usable_icons(server_info),
         description=description,
     )
+
+
+def _leaves(exc: BaseException) -> Iterator[BaseException]:
+    """Every non-group exception reachable from *exc*, nearest first.
+
+    Groups are flattened and ``__cause__`` / ``__context__`` followed, because
+    the one that knows what went wrong can be at any of those — including a
+    group's own: raising a group from ``__aexit__`` while another exception is
+    in flight leaves that one in the group's ``__context__``. Cycles are
+    possible — an exception can be its own context after a re-raise — so each
+    is yielded once.
+
+    Breadth-first, and that is the property worth keeping: siblings before
+    contexts, so an unrelated exception that merely happened to be in flight is
+    consulted only after every direct member has had nothing to say.
+    """
+    seen: set[int] = set()
+    queue: deque[BaseException] = deque([exc])
+    while queue:
+        current = queue.popleft()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, BaseExceptionGroup):
+            queue.extend(current.exceptions)
+        else:
+            yield current
+        queue.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+
+
+def _describe(exc: BaseException) -> str:
+    """The failure in the words of whatever actually failed.
+
+    anyio runs the SDK's transport in a task group, so everything raised inside
+    it reaches us wrapped: ``str`` of an ``ExceptionGroup`` is "unhandled errors
+    in a TaskGroup (1 sub-exception)" — the same sentence for a rejected
+    credential, a timeout, and a server that is not MCP at all, which is what
+    made a real report unreadable. The leaves carry the message; this puts one
+    of them back.
+
+    First line only. A pydantic ``ValidationError`` arrives here as eleven
+    stanzas naming every member of the JSON-RPC union, and none of them tells a
+    user anything the first line does not.
+
+    A leaf with nothing to say falls back to its type name rather than to the
+    group. anyio's stream exceptions — ``EndOfStream``, ``ClosedResourceError``,
+    ``BrokenResourceError``, all of which this transport traffics in — stringify
+    to ``""``, and returning ``str(exc)`` for them put the TaskGroup sentence
+    back, which is the whole thing this function exists to remove.
+    """
+    nearest: BaseException | None = None
+    for leaf in _leaves(exc):
+        nearest = nearest or leaf
+        first_line = str(leaf).split("\n", 1)[0].strip()
+        if first_line:
+            return first_line
+    return type(nearest or exc).__name__
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """The HTTP status of the nearest leaf that carries a response, if any.
+
+    Duck-typed on ``leaf.response.status_code`` rather than matched against
+    ``httpx2.HTTPStatusError``: the SDK wraps transport failures in its own
+    classes, and what matters is that something answered with a status, not
+    which library minted the object holding it.
+    """
+    for leaf in _leaves(exc):
+        status_code = getattr(getattr(leaf, "response", None), "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+    return None
+
+
+def _unreachable(
+    exc: BaseException, *, handshook: bool, refused: list[int] | None = None
+) -> ConnectorUnreachableError:
+    """Turn a probe failure into the error the user is shown.
+
+    The type is chosen by **what the user would do next**, not by which library
+    raised: a rejected credential and a refused connection are one sentence
+    apart in English and a world apart in remedy. Anything that does not sort
+    into one of those stays :class:`ConnectorUnreachableError`, whose wording
+    covers the group it is left with — timed out, DNS, connection refused.
+
+    ``handshook`` is what makes the wrong-endpoint hint safe to give. Before the
+    session opens, a body that will not parse as JSON-RPC means the URL is
+    probably not an MCP endpoint at all. After it opens, the endpoint has
+    already proved it speaks Streamable HTTP — a parse failure while paging
+    ``tools/list`` is the server misbehaving mid-catalogue, and telling the user
+    to change a URL that is right would send them the wrong way.
+
+    Every branch logs ``detail`` before returning. The client is shown a
+    localized sentence built from the error *type* and never this string, so
+    without the log line the only description of what actually happened is
+    discarded at the browser — which is exactly how "it says it cannot connect"
+    became unanswerable. The log keeps it, untruncated, under the request id
+    ``RequestIDMiddleware`` bound.
+
+    The distilled line, and deliberately **not** ``exc_info``. The traceback
+    here is the anyio TaskGroup wrapper plus, for a non-MCP answer, a pydantic
+    union error naming all eleven JSON-RPC members — the noise ``_describe``
+    exists to strip. This is triggered by anyone mistyping a URL, so it is
+    unbounded in frequency against a 10 MB rotating sink, and none of what it
+    would add describes the user's server.
+    """
+    detail = _describe(exc)
+    error = _classify(exc, handshook=handshook, detail=detail, refused=refused or [])
+    logger.warning("MCP probe failed (%s): %s", error.error_type, detail)
+    return error
+
+
+def _first_mcp_error(exc: BaseException) -> MCPError | None:
+    """The MCP-level error the session raised, if the failure is one.
+
+    **The common shape, not an edge case.** For a server that answers but is
+    not MCP, the transport raises nothing: it turns the answer into a JSON-RPC
+    error and sends it up the stream, and the session raises *that*. So the
+    signal never reaches the HTTP-exception checks above — a URL missing its
+    ``/mcp`` suffix arrived as an unclassified failure until this looked for
+    it here.
+    """
+    for leaf in _leaves(exc):
+        if isinstance(leaf, MCPError):
+            return leaf
+    return None
+
+
+def _classify(
+    exc: BaseException, *, handshook: bool, detail: str, refused: list[int]
+) -> ConnectorUnreachableError:
+    """The branch of :func:`_unreachable` that picks the type."""
+    if any(isinstance(leaf, ssl.SSLError) for leaf in _leaves(exc)):
+        return ConnectorTlsFailedError(f"TLS verification failed: {detail}")
+
+    # Before the session opens, an MCP-level error is the remote end telling us
+    # what it is. Only before: afterwards the endpoint has proved itself, and
+    # the same codes mean a server misbehaving mid-catalogue.
+    # Before the SDK's stand-in, which cannot tell these apart: a credential the
+    # server refused is the one failure here fixed by editing a key rather than
+    # an address.
+    if any(status_code in (401, 403) for status_code in refused):
+        return ConnectorAuthRejectedError(
+            f"The MCP server rejected the credential ({refused[-1]})."
+        )
+
+    mcp_error = _first_mcp_error(exc) if not handshook else None
+    if mcp_error is not None:
+        # ``METHOD_NOT_FOUND`` is the SDK's reading of a 404 with no session —
+        # a gateway or a plain web root that has never heard of this method,
+        # which is what a URL without its ``/mcp`` suffix looks like from here.
+        # Matched on the code rather than its wording: the code is the
+        # protocol's, the wording is this SDK's.
+        if mcp_error.code == METHOD_NOT_FOUND or mcp_error.message.lower().startswith(
+            _NOT_MCP_CONTENT_TYPE
+        ):
+            return ConnectorNotMcpEndpointError(f"{_WRONG_ENDPOINT_HINT} (detail: {detail})")
+        if mcp_error.code == INTERNAL_ERROR:
+            return ConnectorHttpStatusError("The MCP server answered with an error response.")
+
+    status_code = _http_status(exc)
+    if status_code in (401, 403):
+        return ConnectorAuthRejectedError(
+            f"The MCP server rejected the credential ({status_code})."
+        )
+    if status_code is not None and status_code >= 400:
+        return ConnectorHttpStatusError(f"The MCP server answered HTTP {status_code}.")
+
+    if not handshook and _NOT_JSONRPC in detail.lower():
+        return ConnectorNotMcpEndpointError(f"{_WRONG_ENDPOINT_HINT} (detail: {detail})")
+    return ConnectorUnreachableError(f"Could not reach the MCP server: {detail}")
 
 
 def _usable_icons(server_info: Implementation | None) -> list[dict]:
