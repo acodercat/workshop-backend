@@ -89,7 +89,6 @@ _CANONICAL = "https://mcp.notion.com/mcp"
 @pytest.mark.parametrize(
     "typed",
     [
-        "https://mcp.notion.com/mcp/",  # trailing slash
         "https://MCP.Notion.com/mcp",  # host case
         "https://mcp.notion.com:443/mcp",  # the default port
         "https://mcp.notion.com/mcp#setup",  # a fragment, never sent

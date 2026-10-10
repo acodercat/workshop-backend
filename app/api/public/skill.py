@@ -17,11 +17,9 @@ import logging
 from fastapi import (
     APIRouter,
     Depends,
-    File,
     HTTPException,
     Query,
     Request,
-    UploadFile,
     status,
 )
 from sqlalchemy import func, or_, select, update as sql_update
@@ -29,7 +27,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
-from app.api.uploads import read_capped
+from app.api.uploads import multipart, read_capped, upload_request_body, uploaded_file
 from app.auth import authenticate_and_get_user
 from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.models.skill_category import SkillCategory
@@ -80,19 +78,22 @@ def _to_response(skill: Skill, *, enabled: bool, display_name: str | None = None
     )
 
 
-@router.post("/skills", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/skills",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra={"requestBody": upload_request_body()},
+)
 @limiter.limit("30/minute")
 async def register_skill(
     request: Request,
-    file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SkillResponse:
     """Upload + register a skill bundle in one request.
 
-    Accepts a ``.zip`` or ``.md`` file via multipart. The backend
-    validates, normalizes (flattens wrapper zips), uploads to OSS,
-    and creates the DB row.
+    Accepts a ``.zip`` or ``.md`` file via multipart, in the field ``file``,
+    read only once the user is known. The backend validates, normalizes
+    (flattens wrapper zips), uploads to OSS, and creates the DB row.
 
     400 if the file is malformed, lacks SKILL.md, or has unsafe entries.
     400 if the file extension isn't in the SKILL_POLICY whitelist.
@@ -101,13 +102,11 @@ async def register_skill(
         already has.
     413 if the upload exceeds ``SKILL_POLICY.max_bytes``.
     """
-    data = await read_capped(file, SKILL_POLICY.max_bytes)
-    skill = await register_skill_bundle(
-        db,
-        user_id=current_user.id,
-        filename=file.filename or "skill.zip",
-        data=data,
-    )
+    async with multipart(request) as form:
+        file = uploaded_file(form)
+        data = await read_capped(file, SKILL_POLICY.max_bytes)
+        filename = file.filename or "skill.zip"
+    skill = await register_skill_bundle(db, user_id=current_user.id, filename=filename, data=data)
     # A fresh upload has no preference row, so it is not in its owner's
     # composer picker until they turn it on. Reachable meanwhile by a
     # request that names it directly — a pick is its own authorization.

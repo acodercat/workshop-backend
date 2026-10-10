@@ -300,12 +300,6 @@ async def _probe(
                     else []
                 )
                 server_info = session.server_info
-    except ConnectorUnreachableError:
-        # Already a sentence about what went wrong — ``_list_all_tools`` raises
-        # these for a repeated cursor or a runaway page count, and re-wrapping
-        # them prefixed "Could not reach" onto a server that was reached,
-        # handshook and paginated.
-        raise
     except Exception as exc:
         raise _unreachable(exc, handshook=handshook, refused=refused) from exc
 
@@ -430,7 +424,16 @@ def _unreachable(
     would add describes the user's server.
     """
     detail = _describe(exc)
-    error = _classify(exc, handshook=handshook, detail=detail, refused=refused or [])
+    # Already the sentence to show: ``_list_all_tools`` raises these for a
+    # repeated cursor or a runaway page count, from inside the SDK's task group,
+    # so they arrive wrapped like everything else — and classified afresh they
+    # would read as a server that could not be reached, when it was reached,
+    # handshook and paginated.
+    own = next((leaf for leaf in _leaves(exc) if isinstance(leaf, ConnectorUnreachableError)), None)
+    if own is not None:
+        error = own
+    else:
+        error = _classify(exc, handshook=handshook, detail=detail, refused=refused or [])
     logger.warning("MCP probe failed (%s): %s", error.error_type, detail)
     return error
 

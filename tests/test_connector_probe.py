@@ -269,6 +269,15 @@ class TestTheFailureSaysWhatFailed:
         assert isinstance(error, ConnectorTlsFailedError)
         assert error.error_type == "connector_tls_failed"
 
+    def test_this_modules_own_error_comes_back_as_it_is(self):
+        # ``_list_all_tools`` raises these from inside the SDK's task group — a
+        # repeated cursor, a runaway page count — so they arrive wrapped like
+        # everything else. Classified afresh, a server that was reached and
+        # paginated would read as unreachable, or as refusing the credential.
+        own = ConnectorUnreachableError("The MCP server repeated a tools/list cursor.")
+        wrapped = ExceptionGroup("unhandled errors in a TaskGroup", [own])
+        assert _unreachable(wrapped, handshook=True, refused=[401]) is own
+
     def test_a_rejected_credential_is_not_a_connection_problem(self):
         # 401/403 is the one failure here fixed by editing a credential rather
         # than an address.

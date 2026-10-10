@@ -26,12 +26,15 @@ object. The script stays as the recovery path for a console that is
 down or an operator who has only SSH.
 """
 
+from typing import cast, get_args
+
 import sqlalchemy as sa
-from fastapi import APIRouter, File, Form, Query, UploadFile, status
+from fastapi import APIRouter, Query, Request, status
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import func, select
 
 from app.api.admin.dependencies import StaffContext
-from app.api.uploads import read_capped
+from app.api.uploads import form_field, multipart, read_capped, upload_request_body, uploaded_file
 from app.common.pagination import paginate
 from app.errors import (
     CategoryNotFoundError,
@@ -143,13 +146,15 @@ async def list_skills(
     "/skills",
     response_model=SkillResponse,
     status_code=status.HTTP_201_CREATED,
+    openapi_extra={
+        "requestBody": upload_request_body(
+            origin={"type": "string", "enum": list(get_args(PlatformSkillOrigin))}
+        )
+    },
 )
-async def upload_skill(
-    ctx: StaffContext,
-    file: UploadFile = File(...),
-    origin: PlatformSkillOrigin = Form(...),
-) -> SkillResponse:
-    """Upload a platform skill bundle.
+async def upload_skill(ctx: StaffContext, request: Request) -> SkillResponse:
+    """Upload a platform skill bundle: the file in ``file``, read only once the
+    operator is known, and its ``origin`` beside it.
 
     ``origin`` is the one thing the bundle cannot tell us and it decides
     who sees the skill: ``SYSTEM`` is agent-only core, ``OFFICIAL`` is
@@ -170,14 +175,15 @@ async def upload_skill(
     400 if the bundle is malformed or the extension is not allowed,
     413 if it exceeds ``SKILL_POLICY.max_bytes``.
     """
-    data = await read_capped(file, SKILL_POLICY.max_bytes)
+    async with multipart(request) as form:
+        origin = _platform_origin(form_field(form, "origin"))
+        file = uploaded_file(form)
+        data = await read_capped(file, SKILL_POLICY.max_bytes)
+        filename = file.filename or "skill.zip"
 
     async with audit(ctx, action=AuditAction.SKILL_UPLOAD, target_type="skill") as draft:
         skill, replaced_key = await register_platform_skill_bundle(
-            ctx.db,
-            origin=SkillOrigin(origin),
-            filename=file.filename or "skill.zip",
-            data=data,
+            ctx.db, origin=SkillOrigin(origin), filename=filename, data=data
         )
         draft.target_id = skill.id
         draft.payload = {
@@ -194,6 +200,21 @@ async def upload_skill(
     # A platform upload has no owner, so neither name column applies.
     await ctx.db.refresh(skill)
     return _to_skill_response(skill, None, None)
+
+
+def _platform_origin(value: str) -> PlatformSkillOrigin:
+    """The ``origin`` field, refused like a declared one would be."""
+    if value not in get_args(PlatformSkillOrigin):
+        raise RequestValidationError(
+            [
+                {
+                    "type": "literal_error",
+                    "loc": ("body", "origin"),
+                    "msg": f"Input should be one of {', '.join(get_args(PlatformSkillOrigin))}",
+                }
+            ]
+        )
+    return cast(PlatformSkillOrigin, value)
 
 
 @router.patch("/skills/{skill_id}", response_model=SkillResponse)
