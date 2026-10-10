@@ -25,8 +25,6 @@ class TestSpellingsOfOneEndpoint:
     @pytest.mark.parametrize(
         "written",
         [
-            "https://mcp.notion.com/mcp/",
-            "https://mcp.notion.com/mcp//",
             "HTTPS://mcp.notion.com/mcp",
             "https://MCP.Notion.COM/mcp",
             "https://mcp.notion.com:443/mcp",
@@ -44,6 +42,11 @@ class TestSpellingsOfOneEndpoint:
 
 
 class TestWhatItMustNotTouch:
+    def test_a_trailing_slash_on_a_path_is_kept(self):
+        # The connection follows no redirect, so a server that serves ``/mcp/``
+        # and answers ``/mcp`` with a 307 is reachable only as written.
+        assert normalize_connector_url("https://x.com/mcp/") == "https://x.com/mcp/"
+
     def test_the_path_keeps_its_case(self):
         # Paths are case-sensitive (RFC 3986 §6.2.2.1). Folding them would
         # point a Connector at a different resource.
@@ -69,9 +72,7 @@ class TestWhatItMustNotTouch:
     def test_credentials_in_the_url_are_carried_through(self):
         # Dropping them would turn an authenticated endpoint into an anonymous
         # one that fails at connect time, blamed on the server.
-        assert normalize_connector_url("https://user:pw@x.com/mcp/") == (
-            "https://user:pw@x.com/mcp"
-        )
+        assert normalize_connector_url("https://user:pw@x.com/mcp") == ("https://user:pw@x.com/mcp")
 
 
 class TestMalformedInputIsLeftToItsJudge:
@@ -86,7 +87,7 @@ class TestEveryWayInGoesThroughIt:
     """On the type, not at the call sites — five of those write a URL."""
 
     def test_creating_a_connector(self):
-        assert ConnectorCreate(name="n", url="HTTPS://X.com/mcp/").url == ("https://x.com/mcp")
+        assert ConnectorCreate(name="n", url="HTTPS://X.com/mcp").url == ("https://x.com/mcp")
 
     def test_editing_one(self):
         assert ConnectorUpdate(url="https://x.com:443/mcp#f").url == ("https://x.com/mcp")
@@ -94,7 +95,7 @@ class TestEveryWayInGoesThroughIt:
     def test_testing_a_connection(self):
         # The probe too: a test that succeeded against one spelling and a row
         # stored under another is a confusing way to fail later.
-        assert ConnectionTestRequest(url="https://X.com/mcp/").url == ("https://x.com/mcp")
+        assert ConnectionTestRequest(url="https://X.com/mcp#f").url == ("https://x.com/mcp")
 
     def test_an_omitted_url_stays_omitted(self):
         assert ConnectorUpdate().url is None

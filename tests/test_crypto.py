@@ -2,9 +2,11 @@
 
 import pytest
 from cryptography.fernet import Fernet
+from pydantic import ValidationError
 
 from app.errors import ConnectorCredentialUnreadableError
 from app.services import crypto
+from config import Settings
 
 
 def test_encrypt_decrypt_roundtrip(monkeypatch):
@@ -59,4 +61,22 @@ class TestOpeningASecretThatWillNotOpen:
         assert "credential" in str(caught.value)
         # Never the value, and never Fernet's own words about it.
         assert sealed not in str(caught.value)
+        crypto._cipher.cache_clear()
+
+
+def test_a_key_that_is_not_fernet_fails_at_boot():
+    # Checked when the settings are read, not on the first connector a user
+    # creates hours later.
+    with pytest.raises(ValidationError, match="mcp_credential_encryption_key"):
+        Settings(mcp_credential_encryption_key="not-a-fernet-key")
+    Settings(mcp_credential_encryption_key="")  # unset stays allowed
+
+
+def test_an_unset_key_is_this_deployments_fault_not_the_rows(monkeypatch):
+    monkeypatch.setattr(crypto.settings, "mcp_credential_encryption_key", "")
+    crypto._cipher.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="not set"):
+            crypto.open_secret("whatever", what="credential")
+    finally:
         crypto._cipher.cache_clear()

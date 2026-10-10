@@ -1,4 +1,5 @@
-from pydantic import Field
+from cryptography.fernet import Fernet
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MINUTES_PER_WEEK = 60 * 24 * 7
@@ -51,6 +52,14 @@ class Settings(BaseSettings):
         default="",
         description="Fernet key for encrypting MCP Connector credentials at rest",
     )
+
+    @field_validator("mcp_credential_encryption_key")
+    @classmethod
+    def _a_fernet_key_when_set(cls, key: str) -> str:
+        if key:
+            Fernet(key.encode())  # refuses anything but a Fernet key, at boot rather than first use
+        return key
+
     # OAuth Connector redirect URI — the public callback the provider sends the
     # browser back to. Must match a route the frontend serves and be registered
     # (for manual OAuth apps). Empty default → OAuth connectors fail loudly at

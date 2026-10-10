@@ -68,6 +68,9 @@ _SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # / < 500 lines, with bulk content split into reference files the agent
 # loads on demand. 32 KiB (~8K tokens) is a generous cap above that.
 _MAX_BODY_BYTES = 32 * 1024  # 32 KiB
+# The frontmatter is a name, a description and a metadata block; it is parsed
+# before anything else is checked, so it is bounded on its own.
+_MAX_FRONTMATTER_BYTES = 8 * 1024
 
 # Decompression-safety / distribution limits. The per-file size and file
 # count match the Agent Skills standard (≤ 25 MB uncompressed per file,
@@ -357,30 +360,35 @@ def _split_frontmatter(content: str) -> tuple[dict[str, Any] | None, str]:
     Returns ``None`` for the fields when there is no fence at all, versus an
     empty dict when a fence is there but holds nothing usable — the caller
     reports a different error for each, so they must not collapse.
+
+    Only the keys read downstream are kept, and only in the shape they are
+    read: ``name`` and ``description`` as strings, ``metadata`` as a dict. A
+    YAML alias is cheap to load and unbounded to render — a few nested ones
+    expand exponentially under ``str()`` — so no value is ever rendered, and a
+    key of another shape reads as absent.
     """
     import yaml
 
     match = _FRONTMATTER_RE.match(content)
     if not match:
         return None, content
+    block = match.group(1)
+    if len(block.encode("utf-8")) > _MAX_FRONTMATTER_BYTES:
+        raise SkillFrontmatterInvalidError(
+            f"SKILL.md frontmatter is over {_MAX_FRONTMATTER_BYTES} bytes."
+        )
     try:
-        raw = yaml.safe_load(match.group(1))
+        raw = yaml.safe_load(block)
     except yaml.YAMLError:
         raw = None
     if not isinstance(raw, dict):
         return {}, content[match.end() :]
-    # Everything is coerced to ``str`` (the common case: name / description,
-    # which callers treat as strings) — EXCEPT the Agent Skills spec's
-    # ``metadata`` block, kept structured so callers can read author-defined
-    # fields like ``metadata.display_name`` instead of a stringified dict.
-    # Scoping the exception to ``metadata`` keeps a malformed scalar field
-    # (e.g. ``name:`` given an object) a clean validation reject, not a crash.
     meta: dict[str, Any] = {}
-    for k, v in raw.items():
-        if v is None:
-            continue
-        key = str(k)
-        meta[key] = v if key == "metadata" and isinstance(v, dict) else str(v)
+    for key in ("name", "description"):
+        if isinstance(raw.get(key), str):
+            meta[key] = raw[key]
+    if isinstance(raw.get("metadata"), dict):
+        meta["metadata"] = raw["metadata"]
     return meta, content[match.end() :]
 
 

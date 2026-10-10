@@ -12,8 +12,10 @@ never point a URL somewhere else:
   and §3.2.2; the path is *not*, and is left exactly as typed.
 - **the default port** dropped — ``https://x:443/mcp`` and ``https://x/mcp``
   are the same request on the wire.
-- **trailing slashes** trimmed from the path. An MCP endpoint is a resource,
-  not a directory.
+- **a bare ``/``** dropped: ``https://x`` and ``https://x/`` are the same
+  request on the wire. Any other trailing slash is kept — the connection
+  follows no redirect, so a server that serves ``/mcp/`` and answers ``/mcp``
+  with a 307 is reachable only by the spelling it serves.
 - **the fragment** dropped. It is never sent to the server, so it can only
   ever be a second name for one endpoint.
 
@@ -59,4 +61,5 @@ def normalize_connector_url(url: str) -> str:
             credentials = f"{credentials}:{parts.password}"
         netloc = f"{credentials}@{netloc}"
 
-    return urlunsplit((scheme, netloc, parts.path.rstrip("/"), parts.query, ""))
+    path = "" if parts.path == "/" else parts.path
+    return urlunsplit((scheme, netloc, path, parts.query, ""))

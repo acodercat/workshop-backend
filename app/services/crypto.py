@@ -7,7 +7,7 @@ time — keep the two ``.env`` values identical.
 
 from functools import lru_cache
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from app.errors import ConnectorCredentialUnreadableError
 from config import settings
@@ -46,10 +46,12 @@ def open_secret(ciphertext: str, *, what: str) -> str:
     """
     try:
         return decrypt_secret(ciphertext)
-    except Exception:
-        # ``from None``: what is safe to chain depends on what sits inside the
-        # ``try``, and Fernet saying nothing today is not a property of this
-        # function. A parse added beside it would carry the plaintext.
+    except InvalidToken:
+        # Only Fernet's own refusal: a key that is unset or malformed is this
+        # deployment's fault, not the row's, and telling the user to set the
+        # secret again would not fix it. ``from None``: what is safe to chain
+        # depends on what sits inside the ``try``, and Fernet saying nothing
+        # today is not a property of this function.
         raise ConnectorCredentialUnreadableError(
             f"This Connector's {what} could not be read. Set it again."
         ) from None

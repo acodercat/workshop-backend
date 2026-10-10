@@ -9,6 +9,7 @@ surfaces as a behavior change in a named test.
 
 import codecs
 import io
+import time
 import zipfile
 
 import pytest
@@ -24,6 +25,7 @@ from app.errors import (
 )
 from app.services.skill_bundle import (
     _MAX_BODY_BYTES,
+    _MAX_FRONTMATTER_BYTES,
     parse_bundle,
     parse_skill_md,
     validate_zip_structure,
@@ -379,3 +381,40 @@ class TestBodySizeCap:
         data = _zip({"SKILL.md": "x" * (_MAX_BODY_BYTES + 1)})
         with pytest.raises(SkillFrontmatterInvalidError):
             parse_bundle(data)
+
+
+class TestTheFrontmatterIsReadNarrowly:
+    """Only ``name``, ``description`` and ``metadata`` are read, each in the
+    shape it is used in. Everything else in the block is never rendered."""
+
+    def test_nested_aliases_are_never_expanded(self):
+        # Cheap to load, exponential to render: ``str()`` of the last anchor
+        # would be ~3**8 copies of the first list. Neither value is a string,
+        # so neither is looked at — the name simply reads as missing.
+        bomb = "a: &a [x, x, x]\n" + "".join(
+            f"{chr(98 + i)}: &{chr(98 + i)} [*{chr(97 + i)}, *{chr(97 + i)}, *{chr(97 + i)}]\n"
+            for i in range(8)
+        )
+        started = time.monotonic()
+        with pytest.raises(SkillFrontmatterInvalidError, match="'name'"):
+            parse_skill_md(f"---\n{bomb}name: *i\ndescription: *i\n---\nBody.\n".encode())
+        assert time.monotonic() - started < 1
+
+    def test_a_name_that_is_not_a_string_is_no_name(self):
+        with pytest.raises(SkillFrontmatterInvalidError, match="'name'"):
+            parse_skill_md(b"---\nname: 123\n---\nBody.\n")
+
+    def test_a_description_that_is_not_a_string_falls_back_to_the_body(self):
+        parsed = parse_skill_md(b"---\nname: ok\ndescription: [a, b]\n---\nBody line.\n")
+        assert parsed.description == "Body line."
+
+    def test_metadata_display_name_is_still_read(self):
+        parsed = parse_skill_md(
+            b"---\nname: ok\nmetadata:\n  display_name: Shown Name\n---\nBody.\n"
+        )
+        assert parsed.display_name == "Shown Name"
+
+    def test_an_oversized_frontmatter_is_refused_before_it_is_parsed(self):
+        padding = "x" * (_MAX_FRONTMATTER_BYTES + 1)
+        with pytest.raises(SkillFrontmatterInvalidError, match="frontmatter is over"):
+            parse_skill_md(f"---\nname: ok\nnote: {padding}\n---\nBody.\n".encode())
