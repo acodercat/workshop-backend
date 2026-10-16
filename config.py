@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     # already diverge on purpose, and the **default** carries it — not the
     # ``.env`` — so a deployment is correct without anyone remembering to set it.
     mcp_client_name: str = Field(
-        default="PPIG Connector",
+        default="Axon Connector",
         description="Client name presented to OAuth authorization servers",
     )
     algorithm: str = Field(default="HS256", description="Algorithm for JWT")
@@ -345,7 +345,7 @@ class Settings(BaseSettings):
         description="Verified sender address (must be approved + SPF/DKIM passed in DM console)",
     )
     aliyun_dm_from_alias: str = Field(
-        default="PPIG",
+        default="AXON",
         description="``发送人名称`` shown in the recipient's inbox; ≤30 chars",
     )
 
