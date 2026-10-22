@@ -76,6 +76,11 @@ async def boom_with_details():
     raise _ForbiddenError("not allowed", details={"limit": 32768, "size": 99})
 
 
+@app.get("/boom-unexpected")
+async def boom_unexpected():
+    raise RuntimeError("boom")
+
+
 client = TestClient(app)
 
 
@@ -156,6 +161,20 @@ def test_every_response_carries_a_request_id() -> None:
     response = client.get("/health/live")
 
     assert response.headers.get("X-Request-ID")
+
+
+def test_an_unexpected_error_carries_the_request_id_and_cors_headers() -> None:
+    origin = "http://localhost:9999"
+    response = TestClient(app, raise_server_exceptions=False).get(
+        "/boom-unexpected", headers={"Origin": origin, "X-Request-ID": "trace-500"}
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {"type": "internal_server_error", "message": "An unexpected error occurred."}
+    }
+    assert response.headers["X-Request-ID"] == "trace-500"
+    assert response.headers["access-control-allow-origin"] == origin
 
 
 def test_a_sane_inbound_request_id_is_reused() -> None:

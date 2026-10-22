@@ -19,7 +19,8 @@ Five handlers cover the surface:
 - :func:`validation_exception_handler` — Pydantic / FastAPI request-body
   validation failures; emits ``error.details`` with the per-field
   breakdown.
-- :func:`general_exception_handler` — last-resort 500 catch.
+- :func:`general_exception_handler` — last-resort 500 catch, answered by
+  :class:`UnexpectedErrorMiddleware` rather than registered as a handler.
 
 :func:`install_error_handlers` registers all of them on an app in one
 call. Every ASGI entrypoint in the project (the public API, the admin
@@ -37,6 +38,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.errors import AppError
 
@@ -220,14 +222,48 @@ async def general_exception_handler(
     )
 
 
-def install_error_handlers(app: FastAPI) -> None:
-    """Register every handler above on ``app``.
+class UnexpectedErrorMiddleware:
+    """Answer an exception no handler took, from inside the other middleware.
 
-    Order of registration does not matter — Starlette dispatches on the
-    exception class, resolving to the most specific registered base — but
-    the set does: ``Exception`` last in the list below is the catch-all,
-    and omitting any one of the others would let that path fall through
-    to a bare 500 with no envelope.
+    Starlette runs an ``Exception`` handler in its outermost middleware, so
+    that 500 would carry neither the request id nor CORS headers, and a
+    browser would report a network error instead of the envelope. A
+    response already started has nothing left to answer with, and its
+    exception propagates.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception as exc:
+            if started:
+                raise
+            response = await general_exception_handler(Request(scope), exc)
+            await response(scope, receive, send)
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Register every handler above on ``app``, and the middleware for what
+    none of them takes.
+
+    Order of registration does not matter to the handlers — Starlette
+    dispatches on the exception class, resolving to the most specific
+    registered base — but the set does: omitting any one would let that
+    path fall through to the bare 500. The middleware must be added before
+    any other, so that it runs innermost.
     """
     # Each ``ignore`` covers the same thing: Starlette types the handler as
     # taking ``Exception``, while every handler below narrows to the class it
@@ -238,4 +274,4 @@ def install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
-    app.add_exception_handler(Exception, general_exception_handler)
+    app.add_middleware(UnexpectedErrorMiddleware)

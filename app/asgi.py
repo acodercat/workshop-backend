@@ -100,6 +100,8 @@ def create_app(
         RateLimitExceeded,
         rate_limit_exceeded_handler,  # type: ignore[arg-type]
     )
+    # Before any ``add_middleware`` below: it adds the middleware that answers
+    # an unexpected error, which must run inside CORS and the request id.
     install_error_handlers(app)
 
     # SlowAPIMiddleware makes ``limiter.default_limits`` an actual global
