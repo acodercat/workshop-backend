@@ -54,14 +54,18 @@ def validate_public_url(url: str) -> None:
     try:
         addr_infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.") from exc
+        raise InvalidConnectorUrlError(_not_public(host)) from exc
 
     for *_, sockaddr in addr_infos:
         ip = ipaddress.ip_address(sockaddr[0])
         if not _is_public(ip):
-            raise InvalidConnectorUrlError(
-                f"Connector URL resolves to a non-public address ({ip})."
-            )
+            raise InvalidConnectorUrlError(_not_public(host))
+
+
+def _not_public(host: str) -> str:
+    """One refusal whether *host* is unknown or internal, naming no address: a
+    caller who could tell the two apart could map the network this runs in."""
+    return f"The host {host!r} does not resolve to a public address."
 
 
 # IPv6 prefixes that carry an IPv4 address inside them and that ``is_global``
@@ -170,7 +174,7 @@ class _PinnedResolveTransport(httpx2.AsyncHTTPTransport):
                 host, port, type=socket.SOCK_STREAM
             )
         except socket.gaierror as exc:
-            raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.") from exc
+            raise InvalidConnectorUrlError(_not_public(host)) from exc
 
         # Every address is checked, and any private one refuses the whole
         # request: a name that answers with a mix is the rebinding case, and
@@ -183,12 +187,10 @@ class _PinnedResolveTransport(httpx2.AsyncHTTPTransport):
             address = str(sockaddr[0])
             ip = ipaddress.ip_address(address)
             if not _is_public(ip):
-                raise InvalidConnectorUrlError(
-                    f"Connector URL resolves to a non-public address ({ip})."
-                )
+                raise InvalidConnectorUrlError(_not_public(host))
             candidates.append(address)
         if not candidates:
-            raise InvalidConnectorUrlError(f"Could not resolve host {host!r}.")
+            raise InvalidConnectorUrlError(_not_public(host))
 
         # Connect to a validated IP, but keep TLS SNI + cert verification on the
         # real hostname (httpcore reads ``sni_hostname``). The ``Host`` header is
