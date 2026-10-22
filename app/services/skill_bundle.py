@@ -21,6 +21,7 @@ Threats this layer is responsible for:
 - path traversal in zip entries (``..`` or absolute paths)
 - symlink entries (refuse — Python's ``zipfile`` doesn't follow them,
   but staging code might)
+- encrypted or damaged entries (unreadable — refused, never a 500)
 - missing or unparseable ``SKILL.md`` (would silently produce a
   no-op skill the LLM can never use)
 - absurd nesting / oversized inner files (caller already enforces
@@ -31,7 +32,9 @@ from __future__ import annotations
 
 import io
 import re
+import stat
 import zipfile
+import zlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -90,6 +93,12 @@ _MAX_ENTRY_COUNT = 500  # Agent Skills: files per bundle
 _MAX_COMPRESSION_RATIO = 100
 _MAX_TOTAL_UNCOMPRESSED = 200 * 1024 * 1024  # 200 MiB — hard ceiling on declared expansion
 
+# The general-purpose flag bit that marks an entry encrypted.
+_ENCRYPTED = 0x1
+# What reading an entry raises when its bytes are not what its header promised:
+# a bad CRC, a truncated or corrupt stream, a compression method zipfile lacks.
+_UNREADABLE = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError)
+
 
 @dataclass(frozen=True)
 class ParsedSkill:
@@ -112,7 +121,8 @@ def validate_zip_structure(data: bytes) -> None:
 
     Pure header-only inspection — reads the central directory, never
     a compressed stream. Raises :class:`InvalidSkillBundleError` on
-    bad-zip / path-traversal / symlink / zip-bomb signals.
+    path-traversal / symlink / zip-bomb signals, and
+    :class:`SkillBundleUnreadableError` on a bad zip or an encrypted entry.
     """
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -137,7 +147,7 @@ def parse_bundle(data: bytes) -> ParsedSkill:
         raise SkillBundleUnreadableError(f"not a valid zip file: {exc}") from exc
 
     with zf:
-        raw = _decode_skill_md(zf.read(_locate_skill_md(zf)))
+        raw = _decode_skill_md(_read_entry(zf, _locate_skill_md(zf)))
     return _parse_skill_md_text(raw)
 
 
@@ -182,7 +192,7 @@ def normalize_bundle(data: bytes) -> bytes | None:
                 if info.is_dir():
                     continue
                 new_name = info.filename.removeprefix(prefix)
-                out.writestr(new_name, zf.read(info.filename))
+                out.writestr(new_name, _read_entry(zf, info.filename))
 
     return buf.getvalue()
 
@@ -239,7 +249,7 @@ def _reject_zip_bomb(zf: zipfile.ZipFile) -> None:
 
 
 def _reject_unsafe_entries(zf: zipfile.ZipFile) -> None:
-    """Guard against path traversal and symlinks.
+    """Guard against path traversal, symlinks and encrypted entries.
 
     Symlinks are encoded in zip's external attrs (Unix file type bits);
     Python's ``zipfile`` extracts them as regular files but downstream
@@ -260,12 +270,26 @@ def _reject_unsafe_entries(zf: zipfile.ZipFile) -> None:
             raise InvalidSkillBundleError(
                 f"refused parent-traversal path: {name!r}",
             )
-        # Symlink detection: Unix file type S_IFLNK = 0o120000 in upper
-        # 16 bits of external_attr when ``create_system == 3`` (Unix).
-        if info.create_system == 3 and (info.external_attr >> 16) & 0o170000 == 0o120000:
+        # Symlink detection: Unix file type S_IFLNK in the upper 16 bits of
+        # external_attr, whatever system the entry names — unzip reads that
+        # mode for more systems than Unix alone.
+        if stat.S_ISLNK(info.external_attr >> 16):
             raise InvalidSkillBundleError(
                 f"refused symlink entry in bundle: {name!r}",
             )
+        if info.flag_bits & _ENCRYPTED:
+            raise SkillBundleUnreadableError(
+                f"{name!r} is encrypted; re-export the bundle without a password",
+            )
+
+
+def _read_entry(zf: zipfile.ZipFile, name: str) -> bytes:
+    """*name*'s bytes. An entry that does not decompress to what its header
+    promised is a broken upload, not a server error."""
+    try:
+        return zf.read(name)
+    except _UNREADABLE as exc:
+        raise SkillBundleUnreadableError(f"could not read {name!r}: {exc}") from exc
 
 
 def _locate_skill_md(zf: zipfile.ZipFile) -> str:
