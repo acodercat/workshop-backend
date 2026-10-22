@@ -185,14 +185,18 @@ def normalize_bundle(data: bytes) -> bytes | None:
         wrapper = next(iter(top_levels))
         prefix = f"{wrapper}/"
 
-        # Repack: strip the wrapper prefix from all entries
+        # Repack: strip the wrapper prefix from all entries, each keeping its
+        # mode — a script staged without its executable bit cannot be run.
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as out:
             for info in zf.infolist():
                 if info.is_dir():
                     continue
-                new_name = info.filename.removeprefix(prefix)
-                out.writestr(new_name, _read_entry(zf, info.filename))
+                moved = zipfile.ZipInfo(info.filename.removeprefix(prefix), info.date_time)
+                moved.create_system = info.create_system
+                moved.external_attr = info.external_attr
+                moved.compress_type = zipfile.ZIP_DEFLATED
+                out.writestr(moved, _read_entry(zf, info.filename))
 
     return buf.getvalue()
 

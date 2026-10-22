@@ -99,6 +99,20 @@ class TestHappyPath:
         assert parsed.name == "wrapped"
         assert parsed.description == "Wrapped variant."
 
+    def test_flattening_keeps_a_scripts_mode(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("wrapper/SKILL.md", _skill_md({"name": "n"}, "body"))
+            script = zipfile.ZipInfo("wrapper/scripts/run.sh")
+            script.create_system = 3  # Unix
+            script.external_attr = 0o100755 << 16
+            zf.writestr(script, "#!/bin/sh\n")
+        flattened = normalize_bundle(buf.getvalue())
+        assert flattened is not None
+        with zipfile.ZipFile(io.BytesIO(flattened)) as zf:
+            assert zf.getinfo("scripts/run.sh").external_attr >> 16 == 0o100755
+            assert zf.getinfo("scripts/run.sh").compress_type == zipfile.ZIP_DEFLATED
+
     def test_fallback_description_from_first_body_line(self):
         data = _zip(
             {
