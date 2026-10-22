@@ -74,10 +74,15 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
         # requests when investigating anything that must happen exactly once.
         named.propagate = False
 
+    # Every sink sets ``diagnose=False``, which loguru defaults to True: it
+    # prints each frame's variables beside a traceback, and those include
+    # the passwords and tokens a failing request was handling.
+
     # Console output (colored)
     logger.add(
         sys.stderr,
         level=level,
+        diagnose=False,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <magenta>{extra[request_id]}</magenta> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
     )
 
@@ -89,6 +94,7 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
         rotation="10 MB",
         retention="7 days",
         compression="gz",
+        diagnose=False,
     )
 
     # Separate error log file
@@ -100,7 +106,7 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
         retention="30 days",
         compression="gz",
         backtrace=True,
-        diagnose=True,
+        diagnose=False,
     )
 
     return logger

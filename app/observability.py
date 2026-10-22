@@ -88,6 +88,9 @@ def _init_sentry() -> None:
     are reported via explicit ``capture_exception`` in the 500-class
     exception handlers (the catch-all handler turns unhandled exceptions
     into responses before Sentry's ASGI integration could see them).
+
+    Request bodies and frame locals stay home too: sign-in, registration
+    and password changes carry plaintext passwords in both.
     """
     if not settings.sentry_dsn:
         return
@@ -98,6 +101,8 @@ def _init_sentry() -> None:
         environment=settings.sentry_environment or None,
         traces_sample_rate=settings.sentry_traces_sample_rate,
         send_default_pii=False,
+        include_local_variables=False,
+        max_request_body_size="never",
     )
     stdlib_logger.info(
         "Sentry error tracking enabled (environment=%s)",
