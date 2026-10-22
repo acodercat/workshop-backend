@@ -1,9 +1,14 @@
 from cryptography.fernet import Fernet
+from limits import parse_many
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MINUTES_PER_WEEK = 60 * 24 * 7
 MINUTES_PER_WORKDAY = 60 * 8
+
+# What ``.env.example`` once shipped as ``secret_key``. Copied unchanged, it signs
+# every token with a value anyone with the repository has.
+_PLACEHOLDER_SECRET_KEY = "change-me-to-a-random-secret-key"
 
 
 class Settings(BaseSettings):
@@ -43,7 +48,18 @@ class Settings(BaseSettings):
     )
 
     # Security
-    secret_key: str = Field(description="Secret key for JWT encoding")
+    secret_key: str = Field(min_length=32, description="Secret key for JWT encoding")
+
+    @field_validator("secret_key")
+    @classmethod
+    def _not_the_placeholder(cls, key: str) -> str:
+        if key == _PLACEHOLDER_SECRET_KEY:
+            raise ValueError(
+                "secret_key is the .env.example placeholder; generate one with "
+                'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        return key
+
     # Fernet key (44-char urlsafe base64) for encrypting Connector credentials
     # at rest. Generate with ``Fernet.generate_key()``. Empty default so a
     # deploy without the Connector feature still boots; connector create/probe
@@ -205,6 +221,21 @@ class Settings(BaseSettings):
         default="20/hour",
         description="Per-IP registration completion attempts",
     )
+
+    @field_validator(
+        "rate_limit_default",
+        "rate_limit_login",
+        "rate_limit_admin_login",
+        "rate_limit_message_create",
+        "rate_limit_upload_url",
+        "rate_limit_share_unlock",
+        "rate_limit_register_code",
+        "rate_limit_register",
+    )
+    @classmethod
+    def _a_rate_limit(cls, rate: str) -> str:
+        parse_many(rate)  # slowapi parses it per request; a typo fails boot instead
+        return rate
 
     # Registration / email verification — values picked to match
     # mainstream consumer products (60s resend cooldown, 10min code
