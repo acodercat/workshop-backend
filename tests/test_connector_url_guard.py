@@ -11,6 +11,9 @@ import pytest
 from app.errors import InvalidConnectorUrlError
 from app.services.mcp import url_guard
 
+# The one refusal for a host that is unknown or internal, which names no address.
+_NOT_PUBLIC = "The host 'rebind.example.com' does not resolve to a public address."
+
 
 class TestValidatePublicUrl:
     @pytest.mark.parametrize(
@@ -55,8 +58,20 @@ class TestValidatePublicUrl:
             raise socket.gaierror("nope")
 
         monkeypatch.setattr(url_guard.socket, "getaddrinfo", boom)
-        with pytest.raises(InvalidConnectorUrlError):
-            url_guard.validate_public_url("https://no.such.host.invalid/x")
+        with pytest.raises(InvalidConnectorUrlError) as refused:
+            url_guard.validate_public_url("https://rebind.example.com/x")
+        assert str(refused.value) == _NOT_PUBLIC
+
+    def test_a_private_answer_is_refused_like_no_answer(self, monkeypatch):
+        """Told apart, the two would let a caller map internal names to addresses."""
+        monkeypatch.setattr(
+            url_guard.socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [(2, 1, 6, "", ("10.0.0.5", 443))],
+        )
+        with pytest.raises(InvalidConnectorUrlError) as refused:
+            url_guard.validate_public_url("https://rebind.example.com/x")
+        assert str(refused.value) == _NOT_PUBLIC
 
 
 class TestEmbeddedIPv4Prefixes:
@@ -154,10 +169,32 @@ class TestPinnedResolveTransport:
             lambda *args, **kwargs: [(2, 1, 6, "", ("10.0.0.5", 443))],
         )
         transport = url_guard._PinnedResolveTransport()
-        with pytest.raises(InvalidConnectorUrlError):
+        with pytest.raises(InvalidConnectorUrlError) as refused:
             await transport.handle_async_request(
                 httpx.Request("GET", "https://rebind.example.com/")
             )
+        assert str(refused.value) == _NOT_PUBLIC
+
+    async def test_one_private_answer_among_public_ones_is_refused(self, monkeypatch):
+        monkeypatch.setattr(
+            url_guard.socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (2, 1, 6, "", ("93.184.216.34", 443)),
+                (2, 1, 6, "", ("10.0.0.5", 443)),
+            ],
+        )
+
+        async def connect(self, request, **kwargs):
+            raise AssertionError(f"connected to {request.url.host}")
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", connect)
+        transport = url_guard._PinnedResolveTransport()
+        with pytest.raises(InvalidConnectorUrlError) as refused:
+            await transport.handle_async_request(
+                httpx.Request("GET", "https://rebind.example.com/")
+            )
+        assert str(refused.value) == _NOT_PUBLIC
 
     async def test_falls_over_to_the_next_address(self, monkeypatch):
         # A CDN name answers with several addresses and ``getaddrinfo`` rotates
