@@ -26,6 +26,7 @@ from app.errors import (
 from app.services.skill_bundle import (
     _MAX_BODY_BYTES,
     _MAX_FRONTMATTER_BYTES,
+    normalize_bundle,
     parse_bundle,
     parse_skill_md,
     validate_zip_structure,
@@ -34,9 +35,15 @@ from app.services.skill_bundle import (
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
-def _zip(files: dict[str, bytes | str], *, with_symlink: tuple[str, str] | None = None) -> bytes:
+def _zip(
+    files: dict[str, bytes | str],
+    *,
+    with_symlink: tuple[str, str] | None = None,
+    symlink_system: int = 3,
+) -> bytes:
     """Build a zip from a {name: content} mapping. Optionally write one
-    entry whose external_attr marks it as a Unix symlink."""
+    entry whose external_attr marks it as a symlink, made on
+    ``symlink_system`` (3 is Unix)."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         for name, content in files.items():
@@ -46,7 +53,7 @@ def _zip(files: dict[str, bytes | str], *, with_symlink: tuple[str, str] | None 
         if with_symlink is not None:
             link_name, target = with_symlink
             info = zipfile.ZipInfo(link_name)
-            info.create_system = 3  # Unix
+            info.create_system = symlink_system
             info.external_attr = (0o120000 | 0o777) << 16  # S_IFLNK
             zf.writestr(info, target)
     return buf.getvalue()
@@ -198,13 +205,23 @@ class TestSafetyRejections:
         with pytest.raises(InvalidSkillBundleError, match="refused"):
             validate_zip_structure(data)
 
-    def test_symlink_entry_rejected(self):
+    # 16 is BeOS: unzip restores a symlink from more systems than Unix alone.
+    @pytest.mark.parametrize("system", [3, 16], ids=["unix", "beos"])
+    def test_symlink_entry_rejected(self, system):
         data = _zip(
             {"SKILL.md": _skill_md({"name": "n"}, "body")},
             with_symlink=("link.txt", "/etc/passwd"),
+            symlink_system=system,
         )
         with pytest.raises(InvalidSkillBundleError, match="symlink"):
             validate_zip_structure(data)
+
+    def test_encrypted_entry_rejected(self):
+        data = bytearray(_zip({"SKILL.md": _skill_md({"name": "n"}, "body")}))
+        # The general-purpose flag's encryption bit, in the central directory.
+        data[data.rindex(b"PK\x01\x02") + 8] |= 0x1
+        with pytest.raises(SkillBundleUnreadableError, match="encrypted"):
+            validate_zip_structure(bytes(data))
 
 
 # ── rejection: zip bombs ────────────────────────────────────────────────────
@@ -300,6 +317,34 @@ class TestEncodingRejections:
             zf.writestr("SKILL.md", b"\xff\xfe\xfdname: x")
         with pytest.raises(SkillBundleUnreadableError):
             parse_bundle(buf.getvalue())
+
+
+class TestUnreadableEntries:
+    """An entry whose bytes do not match its header passes the header-only
+    checks, and fails only once it is read — as the uploader's broken
+    archive, not a 500."""
+
+    @staticmethod
+    def _damaged(name: str) -> bytes:
+        content = _skill_md({"name": "n"}, "body").encode()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr(name, content)
+        data = bytearray(buf.getvalue())
+        data[data.index(content[-4:])] ^= 0xFF  # no longer matches its CRC
+        return bytes(data)
+
+    def test_a_damaged_skill_md_is_unreadable(self):
+        data = self._damaged("SKILL.md")
+        validate_zip_structure(data)
+        with pytest.raises(SkillBundleUnreadableError, match="SKILL.md"):
+            parse_bundle(data)
+
+    def test_a_damaged_entry_is_unreadable_when_flattened(self):
+        data = self._damaged("wrapper/SKILL.md")
+        validate_zip_structure(data)
+        with pytest.raises(SkillBundleUnreadableError, match="wrapper/SKILL.md"):
+            normalize_bundle(data)
 
 
 # ── frontmatter detection ───────────────────────────────────────────────────
