@@ -645,12 +645,24 @@ class UserNotFoundError(AppError):
 
 
 class SessionNotFoundError(AppError):
-    """No session with that id (admin-console lookup — unlike the
-    customer surface, soft-deleted sessions are still found here, so
-    this fires only for ids that never existed)."""
+    """No session with that id that the caller may see.
+
+    On the customer surface that covers soft-deleted sessions and other
+    users' ids too — one answer, so ownership is not leaked. The admin
+    console still finds soft-deleted sessions, so there it fires only for
+    ids that never existed."""
 
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "session_not_found"
+
+
+class ShareNotFoundError(AppError):
+    """No live share behind that token: never created, revoked, or its
+    session is gone. One type for all of them, because the visitor's next
+    step is the same — ask the owner for a new link."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "share_not_found"
 
 
 class FeedbackNotFoundError(AppError):

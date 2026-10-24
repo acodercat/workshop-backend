@@ -45,7 +45,7 @@ from app.auth import (
     decode_share_view_token,
     verify_password,
 )
-from app.errors import FileNotInSessionError
+from app.errors import FileNotInSessionError, ShareNotFoundError
 from app.models.message import Message
 from app.models.session import Session
 from app.models.session_share import SessionShare
@@ -90,7 +90,7 @@ async def _resolve_share(db: AsyncSession, token: str) -> tuple[SessionShare, Se
     )
     row = (await db.execute(stmt)).first()
     if row is None:
-        raise HTTPException(status_code=404, detail="Share not found")
+        raise ShareNotFoundError("No live share behind this token.")
     return row[0], row[1]
 
 

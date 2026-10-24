@@ -47,6 +47,7 @@ from app.errors import (
     FileCountQuotaExceededError,
     FileNotInSessionError,
     FileSizeQuotaExceededError,
+    SessionNotFoundError,
 )
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
@@ -152,7 +153,7 @@ async def _get_or_404(
         stmt = stmt.with_for_update()
     session = (await db.execute(stmt)).scalar_one_or_none()
     if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise SessionNotFoundError("Session not found.")
     return session
 
 
@@ -820,7 +821,7 @@ async def create_message(
             detail=str(exc),
         )
     except SessionGoneError:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise SessionNotFoundError("Session not found.")
     except RecipeNotInvokableError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
