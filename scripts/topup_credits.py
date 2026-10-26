@@ -107,6 +107,7 @@ async def main(args: argparse.Namespace) -> int:
                 amount_micro=amount_micro,
                 idempotency_key=args.idempotency_key,
                 reason=args.reason,
+                source="admin",
             )
         except TopupAlreadyApplied as exc:
             # Re-fetch and show current balance so operators can verify

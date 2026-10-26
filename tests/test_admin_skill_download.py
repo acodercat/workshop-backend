@@ -44,7 +44,6 @@ def _skill(**over) -> Skill:
             "name": "pdf-tools",
             "display_name": "PDF",
             "description": "reads pdfs",
-            "enabled": True,
             "bundle_key": "official/pdf/9f3c1a2b/original-name.zip",
             "bundle_size": 10,
             **over,

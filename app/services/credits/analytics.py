@@ -6,7 +6,7 @@ that owns the ledger owns them — the same placement as
 :mod:`~app.services.credits.transactions`. The console is the first
 caller; a customer-facing "your usage this month" would reuse them.
 
-**How spend is counted.** A turn writes three or four ledger rows, not
+**How spend is counted.** A turn writes two or three ledger rows, not
 one: ``RESERVE -estimate`` at enqueue, then at settle ``SETTLE
 +estimate`` (releasing the hold) and ``SETTLE -actual`` (the real
 charge); a turn that never measured usage gets ``REFUND +estimate``
@@ -51,34 +51,12 @@ _GRANT_ROWS = (
 )
 _CLAWBACK_ROWS = "kind = 'ADJUST' AND amount < 0"
 
-# A grant the customer actually **paid for**. The marker is the payment
-# order's back-link, not the ledger kind: ``TOPUP`` is what
-# ``apply_topup`` writes for *every* balance increase it handles — a
-# purchase, the registration welcome grant, an operator giveaway
-# (``scripts/topup_credits.py``), a commission conversion — so reading
-# ``kind = 'TOPUP'`` as "sold" books each of those as revenue, and the
-# welcome grant alone moves it by the full signup volume.
-# ``payment_order.ledger_id`` is set only on the PENDING→PAID flip, so
-# it is the one structural record that money changed hands — and it
-# stays right when a second provider lands, which keying on the ``hf:``
-# idempotency prefix would not.
-#
-# Uncorrelated ``IN`` rather than a correlated ``EXISTS`` because this
-# sits inside an aggregate ``FILTER``, where a correlated subquery
-# re-runs per row instead of being pulled up into a semi-join; this form
-# lets Postgres hash the (small) order table once. The ``IS NOT NULL``
-# guard is load-bearing, not decoration: a NULL in the subquery would
-# make the negation below evaluate to NULL for every unmatched row and
-# silently report zero free grants.
-_SOLD_ROWS = "id IN (SELECT ledger_id FROM payment_order WHERE ledger_id IS NOT NULL)"
-
-# The share of grants the platform *gave away* rather than sold. Defined
-# against ``_GRANT_ROWS`` rather than by listing kinds, so a new grant
-# kind counts as free unless it is a purchase. Without this split,
-# "granted" moves for opposite reasons — a good sales day and an
-# expensive giveaway look identical — and the sold half is already
-# reported in ¥ by the payments summary.
-_FREE_GRANT_ROWS = f"{_GRANT_ROWS} AND NOT ({_SOLD_ROWS})"
+# The share of grants the platform *gave away* rather than sold. Upstream
+# subtracts the grants a paid order stands behind; this deployment has no
+# payment flow — ``payment_order`` is dropped in ``b7e2d9a4c1f5`` — so
+# nothing is sold and every grant is a giveaway. Kept as its own name, and
+# the dashboard keeps its field, because the console is shared with upstream.
+_FREE_GRANT_ROWS = _GRANT_ROWS
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,14 +84,10 @@ class CreditsSummary:
 
     spend_micro: int
     granted_micro: int
-    """Every credit added: purchases and giveaways together — the
-    liability increase."""
+    """Every credit added — the liability increase."""
     granted_free_micro: int
-    """The giveaway half of it — every grant with no paid order behind
-    it, so welcome grants, check-ins, referral rewards, operator top-ups
-    and commission conversions all land here. Reported beside the total
-    because the two move for opposite reasons; the remainder
-    (``granted_micro - granted_free_micro``) is what was sold."""
+    """The giveaway share of it. Equal to ``granted_micro`` here, since this
+    deployment sells nothing; see ``_FREE_GRANT_ROWS``."""
     clawed_back_micro: int
     active_users: int
     settled_turns: int

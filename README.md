@@ -281,15 +281,23 @@ code, produced a report, and delivered it back. Tool calls appear as
 | `text` (USER) | USER | `content`, `files` | `files` is always a list of file refs (possibly empty); frontend downloads via `GET /files/download-url?file_key=…` |
 | `text` (ASSISTANT) | ASSISTANT | `content` | Plain text (may contain Markdown). No `files`. |
 | `tool_use` | ASSISTANT | `tool_use_id`, `tool`, `args` | One per tool invocation. Immutable once written. |
-| `tool_result` | ASSISTANT | `tool_use_id`, `tool`, `output`, `files` | Paired with a prior `tool_use` via matching `tool_use_id`. `files` is always present (possibly empty). |
+| `tool_result` | ASSISTANT | `tool_use_id`, `tool`, `output`, `files`, optional `is_error` | Paired with a prior `tool_use` via matching `tool_use_id`. `files` is always present (possibly empty); `is_error: true` appears only on a failed call. |
 | `error` | ASSISTANT (failure path) | `message` | Terminal block when the agent raised before completing. |
 
 **Lifecycle semantics** — blocks are immutable after creation and
-there are no discriminator fields (no `status`, no `is_error`). A
-`tool_use` with a matching `tool_result` = tool finished; a `tool_use`
-without one = tool never returned (cancelled, errored mid-flight, or
-the session itself died). Error text from an errored tool, if any,
-lives in `tool_result.output`.
+carry no `status` field. A `tool_use` with a matching `tool_result` =
+tool finished (`is_error: true` if it failed, its error text in
+`output`); a `tool_use` without one = tool never returned (cancelled,
+errored mid-flight, or the session itself died).
+
+**Questions to the user** — a `tool_use` with `tool: "ask_user"` is the
+agent asking the user: `args.questions` is a list of
+`{question, header, options: [{label, description, preview?}], multi_select}`,
+which the frontend draws as a question card, and a successful
+`tool_result` (no `is_error`) means the turn ended waiting on the answer.
+The backend records no "awaiting" state of its own — the session is
+`complete`, and the frontend derives the pending question from the last
+ASSISTANT message. The answer is an ordinary USER message.
 
 Both directions of `files` use the **same** file-ref shape:
 `{file_key, filename, mime_type, size_bytes}`. Frontend download flow
@@ -301,9 +309,8 @@ presigned OSS URLs.
 - **Agent failure mid-turn** — `blocks` ends with an `error` block and
   `session.status = 'failed'`. The last `tool_use` block has no matching
   `tool_result` because it never arrived.
-- **Tool returned error** — a normal `tool_result` block with the error
-  text in `output`. Nothing on the block marks it as an error; the
-  distinction is in the text itself. The turn can still finish as
+- **Tool returned error** — a `tool_result` block with `is_error: true`
+  and the error text in `output`. The turn can still finish as
   `complete`.
 - **User cancellation** — indistinguishable from "tool never returned"
   in the persisted timeline: the `tool_use` block sits without a

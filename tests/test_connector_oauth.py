@@ -1114,7 +1114,7 @@ class TestBuildOAuthConnector:
         async def never(**kwargs):
             registered.append(kwargs)
 
-        monkeypatch.setattr(endpoint, "_register_oauth_client", never)
+        monkeypatch.setattr(endpoint.authorization, "register_client", never)
 
         db = _session()
         db.execute.return_value = MagicMock(first=MagicMock(return_value=(1,)))
@@ -1142,7 +1142,7 @@ class TestBuildOAuthConnector:
                 "authorization_server": {"issuer": "https://as/"},
             }
 
-        monkeypatch.setattr(endpoint, "_register_oauth_client", fake_register)
+        monkeypatch.setattr(endpoint.authorization, "register_client", fake_register)
 
         connector = await endpoint._build_oauth_connector(
             _db_with_no_connector_named_that(),
@@ -1533,7 +1533,7 @@ class TestProbeCredential:
 
         tokens = OAuthToken(access_token="at", token_type="Bearer")
         monkeypatch.setattr(
-            endpoint, "open_secret", lambda ciphertext, **_: tokens.model_dump_json()
+            endpoint.grant, "open_secret", lambda ciphertext, **_: tokens.model_dump_json()
         )
         auth_type, credential = endpoint._probe_credential(
             self._connector(auth_type=MCPServerAuthType.OAUTH, oauth_tokens_encrypted="enc")
@@ -1551,15 +1551,21 @@ class TestProbeCredential:
                 self._connector(auth_type=MCPServerAuthType.OAUTH, oauth_tokens_encrypted=None)
             )
 
-    def test_a_token_past_its_lifetime_steers_rather_than_probing_dead(self):
+    def test_a_token_past_its_lifetime_steers_rather_than_probing_dead(self, monkeypatch):
         # A dead token produces a 401 that ``probe`` reports as an unreachable
         # server — blaming the MCP server for a fact already on the row
         # (mirrors the worker's connect-time refusal, ``_usable_unrenewed``).
         from datetime import datetime, timedelta
 
+        from mcp.shared.auth import OAuthToken
+
         from app.api.public import mcp_server as endpoint
         from app.models.mcp_server import MCPServerAuthType
 
+        tokens = OAuthToken(access_token="at", token_type="Bearer")
+        monkeypatch.setattr(
+            endpoint.grant, "open_secret", lambda ciphertext, **_: tokens.model_dump_json()
+        )
         with pytest.raises(ConnectorOAuthError, match="recorded lifetime"):
             endpoint._probe_credential(
                 self._connector(
@@ -1938,8 +1944,12 @@ class TestOAuthCallbackHealth:
             return outcome
 
         monkeypatch.setattr(endpoint, "probe", fake_probe)
-        connector = _stored_connector()
-        await endpoint._probe_after_authorization(connector, "at")
+        monkeypatch.setattr(
+            endpoint.grant, "stored_tokens", lambda _c: MagicMock(access_token="at")
+        )
+        connector = _stored_connector(oauth_tokens_expires_at=None)
+        monkeypatch.setattr(endpoint, "_get_owned_connector", AsyncMock(return_value=connector))
+        await endpoint._probe_after_authorization(AsyncMock(), connector)
         return connector
 
     async def test_an_unreachable_server_is_marked(self, monkeypatch):
@@ -2030,6 +2040,46 @@ class TestIssuerIdentification:
             self._check(self._RECORDED, recorded=None)
 
 
+class TestCallbackBelongsToWhoeverStartedIt:
+    """RFC 9700 §4.7: ``state`` is bound to the user agent that started the flow.
+
+    Otherwise a user starts an authorization on their own Connector, sends the
+    consent link to a victim, and the victim's provider account lands on the
+    attacker's Connector.
+    """
+
+    async def test_a_state_started_by_another_user_is_refused_unexchanged(self, monkeypatch):
+        import json as json_module
+
+        from app.api.public import mcp_server as endpoint
+        from app.rate_limit import limiter
+        from app.schemas.mcp_server import OAuthCallbackRequest
+
+        monkeypatch.setattr(limiter, "enabled", False)
+        exchanged: list[object] = []
+
+        async def never(*_args, **_kwargs):
+            exchanged.append(True)
+
+        monkeypatch.setattr(endpoint.oauth, "exchange_code", never)
+        redis = AsyncMock()
+        _stub_state_consumption(
+            redis,
+            json_module.dumps({"connector_id": 1, "user_id": 7, "code_verifier": "v"}),
+        )
+
+        with pytest.raises(ConnectorAuthorizationExpiredError):
+            await endpoint.oauth_callback(
+                request=MagicMock(),
+                body=OAuthCallbackRequest(code="c", state="s", iss=None),
+                db=_session(),
+                redis=redis,
+                current_user=MagicMock(id=8),
+            )
+
+        assert exchanged == []
+
+
 class TestCallbackRejectsAMixedUpResponse:
     """The check has to be wired into the callback, not merely available."""
 
@@ -2073,6 +2123,7 @@ class TestCallbackRejectsAMixedUpResponse:
                 ),
                 db=_session(),
                 redis=redis,
+                current_user=MagicMock(id=7),
             )
 
         assert exchanged == []
@@ -2162,6 +2213,7 @@ class TestTwoAuthorizationsInTheAir:
             body=OAuthCallbackRequest(code="c", state=state, iss=None),
             db=db or AsyncMock(),
             redis=redis,
+            current_user=MagicMock(id=7),
         )
 
     async def test_the_older_flow_cannot_land_on_top_of_the_newer(
@@ -2212,7 +2264,7 @@ class TestTwoAuthorizationsInTheAir:
             return MagicMock(access_token="stale")
 
         monkeypatch.setattr(endpoint.oauth, "exchange_code", slow_exchange)
-        monkeypatch.setattr(endpoint, "_load_oauth_client", lambda _c: MagicMock())
+        monkeypatch.setattr(endpoint.grant, "stored_client", lambda _c: MagicMock())
         monkeypatch.setattr(
             endpoint.settings,
             "mcp_oauth_redirect_uri",
@@ -2248,7 +2300,7 @@ class TestTwoAuthorizationsInTheAir:
             "store_tokens",
             lambda *args, **kwargs: stored.append(args),
         )
-        monkeypatch.setattr(endpoint, "_load_oauth_client", lambda _c: MagicMock())
+        monkeypatch.setattr(endpoint.grant, "stored_client", lambda _c: MagicMock())
         monkeypatch.setattr(
             endpoint.settings,
             "mcp_oauth_redirect_uri",
@@ -2298,7 +2350,7 @@ class TestTwoAuthorizationsInTheAir:
         from app.api.public import mcp_server as endpoint
 
         with pytest.raises(ConnectorAuthorizationExpiredError) as caught:
-            await endpoint._reject_an_unawaited_authorization(
+            await endpoint.authorization._reject_an_unawaited_authorization(
                 self._redis(current_state=None),
                 "whatever",
                 {"connector_id": 1},
@@ -2360,7 +2412,7 @@ def _session(**kwargs) -> AsyncMock:
 
     ``AsyncMock`` invents a truthy attribute on demand, so a bare one claims to
     be holding pending inserts, updates *and* deletes — which is what a session
-    that has only read looks nothing like, and what ``_release_connection``
+    that has only read looks nothing like, and what ``release_connection``
     refuses to commit over. Stating them makes the double honest about being
     fresh.
     """
@@ -2461,10 +2513,10 @@ class TestAnAuthorizationServerThatChanged:
     async def _client_for(self, connector, discovered, db=None):
         from app.api.public import mcp_server as endpoint
 
-        return await endpoint._client_for_authorization(
+        return await endpoint.authorization._client_for_authorization(
+            db or AsyncMock(),
             connector,
             discovered,
-            db or AsyncMock(),
         )
 
     async def test_a_migrated_issuer_re_registers_instead_of_reusing(self, monkeypatch):
@@ -2500,7 +2552,7 @@ class TestAnAuthorizationServerThatChanged:
             discovered.metadata.issuer
         )
         assert (
-            endpoint._why_the_stored_client_is_unusable(
+            endpoint.authorization._why_the_stored_client_is_unusable(
                 connector,
                 _dcr_client("fresh"),
                 discovered,
@@ -2536,10 +2588,10 @@ class TestAnAuthorizationServerThatChanged:
         # inherit a dead one's backoff.
         assert connector.oauth_refresh_after is None
 
-    async def test_an_expired_registration_keeps_the_grant(self, monkeypatch):
+    async def test_an_expired_registration_drops_the_grant_too(self, monkeypatch):
         # The other reason to re-register. The authorization server has not
-        # moved, so the grant still belongs where the row points, and dropping
-        # it would cost a working Connector for nothing.
+        # moved, but the refresh token is bound to the client being replaced
+        # (RFC 6749 §6) and cannot renew under the new one.
         from app.api.public import mcp_server as endpoint
 
         monkeypatch.setattr(
@@ -2558,8 +2610,30 @@ class TestAnAuthorizationServerThatChanged:
         await self._client_for(connector, self._discovered("https://as-a.example.com"))
 
         endpoint.oauth.ensure_client.assert_awaited()
-        assert connector.oauth_tokens_encrypted == "sealed-grant-from-as-a"
-        assert connector.oauth_tokens_expires_at == _LATER
+        assert connector.oauth_tokens_encrypted is None
+        assert connector.oauth_tokens_expires_at is None
+
+    async def test_a_row_with_no_issuer_drops_its_grant_on_re_registration(self, monkeypatch):
+        # Nothing says whether the server moved. Keeping the grant would leave
+        # an old refresh token beside the new client and the newly recorded
+        # token endpoint — renewable before the browser leg finishes.
+        from app.api.public import mcp_server as endpoint
+
+        monkeypatch.setattr(
+            endpoint.oauth,
+            "ensure_client",
+            AsyncMock(return_value=_dcr_client("fresh")),
+        )
+        monkeypatch.setattr(endpoint.settings, "mcp_oauth_redirect_uri", "https://app/cb")
+        connector = self._connector(None)
+        connector.oauth_client_encrypted = _sealed(_dcr_client("old", secret="old"))
+        connector.oauth_tokens_encrypted = "sealed-grant"
+        connector.oauth_tokens_expires_at = _LATER
+
+        await self._client_for(connector, self._discovered("https://as-a.example.com"))
+
+        endpoint.oauth.ensure_client.assert_awaited()
+        assert connector.oauth_tokens_encrypted is None
 
     async def test_a_manual_client_is_refused_rather_than_replaced(self, monkeypatch):
         # It is the operator's own OAuth app; there is no second one to make.
@@ -2683,7 +2757,7 @@ class TestAnAuthorizationServerThatChanged:
             discovered.metadata.issuer
         )
         assert (
-            endpoint._why_the_stored_client_is_unusable(
+            endpoint.authorization._why_the_stored_client_is_unusable(
                 connector,
                 _dcr_client("fresh"),
                 discovered,
@@ -2716,7 +2790,7 @@ class TestAnExpiredClientRegistration:
     not hand them the same dead registration."""
 
     def test_a_stated_expiry_in_the_past_counts(self):
-        from app.api.public.mcp_server import _secret_expired
+        from app.services.mcp.authorization import _secret_expired
 
         assert _secret_expired(
             OAuthClientInformationFull(
@@ -2730,7 +2804,7 @@ class TestAnExpiredClientRegistration:
     def test_zero_means_never(self):
         # RFC 7591 §3.2.1. Reading it as a 1970 deadline would re-register a
         # perfectly good client on every authorization.
-        from app.api.public.mcp_server import _secret_expired
+        from app.services.mcp.authorization import _secret_expired
 
         assert not _secret_expired(
             OAuthClientInformationFull(
@@ -2744,7 +2818,7 @@ class TestAnExpiredClientRegistration:
     def test_a_manual_client_is_never_re_registered(self):
         # It belongs to the operator's own OAuth app and carries no expiry, so
         # it must not be replaced behind their back.
-        from app.api.public.mcp_server import _secret_expired
+        from app.services.mcp.authorization import _secret_expired
 
         assert not _secret_expired(
             OAuthClientInformationFull(
@@ -3024,7 +3098,7 @@ class TestEndingAnAuthorization:
             ConnectorUpdate(connected=False),
         )
 
-        assert [task.func for task in queued.tasks] == [endpoint._revoke_quietly]
+        assert [task.func for task in queued.tasks] == [endpoint.authorization._revoke_quietly]
         assert queued.tasks[0].args[-1] is tokens
 
     async def test_reconnecting_without_a_grant_is_refused(self, monkeypatch):
@@ -3179,7 +3253,9 @@ class TestEndingAnAuthorization:
             current_user=MagicMock(id=7),
         )
 
-        assert [task.func for task in background_tasks.tasks] == [endpoint._revoke_quietly]
+        assert [task.func for task in background_tasks.tasks] == [
+            endpoint.authorization._revoke_quietly
+        ]
 
     async def test_a_provider_that_refuses_the_revocation_is_only_logged(
         self,
@@ -3196,7 +3272,7 @@ class TestEndingAnAuthorization:
             AsyncMock(side_effect=ConnectorOAuthError("nope")),
         )
 
-        await endpoint._revoke_quietly(1, MagicMock(), MagicMock(), MagicMock())
+        await endpoint.authorization._revoke_quietly(1, MagicMock(), MagicMock(), MagicMock())
 
     async def test_converting_to_a_static_credential_tells_the_provider_too(
         self,
@@ -3227,7 +3303,7 @@ class TestEndingAnAuthorization:
 
         assert connector.oauth_tokens_encrypted is None
         assert connector.oauth_client_encrypted is None
-        assert [task.func for task in queued.tasks] == [endpoint._revoke_quietly]
+        assert [task.func for task in queued.tasks] == [endpoint.authorization._revoke_quietly]
 
     async def test_a_grant_that_cannot_be_read_still_lets_go(self, monkeypatch):
         # Sealed under an encryption key that has since been rotated. Reading it

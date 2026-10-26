@@ -113,6 +113,35 @@ class TestHappyPath:
             assert zf.getinfo("scripts/run.sh").external_attr >> 16 == 0o100755
             assert zf.getinfo("scripts/run.sh").compress_type == zipfile.ZIP_DEFLATED
 
+    def test_a_finder_zip_is_a_single_wrapper(self):
+        # Finder's "Compress" puts a ``__MACOSX/`` tree beside the folder; it
+        # used to read as a second top-level directory, and SKILL.md as missing.
+        data = _zip(
+            {
+                "my-skill/SKILL.md": _skill_md({"name": "finder"}, "body"),
+                "__MACOSX/my-skill/._SKILL.md": "appledouble",
+            }
+        )
+
+        assert parse_bundle(data).name == "finder"
+        flattened = normalize_bundle(data)
+        assert flattened is not None
+        with zipfile.ZipFile(io.BytesIO(flattened)) as zf:
+            assert zf.namelist() == ["SKILL.md"]
+
+    def test_macos_metadata_is_dropped_beside_a_root_skill_md(self):
+        data = _zip(
+            {
+                "SKILL.md": _skill_md({"name": "root"}, "body"),
+                "__MACOSX/._SKILL.md": "appledouble",
+            }
+        )
+
+        flattened = normalize_bundle(data)
+        assert flattened is not None
+        with zipfile.ZipFile(io.BytesIO(flattened)) as zf:
+            assert zf.namelist() == ["SKILL.md"]
+
     def test_fallback_description_from_first_body_line(self):
         data = _zip(
             {

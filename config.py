@@ -162,8 +162,9 @@ class Settings(BaseSettings):
         description="Allowed origins for CORS on the admin app",
     )
 
-    # Rate limits — slowapi key is the client IP. Sized for human use;
-    # raise behind authenticated identity if abuse appears.
+    # Rate limits. A decorated limit on an authenticated route keys on the
+    # user; everything else — pre-login routes and the global floor — on the
+    # client IP (see ``app/rate_limit.py``). Sized for human use.
     #
     # ``trust_proxy_headers``: when the API sits behind a reverse proxy,
     # ``request.client.host`` is the proxy's IP (one shared rate-limit
@@ -175,7 +176,10 @@ class Settings(BaseSettings):
         default=False,
         description="Key rate limits on the first X-Forwarded-For hop (only behind a trusted proxy).",
     )
-    rate_limit_default: str = Field(default="200/minute", description="Default per-IP rate limit")
+    rate_limit_default: str = Field(
+        default="200/minute",
+        description="Global floor for routes without their own limit, per client IP",
+    )
     rate_limit_login: str = Field(default="5/minute", description="Per-IP login attempts")
     # Staff sign-in. Tighter than the customer limit: the operator pool is
     # tiny and known, so a burst of attempts is far more likely to be an
@@ -185,7 +189,7 @@ class Settings(BaseSettings):
         description="Per-IP admin-console login attempts",
     )
     rate_limit_message_create: str = Field(
-        default="30/minute", description="Per-IP message-create rate"
+        default="30/minute", description="Per-user message-create rate"
     )
     rate_limit_upload_url: str = Field(
         default="300/minute",
@@ -211,9 +215,10 @@ class Settings(BaseSettings):
     rate_limit_register_code: str = Field(
         default="3/minute;20/hour",
         description=(
-            "Per-IP verification-code send limit (login/register/email-change "
-            "share this code-dispatch endpoint). Two layered limits per OWASP "
-            "OTP guidance: a 3/minute burst cap + a 20/hour ceiling — generous "
+            "Verification-code send limit — per IP on the pre-login endpoint, "
+            "per user on the signed-in ones (email change, sudo). Two "
+            "layered limits per OWASP OTP guidance: a 3/minute burst cap + a "
+            "20/hour ceiling — generous "
             "enough not to false-positive NAT/CGNAT-shared IPs, on top of the "
             "per-identity 60s resend cooldown and Aliyun's own per-number flow "
             "control. slowapi enforces every ';'-separated limit."
@@ -688,10 +693,9 @@ class Settings(BaseSettings):
         ge=0,
         description="Stop turns once the user's projected post-settle balance falls to this many credits. 0 = stop at exactly zero, tolerating one detection window of overshoot (Manus-style).",
     )
-    # Auto-grant on registration. 500 credits at the post-redenomination
-    # peg (1 credit = $0.01) is $5 of headroom — same USD value as the
-    # pre-2026-05 5_000-credit grant, just renumbered with the 10×
-    # denomination change. Generous "try the product" allowance; note
+    # Auto-grant on registration, in whole credits at the current peg
+    # (1 credit ≈ $0.01 of cost basis). A generous "try the product"
+    # allowance; note
     # this is large enough that signup-farming abuse is a real
     # consideration (gate behind email verification + rate limits).
     # Set to 0 to disable (every new user starts at 0 balance, admin must

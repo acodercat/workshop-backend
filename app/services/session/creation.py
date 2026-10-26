@@ -21,10 +21,10 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import UnconfiguredTierError
 from app.models.session import AgentType, Session, SessionStatus, Tier
 from app.services.credits.rates import snapshot_rate
 from app.services.session import connectors as session_connectors
-from app.services.session.exceptions import UnconfiguredTierError
 from config import settings
 
 

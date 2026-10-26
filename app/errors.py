@@ -79,6 +79,24 @@ class EmailTakenError(AppError):
     error_type = "email_taken"
 
 
+class InvalidCredentialsError(AppError):
+    """Username / password sign-in refused. A wrong password, an unknown
+    username and a disabled account all answer this, identically, so a
+    lockout never tells anyone the account exists."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "invalid_credentials"
+
+
+class AccountInactiveError(AppError):
+    """Code sign-in for a disabled or suspended account. Said plainly here,
+    unlike password sign-in: the caller has just proved they hold the
+    account's own email."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "account_inactive"
+
+
 class NotRegisteredError(AppError):
     """Login attempt for an email with no account. The frontend steers
     the user to the (invite-gated) register tab rather than auto-creating."""
@@ -135,6 +153,15 @@ class TooManyVerificationAttemptsError(AppError):
 class IncorrectPasswordError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "incorrect_password"
+
+
+class VerificationChannelUnboundError(AppError):
+    """A sudo code was asked for by an account with no email to send it
+    to. The client offers the code only to accounts that have one, so
+    this is a stale form."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "verification_channel_unbound"
 
 
 class SameEmailError(AppError):
@@ -441,6 +468,14 @@ class OAuthNotConfiguredError(AppError):
     error_type = "oauth_not_configured"
 
 
+class ConnectorNotFoundError(AppError):
+    """No Connector with that id that the caller owns. One answer for both,
+    so the existence of other users' Connectors is not leaked."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "connector_not_found"
+
+
 class ConnectorCatalogEntryNotFoundError(AppError):
     """No such entry in the official Connector directory — the id is unknown or
     the entry has been unpublished. 404 rather than 403 for an unpublished one:
@@ -506,6 +541,40 @@ class AgentTypeDowngradeError(AppError):
     error_type = "agent_type_downgrade"
 
 
+class GenerationInProgressError(AppError):
+    """The session's last turn is still running — refused for a new message
+    and for a delete alike. 409: wait for it, or stop it."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "generation_in_progress"
+
+
+class ConcurrentTaskLimitError(AppError):
+    """The user already has ``settings.max_concurrent_running_tasks`` tasks
+    running. Its own kind rather than a status-derived 429, because the
+    remedy is to let a running task finish or stop it, not to slow down —
+    and the slowapi 429 already owns ``rate_limited``."""
+
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    error_type = "concurrent_task_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} tasks may run at once.",
+            details={"limit": limit},
+        )
+
+
+class UnconfiguredTierError(AppError):
+    """A capability tier resolves to no model this deployment can run —
+    absent from ``settings.session_tier_models``, or naming a model outside
+    ``settings.supported_session_model_ids``. A configuration gap rather
+    than a caller mistake, but one only a request for that tier finds."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "tier_unconfigured"
+
+
 class StaffAuthenticationError(AppError):
     """The admin console could not identify the caller — absent, malformed,
     expired, wrongly-scoped or revoked token, or a deactivated account. All
@@ -560,12 +629,41 @@ class UserNotFoundError(AppError):
 
 
 class SessionNotFoundError(AppError):
-    """No session with that id (admin-console lookup — unlike the
-    customer surface, soft-deleted sessions are still found here, so
-    this fires only for ids that never existed)."""
+    """No session with that id that the caller may see.
+
+    On the customer surface that covers soft-deleted sessions and other
+    users' ids too — one answer, so ownership is not leaked. The admin
+    console still finds soft-deleted sessions, so there it fires only for
+    ids that never existed."""
 
     status_code = status.HTTP_404_NOT_FOUND
     error_type = "session_not_found"
+
+
+class MessageNotFoundError(AppError):
+    """No message with that id in the session — the session itself has
+    already been resolved as the caller's."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "message_not_found"
+
+
+class NotAssistantMessageError(AppError):
+    """Feedback was sent for a message the agent did not write. The UI
+    offers ratings on assistant messages only, so this is a client
+    programming error — 400."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "not_assistant_message"
+
+
+class ShareNotFoundError(AppError):
+    """No live share behind that token: never created, revoked, or its
+    session is gone. One type for all of them, because the visitor's next
+    step is the same — ask the owner for a new link."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "share_not_found"
 
 
 class FeedbackNotFoundError(AppError):

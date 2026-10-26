@@ -1,7 +1,7 @@
 """Unified OSS storage — presigned URLs, uploads, downloads.
 
-``UploadPolicy`` encapsulates per-asset-type config (bucket, extension
-whitelist, size cap). ``generate_upload_url`` mints presigned PUT URLs
+``UploadPolicy`` encapsulates per-asset-type config (bucket, extension →
+Content-Type map, size cap). ``generate_upload_url`` mints presigned PUT URLs
 for session-file uploads; skill bundles upload directly via the
 backend (multipart POST). Generic ops (``upload``, ``download``,
 ``head_size``, ``delete``) take a policy so callers never touch raw
@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 class FileObjectNotFoundError(ValueError):
     """The OSS object doesn't exist (e.g. a presigned upload never
     happened). Translates oss2's ``NoSuchKey`` at the storage boundary so
-    callers don't import ``oss2``. The session layer maps it to HTTP 400.
+    callers don't import ``oss2``. ``confirmed_sizes`` turns it into
+    :class:`~app.errors.FileNotUploadedError` at bind time.
     """
 
     def __init__(self, file_key: str) -> None:
@@ -98,7 +99,7 @@ class UploadPolicy:
     allowed_types: dict[str, str]
 
 
-# Session file uploads (any whitelisted type, 100 MiB cap). The OSS
+# Session file uploads (any extension, 100 MiB cap). The OSS
 # ``key_prefix`` matches the ``SessionFile`` DB model. Pre-existing
 # objects keep their ``documents/...`` keys — file_storage operations
 # read full keys from the DB and never parse the prefix, so the two
@@ -214,14 +215,8 @@ def generate_upload_url(
     filename: str,
     size_bytes: int,
     policy: UploadPolicy,
-    *,
-    key_extra: str = "",
 ) -> UploadUrlResponse:
-    """Validate + mint a presigned PUT URL per *policy*.
-
-    ``key_extra`` is inserted between the policy prefix and the UUID —
-    use it for per-user scoping (e.g. ``f"{user_id}/"``).
-    """
+    """Validate + mint a presigned PUT URL per *policy*."""
     if size_bytes > policy.max_bytes:
         raise FileTooLargeError(size_bytes, policy.max_bytes)
     filename = validate_input_filename(filename)
@@ -236,7 +231,7 @@ def generate_upload_url(
     # ``_INLINE_ALLOWED_EXTENSIONS`` for the inline-preview gate).
     content_type = policy.allowed_types.get(ext, "application/octet-stream")
 
-    file_key = f"{policy.key_prefix}/{key_extra}{uuid.uuid4()}/{filename}"
+    file_key = f"{policy.key_prefix}/{uuid.uuid4()}/{filename}"
     # Tag the object orphan at upload (M5) so a never-bound upload is reaped
     # by the bucket lifecycle rule. Signed into the URL, so the client must
     # echo the header exactly — ``tagging_header`` tells it what to send, and

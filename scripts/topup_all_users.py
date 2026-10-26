@@ -44,6 +44,7 @@ async def main(args: argparse.Namespace) -> int:
                     amount_micro=amount_micro,
                     idempotency_key=f"bulk-topup-{args.tag}-{user_id}",
                     reason=args.reason,
+                    source="admin",
                 )
                 await db.commit()
                 balance_micro = await credits.get_balance(db, user_id)

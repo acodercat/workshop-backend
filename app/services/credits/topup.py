@@ -1,6 +1,12 @@
-"""Admin top-up. Only entry point that creates ``TOPUP`` ledger rows."""
+"""Credit top-ups — the only entry point that creates ``TOPUP`` ledger rows.
+
+Every grant of credits someone paid for or was given comes through here:
+the welcome grant, and an operator's grant (``scripts/topup_credits``).
+``source`` says which, on the row.
+"""
 
 import logging
+from typing import Literal
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,13 +16,14 @@ from app.services.credits._internal import insert_ledger_and_bump_balance
 
 logger = logging.getLogger(__name__)
 
+TopupSource = Literal["welcome_grant", "admin"]
+
 
 class TopupAlreadyApplied(Exception):
     """Raised when a top-up with the same ``idempotency_key`` exists.
 
-    Callers (admin scripts, future payment webhooks) treat this as
-    success — the prior call already moved the balance, so re-trying
-    is a no-op."""
+    Callers treat this as success — the prior call already moved the
+    balance, so re-trying is a no-op."""
 
 
 async def apply_topup(
@@ -26,6 +33,7 @@ async def apply_topup(
     amount_micro: int,
     idempotency_key: str,
     reason: str,
+    source: TopupSource,
     admin_id: int | None = None,
 ) -> CreditLedger:
     """Insert a ``TOPUP`` row + bump balance, atomic under user lock.
@@ -54,7 +62,7 @@ async def apply_topup(
             user_id=user_id,
             amount=amount_micro,
             kind=CreditLedgerKind.TOPUP,
-            reference={"reason": reason, "admin_id": admin_id, "source": "admin"},
+            reference={"reason": reason, "admin_id": admin_id, "source": source},
             idempotency_key=idempotency_key,
         )
     except IntegrityError as exc:

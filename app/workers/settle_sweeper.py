@@ -33,7 +33,8 @@ next tick's first survivor picks it up.
 
 Sweep eligibility (per reservation row, ``state='OPEN'``):
 
-- ``session_id`` is NULL (session was deleted) → refund.
+- ``session_id`` is NULL (session hard-deleted — the app only
+  soft-deletes, so an operator or a test teardown) → refund.
 - ``session.status`` is terminal (worker finished, success or fail)
   → delegate to :func:`~app.services.credits.settle_open_for_session`,
   which reads usage from ``session_turn`` and routes to settle (usage
@@ -42,8 +43,9 @@ Sweep eligibility (per reservation row, ``state='OPEN'``):
   before its terminal flip, or the fleet is down and the turn was never
   claimed) → terminalize the stranded turn + session to FAILED
   (:func:`~app.services.session.recovery.fail_abandoned_turn`) so it
-  stops being a zombie, then refund — atomically. Left OPEN if a worker
-  still holds a live lease.
+  stops being a zombie, then refund — atomically — and announce
+  ``FAILED`` to the owner's open clients, since no worker will. Left OPEN
+  if a worker still holds a live lease.
 - Otherwise (turn still running, not yet expired) → leave open.
 """
 
@@ -52,6 +54,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import redis.asyncio as aioredis
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +63,7 @@ from app.models.credit_reservation import CreditReservation, CreditReservationSt
 from app.models.session import Session, SessionStatus
 from app.services import credits
 from app.services.session.recovery import fail_abandoned_turn
+from app.services.user import publish_session_status
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +82,12 @@ _SWEEP_BATCH = 100
 _NON_TERMINAL = (SessionStatus.IDLE, SessionStatus.RUNNING)
 
 
-async def run_forever(*, interval_seconds: int = 60) -> None:
+async def run_forever(redis: aioredis.Redis, *, interval_seconds: int = 60) -> None:
     """Periodic sweep loop. Cancel-safe via :class:`asyncio.CancelledError`."""
     consecutive_failures = 0
     while True:
         try:
-            processed = await _tick()
+            processed = await _tick(redis)
             consecutive_failures = 0
             if processed:
                 logger.info("sweeper tick: processed=%d", processed)
@@ -106,7 +110,7 @@ async def run_forever(*, interval_seconds: int = 60) -> None:
         await asyncio.sleep(delay)
 
 
-async def _tick() -> int:
+async def _tick(redis: aioredis.Redis) -> int:
     """One sweep cycle. Returns the number of reservations the sweeper
     actually touched (0 when another process held the advisory lock).
 
@@ -137,7 +141,7 @@ async def _tick() -> int:
         candidates = await _list_candidates(lock_db)
         processed = 0
         for candidate in candidates:
-            if await _process_one(candidate):
+            if await _process_one(candidate, redis):
                 processed += 1
         return processed
 
@@ -162,6 +166,7 @@ async def _list_candidates(db: AsyncSession) -> list[tuple]:
             CreditReservation.id,
             CreditReservation.session_id,
             CreditReservation.expires_at,
+            CreditReservation.user_id,
         )
         .join(Session, Session.id == CreditReservation.session_id, isouter=True)
         .where(
@@ -181,7 +186,7 @@ async def _list_candidates(db: AsyncSession) -> list[tuple]:
     return cast("list[tuple[Any, ...]]", rows.all())
 
 
-async def _process_one(candidate: tuple) -> bool:
+async def _process_one(candidate: tuple, redis: aioredis.Redis) -> bool:
     """Settle / refund one reservation in its own short transaction.
 
     Returns ``True`` if the row was actually touched (settled or
@@ -189,11 +194,11 @@ async def _process_one(candidate: tuple) -> bool:
     Per-row exceptions are caught and logged — the sweeper must
     survive a single bad reservation to keep processing the batch.
     """
-    reservation_id, session_id, expires_at = candidate
+    reservation_id, session_id, expires_at, user_id = candidate
     try:
         async with AsyncSessionLocal() as db:
             if session_id is None:
-                # Session was deleted; refund.
+                # Session hard-deleted out from under it; refund.
                 await credits.refund_reservation(
                     db,
                     reservation_id=reservation_id,
@@ -231,6 +236,12 @@ async def _process_one(candidate: tuple) -> bool:
                     reason={"cause": "sweeper_expired_no_terminal"},
                 )
                 await db.commit()
+                await publish_session_status(
+                    redis,
+                    user_id=user_id,
+                    session_id=session_id,
+                    status=SessionStatus.FAILED,
+                )
                 return True
             # Still in-flight; leave alone.
             return False

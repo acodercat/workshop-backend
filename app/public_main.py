@@ -197,8 +197,8 @@ async def lifespan(app: FastAPI):
         max_connections=settings.redis_streaming_pool_size,
         blocking=False,
         # A blocking XREAD holds the socket for up to block_ms (15s), so the
-        # streaming pool needs a read timeout longer than that; the short-op
-        # pool leaves it unset. See redis_streaming_socket_timeout_seconds.
+        # streaming pool needs a read timeout longer than that, where the
+        # short-op pool's is short. See redis_streaming_socket_timeout_seconds.
         socket_timeout=settings.redis_streaming_socket_timeout_seconds,
     )
     logger.info(
@@ -257,4 +257,4 @@ app.include_router(public_router)
 @app.get("/")
 @limiter.exempt
 async def root():
-    return {"message": "Welcome to MetaSeq Agent API"}
+    return {"message": "Welcome to HKGAI Agent API"}

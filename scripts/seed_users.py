@@ -100,6 +100,7 @@ async def _grant_welcome_credits(*, user_id: int) -> None:
                 amount_micro=micro_from_credits(WELCOME_CREDITS),
                 idempotency_key=f"welcome-{user_id}",
                 reason="welcome grant",
+                source="welcome_grant",
             )
             await db.commit()
         except TopupAlreadyApplied:

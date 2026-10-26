@@ -48,7 +48,7 @@ async def assert_file_belongs_to_session(
 async def assert_files_owned_by(
     db: AsyncSession,
     *,
-    user_id: int | None,
+    user_id: int,
     file_keys: Collection[str],
 ) -> None:
     """Raise :class:`FileNotOwnedError` if any key is held by someone else.
@@ -70,12 +70,10 @@ async def assert_files_owned_by(
     A key nobody holds passes. It is only knowable by whoever minted the
     presigned upload, and refusing it would refuse every fresh upload.
 
-    ``IS DISTINCT FROM`` rather than ``!=`` for one reason: rows whose owner
-    is NULL. ``user_id != 7`` is unknown for such a row and drops it, so a
-    logged-in caller would pass on a key held anonymously; ``IS DISTINCT
-    FROM 7`` keeps it, and the check fails closed. (The anonymous-caller
-    case is *not* the reason — SQLAlchemy already compiles ``!= None`` to
-    ``IS NOT NULL``.)
+    ``IS DISTINCT FROM`` rather than ``!=`` for rows whose owner is NULL:
+    ``user_id != 7`` is unknown for such a row and drops it, so the caller
+    would pass on a key someone else's row holds; ``IS DISTINCT FROM 7``
+    keeps it, and the check fails closed.
     """
     if not file_keys:
         return

@@ -1,8 +1,9 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.common.email import NormalizedEmail
+from app.common.password import BcryptPassword
 
 
 class UserResponse(BaseModel):
@@ -49,39 +50,54 @@ class ProfileUpdate(BaseModel):
     avatar_revision: int | None = Field(default=None, ge=0)
 
 
-class PasswordChange(BaseModel):
+class SudoProof(BaseModel):
+    """Exactly one of the current password or a sudo code from
+    ``POST /me/verification-codes``. Checked by
+    :func:`app.services.auth.sudo.require_sudo`, which says why the code
+    exists."""
+
+    current_password: str | None = Field(default=None, min_length=1)
+    verification_code: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+    @model_validator(mode="after")
+    def _exactly_one_proof(self) -> "SudoProof":
+        if (self.current_password is None) == (self.verification_code is None):
+            raise ValueError("Exactly one of 'current_password' or 'verification_code' is required")
+        return self
+
+
+class SudoCodeRequest(BaseModel):
+    """Body for ``POST /me/verification-codes`` — send a sudo code to the
+    account's own email. ``locale`` picks the email template."""
+
+    locale: str = Field(default="zh-CN", max_length=16)
+
+
+class PasswordChange(SudoProof):
     """Body for ``PUT /me/password``.
 
-    ``new_password`` is capped at 72 chars because bcrypt silently
-    truncates anything past 72 bytes — keeping the cap explicit means
-    the user can't end up in a state where the password they typed
-    differs from the prefix actually used at next login."""
+    ``new_password`` is capped at bcrypt's input bound, which is in
+    bytes (see :data:`~app.common.password.BCRYPT_MAX_BYTES`)."""
 
-    current_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6, max_length=72)
+    new_password: BcryptPassword = Field(..., min_length=6)
 
 
-class EmailChangeCodeRequest(BaseModel):
+class EmailChangeCodeRequest(SudoProof):
     """Body for ``POST /me/email/verification-codes`` (step 1 of email
-    change).
-
-    ``current_password`` is the sudo gate — even though the caller is
-    already JWT-authenticated, changing the email touches the password-
-    recovery surface, so we re-verify possession of the credential
-    before sending a code to the new address. ``locale`` controls the
-    language of the email body, mirroring registration."""
+    change): prove identity, then a code goes to the new address.
+    ``locale`` controls the language of the email body, mirroring
+    registration."""
 
     new_email: NormalizedEmail
-    current_password: str = Field(..., min_length=1)
     locale: str = Field(default="zh-CN", max_length=16)
 
 
 class EmailChangeRequest(BaseModel):
     """Body for ``PUT /me/email`` (step 2 of email change).
 
-    The caller already proved possession of ``current_password`` in
-    step 1; here they prove possession of the *new* email by quoting
-    back the 6-digit verification code that was sent there."""
+    The caller already proved their identity in step 1; here they prove
+    possession of the *new* email by quoting back the 6-digit
+    verification code that was sent there."""
 
     new_email: NormalizedEmail
     code: str = Field(..., pattern=r"^\d{6}$")
@@ -90,6 +106,8 @@ class EmailChangeRequest(BaseModel):
 __all__ = [
     "UserResponse",
     "ProfileUpdate",
+    "SudoProof",
+    "SudoCodeRequest",
     "PasswordChange",
     "EmailChangeCodeRequest",
     "EmailChangeRequest",

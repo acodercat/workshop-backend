@@ -3,18 +3,20 @@
 Sub-modules:
 
 - :mod:`.verification` — Redis-backed verification code lifecycle
-  (generate → send → validate → consume). Shared between registration
-  and email-change flows; namespaced by Redis prefix so they don't
-  collide.
+  (generate → send → validate → consume). Shared by every code flow;
+  namespaced by Redis prefix so they don't collide.
 - :mod:`.register` — register orchestration: redeem an invite code,
   create an ``ACTIVE`` user, log them straight in.
 - :mod:`.invite` — invite-code creation + redemption.
-- :mod:`.email_change` — change-email orchestration for an
-  authenticated user: sudo + verify code + bump ``token_version``.
+- :mod:`.login` — login by verification code.
+- :mod:`.sudo` — the sudo gate in front of credential changes:
+  current password or a sudo code.
+- :mod:`.email_change` — changing a signed-in user's email: sudo +
+  verify code + bump ``token_version``.
 
-Email-change exports stay submodule-scoped (``from app.services.auth
-.email_change import ...``) — they're called from one endpoint each,
-so re-exporting at the package level adds noise without saving work.
+The sudo and email-change exports stay submodule-scoped — they're
+called from the user endpoints alone, so re-exporting at the package level
+adds noise without saving work.
 """
 
 from app.services.auth.invite import (

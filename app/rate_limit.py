@@ -13,6 +13,12 @@ bucket and throttle each other. A principal is a customer (``user:{id}``)
 or a console operator (``staff:{id}``), stamped by
 :func:`set_rate_limit_principal`.
 
+That holds for **decorated** limits, which slowapi checks inside the
+endpoint, after the auth dependency has run. The global floor
+(``default_limits``, applied by the middleware in :mod:`app.asgi`) runs
+before any dependency and so always keys on the IP. It is sized as a
+floor accordingly — every limit that matters is a decorator.
+
 Counters are stored in **Redis** (``settings.redis_url``), not in
 process memory. With multiple uvicorn workers / hosts an in-memory
 store would count each process independently, so a ``5/minute`` login
@@ -77,10 +83,11 @@ def _rate_limit_key(request: Request) -> str:
     """Rate-limit key: the authenticated principal if known, else the IP.
 
     :func:`set_rate_limit_principal` stamps the principal once a Bearer
-    token is validated, and FastAPI resolves that dependency before
-    slowapi evaluates this key — so an authenticated request keys on
-    ``user:{id}`` / ``staff:{id}`` and is immune to NAT-shared IPs,
-    while a pre-login request keys on ``ip:{addr}``.
+    token is validated, and FastAPI resolves that dependency before a
+    decorated limit evaluates this key — so such a request keys on
+    ``user:{id}`` / ``staff:{id}`` and is immune to NAT-shared IPs, while
+    a pre-login request, and the middleware's global floor, key on
+    ``ip:{addr}``.
     """
     principal = getattr(request.state, "rate_limit_principal", None)
     if principal is not None:

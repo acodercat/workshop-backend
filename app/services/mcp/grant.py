@@ -130,13 +130,17 @@ def stored_authorization(
     an endpoint would post a refresh token, and the client secret under it, to
     whatever host the Connector happens to point at.
     """
-    stored = connector.oauth_metadata or {}
-    authorization_server = stored.get("authorization_server")
-    if not authorization_server or not connector.oauth_client_encrypted:
+    authorization_server = (connector.oauth_metadata or {}).get("authorization_server")
+    client = stored_client(connector)
+    if not authorization_server or client is None:
         return None
-    return (
-        OAuthMetadata.model_validate(authorization_server),
-        OAuthClientInformationFull.model_validate_json(
-            open_secret(connector.oauth_client_encrypted, what="OAuth client")
-        ),
+    return OAuthMetadata.model_validate(authorization_server), client
+
+
+def stored_client(connector: MCPServer) -> OAuthClientInformationFull | None:
+    """The OAuth client registration on the row, decrypted."""
+    if not connector.oauth_client_encrypted:
+        return None
+    return OAuthClientInformationFull.model_validate_json(
+        open_secret(connector.oauth_client_encrypted, what="OAuth client")
     )

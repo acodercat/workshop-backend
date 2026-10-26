@@ -6,7 +6,7 @@ from typing import Annotated
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from app.models.mcp_server import MCPServerAuthType
-from app.services.mcp.url_identity import normalize_connector_url
+from app.services.connector.url_identity import normalize_connector_url
 
 
 def _require_auth_credentials(
@@ -97,8 +97,10 @@ class ConnectorResponse(BaseModel):
     # *server* publishes, and resource access is not one of those. Same naming
     # rule as the flags below.
     resources_enabled: bool = False
-    # Whether the agent currently gets this Connector's tools. Disconnecting
-    # keeps the credentials, so reconnecting is one click; deleting discards them.
+    # Whether the Connector is usable at all — what a session's switch can
+    # turn on. Which sessions get its tools is their own configuration.
+    # Disconnecting an OAuth Connector gives its grant up (reconnecting means
+    # authorizing again); other auth types keep the credential the user typed.
     connected: bool
     # The provider's verdict, not the user's: the stored OAuth grant stopped
     # working and only a fresh authorization fixes it. Orthogonal to

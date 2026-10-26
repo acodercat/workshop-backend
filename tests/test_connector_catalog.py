@@ -12,13 +12,13 @@ from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.schemas.mcp_server import ConnectorCatalogEntryResponse
 from app.services import crypto
-from app.services.localized_text import DEFAULT_LOCALE
-from app.services.mcp import catalog
-from app.services.mcp.catalog import (
+from app.services.connector import catalog
+from app.services.connector.catalog import (
     CREDENTIAL_AUTH_TYPES,
     INSTANTIABLE_AUTH_TYPES,
     build_connector,
 )
+from app.services.localized_text import DEFAULT_LOCALE
 
 
 def _entry(**over) -> MCPServerCatalogEntry:
@@ -227,8 +227,8 @@ class TestPreRegisteredClientPassThrough:
 
         monkeypatch.setattr(endpoint.catalog, "get_published_entry", AsyncMock(return_value=entry))
         monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
-        monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
-        monkeypatch.setattr(endpoint, "_register_oauth_client", _capture)
+        monkeypatch.setattr(endpoint, "release_connection", AsyncMock())
+        monkeypatch.setattr(endpoint.authorization, "register_client", _capture)
         await endpoint._build_catalog_connector(
             MagicMock(), catalog_id=entry.id, user_id=42, locale=DEFAULT_LOCALE
         )

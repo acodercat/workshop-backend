@@ -20,8 +20,11 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.api.public import mcp_server as endpoint
+from app.database import release_connection
+from app.errors import ConnectorNotFoundError
 from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.schemas.mcp_server import ConnectorUpdate
+from app.services.mcp import authorization
 
 _EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -42,14 +45,14 @@ class TestTheReleaseIsRefusedOverPendingWork:
         db.dirty = {MagicMock()}
 
         with pytest.raises(RuntimeError, match="pending change"):
-            await endpoint._release_connection(db)
+            await release_connection(db)
 
         db.commit.assert_not_awaited()
 
     async def test_a_read_only_prelude_is_released(self):
         db = _session()
 
-        await endpoint._release_connection(db)
+        await release_connection(db)
 
         db.commit.assert_awaited_once()
 
@@ -59,22 +62,37 @@ class TestEveryOutboundCallIsPrecededByARelease:
     forgets", which no behavioural test of today's handlers can express."""
 
     @pytest.mark.parametrize(
-        "function,call",
+        "module,function,call",
         [
-            ("create_connector", "await probe("),
-            ("_build_catalog_connector", "await _register_oauth_client("),
-            ("_build_oauth_connector", "await _register_oauth_client("),
-            ("create_connector_authorization", "await oauth.discover_authorization("),
-            ("oauth_callback", "await oauth.discover_authorization("),
-            ("create_connector_tool_listing", "await probe("),
-            ("update_connector", "await probe("),
+            (endpoint, "create_connector", "await probe("),
+            (endpoint, "_build_catalog_connector", "await authorization.register_client("),
+            (endpoint, "_build_oauth_connector", "await authorization.register_client("),
+            (authorization, "start", "await oauth.discover_authorization("),
+            (authorization, "complete", "await oauth.exchange_code("),
+            (endpoint, "create_connector_tool_listing", "await probe("),
+            (endpoint, "update_connector", "await probe("),
         ],
     )
-    def test_the_release_comes_first(self, function, call):
-        source = inspect.getsource(getattr(endpoint, function))
-        assert "_release_connection(db)" in source, f"{function} holds its connection"
-        assert source.index("_release_connection(db)") < source.index(call), (
+    def test_the_release_comes_first(self, module, function, call):
+        source = inspect.getsource(getattr(module, function))
+        assert "release_connection(db)" in source, f"{function} holds its connection"
+        assert source.index("release_connection(db)") < source.index(call), (
             f"{function} dials before releasing"
+        )
+
+
+class TestEveryProbeOfAnExistingRowIsFollowedByAReread:
+    """Source-level for the same reason as the release: what has to hold is
+    that no future handler writes to the pre-probe copy."""
+
+    @pytest.mark.parametrize(
+        "function",
+        ["update_connector", "create_connector_tool_listing", "_probe_after_authorization"],
+    )
+    def test_the_row_is_read_again_after_the_probe(self, function):
+        source = inspect.getsource(getattr(endpoint, function))
+        assert source.index("await probe(") < source.rindex("await _get_owned_connector("), (
+            f"{function} writes to the row it read before the probe"
         )
 
 
@@ -126,7 +144,7 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
         # The URL guard has its own cover in test_connector_url_uniqueness;
         # here it would only answer from a double that knows nothing.
         monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
-        monkeypatch.setattr(endpoint, "_release_authorization", AsyncMock())
+        monkeypatch.setattr(endpoint.authorization, "release", AsyncMock())
         monkeypatch.setattr(endpoint, "_decrypt_or_none", lambda ciphertext: None)
         monkeypatch.setattr(endpoint.limiter, "enabled", False)
         return await endpoint.update_connector(
@@ -178,3 +196,37 @@ class TestUpdateProbesTheRowItIsAboutToBecome:
 
         assert connector.name == "before"
         assert connector.url == "https://mcp.example.com/mcp"
+
+
+class TestARowDeletedDuringTheProbeIsNotFound:
+    """The other side of releasing: while the probe runs, nothing holds the
+    row, so a concurrent DELETE can land. Writing to the pre-probe copy would
+    match no row and surface as a ``StaleDataError`` 500; re-reading after the
+    probe turns it into the 404 the client already handles."""
+
+    async def test_a_tool_listing_answers_not_found(self, monkeypatch):
+        connector = MCPServer(id=1, user_id=7, url="https://mcp.example.com/mcp")
+        monkeypatch.setattr(
+            endpoint,
+            "_get_owned_connector",
+            AsyncMock(side_effect=[connector, ConnectorNotFoundError("gone")]),
+        )
+        monkeypatch.setattr(
+            endpoint, "_probe_credential", lambda _c: (MCPServerAuthType.NONE, None)
+        )
+        monkeypatch.setattr(
+            endpoint,
+            "probe",
+            AsyncMock(return_value=endpoint.ProbeResult(server_name="s", tools=[])),
+        )
+        monkeypatch.setattr(endpoint.limiter, "enabled", False)
+        db = _session()
+
+        with pytest.raises(ConnectorNotFoundError):
+            await endpoint.create_connector_tool_listing(
+                request=MagicMock(), connector_id=1, db=db, current_user=MagicMock(id=7)
+            )
+
+        # The release's commit, and no other.
+        db.commit.assert_awaited_once()
+        assert connector.tool_count is None

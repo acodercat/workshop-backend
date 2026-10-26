@@ -298,3 +298,10 @@ def _resolving_to(address: str):
         return [(2, 1, 6, "", (address, port))]
 
     return _getaddrinfo
+
+
+def test_trust_is_pinned_to_certifi_on_the_transport():
+    # On the transport's context, the only one that applies: a client's
+    # ``verify=`` is ignored once a transport is supplied.
+    context = url_guard.guarded_client()._transport._pool._ssl_context  # type: ignore[attr-defined]
+    assert context is url_guard._CERTIFI_TRUST

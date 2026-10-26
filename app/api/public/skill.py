@@ -7,8 +7,8 @@ uploads to OSS, and creates the DB row — one request, one response.
 The bundle itself is **immutable** through this surface — edits to a
 skill require a new upload (gives the worker a clean cache key and
 avoids ambiguity about which version a running session staged). The
-PATCH endpoint only changes picker-visible metadata (name /
-description) and the enable toggle.
+PATCH endpoint only changes picker-visible metadata (display name /
+description) and the caller's enable toggle; ``name`` is immutable.
 """
 
 import asyncio
@@ -22,13 +22,14 @@ from fastapi import (
     Request,
     status,
 )
-from sqlalchemy import func, or_, select, update as sql_update
+from sqlalchemy import exists, func, or_, select, update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
 from app.api.uploads import multipart, read_capped, upload_request_body, uploaded_file
 from app.auth import authenticate_and_get_user
+from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.models.skill_category import SkillCategory
 from app.models.user import User
@@ -38,13 +39,9 @@ from app.schemas.file import DownloadUrlResponse
 from app.schemas.skill import SkillCategoryResponse, SkillResponse, SkillUpdate
 from app.services import file_storage, localized_text
 from app.services.file_storage import SKILL_POLICY
+from app.services.localized_text import DEFAULT_LOCALE, normalize_locale
 from app.services.skill_download import skill_download_url
 from app.services.skill_enablement import preference_join
-from app.services.skill_i18n import (
-    DEFAULT_LOCALE,
-    normalize_locale,
-    resolve_display_name,
-)
 from app.services.skill_registration import register_skill_bundle
 
 logger = logging.getLogger(__name__)
@@ -160,7 +157,7 @@ async def list_skills(
         _to_response(
             skill,
             enabled=bool(preference_enabled),
-            display_name=resolve_display_name(
+            display_name=localized_text.resolve(
                 skill.display_name, skill.display_name_i18n, resolved_locale
             ),
         )
@@ -279,10 +276,14 @@ async def delete_skill(
     """Delete a skill row and best-effort drop its OSS bundle.
 
     The OSS delete is intentionally outside the DB transaction: a
-    stale OSS object (DB row gone, bundle remains) is recoverable
-    by a future cleanup cron; a missing OSS object with a live DB
-    row would corrupt the worker's staging step. Order: DB first,
-    then OSS.
+    stale OSS object (DB row gone, bundle remains) costs only storage;
+    a missing OSS object with a live DB row would corrupt the worker's
+    staging step. Order: DB first, then OSS.
+
+    The object is kept while a queued or running turn pins it: a pick
+    snapshots ``bundle_key`` at enqueue, and the worker stages the bundle
+    only when the model invokes the skill, so deleting it would fail a
+    turn the user started before they deleted the skill.
     """
     skill = await _get_owned_skill(db, skill_id, current_user.id)
     bundle_key = skill.bundle_key
@@ -296,11 +297,14 @@ async def delete_skill(
         skill_name,
     )
 
+    if await _pinned_by_a_live_turn(db, bundle_key):
+        logger.info("skill delete: keeping %s, a live turn pins it", bundle_key)
+        return
     try:
         await asyncio.to_thread(file_storage.delete, SKILL_POLICY, bundle_key)
     except Exception as exc:
         # Don't fail the request — the DB row is gone, which is the
-        # user-visible state. Leftover OSS object is cleanup-cron's job.
+        # user-visible state; a leftover object costs only storage.
         logger.warning(
             "skill delete: OSS cleanup failed for %s (skill id=%s): %s",
             bundle_key,
@@ -349,6 +353,20 @@ async def _get_owned_skill(
             detail="skill not found",
         )
     return skill
+
+
+async def _pinned_by_a_live_turn(db: AsyncSession, bundle_key: str) -> bool:
+    """Whether a ``PENDING`` / ``RUNNING`` turn snapshotted *bundle_key*."""
+    return bool(
+        await db.scalar(
+            select(
+                exists().where(
+                    SessionTurn.status.in_((SessionTurnStatus.PENDING, SessionTurnStatus.RUNNING)),
+                    SessionTurn.skills.contains([{"bundle_key": bundle_key}]),
+                )
+            )
+        )
+    )
 
 
 async def _get_visible_skill(

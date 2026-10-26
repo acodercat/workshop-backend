@@ -11,8 +11,8 @@ one read path:
   (``agent-worker/agent_worker/runtime/runner.py``) inserts rows in a
   short transaction *before* emitting the SSE ``tool_result`` event,
   so the frontend can immediately download the freshly produced file.
-- **Read**: download endpoints (``endpoints/session.py`` for owner,
-  ``endpoints/share.py`` for share recipients) verify
+- **Read**: download endpoints (``app/api/public/session.py`` for owner,
+  ``app/api/public/share.py`` for share recipients) verify
   ``(session_id, file_key)`` is present here, no JSONB scans, no key-
   prefix parsing.
 
@@ -75,18 +75,18 @@ class SessionFile(Base):
         nullable=False,
     )
     # Denormalized owner, copied from ``session.user_id`` by the producer
-    # (immutable relationship ⇒ never stale). Nullable to mirror it —
-    # anonymous sessions carry no owner. ``ON DELETE CASCADE`` matches the
-    # session-ownership family.
+    # (immutable relationship ⇒ never stale). Every writer — the bind on
+    # enqueue and the worker's deliverables — sets it; the column is still
+    # nullable from when ``session.user_id`` was. ``ON DELETE CASCADE``
+    # matches the session-ownership family.
     #
-    # Column + ``ix_session_files_user_id_created_at`` are **future-only**
-    # today: no read path filters it. The existing per-user reads (the
-    # file library, the upload quota count) can't simply switch — they
-    # join ``session`` anyway for ``deleted_at IS NULL`` (a soft-deleted
-    # session's files must read as gone) and the library's title search,
-    # and pre-backfill rows may carry NULL here. A future adopter (e.g.
-    # an admin all-files-by-user view) must either not care about
-    # soft-delete or keep the join alongside this filter.
+    # Read by the ownership gate (``assert_files_owned_by``), which refuses
+    # binding a key whose row names a different owner. The per-user
+    # *listings* (the file library, the upload quota count) still join
+    # ``session`` instead — they need ``deleted_at IS NULL`` (a soft-deleted
+    # session's files must read as gone) and the library's title search, so
+    # a new reader filtering on this column must keep that join or not care
+    # about soft-delete.
     user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )

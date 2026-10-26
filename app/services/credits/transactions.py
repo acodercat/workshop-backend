@@ -16,8 +16,8 @@ transaction:
   zero-amount row only reads as "money vanished". These are filtered
   out; the ``RESERVE`` / ``REFUND`` ledger pair stays on the audit
   trail, just off the user-facing list.
-- Non-reservation ledger rows (``TOPUP`` / ``ADJUST``) pass through
-  directly. ``TOPUP`` rows whose idempotency key starts with
+- Non-reservation ledger rows (``TOPUP`` / ``ADJUST`` / ``REFERRAL`` /
+  ``CHECKIN``) pass through directly. ``TOPUP`` rows whose idempotency key starts with
   ``welcome-`` are re-tagged as ``WELCOME_GRANT`` so the UI can
   surface the onboarding moment cleanly.
 

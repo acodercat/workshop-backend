@@ -129,7 +129,55 @@ def render_email_change_verification(*, code: str, locale: str) -> tuple[str, st
     )
 
 
-# Account-approved notification. Unlike the two templates above this
+_SUDO_VERIFY_SUBJECT = {
+    "zh-CN": "【HKGAI Agent】您的身份验证码 {code}",
+    "en-US": "[HKGAI Agent] Confirm it's you — code {code}",
+}
+
+
+_SUDO_VERIFY_BODY_ZH = """<div style="max-width:480px;margin:0 auto;padding:48px 32px;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#0a0a0a;background:#ffffff;line-height:1.6;">
+  <div style="font-size:13px;font-weight:500;color:#0a0a0a;letter-spacing:0.5px;margin-bottom:48px;">HKGAI Agent</div>
+  <div style="font-size:20px;font-weight:600;color:#0a0a0a;margin-bottom:24px;line-height:1.4;">确认是您本人</div>
+  <p style="font-size:15px;color:#374151;margin:0 0 32px;">您正在修改 HKGAI Agent 账号的登录凭证（密码或邮箱）。使用下方验证码确认是您本人操作。</p>
+  <div style="font-family:-apple-system,'SF Mono',Menlo,Consolas,monospace;font-size:36px;font-weight:600;letter-spacing:8px;color:#0a0a0a;margin:0 0 16px;">{code}</div>
+  <p style="font-size:14px;color:#6b7280;margin:0 0 48px;">验证码将在 10 分钟后过期。</p>
+  <div style="border-top:1px solid #e5e7eb;padding-top:32px;">
+    <p style="font-size:13px;color:#6b7280;margin:0 0 12px;">如果这不是您本人的操作，请勿将验证码告诉任何人，并尽快检查账号安全。</p>
+    <p style="font-size:13px;color:#6b7280;margin:0;">HKGAI Agent 不会通过任何渠道向您索取此验证码。</p>
+  </div>
+  <div style="margin-top:48px;font-size:12px;color:#9ca3af;line-height:1.7;">香港生成式人工智能研发中心</div>
+</div>"""
+
+
+_SUDO_VERIFY_BODY_EN = """<div style="max-width:480px;margin:0 auto;padding:48px 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#0a0a0a;background:#ffffff;line-height:1.6;">
+  <div style="font-size:13px;font-weight:500;color:#0a0a0a;letter-spacing:0.5px;margin-bottom:48px;">HKGAI Agent</div>
+  <div style="font-size:20px;font-weight:600;color:#0a0a0a;margin-bottom:24px;line-height:1.4;">Confirm it's you</div>
+  <p style="font-size:15px;color:#374151;margin:0 0 32px;">You're changing a sign-in credential on your HKGAI Agent account (password or email). Use the code below to confirm it's you.</p>
+  <div style="font-family:-apple-system,'SF Mono',Menlo,Consolas,monospace;font-size:36px;font-weight:600;letter-spacing:8px;color:#0a0a0a;margin:0 0 16px;">{code}</div>
+  <p style="font-size:14px;color:#6b7280;margin:0 0 48px;">This code will expire in 10 minutes.</p>
+  <div style="border-top:1px solid #e5e7eb;padding-top:32px;">
+    <p style="font-size:13px;color:#6b7280;margin:0 0 12px;">If you didn't request this, don't share the code with anyone and review your account security.</p>
+    <p style="font-size:13px;color:#6b7280;margin:0;">HKGAI Agent will never ask you for this code through any channel.</p>
+  </div>
+  <div style="margin-top:48px;font-size:12px;color:#9ca3af;line-height:1.7;">Hong Kong Generative AI Research &amp; Development Center</div>
+</div>"""
+
+
+_SUDO_VERIFY_BODY = {
+    "zh-CN": _SUDO_VERIFY_BODY_ZH,
+    "en-US": _SUDO_VERIFY_BODY_EN,
+}
+
+
+def render_sudo_verification(*, code: str, locale: str) -> tuple[str, str]:
+    """Returns ``(subject, html_body)`` for the sudo-code email sent to
+    the account's own address before a credential change.
+    Copy names what is being changed, so a recipient who did not ask can
+    tell a hijack attempt from a stray code."""
+    return _render(_SUDO_VERIFY_SUBJECT, _SUDO_VERIFY_BODY, code=code, locale=locale)
+
+
+# Account-approved notification. Unlike the verification templates above this
 # carries no ``{code}`` — it's a one-way notice that an admin flipped a
 # PENDING account to ACTIVE, so the user can now sign in. Same visual
 # shell/branding as the verification emails. Note: there is no Aliyun

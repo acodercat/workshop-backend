@@ -1,6 +1,6 @@
 """InviteCode — an access code redeemed at registration.
 
-Two origins, mirroring the ``skill`` / ``recipe`` pattern:
+Two origins, mirroring the ``skill`` pattern:
 
 - ``SYSTEM`` — operator-issued, no owner (``owner_user_id IS NULL``).
   The cold-start path: the first users have no referrer, so admins

@@ -92,7 +92,7 @@ automated path does.
 |---|---|
 | `GET /users?q=&status=` | Paginated directory. One `q` ILIKE-matched against username / email (at ~100 users no index needed). Row: id, username, name, email, status, balance_credits, created_at. |
 | `GET /users/{id}` | Profile + credit balance + session count. |
-| `PATCH /users/{id}` | `{status}` — ACTIVE ↔ DISABLED. Takes effect on the user's next request (status is checked per request; no token bump needed). |
+| `PATCH /users/{id}` | `{status}` — ACTIVE / DISABLED / SUSPENDED. Takes effect on the user's next request (status is checked per request; no token bump needed). |
 
 Not included: editing email (the sudo-gated self-serve flow owns
 it), password resets (OTP owns recovery), user deletion,
@@ -117,7 +117,7 @@ they can never collide with another producer's keys.
 
 | Route | What |
 |---|---|
-| `GET /sessions?days=` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. `days` (1/7/30/90, omit for all time) cuts on `updated_at`, the column the list sorts and shows, which is also why the filter costs nothing. Same row plus `user_id` / `owner_username` / `owner_name`, all nullable because `session.user_id` is and all null together — the outer join supplies them or it does not. The display name rides along so the row renders the same operator-facing identity the dashboard leaderboards do beside it. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. |
+| `GET /sessions?days=` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. `days` (1/7/30/90, omit for all time) cuts on `updated_at`, the column the list sorts and shows, which is also why the filter costs nothing. Same row plus `user_id` / `owner_username` / `owner_name`, always present — `session.user_id` is NOT NULL, so the owner is an inner join. The display name rides along so the row renders the same operator-facing identity the dashboard leaderboards do beside it. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. |
 | `GET /users/{id}/sessions` | The same rows for one user, `ORDER BY updated_at DESC`. Paginated **including soft-deleted** (`deleted_at` visible — unlike the customer list, support needs to see what was deleted). Row: id, title, status, agent_type, `model_id`, `turn_count`, `total_tokens`, `spent_credits`, created_at, updated_at, deleted_at. |
 
 `session.tier` is deliberately **not** on either row. It is the capability
@@ -214,7 +214,7 @@ Replaces reaching for `scripts/create_invite_code.py` over SSH.
 | Route | What |
 |---|---|
 | `GET /invite-codes?origin=&q=` | Codes, newest first; `REFERRAL` rows carry their owner. `used_count` / `max_uses` is the whole state. |
-| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000) |
+| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000, or `null` for unlimited) |
 | `GET /invite-redemptions` | Who redeemed what, invitee and referrer both resolved through aliased joins |
 
 **Only `SYSTEM` codes are mintable here.** A `REFERRAL` code is a
@@ -257,12 +257,11 @@ every windowed figure, the rankings, and the latest sessions
 governed most panels and not all of them, which read as a bug; the
 parameter stays because the ratings and session pages still offer it.
 
-**Granted is reported with its giveaway share split out.** `granted`
-is every credit added — `TOPUP` (bought) alongside `CHECKIN`,
-`REFERRAL` and positive `ADJUST` (given). Those move for opposite
-reasons, so a single number cannot tell a purchase from a giveaway. `granted_free` is defined as `_GRANT_ROWS AND kind <>
-'TOPUP'` rather than by listing kinds, so a new grant kind counts as
-free unless it is a purchase.
+**Granted is reported with its giveaway share beside it.** `granted`
+is every credit added — `TOPUP`, `CHECKIN`, `REFERRAL` and positive
+`ADJUST`. Upstream splits out the share no paid order stands behind;
+this deployment sells nothing, so `granted_free` equals `granted`. The
+field stays because the console is shared with upstream.
 
 **`outstanding` and `total_users` are not windowed** — `SUM(user.credit_balance)`
 and `COUNT(*)` over `user` are positions rather than flows. Each rides on

@@ -54,8 +54,9 @@ class SessionTurnStatus(StrEnum):
     # User-initiated cancel: the turn ran but was cut short by user
     # intent. Distinct from COMPLETE so the queue layer records intent
     # honestly, mirroring the parent ``session_status.CANCELLED``. The
-    # worker writes it via ``cancel_turn``; tokens are still recorded
-    # (partial work is billable).
+    # worker writes it via ``cancel_turn``, tokens recorded (partial work is
+    # billable); the backend writes it for a turn stopped before any worker
+    # claimed it (``cancel_unclaimed_turn``), with nothing to bill.
     CANCELLED = "CANCELLED"
     FAILED = "FAILED"
 
@@ -73,8 +74,10 @@ class TerminationReason(StrEnum):
 
     Values mirror the worker's
     ``agent_worker.infra.database.TerminationReason`` (the worker is
-    the main writer; the backend writes only ``WORKER_LOST`` from
-    :func:`~app.services.session.recovery.fail_abandoned_turn`) and ride
+    the main writer; the backend writes ``WORKER_LOST`` from
+    :func:`~app.services.session.recovery.fail_abandoned_turn` and
+    ``USER_CANCELLED`` from
+    :func:`~app.services.session.recovery.cancel_unclaimed_turn`) and ride
     the cancel-channel payload + the ``agent.stopped`` wire event —
     change both repos together.
 
@@ -137,7 +140,6 @@ class SessionTurn(Base):
     #
     # A collection (0..N): NOT NULL DEFAULT '[]' so "no skills" is the
     # empty array, never NULL — readers iterate without a null-guard.
-    # Contrast ``recipe`` below: an optional single value that IS NULL.
     skills: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB,
         nullable=False,
@@ -179,18 +181,6 @@ class SessionTurn(Base):
         server_default=text("'[]'::jsonb"),
         default=list,
     )
-    # Per-turn recipe snapshot, or NULL. The backend resolves the picked
-    # recipe id → its vetted ``instructions`` server-side (the client
-    # sends only ``recipe_id``, never raw text) and pins the rendered
-    # snapshot here, so a later recipe edit / delete can't strand a
-    # queued turn. The worker injects ``instructions`` verbatim as an
-    # axon ``<system-reminder>``. Shape:
-    #   {"id": int, "display_name": str, "instructions": str}
-    #
-    # An optional single value (0 or 1): nullable, NULL = "no recipe".
-    # No DEFAULT — an empty ``{}`` isn't a valid recipe, so unlike the
-    # ``skills`` array above there's no meaningful empty value to default to.
-    recipe: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # Token usage as reported by axon's ``AgentStoppedEvent.usage``,
     # written by the worker in the same fenced UPDATE that flips
     # ``status`` terminal (see

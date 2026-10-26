@@ -36,7 +36,7 @@ async def submit_feedback(
     confirmation; the persisted row's id is admin-side metadata and
     never echoed back.
 
-    Rate-limited to 5/hour per IP to throttle spam without choking
+    Rate-limited to 5/hour per user to throttle spam without choking
     legitimate sequential reports of related issues.
     """
     feedback = UserFeedback(

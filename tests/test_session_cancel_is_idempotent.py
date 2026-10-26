@@ -19,6 +19,7 @@ client waits forever for an event that is not coming.
 asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 """
 
+import json
 import uuid
 from unittest.mock import AsyncMock
 
@@ -96,7 +97,11 @@ def test_cancelling_a_stopped_session_is_accepted_silently(status, monkeypatch):
 def test_an_unclaimed_turn_is_hard_cancelled_and_says_already_stopped(monkeypatch):
     """A ``PENDING`` turn is cancelled in the DB with no worker involved,
     so no ``agent.stopped`` follows this one either — same flag as a
-    terminal session, for the same reason."""
+    terminal session, for the same reason.
+
+    Nothing goes to the cancel channel. What is published is the status
+    change, on the user's notification channel: no worker will announce a
+    terminal it never wrote, and the user's other tabs need to hear it."""
     redis = AsyncMock()
     client = _app(monkeypatch, SessionStatus.RUNNING, redis)
     monkeypatch.setattr(
@@ -109,7 +114,12 @@ def test_an_unclaimed_turn_is_hard_cancelled_and_says_already_stopped(monkeypatc
 
     assert response.status_code == 202
     assert response.json() == {"already_stopped": True}
-    redis.publish.assert_not_awaited()
+    redis.publish.assert_awaited_once()
+    channel, payload = redis.publish.await_args.args
+    assert channel == "user_events:bus"
+    event = json.loads(payload)["event"]
+    assert event["session_id"] == str(SESSION_ID)
+    assert event["status"] == "CANCELLED"
 
 
 def test_cancelling_a_running_session_still_signals_the_worker(monkeypatch):

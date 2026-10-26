@@ -1,4 +1,11 @@
-"""SSE stream generator for the per-user notification channel.
+"""The per-user notification channel: what the backend publishes on it, and
+the SSE generator that tails it.
+
+:func:`publish_session_status` is the backend's half of
+``session.status_changed``: the worker announces the terminals it writes
+(its ``wire/user_events.py`` is the other half, same payload), and the
+backend the transitions it writes itself — ``RUNNING`` at enqueue, and the
+``CANCELLED`` / ``FAILED`` of the two recovery paths.
 
 :func:`stream_user_events` is a long-lived async generator that runs
 until the HTTP client disconnects: sse-starlette observes the ASGI
@@ -13,13 +20,54 @@ process), not read per-connection from Redis. Carries cross-session
 sync regardless of which page the user is on.
 """
 
+import logging
 import time
+import uuid
 from collections.abc import AsyncIterator
 
 import orjson
+import redis.asyncio as aioredis
 
 from app.common.sse import SSEMessage, sse_event
+from app.models.session import SessionStatus
+from app.services.redis import USER_EVENTS_CHANNEL
 from app.services.user.hub import UserEventHub
+
+logger = logging.getLogger(__name__)
+
+
+async def publish_session_status(
+    redis: aioredis.Redis,
+    *,
+    user_id: int,
+    session_id: uuid.UUID,
+    status: SessionStatus,
+) -> None:
+    """Tell every open client of ``user_id`` that a session moved to ``status``.
+
+    Caller invokes **after** the commit. Never raises: the event is
+    idempotent state sync, and a client that missed it reconciles on its
+    next ``GET /sessions``, so a failed publish must not fail a write that
+    already committed.
+    """
+    payload = {
+        "user_id": user_id,
+        "event": {
+            "type": "session.status_changed",
+            "session_id": str(session_id),
+            "status": status.value,
+            "ts": time.time(),
+        },
+    }
+    try:
+        await redis.publish(USER_EVENTS_CHANNEL, orjson.dumps(payload).decode())
+    except Exception:
+        logger.warning(
+            "session %s: status_changed(%s) publish failed",
+            session_id,
+            status.value,
+            exc_info=True,
+        )
 
 
 async def stream_user_events(

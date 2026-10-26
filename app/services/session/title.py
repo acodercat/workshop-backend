@@ -1,7 +1,8 @@
 """LLM-backed session-title generation.
 
-A single stateless helper: take a user message, return a short
-Chinese title describing what the conversation is about. The backend
+A single stateless helper: take a user message, return a short title,
+in the message's own language, describing what the conversation is
+about. The backend
 calls it from the ``POST /sessions/titles`` endpoint; there's no DB
 persistence or session awareness here — the caller decides whether
 to save it.
@@ -48,7 +49,7 @@ _client = AsyncOpenAI(
 
 
 async def generate_title(content: str) -> str:
-    """Return a short Chinese title summarizing ``content``.
+    """Return a short title summarizing ``content``, in its own language.
 
     Raises :class:`openai.OpenAIError` on network/upstream failure —
     the endpoint translates that into a 502 so the frontend can fall

@@ -133,7 +133,7 @@ async def http_exception_handler(
     ``exc.detail`` is treated two ways:
 
     - **dict** — caller passed a structured payload (currently the
-      readiness probe in ``main.py`` returns ``{"status": "...",
+      readiness probe in ``app/asgi.py`` returns ``{"status": "...",
       "errors": [...]}``); pass it through under ``details`` and
       synthesize ``message`` from the status phrase.
     - **str / anything else** — used as ``message`` directly.

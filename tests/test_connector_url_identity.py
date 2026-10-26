@@ -16,7 +16,7 @@ from app.schemas.mcp_server import (
     ConnectorCreate,
     ConnectorUpdate,
 )
-from app.services.mcp.url_identity import normalize_connector_url
+from app.services.connector.url_identity import normalize_connector_url
 
 CANONICAL = "https://mcp.notion.com/mcp"
 

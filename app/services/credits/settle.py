@@ -340,8 +340,9 @@ async def settle_open_for_user(
 
     Routing:
 
-    - session deleted (``session_id IS NULL`` after the SET-NULL FK
-      kicked in) → refund, the user got no value;
+    - session hard-deleted (``session_id IS NULL`` after the SET-NULL FK
+      kicked in — an operator or test teardown; the app only soft-deletes,
+      settling first) → refund, nothing is left to measure;
     - session non-terminal → leave open, the turn isn't finished;
     - session terminal + usage on ``session_turn`` → settle with that
       usage (a FAILED turn that recorded measured tokens settles here too);
@@ -374,7 +375,7 @@ async def settle_open_for_user(
     )
     for reservation_id, turn_id, session_id, session_status in rows.all():
         if session_id is None:
-            # FK was SET NULL by a session delete — nothing left to
+            # FK was SET NULL by a hard delete — nothing left to
             # measure cost against, so refund. Must run *before* the
             # terminal check: ``session_status`` is None on a deleted-
             # session row and ``None not in (...)`` is True, which

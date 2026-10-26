@@ -73,7 +73,7 @@ async def _patch(monkeypatch, connector: MCPServer, body: ConnectorUpdate) -> No
     monkeypatch.setattr(endpoint, "_reject_duplicate_url", AsyncMock())
     # A URL change probes the row as it will be, which resolves a hostname and
     # opens a connection. Neither is what any test here is about.
-    monkeypatch.setattr(endpoint, "_release_connection", AsyncMock())
+    monkeypatch.setattr(endpoint, "release_connection", AsyncMock())
     monkeypatch.setattr(
         endpoint,
         "probe",

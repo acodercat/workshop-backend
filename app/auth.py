@@ -1,5 +1,7 @@
 import asyncio
+import functools
 import logging
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -13,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
 from app.api.dependencies import get_db
+from app.common.password import BCRYPT_MAX_BYTES
 from app.database import AsyncSessionLocal
 from app.errors import StaffAuthenticationError
 from app.rate_limit import set_rate_limit_principal
@@ -29,6 +32,10 @@ def _hash_password_sync(password: str) -> str:
 
 
 def _verify_password_sync(plain_password: str, hashed_password: str) -> bool:
+    if len(plain_password.encode("utf-8")) > BCRYPT_MAX_BYTES:
+        # bcrypt 5 raises on such input, and no stored hash can match it:
+        # every hash was made from at most that many bytes.
+        return False
     try:
         return bcrypt.checkpw(
             plain_password.encode("utf-8"),
@@ -50,6 +57,24 @@ async def verify_password(plain_password: str, hashed_password: str) -> bool:
     return await asyncio.to_thread(_verify_password_sync, plain_password, hashed_password)
 
 
+@functools.cache
+def _absent_account_hash() -> str:
+    return _hash_password_sync(secrets.token_urlsafe(16))
+
+
+async def _password_matches(password: str, password_hash: str | None) -> bool:
+    """:func:`verify_password`, also when no account matched (``None``).
+
+    That case still runs a bcrypt round, against a throwaway hash at the
+    configured cost, and answers ``False`` — so an unknown username takes
+    as long as a wrong password and response time cannot tell them apart.
+    """
+    if password_hash is None:
+        await verify_password(password, await asyncio.to_thread(_absent_account_hash))
+        return False
+    return await verify_password(password, password_hash)
+
+
 async def get_user_by_username(db: AsyncSession, username: str) -> models.User | None:
     """Look up a user by their username — the login identifier."""
     stmt = select(models.User).where(models.User.username == username)
@@ -61,35 +86,30 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> m
     """Return the user iff the credentials are valid, regardless of
     status.
 
-    Status checking is left to the calling endpoint via
-    :func:`assert_user_active` — ``DISABLED`` / ``SUSPENDED`` collapse
-    to a generic 401 indistinguishable from wrong creds so
-    admin-initiated lockouts don't leak account state. A status flip
+    Status checking is left to the caller via :func:`is_user_active` —
+    the password flow collapses ``DISABLED`` / ``SUSPENDED`` into the same
+    401 as wrong credentials so admin-initiated lockouts don't leak account
+    state. A status flip
     also blocks any *existing* JWT at its next request (see the status
     gate in :func:`_decode_and_get_user`); ``token_version`` is still the
     lever for force-logout on a password / email change.
     """
     user = await get_user_by_username(db, username)
-    if user is None or not await verify_password(password, user.password_hash):
+    if not await _password_matches(password, user.password_hash if user else None):
         return None
     return user
 
 
-def assert_user_active(user: models.User, *, inactive_detail: str) -> None:
-    """Gate sign-in on account status; no-op for an ``ACTIVE`` user.
+def is_user_active(user: models.User) -> bool:
+    """Whether the account may sign in and hold a session right now.
 
-    ``DISABLED`` / ``SUSPENDED`` collapse to an opaque 401 carrying
-    ``inactive_detail`` — kept generic (and, for password login,
-    identical to the wrong-credentials message) so admin-initiated
-    lockouts don't leak account state. The caller passes the detail
-    because what's "opaque" differs by flow.
+    Checked at sign-in *and* on every authenticated request, so a flip to
+    ``DISABLED`` / ``SUSPENDED`` takes effect on the next call without a
+    ``token_version`` bump. What a refusal looks like is the caller's: the
+    password flow keeps it indistinguishable from wrong credentials, the code
+    flow can say it plainly. Mirrors :func:`is_staff_active`.
     """
-    if user.status is not models.UserStatus.ACTIVE:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=inactive_detail,
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    return user.status is models.UserStatus.ACTIVE
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
@@ -190,12 +210,9 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
     user = await get_user_by_username(db, username=username)
     if user is None or user.token_version != token_version:
         raise credentials_exception
-    if user.status is not models.UserStatus.ACTIVE:
-        # A flip to DISABLED / SUSPENDED takes effect on the very next
-        # request — no ``token_version`` bump required. The row is already
-        # loaded, so this is a free in-memory check. Same opaque 401 as a
-        # bad token so a lockout never leaks account state (mirrors
-        # :func:`assert_user_active`).
+    if not is_user_active(user):
+        # Same opaque 401 as a bad token so a lockout never leaks account
+        # state; the row is already loaded, so this is a free check.
         raise credentials_exception
     return user
 
@@ -364,7 +381,7 @@ async def authenticate_staff(db: AsyncSession, username: str, password: str) -> 
     :func:`authenticate_user`.
     """
     staff = await get_staff_by_username(db, username)
-    if staff is None or not await verify_password(password, staff.password_hash):
+    if not await _password_matches(password, staff.password_hash if staff else None):
         return None
     return staff
 

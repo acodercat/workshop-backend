@@ -9,7 +9,8 @@ through live switches, so there is no single-Connector path to make
 idempotent.
 
 Ownership is not checked here. It is validated once, where the
-configuration is written (``_assert_owned_connectors`` in the endpoint), and
+configuration is written
+(:func:`app.services.connector.ownership.require_owned_connectors`), and
 enforced again where it is spent: each firing copies these ids onto a new
 session, and that session's enqueue re-reads every row by id and drops
 what is no longer this user's or no longer connected.

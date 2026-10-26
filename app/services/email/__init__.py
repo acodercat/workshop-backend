@@ -14,6 +14,7 @@ from app.services.email.templates import (
     render_credits_topped_up,
     render_email_change_verification,
     render_register_verification,
+    render_sudo_verification,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "render_credits_topped_up",
     "render_register_verification",
     "render_email_change_verification",
+    "render_sudo_verification",
 ]

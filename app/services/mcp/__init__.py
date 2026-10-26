@@ -1,1 +1,1 @@
-"""MCP Connector services — URL safety guard and remote-server probe."""
+"""MCP protocol services — the URL guard, the probe, and the OAuth machinery."""

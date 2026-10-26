@@ -80,7 +80,6 @@ def _existing_skill() -> Skill:
         display_name="Old Name",
         description="old",
         status=SkillStatus.PUBLISHED,
-        enabled=False,
         bundle_key="official/smoke-skill/OLD/smoke-skill.zip",
         bundle_size=10,
     )
@@ -223,12 +222,9 @@ def test_a_custom_origin_is_not_accepted() -> None:
 
 
 def test_turning_a_listing_agent_only_drops_what_users_said_about_it() -> None:
-    """Nothing lists a SYSTEM skill, so nothing can unsay a stale answer.
-
-    An ``enabled = false`` row left behind would hide a core skill from
-    that user for good, with no surface to undo it on — and it would
-    break the invariant that a preference row only exists for a skill
-    its user can see.
+    """Nothing lists a SYSTEM skill, so nothing could show or change a
+    preference row left behind — keeping one would break the invariant
+    that a preference row only exists for a skill its user can see.
     """
     live = _existing_skill()  # OFFICIAL
     db = _FakeDb(existing=live)

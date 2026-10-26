@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 class CheckInStatus(NamedTuple):
-    """Snapshot for ``GET /check-ins/status``. ``streak_day`` is the
+    """Snapshot for ``GET /check-ins/today``. ``streak_day`` is the
     current consecutive-day streak; ``total_days`` is the lifetime
     check-in count (the "累计签到" display)."""
 

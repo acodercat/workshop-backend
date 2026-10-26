@@ -9,7 +9,7 @@ fields are event-type-specific, declared per variant below.
 All values are strings because Redis Streams store flat ``str → str``
 maps. Non-string values the worker writes (dicts, lists, ints,
 floats) go through the worker's ``_encode_fields``
-(``agent_worker.infra.redis_queue``) which JSON-encodes non-strings —
+(``agent_worker.infra.stream_writer``) which JSON-encodes non-strings —
 so e.g. ``elapsed`` is the literal string ``"2.5"`` and structured
 fields like ``args`` / ``files`` / ``usage`` are JSON strings the
 backend forwards verbatim to the frontend. ``None``-valued fields are
@@ -83,7 +83,7 @@ class AgentMessageEvent(_EventBase):
     ``stop_reason`` is the *provider-native* finish reason
     (``"stop"``/``"length"``/``"tool_calls"``/...), NOT the agent-level
     :class:`~axon.events.StopReason` (which appears on ``agent.stopped``).
-    ``usage`` is a JSON-encoded ``TokenUsage`` dict or ``"null"``.
+    ``usage`` is a JSON-encoded ``TokenUsage`` dict, absent when unknown.
     """
 
     type: Literal["agent.message"]
@@ -144,7 +144,7 @@ class AgentToolProgressEvent(_EventBase):
     """``agent.tool_progress`` — periodic update during tool execution.
 
     ``elapsed`` is a stringified float (seconds). ``output`` is the
-    tool's partial stdout/stderr so far, or ``"null"`` if unavailable.
+    tool's partial stdout/stderr so far, absent if unavailable.
     """
 
     type: Literal["agent.tool_progress"]
@@ -184,9 +184,8 @@ class AgentStatusEvent(_EventBase):
       like ``"started"``) — only ``status`` is present.
     - Real ``AgentStatusEvent`` from axon (compaction, output recovery) —
       all of ``status`` / ``before`` / ``after`` / ``recovery`` /
-      ``max_recoveries`` are written by ``dataclasses.asdict``; the
-      optional ``int | None`` fields land on the wire as the literal
-      string ``"null"`` when unset.
+      ``max_recoveries`` are written by ``dataclasses.asdict``; an
+      optional ``int | None`` field left unset is dropped, not sent.
     """
 
     type: Literal["agent.status"]

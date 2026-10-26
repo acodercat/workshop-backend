@@ -43,7 +43,7 @@ class SessionResponse(BaseModel):
     """Session metadata only — used by the list endpoint."""
 
     id: UUID
-    user_id: int | None
+    user_id: int
     title: str | None
     status: SessionStatus
     tier: Tier
@@ -87,15 +87,11 @@ class MessageCreate(BaseModel):
     )
     # Per-turn composer picks; see ``SKILLS_MAX`` for why this is bounded.
     skills: list[str] = Field(default_factory=list, max_length=SKILLS_MAX)
-    # Optional recipe picked from the composer. The backend resolves it
-    # to a pinned snapshot on ``session_turn.recipe``; its instructions
-    # ride to the worker as a system-reminder. ``None`` = no recipe.
-    recipe_id: int | None = Field(default=None, ge=1)
     # One-way LITE → FULL mode upgrade, committed atomically with this
     # send (the composer's mode pick is local until the user actually
     # sends). ``None`` = keep the session's current mode; FULL → LITE
-    # is rejected. Unlike ``skills``/``recipe_id`` (per-turn selections)
-    # this persists on the session.
+    # is rejected. Unlike ``skills`` (a per-turn selection) this persists
+    # on the session.
     agent_type: AgentType | None = None
 
     @field_validator("content")

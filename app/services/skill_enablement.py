@@ -20,7 +20,7 @@ What a turn does spend is bounded where it is chosen, by the cap on
 
 from sqlalchemy import ColumnElement, and_
 
-from app.models.skill import Skill, SkillOrigin, SkillStatus
+from app.models.skill import Skill
 from app.models.user_skill_preference import UserSkillPreference
 
 
@@ -33,20 +33,3 @@ def preference_join(user_id: int) -> ColumnElement[bool]:
         UserSkillPreference.skill_id == Skill.id,
         UserSkillPreference.user_id == user_id,
     )
-
-
-def legacy_enabled(origin: SkillOrigin, status: SkillStatus) -> bool:
-    """TRANSITIONAL — the value that keeps a pre-``status`` worker right.
-
-    ``core/agent-worker`` is shared with metaseq's deployment, and until
-    both databases carried ``status`` it had to gate on
-    ``COALESCE(pref.enabled, skill.enabled)``. One value serves every
-    origin: ``SYSTEM`` has no preference rows, so the old formula reads
-    this column and it must mirror liveness; everyone else either has a
-    row it never looks past, or is legitimately off.
-
-    It stays load-bearing until every database carries ``status`` *and* the
-    worker deployed against it reads that instead — one of the two is still on
-    the old chain. Deleted with the column, in the migration that follows both.
-    """
-    return origin is SkillOrigin.SYSTEM and status is SkillStatus.PUBLISHED

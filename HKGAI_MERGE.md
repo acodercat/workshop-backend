@@ -137,7 +137,10 @@ After every merge that touches `app/api/admin/`:
    the skill upload's displaced `bundle_key` is logged at INFO.
 4. Tests: drop assertions on audit rows / payloads, keep the behavioural
    ones and assert `db.commits`. `tests/test_admin_mutations_commit.py`
-   is this branch's own and stays.
+   is this branch's own and stays. Tests that exist only for the trail go
+   whole: master's `tests/test_admin_staff_update.py` (a no-op PATCH writes
+   no audit row) and the forwarded-hop case in `tests/test_admin_dependencies.py`
+   (the parse that keeps `admin_audit_log.ip_address` within its width).
 5. Docs: `docs/admin-console.md` route tables have no `Audit` column here.
 
 ## Excluding the phone channel — the second thing a plain merge gets wrong
@@ -154,6 +157,8 @@ because it is *addition*, not conflict.
 | `app/services/auth/{login,register}.py` | look up `User.email` directly; no `channel` parameter |
 | `app/api/endpoints/auth.py` | pass `identifier=body.email` |
 | `app/api/endpoints/user.py` | no `/me/phone` endpoints |
+| `app/services/auth/email_change.py`, `sudo.py` | master folds email and phone change into `credential_change.py` and lets `request_sudo_code` pick a channel. Here `email_change.py` stays — taking `proof: SudoProof` — and `sudo.py` sends the code to `user.email`. A merge brings `credential_change.py` and `tests/test_credential_change.py` back as new files: fold any change into `email_change.py` / `tests/test_email_change.py` and delete them |
+| `app/schemas/user.py` | `SudoCodeRequest` carries `locale` alone — no `channel` |
 | `app/errors.py` | no `PhoneTakenError` / `SamePhoneError` / `SmsSendFailedError` |
 | `app/services/redis.py` | no `phone_verify` / `phone_change` prefixes or key builders |
 | `config.py` | no `aliyun_sms_*` block — note master's default `SignName` is the **水杉智算** brand |
@@ -202,6 +207,8 @@ Then the edits deletion alone does not cover:
 | `app/errors.py` | drop the 8 payment/commission/withdrawal error classes; the domain list in the module docstring |
 | `config.py` | drop the `# ── Payments` and `# ── Referral commission` sections, and `credit_bonus_rate` (its only reader was order creation) |
 | `app/services/credits/rates.py` | drop `recharge_bonus_credits` (same — no caller left) |
+| `app/services/credits/topup.py` | `TopupSource` is `welcome_grant` / `admin` — master adds `payment` / `commission_conversion` |
+| `app/services/credits/analytics.py` | no `_SOLD_ROWS`: `_FREE_GRANT_ROWS` is `_GRANT_ROWS`. Master's reads `payment_order`, which **arrives without a conflict** and fails the dashboard's summary query at runtime, on a table `b7e2d9a4c1f5` dropped |
 | docs | `CLAUDE.md` two sections + cross-refs; `README.md` background-process section; `docs/credits.md`; `docs/credits-future.md` "Shipped — Payment integration" |
 
 **Kept on purpose:** `credit_price_cny` and `rates.credits_from_cny` — the admin

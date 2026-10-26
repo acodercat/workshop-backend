@@ -3,9 +3,9 @@
 Two-step flow that mirrors registration but operates on an *already
 authenticated* user:
 
-1. :func:`request_email_change_code` — sudo gate (verify
-   ``current_password``), uniqueness pre-check on the new address,
-   send a 6-digit code to the new address.
+1. :func:`request_email_change_code` — the sudo gate
+   (:func:`~app.services.auth.sudo.require_sudo`), uniqueness pre-check
+   on the new address, send a 6-digit code to the new address.
 2. :func:`change_email` — verify the code, atomically update
    ``user.email``, and bump ``token_version`` so all other sessions
    are forced to re-authenticate. Email is a password-recovery
@@ -24,13 +24,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import revoke_user_tokens, verify_password
-from app.errors import (
-    EmailTakenError,
-    IncorrectPasswordError,
-    SameEmailError,
-)
+from app.auth import revoke_user_tokens
+from app.errors import EmailTakenError, SameEmailError
 from app.models.user import User
+from app.schemas.user import SudoProof
+from app.services.auth.sudo import require_sudo
 from app.services.auth.verification import (
     send_email_change_code,
     verify_email_change_code,
@@ -45,7 +43,7 @@ async def request_email_change_code(
     *,
     user: User,
     new_email: str,
-    current_password: str,
+    proof: SudoProof,
     # ``str`` rather than ``Locale``: the renderer documents a fallback for
     # unknown values and implements it, so the narrow type was a promise the
     # request schema never made.
@@ -59,12 +57,11 @@ async def request_email_change_code(
     here is already authenticated, so returning ``email_taken`` is
     expected UX rather than an information leak.
 
-    The ``current_password`` check happens before the uniqueness
-    check on purpose — refusing on bad password before doing any
-    DB lookup gives an attacker who steals a session no extra signal.
+    The sudo check happens before the uniqueness check on purpose —
+    refusing a bad proof before doing any DB lookup gives an attacker
+    who steals a session no extra signal.
     """
-    if not await verify_password(current_password, user.password_hash):
-        raise IncorrectPasswordError("Current password incorrect")
+    await require_sudo(redis, user=user, proof=proof)
 
     # Refuse no-op changes — there's nothing to verify and the user
     # would just burn a code for no reason.

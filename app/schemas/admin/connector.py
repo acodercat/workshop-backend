@@ -19,8 +19,8 @@ from typing import Annotated
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from app.models.mcp_server import MCPServerAuthType
-from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
-from app.services.mcp.url_identity import normalize_connector_url
+from app.services.connector.catalog import INSTANTIABLE_AUTH_TYPES
+from app.services.connector.url_identity import normalize_connector_url
 
 # Every URL that reaches a column goes through here, so the two spellings of
 # one endpoint cannot become two entries — see ``url_identity``. On the type
@@ -96,7 +96,7 @@ def _must_be_instantiable(
     mean the same rather than fail.
 
     ``BEARER``/``HEADER`` need a per-user secret and the catalog holds
-    none, so :func:`~app.services.mcp.catalog.build_connector` refuses
+    none, so :func:`~app.services.connector.catalog.build_connector` refuses
     them — an entry declaring one is unusable the moment it is published.
     ``catalog.py`` says operator tooling should offer only
     ``INSTANTIABLE_AUTH_TYPES``; ``manage_connector_catalog.py`` already

@@ -25,7 +25,6 @@ from app.models.staff import Staff, StaffStatus
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _OWNED = uuid.UUID("11111111-1111-1111-1111-111111111111")
-_ORPHAN = uuid.UUID("22222222-2222-2222-2222-222222222222")
 
 
 def _session(session_id: uuid.UUID, user_id: int | None) -> Session:
@@ -127,24 +126,6 @@ def test_owner_and_usage_land_on_the_row(monkeypatch) -> None:
     # customer picked, and the console does not carry it.
     assert row["model_id"] == "qwen-main"
     assert "tier" not in row
-
-
-def test_an_ownerless_session_renders_rather_than_500s(monkeypatch) -> None:
-    """``session.user_id`` is nullable, so the outer join can hand back a
-    row with no owner. It belongs on the page — a response model that
-    could not represent it would fail the whole request over one row."""
-    db = _FakeDb([(_session(_ORPHAN, None), None, None)], [])
-
-    (row,) = _items(db, monkeypatch, {})
-
-    # Null together: the outer join supplies both columns or neither.
-    assert (row["user_id"], row["owner_username"], row["owner_name"]) == (
-        None,
-        None,
-        None,
-    )
-    # Absent from both aggregates: zeros, not nulls.
-    assert (row["turn_count"], row["total_tokens"], row["spent_credits"]) == (0, 0, 0)
 
 
 def test_the_row_carries_no_conversation(monkeypatch) -> None:

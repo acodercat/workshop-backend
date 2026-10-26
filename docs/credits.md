@@ -41,7 +41,8 @@ Every choice below was made with three pressures in mind:
 
 1. **Agent workload is high-stakes per call.** A runaway agent loop
    can spend \$5+ before it stops. We need the ability to **refuse
-   service** when a user can't afford the worst-case cost.
+   service** when a user can't afford a turn, and to stop one that runs
+   their balance out.
 2. **Audit trail is non-negotiable.** First customer to ask "where
    did my 10,000 credits go" needs a per-row answer, not a balance
    delta.
@@ -99,7 +100,7 @@ Cost is computed in floats during one short helper
 ### Pre-deduct (reserve) → settle (true-up)
 
 ```
-turn starts            →  reserve max-estimate    (debit balance)
+turn starts            →  reserve an estimate     (debit balance)
 worker finishes turn   →  read actual usage       (from session_turn)
 settle path            →  refund (reserved-actual) + record actual cost
 ```
@@ -192,11 +193,13 @@ CREATE INDEX ix_credit_ledger_user_created
 
 | value | who writes it | sign | meaning |
 |---|---|---|---|
-| `TOPUP` | admin script / welcome grant | + | money in |
-| `RESERVE` | `queue_user_message` at turn start | − | hold pessimistic max cost |
+| `TOPUP` | welcome grant / operator (`reference.source` says which) | + | money in |
+| `RESERVE` | `queue_user_message` at turn start | − | hold a typical turn's cost |
 | `SETTLE` | settle path (lazy sweep / sweeper) | both | two rows: reverse-reserve + actual debit |
 | `REFUND` | settle path on missing usage / session delete / expired | + | full refund |
-| `ADJUST` | admin (no CLI yet; call service directly) | either | manual correction |
+| `ADJUST` | `adjust_credits` script / admin console | either | manual correction |
+| `REFERRAL` | registration through a referral code | + | the referrer's reward |
+| `CHECKIN` | daily check-in | + | the day's reward |
 
 `SETTLE` is unusual — every settle writes **two** rows in one tx:
 
@@ -290,8 +293,9 @@ note is short because the org concept here is identity-only for V3.
 The math used at both reserve and settle. Two callers, one helper
 (`rates.cost_micro_credits`):
 
-- **reserve** plugs in pessimistic upper bounds for each input so
-  the hold covers the worst plausible turn.
+- **reserve** plugs in estimates near a typical turn — an entry gate
+  and a per-user concurrency throttle, not a worst-case bound
+  (mid-turn overruns are the budget enforcer's).
 - **settle** plugs in actual measurements from `session_turn` so the
   user pays for what they used.
 
@@ -337,12 +341,12 @@ cost_micro      = ceil(token_micro + duration_micro + fee_micro)
 
 ### Reserve vs settle — same call, different inputs
 
-| input            | reserve                                                | settle                                            |
-|------------------|--------------------------------------------------------|---------------------------------------------------|
-| `input_tokens`   | `credit_reserve_max_input_tokens` (16_000)             | `session_turn.input_tokens`                       |
-| `output_tokens`  | `rate.reserve_max_output_tokens` (per-model: 4096/8192)| `session_turn.output_tokens`                      |
-| `turn_seconds`   | `credit_reserve_max_turn_seconds` (1860)               | `session_turn.terminated_at - session_turn.created_at` |
-| `rate snapshot`  | live config row at reserve time                        | the snapshot frozen on the reservation            |
+| input            | reserve                                                         | settle                                                 |
+|------------------|-----------------------------------------------------------------|--------------------------------------------------------|
+| `input_tokens`   | the model's `reserve_est_input_tokens` (a per-model p50), else `credit_reserve_max_input_tokens` | `session_turn.input_tokens`          |
+| `output_tokens`  | the rate card's `reserve_max_output_tokens`                     | `session_turn.output_tokens`                           |
+| `turn_seconds`   | `credit_reserve_max_turn_seconds`                               | `session_turn.terminated_at - session_turn.created_at` |
+| `rate snapshot`  | live config row at reserve time                                 | the snapshot frozen on the reservation                 |
 
 At settle the rate snapshot comes from
 `credit_reservation.rate_snapshot` (JSONB, frozen at reserve time)
@@ -350,73 +354,30 @@ At settle the rate snapshot comes from
 between reserve and settle does **not** re-price the open turn:
 the cost shown at start is the cost actually charged.
 
-### Rate card (`config.Settings.credit_rates`)
+### Configuration
 
-Per-model:
-
-| model_id          | in_per_1k_usd | out_per_1k_usd | α (token_markup) | γ (model_fee_credits) | reserve_max_output_tokens |
-|-------------------|--------------:|---------------:|-----------------:|----------------------:|--------------------------:|
-| claude-opus-4-7   | 0.005         | 0.025          | 3.0              | 0                     | 4096                      |
-| claude-opus-4-6   | 0.005         | 0.025          | 3.0              | 0                     | 4096                      |
-| claude-sonnet-4-6 | 0.003         | 0.015          | 3.0              | 0                     | 8192                      |
-| kimi-k2           | 0.00055       | 0.0022         | 3.0              | 0                     | 8192                      |
-| HKGAI-V1          | 0.001         | 0.005          | 3.0              | 0                     | 8192                      |
-| HKGAI-V3          | 0.001         | 0.005          | 3.0              | 0                     | 8192                      |
-
-Global (not per-model):
-
-| knob                                | default | meaning                                          |
-|-------------------------------------|---------|--------------------------------------------------|
-| `credit_per_second_credits` (β)     | **0.0** | per-second infrastructure occupancy fee          |
-| `credit_reserve_max_turn_seconds`   | 1860    | reserve-time upper bound on duration (31 min)    |
-| `credit_reserve_max_input_tokens`   | 16_000  | reserve-time upper bound on input                |
-| `credit_welcome_grant_credits`      | 100_000 | auto-grant at registration                       |
+Every number lives in `config.py` and is documented there; this page
+does not copy them, because a copy is what drifts. Per model, in
+`Settings.credit_rates`: `in_per_1k_usd` / `out_per_1k_usd` (USD cost
+basis), `token_markup` (α), `model_fee_credits` (γ),
+`reserve_max_output_tokens` and `reserve_est_input_tokens`. Global:
+`credit_per_second_credits` (β), `credit_reserve_max_turn_seconds`,
+`credit_reserve_max_input_tokens` (the input estimate for a model with
+no `reserve_est_input_tokens`) and `credit_welcome_grant_credits`.
 
 `token_markup` (α) is per-model so promotional pricing on a single
-model is one number change. β / γ default 0 keeps day-1 behavior
-at "tokens only" — see *Day-1 collapse* below.
+model is one number change.
 
-### Day-1 collapse — currently a tokens-only formula
+### Reserve sizing
 
-Because β and γ are both 0 in the default config, the formula
-currently reduces to:
-
-```
-cost_credits  ≈  ( in_tokens/1000 · in_per_1k_usd
-                 + out_tokens/1000 · out_per_1k_usd )
-              · token_markup
-              · 1000           ← USD → credits ($1 = 1000 credits)
-```
-
-Worked example. `claude-opus-4-7` turn with 5 000 input / 2 000
-output tokens:
-
-```
-= ( 5 · 0.005 + 2 · 0.025 ) · 3.0 · 1000
-= ( 0.025 + 0.050 ) · 3 000
-= 225 credits
-```
-
-Turning on β before the `terminated_at` distribution has stabilized
-in production is intentionally avoided — see §8 *Failure modes*
-("Duration billing enabled but worker does not write
-`terminated_at` yet").
-
-### Reserve sizing — why it can over-hold
-
-Reserve uses the very upper end of every input: `max_input × max_output × max_turn_seconds`. For an average claude-opus-4-7 turn at default config the reserve is:
-
-```
-16 000 in × $0.005/k = $0.080
-+ 4 096 out × $0.025/k = $0.102
-= $0.182 token COGS
-× 3.0 markup × 1000 credits/$  → 547 credits reserved
-```
-
-Settling that with the 225-credit example above refunds 322
-credits. Customers see a transient hold ≈ 2.4× the typical
-settled cost; this is intentional headroom — the cost of not
-blocking on per-stream cost estimation mid-turn.
+The hold is sized from the model's median turn, so roughly half of
+turns cost more than they reserved. That is deliberate: the reserve
+is an entry gate (can this user afford a typical turn?) and a
+concurrency throttle (each running turn holds its share of the
+balance), not a guarantee. A turn that runs past it is watched by the
+budget enforcer, which stops the worst overrun once a user's
+projected post-settle balance reaches its buffer; settle then charges
+actuals either way.
 
 ### Code map
 
@@ -425,7 +386,7 @@ blocking on per-stream cost estimation mid-turn.
 | formula                    | `app/services/credits/rates.py::cost_micro_credits`                             |
 | reserve                    | `app/services/credits/rates.py::reserve_micro_credits`                          |
 | snapshot                   | `app/services/credits/rates.py::snapshot_rate`                                  |
-| legacy snapshot fallback   | `app/services/credits/rates.py::_normalize_rate_snapshot`                       |
+| legacy snapshot fallback   | `app/services/credits/rates.py::normalize_rate_snapshot`                        |
 | rate card + β              | `backend/config.py::Settings.credit_rates`, `credit_per_second_credits`         |
 
 ---
@@ -437,17 +398,17 @@ transaction unless otherwise noted; the `_internal.insert_ledger_
 and_bump_balance` helper takes care of the `SELECT … FOR UPDATE` on
 the user row so concurrent ops never race the balance.
 
-### 6.1 Top-up (admin)
+### 6.1 Top-up
 
-Path: `scripts/topup_credits.py` → `credits.apply_topup` →
-`_internal.insert_ledger_and_bump_balance`.
+Paths: the welcome grant (6.2) and `scripts/topup_credits.py` →
+`credits.apply_topup` → `_internal.insert_ledger_and_bump_balance`.
 
 ```
 1. lock user row (FOR UPDATE)
 2. INSERT credit_ledger
    - amount = +amount_micro
    - kind = TOPUP
-   - reference = {reason, admin_id, source: 'admin'}
+   - reference = {reason, admin_id, source}   -- source: welcome_grant / admin
    - idempotency_key = <required>
 3. UPDATE "user" SET credit_balance = credit_balance + amount_micro
 4. caller commits
@@ -462,8 +423,8 @@ that as success and prints the current balance.
 
 Path: `app/services/auth/register.register_user` → `credits.apply_topup`.
 
-Same as 5.1, with `idempotency_key = f"welcome-{user.id}"` and
-`reason = "welcome grant"`. **Runs in a separate transaction** from
+Same as 6.1, with `idempotency_key = f"welcome-{user.id}"`,
+`reason = "welcome grant"` and `source = "welcome_grant"`. **Runs in a separate transaction** from
 the user/org/member creation — see §2 ("Best-effort welcome grant
 outside the register tx") for why.
 
@@ -478,25 +439,27 @@ Path: `queue_user_message` → `credits.reserve_for_turn`.
 ```
 1. lock user row (FOR UPDATE)
 2. load rate snapshot for session.model_id
-   (raises KeyError if model is unpriced — surfaces as 500; rate
+   (raises ModelUnavailableError → 503 if the model is unpriced; rate
    misconfiguration is an ops bug, not a user error)
-3. compute max-cost estimate:
-     token_micro    = ((max_in/1000 × in_rate
+3. compute the hold:
+     token_micro    = ((est_in/1000 × in_rate
                        + max_out/1000 × out_rate)
                        × token_markup × 1e9)
      duration_micro = credit_reserve_max_turn_seconds
-                      × credit_per_second_credits × 1_000_000
-     fee_micro      = model_fee_credits × 1_000_000
+                      × credit_per_second_credits × 10_000_000
+     fee_micro      = model_fee_credits × 10_000_000
      reserved       = ceil(token_micro + duration_micro + fee_micro)
-   max_in = settings.credit_reserve_max_input_tokens (default 16000)
+   est_in  = the model's reserve_est_input_tokens, else
+             settings.credit_reserve_max_input_tokens
    max_out = rate.reserve_max_output_tokens
 4. if balance < reserved:
      raise InsufficientCreditsError → HTTP 402
-5. INSERT credit_ledger (amount=-reserved, kind=RESERVE,
-                         reference={session_id, turn_id, model_id})
-6. INSERT credit_reservation (state='OPEN',
+5. INSERT credit_reservation (state='OPEN',
                               rate_snapshot=copy of rate row,
                               expires_at=now() + 4h)
+6. INSERT credit_ledger (amount=-reserved, kind=RESERVE,
+                         reservation_id → the row above,
+                         reference={session_id, turn_id, model_id})
 7. caller commits
 ```
 
@@ -564,8 +527,8 @@ removed it after we moved usage storage from the Redis stream
      stop here
 4. compute actual cost using the FROZEN rate_snapshot, not live config:
      ceil(token_cost × token_markup
-          + turn_seconds × credit_per_second_credits × 1_000_000
-          + model_fee_credits × 1_000_000)
+          + turn_seconds × credit_per_second_credits × 10_000_000
+          + model_fee_credits × 10_000_000)
 5. INSERT credit_ledger (amount=+reservation.reserved, kind=SETTLE,
                          reference={reservation_id})
                                                      ← reverse reserve
@@ -602,7 +565,8 @@ Trigger: same paths as settle. Routes when:
 
 ### 6.6 Adjust (manual correction)
 
-Service-only path (`credits.apply_adjust`). Same shape as TOPUP but
+`credits.apply_adjust`, driven by `scripts/adjust_credits.py` and the
+admin console. Same shape as TOPUP but
 allows signed amounts and requires a non-empty `reason`. The CLI passes
 an operator-typed `--reason`; the admin console stopped asking for one
 and passes the fixed `"admin console adjustment"` instead, so on that
@@ -612,8 +576,11 @@ path `admin_id` is what identifies the correction. Used for:
 - Crediting users affected by an incident
 - Manually balancing books after a reconciliation finds drift
 
-No CLI yet — invoke the service from a Python REPL with a
-deterministic `idempotency_key` (e.g. `incident-2026-05-12`).
+Pass a deterministic `idempotency_key` (e.g. `incident-2026-05-12`):
+the script requires one, so a retried correction is a no-op.
+`--to N` sets a balance through `credits.apply_adjust_to`, which settles
+first, computes the delta under the user-row lock, and refuses while a
+turn is in flight.
 
 ---
 
@@ -668,7 +635,7 @@ with an `asyncio.TaskGroup`; the budget enforcer is a flag-gated third). Standal
 
 The polling backstop. Per tick:
 
-1. Try `pg_try_advisory_lock(0x53544c5357454550)` — bytes
+1. Try `pg_try_advisory_xact_lock(0x53544c5357454550)` — bytes
    `b"STLSWEEP"` interpreted as bigint, easy to spot in `pg_locks`.
 2. If another sweeper holds it: skip this tick.
 3. Otherwise: list up to 100 OPEN reservations whose session is
@@ -676,7 +643,7 @@ The polling backstop. Per tick:
 4. For each candidate, open its own session (so one row's DB error
    doesn't poison the rest of the batch) and route to the shared
    settle/refund helpers.
-5. Release the advisory lock.
+5. End the tick's transaction, which releases the lock.
 
 Per-row session isolation is load-bearing: SQLAlchemy doesn't
 auto-rollback on flush error inside a transaction, so a single bad
@@ -698,15 +665,19 @@ path.
 
 ### Multi-node coordination
 
-`pg_try_advisory_lock` is **session-scoped, auto-released on
-connection close**, and lives in Postgres — so the lock works
-across machines without Redis, ZooKeeper, etc.
+`pg_try_advisory_xact_lock` is **transaction-scoped, released when
+the tick's transaction ends** — commit, rollback, crash or lost
+connection alike — and lives in Postgres, so the lock works across
+machines without Redis, ZooKeeper, etc. Transaction- rather than
+session-scoped on purpose: a session lock on a *pooled* connection is
+released only by an explicit unlock, and one failed unlock would leak
+it and wedge every host's sweeper.
 
 Compared to Redis-based distributed locks:
 
 - No TTL to renew (which avoids the classic split-brain after a
   TTL expiry)
-- Crashed sweeper releases the lock for free (connection close)
+- Crashed sweeper releases the lock for free (its transaction ends)
 - Costs one round-trip per tick instead of N for renewal
 
 This is the [pattern most people end up at](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html)
@@ -721,12 +692,12 @@ once they realize they don't need Redlock for a single-DB workload.
 | User has 0 balance, sends message | Reserve fails → 402 → user sees "insufficient credits" |
 | Reserve passes, worker runs normally, then user closes tab | Lazy sweep on next user action OR sweeper (≤60 s later) settles |
 | Reserve passes, worker crashes mid-turn | `session.status` stays RUNNING, `session_turn.input_tokens/output_tokens` stay NULL. Sweeper sees `expires_at < now()` → refund |
-| Reserve passes, worker finishes, session deleted before settle | FK SET NULL clears `reservation.session_id`. Sweeper sees `session_id IS NULL` → refund |
-| Worker writes 0 in / 0 out (legitimately empty turn) | Both columns are 0 (not NULL) → cost = 0 → settles as +reserved / -0 (full refund of reservation; user pays nothing) |
+| Reserve passes, worker finishes, user deletes the session | The delete settles the session's open reservation first, then soft-deletes. (A *hard* delete — operator or test teardown — lets the FK SET NULL `reservation.session_id`; the sweeper then sees `session_id IS NULL` → refund.) |
+| Worker writes 0 in / 0 out (legitimately empty turn) | Both columns are 0 (not NULL) → token cost 0, so the user pays only the β duration fee and any γ model fee |
 | Settle interrupted by DB blip | Per-row isolation in sweeper + state-machine idempotency → next tick retries |
 | Two concurrent requests from the same user attempt to reserve | `SELECT … FOR UPDATE` on the user row serialises them; one sees the updated balance |
 | Welcome grant fails post-registration | Registration succeeds; user has 0 balance; loud log; admin tops up manually |
-| Sweeper process killed mid-sweep | Advisory lock auto-released on connection close. Next tick (or next host's sweeper) picks up; settle is idempotent so re-doing the same reservation is safe |
+| Sweeper process killed mid-sweep | Advisory lock released as the tick's transaction ends. Next tick (or next host's sweeper) picks up; settle is idempotent so re-doing the same reservation is safe |
 | Token-usage migration applied but old worker not deployed yet | Old worker doesn't write `input_tokens` / `output_tokens` → backend settle reads NULL → refunds the reservation (user gets a free turn until worker upgrades). See `credits-future.md` for the deployment-order convention |
 | Duration billing enabled but worker does not write `terminated_at` yet | Backend settles with `turn_seconds = 0.0` → token cost and model fee are charged, but β duration is not. Deploy the worker terminal-write change before turning β above 0 |
 
@@ -760,7 +731,7 @@ asyncio.run(main())
 
 If this ever reports broken users, **stop billing operations and
 investigate**. The likely causes:
-- A bug allowed a balance update outside `_internal._insert_ledger`.
+- A bug allowed a balance update outside `_internal.insert_ledger_and_bump_balance`.
 - A migration interfered with the column.
 - Manual SQL touched `credit_balance` directly.
 
@@ -844,17 +815,13 @@ clearly-named `--idempotency-key=backfill-welcome-{user_id}`.
 
 ## 10. What's not implemented (deferred)
 
-See [`credits-future.md`](credits-future.md) for the design of each:
+Mid-turn spend control (`app/workers/budget_enforcer.py`) has shipped;
+see its section in `CLAUDE.md`. This deployment carries no payment flow:
+credits arrive by the welcome grant, rewards and operator grants. Still
+deferred — see [`credits-future.md`](credits-future.md):
 
-- **Worker-side cost cap** — physical circuit breaker that stops a
-  runaway turn before it can exceed `balance × 1.2`. Compensates for
-  the pre-deduct estimate being an upper bound rather than a hard
-  limit.
 - **Multi-tier org billing** — moving `credit_balance` from user to
   organization, adding budget hierarchy (org / team / project / user).
-- **Payment integration** — Stripe / Alipay / WeChat Pay webhook
-  paths that emit `TOPUP` ledger rows with `source` other than
-  `admin`.
 - **Multiplier system** — group / model / promo multipliers like
   OneAPI uses. Requires real operational pressure to justify.
 - **Auto reconciliation cron** — daily SQL invariant check with an
@@ -871,8 +838,8 @@ See [`credits-future.md`](credits-future.md) for the design of each:
 | **V2** | Durable usage on `session_turn.input_tokens/output_tokens/terminated_at`, written by the worker in its fenced terminal transaction. Backend settle reads from there, no longer from the ephemeral Redis stream. SSE eager-settle hook removed (Redis was the only reason it existed). |
 | **V2 → sibling-process** | Sweeper extracted from the FastAPI lifespan into a standalone process (`app/workers/run.py`), deployed via `deploy.sh background`. Web returns to pure HTTP responsibility. Multi-node coordinated via Postgres advisory lock. |
 | **V2 billing cleanup** | Open reservation uniqueness is enforced with `uq_credit_reservation_open_session`; unused `credit_reservation.kind` / `sandbox_id` were removed after turn-level three-factor billing made the reserved sandbox variant obsolete. |
-| **V3** | Organization concept (mirrors OpenAI). Personal org auto-created at registration. Welcome grant config (default 100_000 credits) — runs as a separate, best-effort transaction after the user/org/member commit. Note: billing still attaches to `user_id`; org-level billing is a V4 migration documented in `credits-future.md`. |
-| **V4 (planned)** | One of: worker-side cost cap, multi-tier org billing, payment integration. Driven by business need. |
+| **V3** | Organization concept (mirrors OpenAI). Personal org auto-created at registration. Welcome grant config (`credit_welcome_grant_credits`) — runs as a separate, best-effort transaction after the user/org/member commit. Note: billing still attaches to `user_id`; org-level billing is a V4 migration documented in `credits-future.md`. |
+| **V4** | Mid-turn budget enforcer (`budget_enforcer`), the 2026-05 credit redenomination (1 credit = 10_000_000 µ-credits). |
 
 ---
 
@@ -886,7 +853,7 @@ See [`credits-future.md`](credits-future.md) for the design of each:
 | Settle / refund | `app/services/credits/settle.py` |
 | Top-up | `app/services/credits/topup.py` |
 | Adjust | `app/services/credits/adjust.py` |
-| Read balance / history | `app/services/credits/balance.py`, `history.py` |
+| Read balance / history | `app/services/credits/balance.py`, `transactions.py` |
 | Rate card + cost math | `app/services/credits/rates.py` |
 | Sweeper (poll loop) | `app/workers/settle_sweeper.py` |
 | Subscriber (push, `settle:notify`) | `app/workers/settle_subscriber.py` |

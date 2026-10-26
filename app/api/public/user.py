@@ -19,7 +19,7 @@ from app.auth import (
     revoke_user_tokens,
     verify_password,
 )
-from app.errors import IncorrectPasswordError, SamePasswordError
+from app.errors import SamePasswordError
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.user import (
@@ -28,6 +28,7 @@ from app.schemas.user import (
     PasswordChange,
     ProfileUpdate,
     ReferralResponse,
+    SudoCodeRequest,
     UserResponse,
 )
 from app.services.auth import get_or_create_referral_code
@@ -35,6 +36,7 @@ from app.services.auth.email_change import (
     change_email,
     request_email_change_code,
 )
+from app.services.auth.sudo import request_sudo_code, require_sudo
 from app.services.user import UserEventHub, stream_user_events
 from config import settings
 
@@ -113,16 +115,33 @@ async def stream_current_user_events(
     return EventSourceResponse(stream_user_events(hub, current_user.id))
 
 
+#
+# Every credential change below is gated on a ``SudoProof`` — see
+# :mod:`app.services.auth.sudo`. The endpoint right below issues its code.
+
+
+@router.post("/me/verification-codes", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(settings.rate_limit_register_code)
+async def request_sudo_verification_code(
+    request: Request,
+    body: SudoCodeRequest,
+    redis: aioredis.Redis = Depends(get_redis),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Send a sudo code to the caller's own email."""
+    await request_sudo_code(redis, user=current_user, locale=body.locale)
+
+
 @router.put("/me/password")
 @limiter.limit("5/minute")
 async def change_password(
     request: Request,
     data: PasswordChange,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> UserResponse:
-    if not await verify_password(data.current_password, current_user.password_hash):
-        raise IncorrectPasswordError("Current password incorrect")
+    await require_sudo(redis, user=current_user, proof=data)
     # Refuse no-op changes: a same-password "update" would still bump
     # ``token_version`` and kick every active session out for nothing.
     if await verify_password(data.new_password, current_user.password_hash):
@@ -138,7 +157,7 @@ async def change_password(
 #
 # Two-step verify-then-commit, mirrors the registration flow:
 #
-#   POST /me/email/verification-codes  { new_email, current_password, locale }
+#   POST /me/email/verification-codes  { new_email, <SudoProof>, locale }
 #       → sudo + uniqueness pre-check + send 6-digit code to new_email. 204.
 #   PUT /me/email                      { new_email, code }
 #       → verify code, atomically swap user.email, bump token_version.
@@ -167,7 +186,7 @@ async def request_email_change_verification_code(
         redis,
         user=current_user,
         new_email=body.new_email,
-        current_password=body.current_password,
+        proof=body,
         locale=body.locale,
     )
 

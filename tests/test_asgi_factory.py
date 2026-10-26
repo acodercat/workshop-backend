@@ -207,3 +207,19 @@ def test_a_request_id_too_long_to_store_is_replaced() -> None:
 
     minted = response.headers["X-Request-ID"]
     assert minted and minted != too_long
+
+
+# --- rate-limit floor ---------------------------------------------------
+
+
+def test_the_floor_runs_in_the_asgi_middleware() -> None:
+    """The global floor answers from the middleware, not the endpoint. The
+    synchronous ``SlowAPIMiddleware`` cannot await the project's async 429
+    handler and falls back to slowapi's flat body; the ASGI variant awaits
+    it, so a floor 429 carries the same envelope as every other error."""
+    from slowapi.middleware import SlowAPIASGIMiddleware, SlowAPIMiddleware
+
+    installed = [m.cls for m in app.user_middleware]
+
+    assert SlowAPIASGIMiddleware in installed
+    assert SlowAPIMiddleware not in installed

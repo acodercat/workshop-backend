@@ -198,12 +198,11 @@ def reserve_micro_credits(
 ) -> int:
     """Compute the upfront reserve amount in µ-credits.
 
-    Pessimistic upper bound across all three factors so the hold
-    covers the worst plausible turn. Input length comes from the
-    caller (:attr:`config.Settings.credit_reserve_max_input_tokens`),
-    output from the rate's own ``reserve_max_output_tokens`` cap,
-    duration from :attr:`config.Settings.credit_reserve_max_turn_seconds`.
-    Settle multi-refunds whatever wasn't used.
+    An entry gate sized near a typical turn, not a worst-case bound: input
+    comes from the caller (the model's p50, :func:`reserve_est_input_tokens`),
+    output from the rate's own ``reserve_max_output_tokens`` cap, duration
+    from :attr:`config.Settings.credit_reserve_max_turn_seconds`. Overruns
+    mid-turn are the budget enforcer's; settle refunds whatever wasn't used.
     """
     return cost_micro_credits(
         rate,
@@ -214,8 +213,14 @@ def reserve_micro_credits(
 
 
 def credits_from_micro(amount_micro: int) -> int:
-    """Convert µ-credits to whole-credit integer (display only)."""
-    return amount_micro // _MICRO_PER_CREDIT
+    """Convert µ-credits to whole credits for display, truncating toward zero.
+
+    Toward zero rather than floor, so a debit displays the same magnitude
+    as a grant of the same size: floor division showed a 0.3-credit turn
+    as ``-1`` and a 1.5-credit one as ``-2``.
+    """
+    whole = abs(amount_micro) // _MICRO_PER_CREDIT
+    return whole if amount_micro >= 0 else -whole
 
 
 def micro_from_credits(amount_credits: int) -> int:

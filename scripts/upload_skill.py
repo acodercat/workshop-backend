@@ -18,9 +18,12 @@ in the composer, which consults the listing's status but not their
 toggle.
 
 Idempotent by name: re-uploading a name that exists replaces that
-skill's bundle in place, keeping its id and every user's preference.
-Nothing about policy moves with it — not the listing's status either —
-because shipping a fix is a content change.
+skill's bundle in place, keeping its id and its status, because shipping
+a fix is a content change. ``--origin`` is required on every upload, as
+it is on the console's form: it is the one piece of policy an upload
+states, so a replace under a different origin moves the skill, and a
+move to ``SYSTEM`` drops every user's preference for it. A default would
+make that move silently on the first upload that forgot the flag.
 
 ``--category`` files the skill under one of the tabs the skills page
 groups by, **resolved by name rather than by id**: a name is what the
@@ -35,9 +38,9 @@ make by hand. This script files a bundle under one; it does not create one.
 
 Usage:
     cd backend
-    uv run python -m scripts.upload_skill path/to/my-skill.zip
+    uv run python -m scripts.upload_skill path/to/core-skill.zip --origin SYSTEM
     uv run python -m scripts.upload_skill path/to/another.zip --origin OFFICIAL
-    uv run python -m scripts.upload_skill path/to/another.zip --publish
+    uv run python -m scripts.upload_skill path/to/another.zip --origin OFFICIAL --publish
     uv run python -m scripts.upload_skill path/to/another.zip \
         --origin OFFICIAL --category 写作
 """
@@ -89,8 +92,8 @@ async def upload_bundle(
                 origin=origin,
                 filename=bundle_path.name,
                 data=data,
-                # A new listing lands STAGED unless asked otherwise;
-                # a replace never touches status at all.
+                # A new listing lands STAGED and a replace keeps its
+                # status, unless ``--publish`` says to go live.
                 publish=publish,
                 # ``None`` leaves the row's category alone — a re-upload
                 # is a content change, not a refiling.
@@ -123,8 +126,9 @@ def main() -> None:
     parser.add_argument(
         "--origin",
         choices=("SYSTEM", "OFFICIAL"),
-        default="SYSTEM",
-        help="Platform origin: SYSTEM (always-on core, default) or OFFICIAL (user opts in).",
+        required=True,
+        help="Platform origin: SYSTEM (agent-only core) or OFFICIAL (user opts in). "
+        "Required even on a replace: a different origin moves the skill.",
     )
     parser.add_argument(
         "--publish",

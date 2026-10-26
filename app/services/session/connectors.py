@@ -10,7 +10,8 @@ what a switch does. Sending the whole set on every toggle would make two tabs
 flipping different Connectors overwrite each other.
 
 Ownership is not checked here. It is validated once, where the configuration
-is written (``_owned_mcp_server_ids``), and enforced again where it is spent:
+is written (:func:`app.services.connector.ownership.require_owned_connectors`),
+and enforced again where it is spent:
 ``_resolve_mcp_servers`` re-reads every row by id and drops what is no longer
 this user's or no longer connected.
 """

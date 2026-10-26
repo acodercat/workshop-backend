@@ -53,7 +53,9 @@ for _key, _value in _TEST_DEFAULTS.items():
     os.environ.setdefault(_key, _CONFIGURED.get(_key) or _value)
 
 import secrets  # noqa: E402
-from collections.abc import AsyncIterator, Iterator  # noqa: E402
+import uuid  # noqa: E402
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
 import bcrypt  # noqa: E402
 import httpx  # noqa: E402
@@ -211,3 +213,52 @@ async def http_client(test_user: dict) -> AsyncIterator[httpx.AsyncClient]:
         token = resp.json()["access_token"]
         client.headers["Authorization"] = f"Bearer {token}"
         yield client
+
+
+@pytest.fixture
+def run_enqueue(monkeypatch) -> Callable[[AsyncMock], Awaitable[list[str]]]:
+    """``queue_user_message`` for one message, every collaborator stubbed.
+
+    ``await run_enqueue(redis)`` enqueues against a fresh session owned by
+    user 7 and returns the stubbed steps in the order they ran — for tests of
+    the function's sequencing and its post-commit announcements, which the
+    real collaborators would need a database to reach.
+    """
+    from app.models.session import AgentType, Session, SessionStatus
+    from app.services.session import enqueue
+
+    session = Session(
+        id=uuid.uuid4(),
+        user_id=7,
+        model_id="m",
+        status=SessionStatus.IDLE,
+        agent_type=AgentType.FULL,
+    )
+    steps: list[str] = []
+
+    def stub(name: str, result: object = None):
+        async def step(*_args, **_kwargs):
+            steps.append(name)
+            return result
+
+        return step
+
+    for owner, name, result in [
+        (enqueue, "_lock_session", session),
+        (enqueue, "_filter_invokable_skills", []),
+        (enqueue, "_resolve_mcp_servers", []),
+        (enqueue, "_bind_session_files", []),
+        (enqueue, "_enforce_concurrent_task_limit", None),
+        (enqueue.session_connectors, "configured_ids", []),
+        (enqueue.credits, "settle_open_for_user", None),
+        (enqueue.credits, "reserve_for_turn", None),
+        (enqueue.file_storage, "clear_orphan_tags", None),
+    ]:
+        monkeypatch.setattr(owner, name, stub(name, result))
+
+    async def run(redis: AsyncMock) -> list[str]:
+        db = MagicMock(flush=AsyncMock(), commit=AsyncMock())
+        await enqueue.queue_user_message(db, redis, session, content="hi", files=[])
+        return steps
+
+    return run

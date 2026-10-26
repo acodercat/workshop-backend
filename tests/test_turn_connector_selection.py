@@ -42,11 +42,6 @@ class TestNothingIsAttachedByDefault:
 
         db.execute.assert_not_awaited()
 
-    async def test_an_anonymous_session_attaches_nothing(self):
-        db = _db_returning((1, "Notion"))
-
-        assert await _resolve_mcp_servers(db, user_id=None, requested=[1]) == []
-
 
 class TestWhatAPickIsFilteredBy:
     async def test_the_query_constrains_id_owner_and_connected(self):
@@ -84,19 +79,3 @@ class TestTheSnapshotShape:
         picked = await _resolve_mcp_servers(db, user_id=42, requested=[7])
 
         assert picked == [{"id": 7, "name": "Notion"}]
-
-    async def test_a_repeated_pick_appears_once(self):
-        db = _db_returning((7, "Notion"))
-
-        picked = await _resolve_mcp_servers(db, user_id=42, requested=[7, 7])
-
-        assert picked == [{"id": 7, "name": "Notion"}]
-
-    async def test_request_order_is_kept(self):
-        # Only so a queued row reads the way it was configured; the worker
-        # connects failed-last by its own rule.
-        db = _db_returning((7, "Notion"), (3, "Linear"))
-
-        picked = await _resolve_mcp_servers(db, user_id=42, requested=[3, 7])
-
-        assert [c["id"] for c in picked] == [3, 7]

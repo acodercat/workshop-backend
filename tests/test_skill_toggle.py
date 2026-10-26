@@ -79,7 +79,6 @@ def _skill(**over) -> Skill:
             "display_name": "Notes",
             "description": "takes notes",
             "status": SkillStatus.PUBLISHED,
-            "enabled": False,
             "bundle_key": "user_skills/7/x/notes.zip",
             "bundle_size": 10,
             "display_name_i18n": None,

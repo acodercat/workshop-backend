@@ -184,3 +184,18 @@ def test_reserve_est_input_tokens_falls_back_to_global(monkeypatch) -> None:
 
     assert rates.reserve_est_input_tokens("m") == 16_000
     assert rates.reserve_est_input_tokens("unknown-model") == 16_000
+
+
+@pytest.mark.parametrize(
+    ("amount_micro", "expected"),
+    [
+        (15_000_000, 1),
+        (-15_000_000, -1),
+        (-3_000_000, 0),
+        (-10_000_000, -1),
+        (0, 0),
+    ],
+)
+def test_credits_from_micro_truncates_toward_zero(amount_micro, expected) -> None:
+    # A debit shows the same magnitude as a grant of the same size.
+    assert rates.credits_from_micro(amount_micro) == expected
