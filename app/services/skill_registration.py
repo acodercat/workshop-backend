@@ -46,7 +46,6 @@ from app.services.skill_bundle import (
     parse_skill_md,
     validate_zip_structure,
 )
-from app.services.skill_enablement import legacy_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +84,11 @@ async def register_skill_bundle(
 
     The row lands ``PUBLISHED`` — a user's own upload has no review to
     wait for — but with **no preference row**, which is how a user who
-    has never said reads as off. Turning a skill on puts its metadata in
-    every turn's LLM context, so that is an explicit opt-in from the
-    skills page, not an upload side effect. The freshly uploaded skill is
-    usable immediately via an explicit composer pick, which consults the
-    listing's status but not the user's toggle.
+    has never said reads as off: turning it on adds it to their composer
+    picker, an explicit choice from the skills page rather than an upload
+    side effect. The freshly uploaded skill is usable immediately via an
+    explicit composer pick, which consults the listing's status but not
+    the user's toggle.
     """
     ext = _canonical_ext(filename)
     is_zip = ext == ".zip"
@@ -139,7 +138,6 @@ async def register_skill_bundle(
         bundle_key=bundle_key,
         bundle_size=len(data),
         status=SkillStatus.PUBLISHED,
-        enabled=legacy_enabled(SkillOrigin.CUSTOM, SkillStatus.PUBLISHED),
     )
     db.add(skill)
     try:
@@ -202,7 +200,10 @@ async def register_platform_skill_bundle(
     **Shipping a bundle is a content change.** A replace leaves the
     listing's ``status`` and every user's preference where they were, so
     an operator fixing a bug cannot pull the skill out from under the
-    people using it.
+    people using it. ``origin`` is the one piece of policy every caller
+    states on every upload, so a replace under a different origin moves
+    the skill; a move to ``SYSTEM`` drops the preferences nothing could
+    show again.
 
     ``publish`` is the exception, and only because it is not a side
     effect: it is the caller saying so. A new row lands ``STAGED`` —
@@ -256,10 +257,10 @@ async def register_platform_skill_bundle(
     if became_agent_only:
         # An existing listing turning agent-only strands whatever its
         # users had said about it: nothing lists a SYSTEM skill, so
-        # nothing can unsay it, and a stale ``enabled = false`` would
-        # hide a core skill from them for good. Dropping those rows is
-        # what keeps "a preference row exists only for a skill its user
-        # can see" true rather than merely usual.
+        # nothing can show or change those rows again (and nothing reads
+        # them — a SYSTEM skill reaches the model on ``status`` alone).
+        # Dropping them is what keeps "a preference row exists only for a
+        # skill its user can see" true rather than merely usual.
         await db.execute(
             delete(UserSkillPreference).where(UserSkillPreference.skill_id == skill.id)
         )
@@ -269,7 +270,6 @@ async def register_platform_skill_bundle(
     skill.description = parsed.description
     skill.bundle_key = bundle_key
     skill.bundle_size = len(data)
-    skill.enabled = legacy_enabled(origin, skill.status)
     if category_id is not None:
         skill.category_id = category_id
 

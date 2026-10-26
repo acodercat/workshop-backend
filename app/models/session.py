@@ -24,14 +24,16 @@ class SessionStatus(StrEnum):
 
     Five values, three lifecycle layers:
 
-    - ``IDLE`` — initial state stamped by ``create_session`` on a fresh
+    - ``IDLE`` — initial state stamped by ``build_session`` on a fresh
       row that hasn't had any turn queued yet. Backend's only "start"
       state; the worker never writes IDLE. Stays IDLE until the first
       ``queue_user_message`` flips it to ``RUNNING``.
     - ``RUNNING`` — backend flipped here when a turn was enqueued. The
       worker is (or will be) processing the agent loop.
     - One of three terminals, written by the worker atomically with
-      the assistant row insert (or with no row, on the error path):
+      the assistant row insert (or with no row, on the error path) —
+      bar the two recovery paths in ``app/services/session/recovery.py``,
+      which write ``CANCELLED`` / ``FAILED`` for turns no worker holds:
         - ``COMPLETE`` — agent finished naturally (any non-cancel
           ``stop_reason`` from axon).
         - ``CANCELLED`` — user invoked ``POST /sessions/{id}/cancel``
@@ -64,7 +66,7 @@ class AgentType(StrEnum):
     - ``FULL`` — sandbox-backed agent (code execution, file tools, skills).
     - ``LITE`` — sandbox-free Q&A + web search.
 
-    Stamped at ``create_session``; the only mutation is the one-way
+    Stamped at ``build_session``; the only mutation is the one-way
     LITE → FULL upgrade riding a message send (``queue_user_message``,
     committed atomically with the turn — never the reverse, which would
     strand the session's sandbox and files). Safe to flip between turns
@@ -88,7 +90,7 @@ class Tier(StrEnum):
     - ``STANDARD`` — balanced speed and capability (the default).
     - ``ADVANCED`` — strongest reasoning / long-task capability.
 
-    Stamped at ``create_session`` alongside the resolved ``model_id``
+    Stamped at ``build_session`` alongside the resolved ``model_id``
     (``settings.session_tier_models[tier]``); the tier round-trips to the
     UI while ``model_id`` stays the server-side execution / billing truth.
     UPPERCASE matches the ``agent_type`` / ``session_status`` convention.
@@ -103,11 +105,11 @@ class Session(Base):
     __tablename__ = "session"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    # Nullable for anonymous sessions. ``ON DELETE CASCADE`` so deleting a
-    # user wipes their sessions (and, via the session cascade, the derived
-    # message / file / site rows) — matching the owned-content user FKs.
-    user_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=True
+    # ``ON DELETE CASCADE`` so deleting a user wipes their sessions (and,
+    # via the session cascade, the derived message / file / site rows) —
+    # matching the owned-content user FKs.
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False
     )
     # Sandbox association lives on the inverse side: each ``sandbox`` row
     # carries the session_id it serves. Look up the current sandbox via
@@ -125,7 +127,7 @@ class Session(Base):
     # at creation like ``model_id`` and round-tripped to the UI for the
     # session badge; ``model_id`` above is the tier resolved through
     # ``settings.session_tier_models``. No Python-side ``default=`` —
-    # ``create_session`` sets it explicitly (migration backfilled existing
+    # ``build_session`` sets it explicitly (migration backfilled existing
     # rows to STANDARD).
     tier: Mapped[Tier] = mapped_column(
         SAEnum(
@@ -138,7 +140,7 @@ class Session(Base):
     # Whether the agent's thinking is on for this session (surfaced to users
     # as "deep think"). Stamped at creation from the composer toggle (default
     # on); the worker reads it at claim time to toggle the model's thinking
-    # config. No Python-side ``default=`` — ``create_session`` sets it
+    # config. No Python-side ``default=`` — ``build_session`` sets it
     # explicitly (the migration backfilled existing rows to FALSE).
     thinking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # Which agent kind this session runs (FULL = sandbox agent, LITE =
@@ -146,7 +148,7 @@ class Session(Base):
     # mutation is the one-way LITE → FULL upgrade riding a message send
     # (see the ``AgentType`` docstring). The worker reads it at claim
     # time (JOINed onto the turn) to pick the harness. No Python-side
-    # ``default=`` — ``create_session`` sets it explicitly (the migration
+    # ``default=`` — ``build_session`` sets it explicitly (the migration
     # backfilled existing rows to FULL).
     agent_type: Mapped[AgentType] = mapped_column(
         SAEnum(
@@ -158,7 +160,8 @@ class Session(Base):
     )
     # No ``default=`` / ``server_default=`` — every INSERT site has to
     # set status explicitly. There is exactly one INSERT site
-    # (``create_session``) and it picks ``IDLE``. A fresh-session
+    # (``build_session``, shared by the endpoint and the schedule
+    # dispatcher) and it picks ``IDLE``. A fresh-session
     # default of ``COMPLETE`` (the prior shape, only there to satisfy
     # NOT NULL) was dishonest: a session with zero turns is not
     # "complete". The IDLE state plus an explicit set at the call site

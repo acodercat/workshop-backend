@@ -8,15 +8,16 @@ Submodule responsibilities:
 
 - :mod:`~app.services.user.hub` — :class:`UserEventHub`, the process-wide
   in-process fan-out for the per-user notification channel.
-- :mod:`~app.services.user.events` — SSE generator that tails one user's
-  notifications off the hub.
+- :mod:`~app.services.user.events` — the backend's publisher for the
+  per-user notification channel, and the SSE generator that tails one
+  user's notifications off the hub.
 - :mod:`~app.services.user.stats` — aggregate counts over the account
   table, for the console dashboard.
 - :mod:`~app.services.user.identity` — the username / display-name pair
   the console renders for a row's owner.
 """
 
-from app.services.user.events import stream_user_events
+from app.services.user.events import publish_session_status, stream_user_events
 from app.services.user.hub import UserEventHub
 from app.services.user.identity import owner_identity
 from app.services.user.stats import count_all, count_registered_since
@@ -26,5 +27,6 @@ __all__ = [
     "count_all",
     "count_registered_since",
     "owner_identity",
+    "publish_session_status",
     "stream_user_events",
 ]

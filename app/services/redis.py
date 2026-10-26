@@ -36,11 +36,12 @@ _CONNECTION_ERROR_BACKOFF_SECONDS = 1.0
 # ``session_stream:{session_id}``; this SSE endpoint XRANGE/XREADs from it.
 SESSION_STREAM_PREFIX = "session_stream"
 
-# Per-user notification channel. The worker PUBLISHes cross-session
-# events (e.g. ``session.status_changed``) as a ``{user_id, event}`` JSON
-# payload to this single global channel; each backend process SUBSCRIBEs
-# once and fans the event out in-process to that user's SSE connections
-# (see ``app/services/user/hub.py``). One global channel — not one per
+# Per-user notification channel. ``session.status_changed`` is PUBLISHed
+# as a ``{user_id, event}`` JSON payload to this single global channel — by
+# the worker for the terminals it writes, by the backend for the transitions
+# it writes (``app/services/user/events.py``). Each backend process
+# SUBSCRIBEs once and fans the event out in-process to that user's SSE
+# connections (see ``app/services/user/hub.py``). One global channel — not one per
 # user — so a process holds a single subscription no matter how many
 # users it serves.
 USER_EVENTS_CHANNEL = "user_events:bus"
@@ -61,7 +62,7 @@ WORKER_NOTIFY_CHANNEL = "notify:worker"
 CANCEL_CHANNEL_PREFIX = "cancel"
 
 # Pub/Sub channel the worker publishes to after committing a terminal
-# ``session_turn`` write (COMPLETE / FAILED). Payload is the session_id
+# ``session_turn`` write (COMPLETE / CANCELLED / FAILED). Payload is the session_id
 # string. Mirrored in ``agent-worker/agent_worker/wire/keys.py``. The
 # subscriber lives in :mod:`app.workers.settle_subscriber` and triggers
 # ``settle_open_for_session`` for sub-second settle latency. Pub/sub is
@@ -90,6 +91,12 @@ EMAIL_CHANGE_PREFIX = "email_change"
 # sibling of ``EMAIL_CHANGE_PREFIX``; namespaced separately from
 # registration/login phone codes for the same reason.
 PHONE_CHANGE_PREFIX = "phone_change"
+
+# Per-user sudo code prefix: a code sent to an address the account already
+# has, standing in for the current password before a credential changes.
+# Keyed by user rather than address, so whichever channel the latest code
+# went to, it is the one that counts.
+SUDO_CODE_PREFIX = "sudo_code"
 
 
 # Per-``state`` pending OAuth-authorization state for MCP Connectors. Holds the
@@ -146,6 +153,11 @@ def phone_change_key(user_id: int, phone: str) -> str:
     ``user_id`` switching to the *new* number. User-bound for the same
     reason as :func:`email_change_key`."""
     return f"{PHONE_CHANGE_PREFIX}:{user_id}:{phone}"
+
+
+def sudo_code_key(user_id: int) -> str:
+    """Redis key holding ``user_id``'s pending sudo code."""
+    return f"{SUDO_CODE_PREFIX}:{user_id}"
 
 
 def cancel_channel(session_id: str) -> str:

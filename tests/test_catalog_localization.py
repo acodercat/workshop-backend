@@ -13,8 +13,8 @@ from app.api.public.mcp_server import _localized_catalog_response
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.services import localized_text
+from app.services.connector.catalog import build_connector
 from app.services.localized_text import DEFAULT_LOCALE
-from app.services.mcp.catalog import build_connector
 
 EN = "en-US"
 
@@ -125,13 +125,10 @@ class TestTheSharedShape:
     def test_a_plain_string_is_one_text_for_every_locale(self):
         assert localized_text.parse("Notion", "fallback") == ("Notion", None)
 
-    def test_the_skills_catalog_still_speaks_its_own_vocabulary(self):
-        # The shape moved; its callers did not have to.
-        from app.services.skill_i18n import parse_display_name, resolve_display_name
-
-        default, i18n = parse_display_name({"en-US": "Writer", "zh-CN": "写作"}, "slug")
+    def test_a_skill_display_name_map_resolves_per_locale(self):
+        default, i18n = localized_text.parse({"en-US": "Writer", "zh-CN": "写作"}, "slug")
         assert default == "写作"
-        assert resolve_display_name(default, i18n, EN) == "Writer"
+        assert localized_text.resolve(default, i18n, EN) == "Writer"
 
 
 class TestTheEntryRowIsUntouched:

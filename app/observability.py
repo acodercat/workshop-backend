@@ -46,10 +46,9 @@ class RequestIDMiddleware:
     the ASGI scope state (``request.state.request_id``) for code that
     stores it rather than logs it.
 
-    Implemented as raw ASGI rather than ``BaseHTTPMiddleware`` because the
-    latter buffers the response body, which breaks the SSE streaming
-    endpoints. This wrapper only touches the response *start* message, so
-    streamed bodies pass through untouched.
+    Implemented as raw ASGI: it only touches the response *start* message,
+    so streamed bodies — the SSE endpoints — pass through untouched, with
+    none of ``BaseHTTPMiddleware``'s per-request task and stream plumbing.
     """
 
     def __init__(self, app):

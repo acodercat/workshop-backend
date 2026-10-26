@@ -12,8 +12,7 @@ from app.database import Base
 for module_info in pkgutil.iter_modules(__path__):
     importlib.import_module(f"{__name__}.{module_info.name}")
 
-from app.models.actor import Actor  # re-exports for convenience
-from app.models.admin_audit_log import AdminAuditLog
+from app.models.admin_audit_log import AdminAuditLog  # re-exports for convenience
 from app.models.check_in import CheckIn
 from app.models.connector_category import ConnectorCategory
 from app.models.invite_code import InviteCode, InviteCodeOrigin
@@ -22,7 +21,6 @@ from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
-from app.models.recipe import Recipe, RecipeOrigin
 from app.models.sandbox import Sandbox
 from app.models.schedule import (
     Schedule,
@@ -46,7 +44,6 @@ from app.models.user_feedback import FeedbackStatus, UserFeedback
 from app.models.user_skill_preference import UserSkillPreference
 
 __all__ = [
-    "Actor",
     "AdminAuditLog",
     "Base",
     "CheckIn",
@@ -60,8 +57,6 @@ __all__ = [
     "MCPServerCatalogEntry",
     "Message",
     "MessageFeedback",
-    "Recipe",
-    "RecipeOrigin",
     "Sandbox",
     "Schedule",
     "ScheduleFile",

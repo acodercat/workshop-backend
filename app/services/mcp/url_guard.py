@@ -21,13 +21,20 @@ Two layers of defense:
 import asyncio
 import ipaddress
 import socket
+import ssl
 from urllib.parse import urlparse
 
+import certifi
 import httpx2
 
 from app.errors import InvalidConnectorUrlError
 
 _DEFAULT_TIMEOUT = 30.0
+
+# Trust anchored to certifi rather than to whatever the host ships; see
+# :func:`guarded_client`. Built once: the same PEM every time, and a context is
+# never changed after this line.
+_CERTIFI_TRUST = ssl.create_default_context(cafile=certifi.where())
 
 
 async def guard_public_url(url: str) -> None:
@@ -244,11 +251,20 @@ def guarded_client(
     takes the finished client, so every caller now builds one here and passes
     the result. DNS-pinned via :class:`_PinnedResolveTransport` and
     ``follow_redirects=False``.
+
+    **Trust is pinned to certifi, on the transport** — as the worker's copy
+    does. httpx2 verifies against the OS trust store by default, so without
+    this a Connector's TLS would depend on the host shipping a CA bundle, and
+    a slim image would fail every MCP server and nothing else. Nothing is
+    lost: the guard refuses any address that is not public, so this client
+    only reaches hosts whose certificates chain to a public root. On the
+    transport, because a client's ``verify=`` is ignored once a transport is
+    supplied. ``SSL_CERT_FILE`` therefore no longer reaches this path.
     """
     return httpx2.AsyncClient(
         headers=headers,
         timeout=timeout if timeout is not None else httpx2.Timeout(_DEFAULT_TIMEOUT),
         auth=auth,
         follow_redirects=False,
-        transport=_PinnedResolveTransport(),
+        transport=_PinnedResolveTransport(verify=_CERTIFI_TRUST),
     )

@@ -37,23 +37,23 @@ async def reconcile_order(db: AsyncSession, order_id: uuid.UUID) -> bool:
     still in flight. Commits every attempt: the attempt itself is
     recorded (``reconcile_attempted_at``), state change or not.
     """
-    order = await db.scalar(
-        select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update()
-    )
+    order = await db.scalar(select(PaymentOrder).where(PaymentOrder.id == order_id))
     if order is None or order.status != PaymentOrderStatus.PENDING:
         return False  # already settled/expired by the webhook or a prior tick
 
+    # Asked before the row is locked: the query is a network round trip, and
+    # a lock held across it would block this order's webhook for as long as
+    # the provider takes to answer — long enough for the provider to time
+    # the notification out and redeliver it.
+    event = await _query(order)
+    order = await orders.lock_order(db, order.out_trade_no)
+    if order is None or order.status != PaymentOrderStatus.PENDING:
+        return False  # the webhook settled it while the provider was asked
+
     now = datetime.now(UTC)
     order.reconcile_attempted_at = now
-    event = await _query(order)
     if event is not None and event.state is ChargeState.PAID:
-        # Capture the provider key before commit — ORM attrs expire on
-        # commit, and commission accrual (post-commit, own tx) takes a
-        # primitive so it re-loads the order fresh.
-        out_trade_no = order.out_trade_no
-        await orders.reconcile_paid(db, order, event)
-        await db.commit()
-        await commission.accrue_for_order(db, out_trade_no=out_trade_no)
+        await settle_paid(db, order, event)
         return True
     if event is not None and event.state is ChargeState.FAILED:
         orders.fail(order, event, via="query")
@@ -68,6 +68,24 @@ async def reconcile_order(db: AsyncSession, order_id: uuid.UUID) -> bool:
         orders.expire(order, now=now, answered=answered)
     await db.commit()
     return due
+
+
+async def settle_paid(db: AsyncSession, order: PaymentOrder, event: VerifiedEvent) -> None:
+    """Settle an order the provider confirmed paid, then accrue the
+    referrer's commission. Commits.
+
+    The pull side's one way to settle a payment — the reconciler and
+    ``scripts/recover_paid_orders.py`` both come through here, so neither
+    can grant without accruing. Accrual runs after the commit, in its own
+    transaction, so a referrer-side failure never rolls back the buyer's
+    top-up.
+    """
+    # Captured first: a duplicate grant rolls the transaction back and
+    # expires the row.
+    out_trade_no = order.out_trade_no
+    await orders.reconcile_paid(db, order, event)
+    await db.commit()
+    await commission.accrue_for_order(db, out_trade_no=out_trade_no)
 
 
 async def _query(order: PaymentOrder) -> VerifiedEvent | None:

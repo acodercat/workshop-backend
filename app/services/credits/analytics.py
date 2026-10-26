@@ -6,7 +6,7 @@ that owns the ledger owns them — the same placement as
 :mod:`~app.services.credits.transactions`. The console is the first
 caller; a customer-facing "your usage this month" would reuse them.
 
-**How spend is counted.** A turn writes three or four ledger rows, not
+**How spend is counted.** A turn writes two or three ledger rows, not
 one: ``RESERVE -estimate`` at enqueue, then at settle ``SETTLE
 +estimate`` (releasing the hold) and ``SETTLE -actual`` (the real
 charge); a turn that never measured usage gets ``REFUND +estimate``

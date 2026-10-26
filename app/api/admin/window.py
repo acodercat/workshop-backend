@@ -39,7 +39,7 @@ def _resolve_window(
 
     The responses shaped as an object echo the window actually used, so a
     stale ``?days=45`` is visible rather than silent. The ones that are
-    not do not: the four leaderboards answer with a bare list and the
+    not do not: the leaderboards answer with a bare list and the
     ratings queue with a ``PaginatedResponse``, and reshaping any of them
     purely to carry ``days`` back would cost an envelope for a field only
     this fallback makes interesting. Worth knowing when reading one of

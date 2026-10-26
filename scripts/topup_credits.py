@@ -1,14 +1,15 @@
 """Admin top-up — add credits to one user's balance.
 
-V1 admin-gating is "you have shell access to the box / DB credentials"
-(see ``backend/CLAUDE.md`` for the rationale). An HTTP admin endpoint
-arrives when there's a real internal review tool to gate.
+Gated by shell access to the box / DB credentials (see ``backend/CLAUDE.md``).
+The admin console grants credits as a signed adjustment; this script is for
+a grant that should read as a ``TOPUP`` — RMB received outside the payment
+flow, or an operator gift.
 
 Usage:
     # By RMB paid (domestic recharge — converts at settings.credit_price_cny, ¥0.1/credit):
     uv run python -m scripts.topup_credits --user-id=60 --cny=100 --idempotency-key=pay-2026-05-18-alice --reason="alipay order #1234"
     # Or by exact credit count:
-    uv run python -m scripts.topup_credits --user-id=3 --credits=100000 --idempotency-key=manual-2026-08-29-3 --reason="赠送"
+    uv run python -m scripts.topup_credits --user-id=315 --credits=1000000 --idempotency-key=manual-2026-09-08-315 --reason="赠送"
 
 Give exactly one of ``--cny`` (RMB the customer paid, converted at the
 ``credit_price_cny`` sale price) or ``--credits`` (exact whole credits).
@@ -107,6 +108,7 @@ async def main(args: argparse.Namespace) -> int:
                 amount_micro=amount_micro,
                 idempotency_key=args.idempotency_key,
                 reason=args.reason,
+                source="admin",
             )
         except TopupAlreadyApplied as exc:
             # Re-fetch and show current balance so operators can verify

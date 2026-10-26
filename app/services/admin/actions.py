@@ -30,4 +30,3 @@ class AuditAction(StrEnum):
     CONNECTOR_CATEGORY_CREATE = "connector_category.create"
     CONNECTOR_CATEGORY_UPDATE = "connector_category.update"
     INVITE_CREATE = "invite.create"
-    # The console's one audited *read*: customer conversation content.

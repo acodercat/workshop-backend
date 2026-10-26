@@ -52,7 +52,6 @@ from app.services import user as user_service
 from app.services.admin import AuditAction, audit
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_download import skill_download_url
-from app.services.skill_enablement import legacy_enabled
 from app.services.skill_registration import register_platform_skill_bundle
 
 router = APIRouter(tags=["skills"])
@@ -165,8 +164,9 @@ async def upload_skill(ctx: StaffContext, request: Request) -> SkillResponse:
     **Uploading a name that already exists replaces that skill's bundle**
     rather than failing: for a platform catalogue, re-uploading ``pdf``
     is shipping a new version of ``pdf``. The row is updated in place and
-    nothing about policy moves with it — neither the listing's status nor
-    any user's preference — because shipping a fix is a content change.
+    its status stays where it was, because shipping a fix is a content
+    change. ``origin`` is the exception, being stated on every upload: a
+    replace under a different origin moves the skill.
     The response is 201 either way: a new bundle now exists either way.
 
     The audit payload *is* the record: it names the skill, its origin,
@@ -271,10 +271,6 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
     ) as draft:
         for field, value in fields.items():
             setattr(skill, field, value)
-        # TRANSITIONAL — see ``skill_enablement.legacy_enabled``. Goes
-        # with the column in the follow-up migration.
-        if "status" in changes:
-            skill.enabled = legacy_enabled(skill.origin, skill.status)
         # Clearing the map is not optional — see the invalidation rule
         # in ``app.services.localized_text``. The bundle re-supplies it
         # on the next upload, so nothing is lost for good here.

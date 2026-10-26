@@ -47,7 +47,7 @@ from app.errors import (
     SkillFrontmatterInvalidError,
     SkillMdMissingError,
 )
-from app.services.skill_i18n import parse_display_name
+from app.services import localized_text
 
 # Bounds the ``---`` … ``---`` frontmatter block; the body between the
 # fences is parsed with ``yaml.safe_load`` (see ``_split_frontmatter``).
@@ -56,11 +56,14 @@ from app.services.skill_i18n import parse_display_name
 # the worker re-discovers from the staged bundle.
 _FRONTMATTER_RE = re.compile(r"^---[ \t]*\r?\n(.*?)^---[ \t]*\r?\n?", re.DOTALL | re.MULTILINE)
 _SKILL_FILENAME = "SKILL.md"
+# Finder's "Compress" adds this tree of AppleDouble files beside every folder.
+_MACOS_METADATA_DIR = "__MACOSX/"
 
 # Picker label budgets — match the DB column lengths in
 # :class:`app.models.skill.Skill`. Skill names are identifiers, so reject
 # invalid values. Descriptions are display text, so a verbose value is clipped.
 _MAX_NAME_CHARS = 64
+_MAX_DISPLAY_NAME_CHARS = 128
 _MAX_DESCRIPTION_CHARS = 1024
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -152,18 +155,18 @@ def parse_bundle(data: bytes) -> ParsedSkill:
 
 
 def normalize_bundle(data: bytes) -> bytes | None:
-    """If the zip has a single wrapper directory, repack with SKILL.md at root.
+    """Repack the zip into its canonical layout: SKILL.md at root, no macOS metadata.
 
     Pre-condition: caller has already run :func:`validate_zip_structure`.
     This function decompresses every entry to repack it; calling it on
     an unvalidated archive would let a zip bomb inflate memory before
     any size check ran.
 
-    Returns the repacked bytes if flattened, or ``None`` if the bundle
-    is already in root-level format (no re-upload needed). This ensures
-    all bundles in OSS have a consistent layout regardless of how the
-    user zipped them, so the worker and frontend never need to handle
-    wrapper dirs.
+    Returns the repacked bytes, or ``None`` if the bundle is already
+    canonical. This ensures all bundles in OSS have a consistent layout
+    regardless of how the user zipped them, so the worker and frontend
+    never need to handle wrapper dirs — or Finder's ``__MACOSX/`` tree,
+    which is the archiver's, not the skill's.
     """
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -171,26 +174,18 @@ def normalize_bundle(data: bytes) -> bytes | None:
         return None
 
     with zf:
-        # Check if SKILL.md is already at root
-        if _SKILL_FILENAME in zf.namelist():
+        names = zf.namelist()
+        wrapper = None if _SKILL_FILENAME in names else _wrapper_dir(names)
+        if wrapper is None and not any(_is_macos_metadata(n) for n in names):
             return None
-
-        # Detect single wrapper directory
-        top_levels = {n.split("/", 1)[0] for n in zf.namelist() if "/" in n}
-        top_levels = {t for t in top_levels if t}
-        root_files = {n for n in zf.namelist() if "/" not in n}
-        if len(top_levels) != 1 or root_files:
-            return None
-
-        wrapper = next(iter(top_levels))
-        prefix = f"{wrapper}/"
+        prefix = f"{wrapper}/" if wrapper else ""
 
         # Repack: strip the wrapper prefix from all entries, each keeping its
         # mode — a script staged without its executable bit cannot be run.
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as out:
             for info in zf.infolist():
-                if info.is_dir():
+                if info.is_dir() or _is_macos_metadata(info.filename):
                     continue
                 moved = zipfile.ZipInfo(info.filename.removeprefix(prefix), info.date_time)
                 moved.create_system = info.create_system
@@ -310,25 +305,34 @@ def _locate_skill_md(zf: zipfile.ZipFile) -> str:
     if _SKILL_FILENAME in names:
         return _SKILL_FILENAME
 
-    # Wrapper-dir case: the archive must have exactly ONE top-level
-    # directory, and that directory must contain SKILL.md. Reject if
-    # there are multiple top-level entries (files or dirs) — otherwise
-    # the worker's flatten step (``find -type d | head -1``) could
-    # pick the wrong directory.
-    top_levels = {n.split("/", 1)[0] for n in names if "/" in n}
-    top_levels = {t for t in top_levels if t}
-    # Also count root-level files (entries without "/") as top-level items
-    root_files = {n for n in names if "/" not in n}
-    if len(top_levels) == 1 and not root_files:
-        wrapper = next(iter(top_levels))
-        candidate = f"{wrapper}/{_SKILL_FILENAME}"
-        if candidate in names:
-            return candidate
+    wrapper = _wrapper_dir(names)
+    if wrapper is not None and f"{wrapper}/{_SKILL_FILENAME}" in names:
+        return f"{wrapper}/{_SKILL_FILENAME}"
 
     raise SkillMdMissingError(
         f"{_SKILL_FILENAME} not found in bundle. The zip must contain "
         f"SKILL.md either at its root or inside a single top-level directory."
     )
+
+
+def _wrapper_dir(names: list[str]) -> str | None:
+    """The archive's single top-level directory, or ``None``.
+
+    Exactly one, and no files beside it — otherwise the worker's flatten
+    step (``find -type d | head -1``) could pick the wrong directory.
+    macOS metadata does not count: Finder's "Compress" puts a
+    ``__MACOSX/`` tree beside every folder it zips.
+    """
+    content = [n for n in names if not _is_macos_metadata(n)]
+    top_levels = {n.split("/", 1)[0] for n in content if "/" in n} - {""}
+    root_files = {n for n in content if "/" not in n}
+    if len(top_levels) != 1 or root_files:
+        return None
+    return next(iter(top_levels))
+
+
+def _is_macos_metadata(name: str) -> bool:
+    return name.startswith(_MACOS_METADATA_DIR)
 
 
 def _decode_skill_md(data: bytes) -> str:
@@ -426,12 +430,12 @@ def _extract_display_name(meta: dict[str, Any], name: str) -> tuple[str, dict[st
 
     The Agent Skills spec reserves the ``metadata`` block for author-defined
     fields, so a bundle can ship a localized title while ``name`` stays an
-    ASCII slug. Shape handling lives in :mod:`app.services.skill_i18n`; falls
-    back to ``name`` when absent or unusable.
+    ASCII slug. Shape handling lives in :mod:`app.services.localized_text`;
+    falls back to ``name`` when absent or unusable.
     """
     metadata = meta.get("metadata")
     raw = metadata.get("display_name") if isinstance(metadata, dict) else None
-    return parse_display_name(raw, name)
+    return localized_text.parse(raw, name, max_chars=_MAX_DISPLAY_NAME_CHARS)
 
 
 def _first_nonempty_line(body: str) -> str:

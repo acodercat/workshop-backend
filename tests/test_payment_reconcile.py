@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.errors import PaymentProviderError
 from app.models.payment_order import PaymentOrder, PaymentOrderStatus
@@ -149,3 +150,27 @@ async def test_settled_order_is_not_touched(processing) -> None:
     assert order.status == PaymentOrderStatus.PAID
     assert order.reconcile_attempted_at is None
     db.commit.assert_not_awaited()
+
+
+async def test_the_provider_is_asked_before_the_row_is_locked(monkeypatch) -> None:
+    """A lock held across the network round trip would block this order's
+    webhook for as long as the provider takes to answer."""
+    order = _order(expires_at=datetime.now(UTC) + timedelta(minutes=5))
+    calls: list[str] = []
+
+    async def scalar(statement):
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        calls.append("lock" if "FOR UPDATE" in sql else "read")
+        return order
+
+    async def query_charge(**_kwargs):
+        calls.append("query")
+        return _event(ChargeState.PROCESSING)
+
+    monkeypatch.setattr(orders, "get_provider", lambda: MagicMock(query_charge=query_charge))
+    db = _db(order)
+    db.scalar = scalar
+
+    await reconcile.reconcile_order(db, order.id)
+
+    assert calls == ["read", "query", "lock"]

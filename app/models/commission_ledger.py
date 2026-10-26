@@ -74,6 +74,13 @@ class CommissionLedgerKind(StrEnum):
     - ``ADJUST``          — manual correction by an operator. Signed;
       carries an ``idempotency_key`` + ``reference.reason``.
 
+    **``CLAWBACK`` and ``ADJUST`` are reserved, not implemented**: no service
+    writes either, and neither may be written by hand — a raw ``INSERT``
+    bypasses the ``_internal`` funnel and the balance invariant with it.
+    Implementing ``CLAWBACK`` also means teaching the withdrawable balance
+    about it: that sums still-frozen ``COMMISSION`` rows, so a clawback of
+    one would be deducted twice — once from the total, once as frozen.
+
     Member values match the Postgres ``commission_ledger_kind`` enum and
     are UPPERCASE, matching the ``credit_ledger_kind`` / ``session_status``
     convention.

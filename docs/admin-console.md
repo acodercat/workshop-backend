@@ -89,7 +89,7 @@ automated path does.
 |---|---|---|
 | `GET /users?q=&status=` | Paginated directory. One `q` ILIKE-matched against username / email / phone (at ~100 users no index needed). Row: id, username, name, email, phone, status, balance_credits, created_at. | — |
 | `GET /users/{id}` | Profile + credit balance + session count. | — |
-| `PATCH /users/{id}` | `{status}` — ACTIVE ↔ DISABLED. Takes effect on the user's next request (status is checked per request; no token bump needed). | `user.update` |
+| `PATCH /users/{id}` | `{status}` — ACTIVE / DISABLED / SUSPENDED. Takes effect on the user's next request (status is checked per request; no token bump needed). | `user.update` |
 
 Not included: editing email/phone (the sudo-gated self-serve flows own
 those), password resets (OTP owns recovery), user deletion,
@@ -113,7 +113,7 @@ they can never collide with payment-webhook keys (`hf:…`).
 
 | Route | What | Audit |
 |---|---|---|
-| `GET /sessions?days=` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. `days` (1/7/30/90, omit for all time) cuts on `updated_at`, the column the list sorts and shows, which is also why the filter costs nothing. Same row plus `user_id` / `owner_username` / `owner_name`, all nullable because `session.user_id` is and all null together — the outer join supplies them or it does not. The display name rides along so the row renders the same operator-facing identity the dashboard leaderboards do beside it. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. | — |
+| `GET /sessions?days=` | The platform-wide list, `ORDER BY updated_at DESC, id DESC`. `days` (1/7/30/90, omit for all time) cuts on `updated_at`, the column the list sorts and shows, which is also why the filter costs nothing. Same row plus `user_id` / `owner_username` / `owner_name`, always present — `session.user_id` is NOT NULL, so the owner is an inner join. The display name rides along so the row renders the same operator-facing identity the dashboard leaderboards do beside it. Backed by `ix_session_updated_at` (`f4c8a2b91d63`) — the per-user index leads with `user_id` and is partial on `deleted_at IS NULL`, so it can serve neither half of this query. | — |
 | `GET /users/{id}/sessions` | The same rows for one user, `ORDER BY updated_at DESC`. Paginated **including soft-deleted** (`deleted_at` visible — unlike the customer list, support needs to see what was deleted). Row: id, title, status, agent_type, `model_id`, `turn_count`, `total_tokens`, `spent_credits`, created_at, updated_at, deleted_at. | — |
 
 `session.tier` is deliberately **not** on either row. It is the capability
@@ -210,7 +210,7 @@ Replaces reaching for `scripts/create_invite_code.py` over SSH.
 | Route | What | Audit |
 |---|---|---|
 | `GET /invite-codes?origin=&q=` | Codes, newest first; `REFERRAL` rows carry their owner. `used_count` / `max_uses` is the whole state. | — |
-| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000) | `invite.create` |
+| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000, or `null` for unlimited) | `invite.create` |
 | `GET /invite-redemptions` | Who redeemed what, invitee and referrer both resolved through aliased joins | — |
 
 **Only `SYSTEM` codes are mintable here.** A `REFERRAL` code is a
@@ -706,8 +706,7 @@ double-entry verified in SQL), the soft-deleted session still readable,
 feedback triage, the ratings queue with its excerpt and filter, a
 minted invite code coming back `SYSTEM`-origin and ownerless, the
 catalog's create/publish pair with **no secret-shaped field on the
-wire**, and an audit trail holding one row per mutating action —
-including `session.view`, naming the conversation's owner.
+wire**, and an audit trail holding one row per mutating action.
 
 Two real bugs it caught that unit tests could not: reading the
 server-computed ``updated_at`` back after a flush raised

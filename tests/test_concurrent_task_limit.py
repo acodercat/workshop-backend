@@ -10,8 +10,8 @@ asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 
 import pytest
 
+from app.errors import ConcurrentTaskLimitError
 from app.services.session import enqueue
-from app.services.session.exceptions import ConcurrentTaskLimitError
 from config import settings
 
 
@@ -36,3 +36,14 @@ async def test_at_cap_rejects() -> None:
     # cap already running → this enqueue would be the (cap+1)-th → rejected.
     with pytest.raises(ConcurrentTaskLimitError):
         await enqueue._enforce_concurrent_task_limit(_CountDb(cap), user_id=1)
+
+
+def test_the_refusal_names_the_cap_for_the_client() -> None:
+    # Its own ``error_type`` with the cap in ``details``: the client can say
+    # "at most N tasks at once" instead of a generic rate-limit message, and
+    # the message carries no user id.
+    exc = ConcurrentTaskLimitError(10)
+
+    assert exc.error_type == "concurrent_task_limit"
+    assert exc.status_code == 429
+    assert exc.details == {"limit": 10}

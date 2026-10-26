@@ -35,13 +35,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.common.pagination import paginate
-from app.errors import (
-    ModelUnavailableError,
-    ScheduleActiveLimitError,
-    ScheduleLimitError,
-)
+from app.errors import ScheduleActiveLimitError, ScheduleLimitError
 from app.models.schedule import Schedule, ScheduleRun, ScheduleStatus
-from app.models.session import AgentType, Session, Tier
+from app.models.session import AgentType, Session
 from app.models.session_turn import SessionTurn, SessionTurnStatus, TerminationReason
 from app.models.user import User
 from app.rate_limit import limiter
@@ -57,14 +53,13 @@ from app.schemas.schedule import (
     ScheduleUpdate,
     UnreadCountResponse,
 )
-from app.services.mcp import ownership as mcp_ownership
+from app.services.connector import ownership as connector_ownership
 from app.services.schedule import (
     connectors as schedule_connectors,
     files as schedule_files,
     lifecycle,
 )
 from app.services.session.creation import resolve_tier
-from app.services.session.exceptions import UnconfiguredTierError
 
 router = APIRouter(tags=["schedules"])
 
@@ -72,7 +67,7 @@ router = APIRouter(tags=["schedules"])
 # frees its ACTIVE slot the moment it fires, so ``_MAX_ACTIVE_SCHEDULES``
 # bounds standing spend but not how many rows accumulate — without this a
 # user creating a one-shot a day would grow the unpaginated list endpoint
-# without limit. Matches the shape of the recipe cap.
+# without limit.
 _MAX_SCHEDULES_PER_USER = 100
 
 # Per-user cap on *active* schedules. Bounds standing spend: every active
@@ -115,9 +110,9 @@ async def _get_or_404(
 async def _assert_row_headroom(db: AsyncSession, user_id: int) -> None:
     """Refuse a schedule the caller has no room to store.
 
-    Race-acceptable, like the active cap and the recipe cap it mirrors: two
-    concurrent creates could each pass and put the user one over, which is
-    not worth a row lock for a soft policy limit.
+    Race-acceptable, like the active cap: two concurrent creates could each
+    pass and put the user one over, which is not worth a row lock for a
+    soft policy limit.
     """
     total = await db.scalar(select(func.count(Schedule.id)).where(Schedule.user_id == user_id))
     if total is not None and total >= _MAX_SCHEDULES_PER_USER:
@@ -147,26 +142,6 @@ async def _assert_activation_headroom(
     active = await db.scalar(query)
     if active is not None and active >= _MAX_ACTIVE_SCHEDULES:
         raise ScheduleActiveLimitError(_MAX_ACTIVE_SCHEDULES)
-
-
-def _assert_tier_runnable(tier: Tier) -> None:
-    """Refuse a tier this deployment cannot run, while the caller is here.
-
-    ``POST /sessions`` learns this the moment it builds the session; a
-    schedule stores the tier now and builds hours later, unattended. Left
-    unchecked the fault surfaces as three ``misconfigured`` occurrences and
-    three unread badges before the auto-pause catches it — for a mistake
-    visible in the request body.
-    """
-    try:
-        resolve_tier(tier)
-    except (UnconfiguredTierError, ModelUnavailableError) as exc:
-        # Left as a generic 400 while the cap and time refusals earned typed
-        # errors, and the difference is the criterion in ``app/errors.py``:
-        # those name something the reader must go and do, this names a gap
-        # in the deployment's own config that they cannot act on at all.
-        # ``POST /sessions`` answers the same fault the same way.
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 # --- Occurrences ------------------------------------------------------------
@@ -368,8 +343,11 @@ async def create_schedule(
     # Validate what the caller sent before asking whether they have room
     # for it: being told "you are at your limit" about a request that was
     # never going to be accepted costs a round trip and reads as the wrong
-    # problem.
-    _assert_tier_runnable(body.tier)
+    # problem. The tier included: ``POST /sessions`` finds an unrunnable
+    # tier the moment it builds the session, but a schedule builds hours
+    # later, unattended — left unchecked, the fault would surface as three
+    # ``misconfigured`` occurrences before the auto-pause caught it.
+    resolve_tier(body.tier)
     schedule = Schedule(
         user_id=current_user.id,
         prompt=body.prompt,
@@ -389,7 +367,7 @@ async def create_schedule(
     )
     lifecycle.assign_recurrence(schedule, body.recurrence)
     lifecycle.arm(schedule, datetime.now(UTC))
-    connector_ids = await mcp_ownership.require_owned_connectors(
+    connector_ids = await connector_ownership.require_owned_connectors(
         db, user_id=current_user.id, ids=body.connectors
     )
     await _assert_row_headroom(db, current_user.id)
@@ -416,7 +394,7 @@ async def list_schedules(
 
     Unpaginated, which is only safe because ``_MAX_SCHEDULES_PER_USER``
     caps the rows — the ACTIVE cap alone would not, since a one-shot frees
-    its slot as soon as it fires. Same posture as recipes.
+    its slot as soon as it fires.
 
     **The unread ids are read before the schedules, and the order is the
     guarantee.** Each statement sees what had committed when it started, so
@@ -464,10 +442,10 @@ async def update_schedule(
     # Validated before the lock is taken, and before the caps are consulted,
     # for the reason ``create`` documents.
     if body.tier is not None:
-        _assert_tier_runnable(body.tier)
+        resolve_tier(body.tier)
     connector_ids: list[int] | None = None
     if body.connectors is not None:
-        connector_ids = await mcp_ownership.require_owned_connectors(
+        connector_ids = await connector_ownership.require_owned_connectors(
             db, user_id=current_user.id, ids=body.connectors
         )
 

@@ -1,11 +1,12 @@
 """Which Connectors belong to a user.
 
-Two places let a client name Connector ids — creating a session and saving
-a scheduled task — and both must refuse an id the caller does not own. The
-whole rule lives here, raising the typed error the shared handler renders,
-so neither endpoint carries a copy: a second copy is how a later change (a
-soft-delete column, an organization scope) gets applied to one caller and
-forgotten at the other.
+Two places let a client name a *set* of Connector ids — creating a session
+and saving a scheduled task — and both must refuse an id the caller does
+not own. The rule lives here, raising the typed error the shared handler
+renders, so neither endpoint carries a copy: a second copy is how a later
+change (a soft-delete column, an organization scope) gets applied to one
+caller and forgotten at the other. (Toggling one Connector on a session is
+a path parameter, answered 404 by ``_owned_connector_or_404`` beside it.)
 
 Ownership only — never ``connected``. Configuration records intent, and a
 Connector disconnected afterwards must not retroactively invalidate it.

@@ -461,9 +461,6 @@ def _classify(
     if any(isinstance(leaf, ssl.SSLError) for leaf in _leaves(exc)):
         return ConnectorTlsFailedError(f"TLS verification failed: {detail}")
 
-    # Before the session opens, an MCP-level error is the remote end telling us
-    # what it is. Only before: afterwards the endpoint has proved itself, and
-    # the same codes mean a server misbehaving mid-catalogue.
     # Before the SDK's stand-in, which cannot tell these apart: a credential the
     # server refused is the one failure here fixed by editing a key rather than
     # an address.
@@ -472,6 +469,9 @@ def _classify(
             f"The MCP server rejected the credential ({refused[-1]})."
         )
 
+    # Before the session opens, an MCP-level error is the remote end telling us
+    # what it is. Only before: afterwards the endpoint has proved itself, and
+    # the same codes mean a server misbehaving mid-catalogue.
     mcp_error = _first_mcp_error(exc) if not handshook else None
     if mcp_error is not None:
         # ``METHOD_NOT_FOUND`` is the SDK's reading of a 404 with no session —

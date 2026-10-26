@@ -31,7 +31,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
+from slowapi.middleware import SlowAPIASGIMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.types import Lifespan
@@ -104,14 +104,22 @@ def create_app(
     # an unexpected error, which must run inside CORS and the request id.
     install_error_handlers(app)
 
-    # SlowAPIMiddleware makes ``limiter.default_limits`` an actual global
+    # The middleware makes ``limiter.default_limits`` an actual global
     # floor. Without it slowapi only enforces limits on endpoints carrying
     # an explicit ``@limiter.limit`` decorator — every other route is
-    # completely unthrottled (the default 200/min is inert). Added BEFORE
-    # CORS so CORS wraps it: a 429 response still gets its
+    # completely unthrottled (the default 200/min is inert). It runs before
+    # any route dependency, so the floor keys on the client IP: the
+    # authenticated principal is stamped later, by the auth dependency, and
+    # only decorated limits see it.
+    #
+    # The ASGI variant, not ``SlowAPIMiddleware``: that one checks limits
+    # synchronously and, finding our async 429 handler, falls back to
+    # slowapi's own flat body without ``Retry-After``. This one awaits it,
+    # so a floor 429 carries the same envelope as every other error. Added
+    # BEFORE CORS so CORS wraps it: a 429 response still gets its
     # ``Access-Control-Allow-Origin`` headers, otherwise the browser would
     # surface an opaque network error instead of the rate-limit JSON.
-    app.add_middleware(SlowAPIMiddleware)
+    app.add_middleware(SlowAPIASGIMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

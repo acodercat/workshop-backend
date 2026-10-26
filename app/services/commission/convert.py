@@ -98,6 +98,7 @@ async def convert_to_credits(
         amount_micro=micro_from_credits(granted_credits),
         idempotency_key=f"commission-convert:{entry.id}",
         reason="commission conversion",
+        source="commission_conversion",
     )
     entry.reference = {**entry.reference, "credit_ledger_id": ledger.id}
     logger.info(

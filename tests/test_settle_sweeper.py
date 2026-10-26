@@ -1,4 +1,6 @@
+import json
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 from sqlalchemy.dialects import postgresql
@@ -47,6 +49,10 @@ async def test_list_candidates_filters_before_limit() -> None:
 
 
 _PAST = datetime(2000, 1, 1, tzinfo=UTC)  # always < now() → "expired"
+
+
+def _redis() -> AsyncMock:
+    return AsyncMock()
 
 
 class _FakeDb:
@@ -102,7 +108,7 @@ async def test_process_one_settles_when_live_status_terminal(monkeypatch) -> Non
     session_id = uuid4()
     calls = _patch_process_one(monkeypatch, live_status=SessionStatus.COMPLETE)
 
-    touched = await settle_sweeper._process_one((1, session_id, _PAST))
+    touched = await settle_sweeper._process_one((1, session_id, _PAST, 7), _redis())
 
     assert touched is True
     assert calls["settle"] == [session_id]
@@ -119,12 +125,29 @@ async def test_process_one_refunds_expired_dead_worker(monkeypatch) -> None:
         fail_returns=True,
     )
 
-    touched = await settle_sweeper._process_one((2, session_id, _PAST))
+    touched = await settle_sweeper._process_one((2, session_id, _PAST, 7), _redis())
 
     assert touched is True
     assert calls["fail"] == [session_id]
     assert calls["refund"] == [2]
     assert calls["settle"] == []
+
+
+async def test_a_recovered_session_is_announced_failed(monkeypatch) -> None:
+    # No worker will announce a terminal it never wrote, so the sweeper does —
+    # otherwise every open tab shows the session RUNNING until a refetch.
+    session_id = uuid4()
+    _patch_process_one(monkeypatch, live_status=SessionStatus.RUNNING)
+    redis = _redis()
+
+    await settle_sweeper._process_one((2, session_id, _PAST, 7), redis)
+
+    channel, raw = redis.publish.await_args.args
+    assert channel == "user_events:bus"
+    payload = json.loads(raw)
+    assert payload["user_id"] == 7
+    assert payload["event"]["session_id"] == str(session_id)
+    assert payload["event"]["status"] == "FAILED"
 
 
 async def test_process_one_leaves_open_when_worker_still_alive(monkeypatch) -> None:
@@ -137,7 +160,7 @@ async def test_process_one_leaves_open_when_worker_still_alive(monkeypatch) -> N
         fail_returns=False,
     )
 
-    touched = await settle_sweeper._process_one((3, session_id, _PAST))
+    touched = await settle_sweeper._process_one((3, session_id, _PAST, 7), _redis())
 
     assert touched is False
     assert calls["refund"] == []

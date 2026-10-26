@@ -4,13 +4,13 @@ Single entry: :func:`reserve_for_turn`. Sequence per call:
 
 1. Lock the user row (``SELECT ... FOR UPDATE``).
 2. Snapshot the rate-card for the model.
-3. Compute ``reserve_micro`` from the rate snapshot + caller's
-   ``max_input_tokens`` (pessimistic upper bound).
+3. Compute ``reserve_micro`` from the rate snapshot + the model's p50
+   input estimate — an entry gate near a typical turn, not a bound.
 4. If balance < reserve_micro: raise
    :class:`~app.errors.InsufficientCreditsError`.
-5. Otherwise: write the ``RESERVE`` ledger row, debit the cached
-   balance, insert a ``credit_reservation`` row with the
-   rate_snapshot frozen on it.
+5. Otherwise: insert the ``credit_reservation`` row with the
+   rate_snapshot frozen on it, then the ``RESERVE`` ledger row that
+   debits the cached balance and links back to it.
 
 All in one transaction (caller's). On any exception, the entire
 reservation rolls back — no half-applied state.

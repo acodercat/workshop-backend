@@ -64,7 +64,6 @@ def _skill(**over) -> Skill:
             "display_name": "PDF",
             "description": "reads pdfs",
             "status": SkillStatus.STAGED,
-            "enabled": False,
             "bundle_key": "official/pdf/x/pdf.zip",
             "bundle_size": 10,
             "display_name_i18n": {"zh": "PDF 工具"},

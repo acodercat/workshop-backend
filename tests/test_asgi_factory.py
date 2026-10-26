@@ -217,3 +217,19 @@ def test_the_acceptor_cap_is_the_audit_column_width() -> None:
     # different layers on purpose (the middleware owns the contract, the
     # model stays free of app-layer imports) — this is what ties them.
     assert AdminAuditLog.request_id.type.length == REQUEST_ID_MAX_LENGTH
+
+
+# --- rate-limit floor ---------------------------------------------------
+
+
+def test_the_floor_runs_in_the_asgi_middleware() -> None:
+    """The global floor answers from the middleware, not the endpoint. The
+    synchronous ``SlowAPIMiddleware`` cannot await the project's async 429
+    handler and falls back to slowapi's flat body; the ASGI variant awaits
+    it, so a floor 429 carries the same envelope as every other error."""
+    from slowapi.middleware import SlowAPIASGIMiddleware, SlowAPIMiddleware
+
+    installed = [m.cls for m in app.user_middleware]
+
+    assert SlowAPIASGIMiddleware in installed
+    assert SlowAPIMiddleware not in installed

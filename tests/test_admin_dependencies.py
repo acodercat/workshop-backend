@@ -61,3 +61,12 @@ def test_prefers_the_first_forwarded_hop() -> None:
 
 def test_falls_back_to_the_socket_peer() -> None:
     assert dependencies.caller_ip(_FakeRequest()) == "10.0.0.9"
+
+
+def test_a_forwarded_hop_that_is_not_an_address_falls_back_to_the_peer() -> None:
+    # The column is String(45) and commits with the operator's action, so an
+    # unparsed hop longer than that would abort the action itself.
+    for hop in ("unknown", "a" * 46):
+        request = _FakeRequest({"x-forwarded-for": hop})
+
+        assert dependencies.caller_ip(request) == "10.0.0.9"

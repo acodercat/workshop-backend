@@ -1,8 +1,8 @@
 """Operator tool for settling commission withdrawals (v1: manual payout).
 
-V1 admin-gating is "you have shell access to the box / DB credentials"
-(see ``backend/CLAUDE.md``), same as ``scripts/topup_credits.py``. An HTTP
-admin endpoint arrives when there's a real internal review tool to gate.
+Gated by shell access to the box / DB credentials (see ``backend/CLAUDE.md``),
+same as ``scripts/topup_credits.py``. The admin console has no withdrawal
+surface yet; this is the payout path.
 
 Usage:
     # List PENDING withdrawals to review:

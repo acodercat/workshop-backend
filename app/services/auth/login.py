@@ -1,9 +1,9 @@
-"""Email-OTP login (login only).
+"""Verification-code login (login only), by email or phone.
 
 The non-trivial half of ``POST /auth/access-tokens-by-code`` — peek the
-code, look up the email, and issue a JWT for an existing ``ACTIVE``
+code, look up the identifier, and issue a JWT for an existing ``ACTIVE``
 user. Registration is the separate invite-gated ``POST /users``; an
-unregistered email here raises ``not_registered`` rather than
+unregistered identifier here raises ``not_registered`` rather than
 auto-creating. The endpoint is a thin adapter over :func:`login_by_code`.
 """
 
@@ -14,8 +14,8 @@ import redis.asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import assert_user_active, create_access_token
-from app.errors import NotRegisteredError
+from app.auth import create_access_token, is_user_active
+from app.errors import AccountInactiveError, NotRegisteredError
 from app.models.user import User
 from app.schemas.auth import LoggedInResponse
 from app.services.auth.verification import Channel, verify_verification_code
@@ -37,8 +37,7 @@ async def login_by_code(
       and return ``LoggedInResponse`` with a fresh JWT.
     - Email not registered → ``NotRegisteredError`` (404); the frontend
       steers the user to the invite-gated register tab.
-    - ``DISABLED`` / ``SUSPENDED`` → opaque 401 via
-      :func:`app.auth.assert_user_active`.
+    - ``DISABLED`` / ``SUSPENDED`` → :class:`~app.errors.AccountInactiveError`.
     """
     # Peek mode — validates the code, increments attempts on mismatch
     # (brute-force stays rate-limited), but doesn't delete on success.
@@ -51,7 +50,8 @@ async def login_by_code(
     if existing is None:
         raise NotRegisteredError("No account for this identifier")
 
-    assert_user_active(existing, inactive_detail="Account is not active")
+    if not is_user_active(existing):
+        raise AccountInactiveError("Account is not active")
 
     # Existing ACTIVE user: consume the code now and issue the JWT. If the
     # code vanished between the peek and now, ``verify_verification_code``

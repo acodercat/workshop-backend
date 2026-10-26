@@ -29,7 +29,7 @@ class UserStatus(StrEnum):
     - ``DISABLED`` — manually disabled by an admin; login refused.
     - ``SUSPENDED`` — temporarily blocked (e.g. risk control); login refused.
 
-    Only ``ACTIVE`` is allowed past :func:`assert_user_active`. Member
+    Only ``ACTIVE`` is allowed past :func:`app.auth.is_user_active`. Member
     values match the Postgres ``user_status`` enum and the Python
     member names — same convention as :class:`SessionStatus`.
     """

@@ -32,7 +32,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-from app.services.mcp.url_identity import normalize_connector_url
+from app.services.connector.url_identity import normalize_connector_url
 
 
 revision: str = "a3d7f61b8e04"

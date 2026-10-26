@@ -5,6 +5,7 @@ pin the routing + guard logic."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -51,7 +52,7 @@ def _paid_event(amount_fen=10000) -> VerifiedEvent:
 
 async def test_handle_webhook_grants_once_on_success(monkeypatch) -> None:
     order = _order()
-    monkeypatch.setattr(orders, "_lock_order", AsyncMock(return_value=order))
+    monkeypatch.setattr(orders, "lock_order", AsyncMock(return_value=order))
     topup = AsyncMock(return_value=MagicMock(id=55))
     monkeypatch.setattr(orders, "apply_topup", topup)
 
@@ -64,7 +65,7 @@ async def test_handle_webhook_grants_once_on_success(monkeypatch) -> None:
 
 async def test_handle_webhook_failure_marks_failed_without_topup(monkeypatch) -> None:
     order = _order()
-    monkeypatch.setattr(orders, "_lock_order", AsyncMock(return_value=order))
+    monkeypatch.setattr(orders, "lock_order", AsyncMock(return_value=order))
     topup = AsyncMock()
     monkeypatch.setattr(orders, "apply_topup", topup)
 
@@ -80,7 +81,7 @@ async def test_handle_webhook_processing_changes_nothing(monkeypatch) -> None:
     # No verdict: the order is neither paid nor dead. It stays PENDING for
     # the reconciler; nothing is granted and nothing is failed.
     order = _order()
-    monkeypatch.setattr(orders, "_lock_order", AsyncMock(return_value=order))
+    monkeypatch.setattr(orders, "lock_order", AsyncMock(return_value=order))
     topup = AsyncMock()
     monkeypatch.setattr(orders, "apply_topup", topup)
 
@@ -95,7 +96,7 @@ async def test_handle_webhook_processing_changes_nothing(monkeypatch) -> None:
 
 async def test_handle_webhook_amount_mismatch_fails_without_topup(monkeypatch) -> None:
     order = _order(amount_fen=10000)
-    monkeypatch.setattr(orders, "_lock_order", AsyncMock(return_value=order))
+    monkeypatch.setattr(orders, "lock_order", AsyncMock(return_value=order))
     topup = AsyncMock()
     monkeypatch.setattr(orders, "apply_topup", topup)
 
@@ -107,7 +108,7 @@ async def test_handle_webhook_amount_mismatch_fails_without_topup(monkeypatch) -
 
 async def test_handle_webhook_already_paid_is_noop(monkeypatch) -> None:
     order = _order(status=PaymentOrderStatus.PAID)
-    monkeypatch.setattr(orders, "_lock_order", AsyncMock(return_value=order))
+    monkeypatch.setattr(orders, "lock_order", AsyncMock(return_value=order))
     topup = AsyncMock()
     monkeypatch.setattr(orders, "apply_topup", topup)
 
@@ -122,7 +123,7 @@ async def test_handle_webhook_duplicate_topup_backlinks_existing(monkeypatch) ->
     # tx back); handle_webhook must re-acquire the order and back-link the
     # existing ledger row instead of double-granting.
     order = _order()
-    monkeypatch.setattr(orders, "_lock_order", AsyncMock(return_value=order))
+    monkeypatch.setattr(orders, "lock_order", AsyncMock(return_value=order))
     monkeypatch.setattr(
         orders,
         "apply_topup",
@@ -156,7 +157,7 @@ async def test_create_order_freezes_grant_and_calls_provider(monkeypatch) -> Non
     order = await orders.create_order(
         db,
         user_id=1,
-        amount_cny=100,
+        amount_cny=Decimal("100"),
         channel="ALIPAY",
     )
 
@@ -176,7 +177,7 @@ async def test_create_order_rejects_amount_below_minimum() -> None:
         await orders.create_order(
             MagicMock(),
             user_id=1,
-            amount_cny=0.5,
+            amount_cny=Decimal("0.5"),
             channel="ALIPAY",
         )
 

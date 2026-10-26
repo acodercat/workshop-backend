@@ -16,10 +16,12 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
 from app.errors import (
+    ConcurrentTaskLimitError,
     FileNotOwnedError,
     FileNotUploadedError,
     FileTooLargeError,
     InsufficientCreditsError,
+    UnconfiguredTierError,
 )
 from app.models.schedule import (
     Schedule,
@@ -29,7 +31,6 @@ from app.models.schedule import (
 )
 from app.models.session import AgentType, Tier
 from app.services.schedule import catch_up_grace, render_run_reminder
-from app.services.session.exceptions import ConcurrentTaskLimitError, UnconfiguredTierError
 from app.workers import schedule_dispatcher
 
 
@@ -453,7 +454,7 @@ class TestRefusals:
             consecutive_failures=schedule_dispatcher._FAILURES_BEFORE_PAUSE - 1,
             late_by=catch_up_grace(ScheduleFrequency.DAILY) - timedelta(seconds=5),
         )
-        _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError("busy"))
+        _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError(10))
 
         await schedule_dispatcher._process_one(7, redis=None)
 
@@ -483,7 +484,7 @@ class TestCongestion:
         # to a thirty-second overlap with the owner's own work.
         schedule = _schedule()
         due = schedule.next_run_at
-        db, _ = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError("busy"))
+        db, _ = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError(10))
 
         assert await schedule_dispatcher._process_one(7, redis=None) is False
 
@@ -501,7 +502,7 @@ class TestCongestion:
         grace = catch_up_grace(ScheduleFrequency.DAILY)
         tick = timedelta(seconds=schedule_dispatcher._TICK_SECONDS)
         schedule = _schedule(late_by=grace - tick - timedelta(seconds=5))
-        db, _ = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError("busy"))
+        db, _ = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError(10))
 
         assert await schedule_dispatcher._process_one(7, redis=None) is False
         assert _runs(db) == []
@@ -514,7 +515,7 @@ class TestCongestion:
         db, calls = _patch(
             monkeypatch,
             schedule,
-            queue_raises=[ConcurrentTaskLimitError("busy"), None],
+            queue_raises=[ConcurrentTaskLimitError(10), None],
         )
 
         assert await schedule_dispatcher._process_one(7, redis=None) is False
@@ -533,7 +534,7 @@ class TestCongestion:
         # Their other schedules cannot be enqueued either, and the tick is
         # what holds the advisory lock open.
         schedule = _schedule()
-        db, calls = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError("busy"))
+        db, calls = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError(10))
         congested: set[int] = set()
 
         assert await schedule_dispatcher._process_one(7, redis=None, congested=congested) is False
@@ -558,7 +559,7 @@ class TestCongestion:
         # ``too_late``, which tells the owner nothing they can act on.
         schedule = _schedule(late_by=catch_up_grace(ScheduleFrequency.DAILY) - timedelta(seconds=5))
         occurrence = schedule.next_run_at
-        db, _ = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError("busy"))
+        db, _ = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError(10))
 
         assert await schedule_dispatcher._process_one(7, redis=None) is True
 
@@ -704,7 +705,7 @@ class TestRetireOnce:
             run_date=occurrence.date(),
             next_run_at=occurrence,
         )
-        db, _ = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError("busy"))
+        db, _ = _patch(monkeypatch, schedule, queue_raises=ConcurrentTaskLimitError(10))
 
         await schedule_dispatcher._process_one(7, redis=None)
 
@@ -777,12 +778,11 @@ class TestUnresolvableTimezone:
         # Deliberately not advanced: computing the next occurrence is the
         # thing that cannot be done.
         assert schedule.next_run_at == before
-        # And deliberately no history row. One would claim this occurrence in
-        # the idempotency index while ``next_run_at`` still points at it, so
-        # the first dispatch after an operator fixed the image and the owner
-        # resumed would collide with it — costing a recurring schedule a
-        # delivery, and retiring a one-shot COMPLETED having never run.
-        assert _runs(db) == []
+        # The history explains the gap. The row cannot collide with a later
+        # run: resuming re-arms the schedule from now, strictly after it.
+        (run,) = _runs(db)
+        assert run.scheduled_for == before
+        assert run.skip_reason is ScheduleSkipReason.MISCONFIGURED
         assert db.commits == 1
 
 

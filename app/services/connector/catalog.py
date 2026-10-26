@@ -1,8 +1,8 @@
 """The official Connector catalog: read the catalog, instantiate an entry.
 
-The only module that reads ``mcp_server_catalog``. Endpoints and the operator
-script both go through here, so adding an admin CRUD later means adding a
-router — not re-deriving these rules.
+The customer surface's view of ``mcp_server_catalog``: what is published,
+and how an entry becomes a user's Connector. The console and the operator
+script manage the entries themselves.
 
 Instantiating **copies** the template onto a new user-owned ``mcp_server`` row
 rather than referencing it live. That is what keeps a Connector working after

@@ -57,9 +57,9 @@ from app.models.connector_category import ConnectorCategory
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.services import localized_text
+from app.services.connector.catalog import INSTANTIABLE_AUTH_TYPES
+from app.services.connector.url_identity import normalize_connector_url
 from app.services.crypto import encrypt_secret
-from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
-from app.services.mcp.url_identity import normalize_connector_url
 
 _URL_HELP = "the entry's MCP server URL, exactly as `list` prints it"
 _CATEGORY_HELP = "a connector category, by the name the console shows"

@@ -3,8 +3,10 @@
 These are raised inside the payment adapters for control flow within the
 service package. They are distinct from the ``AppError`` subclasses in
 ``app/errors.py`` (which the HTTP layer serializes): the adapter raises a
-domain-level provider error, and the endpoint / service translates it to
-the public :class:`~app.errors.PaymentProviderError` envelope. Not
+domain-level provider error, and the service translates a failed charge
+or query into the public :class:`~app.errors.PaymentProviderError`
+envelope. A notification that fails its signature is not translated —
+the webhook answers it with a bare 400 so the provider stops there. Not
 re-exported from the package ``__init__``.
 """
 

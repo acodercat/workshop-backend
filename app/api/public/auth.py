@@ -1,12 +1,13 @@
 from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db, get_redis
-from app.auth import assert_user_active, authenticate_user, create_access_token
+from app.auth import authenticate_user, create_access_token, is_user_active
+from app.errors import InvalidCredentialsError
 from app.rate_limit import limiter
 from app.schemas.auth import (
     AccessTokenResponse,
@@ -41,15 +42,9 @@ async def login_for_access_token(
     password-based sign-in.
     """
     user = await authenticate_user(db, form_data.username, form_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    # Inactive accounts reuse the wrong-credentials message so a disabled
-    # account is indistinguishable from a bad password.
-    assert_user_active(user, inactive_detail="Incorrect username or password")
+    # A disabled account answers exactly like a bad password.
+    if user is None or not is_user_active(user):
+        raise InvalidCredentialsError("Incorrect username or password")
 
     user.last_login_at = datetime.now(UTC)
     access_token = create_access_token(
@@ -85,9 +80,9 @@ async def create_verification_code(
     body: RegisterCodeRequest,
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    """Dispatch a 6-digit verification code to ``email``.
+    """Dispatch a 6-digit verification code to the email or phone.
 
-    Returns 204 regardless of whether the email is already a
+    Returns 204 regardless of whether the identifier is already a
     registered user — telling the caller "this address is registered"
     here would leak account existence. The unified flow's branching
     happens at :func:`access_token_by_code` after the code is
@@ -116,16 +111,16 @@ async def access_token_by_code(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    """Log an existing user in by email + verification code.
+    """Log an existing user in by email or phone + verification code.
 
     **Login only** — peek-verifies the code, then:
 
-    - Email maps to an existing ``ACTIVE`` user → consume the code
-      now (we're committing to log them in), issue a JWT.
-    - Email isn't registered → ``NotRegisteredError`` (404); the
-      frontend steers the user to the invite-gated register tab.
-    - Email maps to ``DISABLED`` / ``SUSPENDED`` → 401 opaque, same
-      as :func:`login_for_access_token`.
+    - The identifier maps to an existing ``ACTIVE`` user → consume the
+      code now (we're committing to log them in), issue a JWT.
+    - It isn't registered → ``NotRegisteredError`` (404); the frontend
+      steers the user to the invite-gated register tab.
+    - It maps to ``DISABLED`` / ``SUSPENDED`` → ``AccountInactiveError``
+      (401) — said plainly, since the code proved the caller holds it.
     """
     return await login_by_code(
         db, redis, channel=body.channel, identifier=body.identifier, code=body.code

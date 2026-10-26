@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -274,3 +275,11 @@ class TestOwnership:
                 raise AssertionError("queried with nothing to check")
 
         await assert_files_owned_by(_Never(), user_id=7, file_keys=[])
+
+
+async def test_files_are_bound_before_the_user_row_is_locked(run_enqueue) -> None:
+    # Binding HEADs each new object in OSS. Under the reservation's user-row
+    # lock, that round trip would hold up every other write for the user.
+    steps = await run_enqueue(AsyncMock())
+
+    assert steps.index("_bind_session_files") < steps.index("reserve_for_turn")

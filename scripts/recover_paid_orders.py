@@ -5,7 +5,8 @@ configured) combined with the reconciler expiring the order can leave an order
 ``EXPIRED`` / ``PENDING`` with no credits even though the customer paid. This
 re-queries Huifu for each not-yet-granted order and, when Huifu confirms the
 payment, grants the credits — idempotently (``apply_topup`` dedupes), and even
-for ``EXPIRED`` orders.
+for ``EXPIRED`` orders — and accrues the referrer's commission, through the
+same :func:`~app.services.payment.reconcile.settle_paid` the reconciler uses.
 
 **Run this only with the current code** (``trans_stat`` mapped to
 :class:`~app.services.payment.provider.ChargeState`, ``S`` → ``PAID``); an
@@ -35,7 +36,7 @@ from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models.payment_order import PaymentOrder, PaymentOrderStatus
-from app.services.payment import orders
+from app.services.payment import orders, reconcile
 from app.services.payment.provider import ChargeState
 
 
@@ -57,14 +58,14 @@ async def _candidate_ids(*, out_trade_no: str | None, days: int) -> list:
 
 async def _process_one(order_id, *, dry_run: bool) -> str:
     async with AsyncSessionLocal() as db:
-        order = await db.scalar(
-            select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update()
-        )
+        order = await db.scalar(select(PaymentOrder).where(PaymentOrder.id == order_id))
         if order is None:
             return "not_found"
         if order.status == PaymentOrderStatus.PAID:
             return "already_paid"
 
+        # Asked before the row is locked, as the reconciler does: a lock held
+        # across the round trip would block this order's webhook.
         try:
             event = await orders.get_provider().query_charge(
                 out_trade_no=order.out_trade_no,
@@ -85,10 +86,13 @@ async def _process_one(order_id, *, dry_run: bool) -> str:
         if not paid:
             return "not_paid"
 
-        # reconcile_paid grants regardless of EXPIRED (only short-circuits on
-        # already-PAID), checks the amount, and is idempotent via apply_topup.
-        await orders.reconcile_paid(db, order, event)
-        await db.commit()
+        order = await orders.lock_order(db, order.out_trade_no)
+        if order is None or order.status == PaymentOrderStatus.PAID:
+            return "already_paid"
+        # Grants regardless of EXPIRED (only an already-PAID order is left
+        # alone), checks the amount, is idempotent via apply_topup, and
+        # accrues the referrer's commission like every other settle path.
+        await reconcile.settle_paid(db, order, event)
         return "granted"
 
 

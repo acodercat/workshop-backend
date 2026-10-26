@@ -139,6 +139,17 @@ same adapter); a second provider (a new adapter behind the Protocol).
   Moving to organization-level balances is a separate migration and
   should be driven by product packaging, not hidden inside turn
   billing.
+- **Queue time is billed as occupancy.** The β duration fee is
+  `terminated_at − session_turn.created_at`, and `created_at` is the
+  enqueue INSERT, so a turn that waits PENDING behind a saturated fleet
+  pays `per_second_credits` for time no sandbox ran (10 minutes queued ≈
+  6 credits at the default β); the budget enforcer projects the same
+  span. The fix is a `session_turn.claimed_at` the worker stamps in its
+  claim UPDATE, with settle and the enforcer measuring from
+  `coalesce(claimed_at, created_at)`. Deferred because `core/agent-worker`
+  is shared: its claim SQL can name the new column only once every
+  database it serves has the migration, so the order is migrate all of
+  them, then deploy the worker.
 - **Sandbox runtime cost.** The old reserved `SANDBOX` variant was
   removed. Current direction is turn-level three-factor billing
   (`tokens + turn_seconds + model_fee`). Reintroduce separate sandbox

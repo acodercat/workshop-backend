@@ -149,6 +149,26 @@ async def test_the_guard_runs_after_the_change_is_flushed() -> None:
     assert db.flushes == 1
 
 
+async def test_the_active_set_is_locked_before_anything_changes() -> None:
+    # Two operators disabling each other used to lock their own target
+    # first, then each other's — a deadlock. Locking the set up front, in
+    # id order, makes the second wait and then see what the first left.
+    steps: list[str] = []
+
+    class _Recording(_FakeDb):
+        async def scalars(self, stmt):
+            steps.append("lock")
+            return await super().scalars(stmt)
+
+        async def flush(self) -> None:
+            steps.append("flush")
+            await super().flush()
+
+    await staff_service.update(_Recording(active_ids=[9]), _account(), status=StaffStatus.DISABLED)
+
+    assert steps == ["lock", "flush", "lock"]
+
+
 # --- passwords ---------------------------------------------------------
 
 

@@ -6,9 +6,9 @@ authenticate (``auth_type`` + Fernet-encrypted ``encrypted_credential``), and a
 cached tool listing for display. The worker resolves url + credential live by
 ``id`` at turn time — the credential is never snapshotted onto ``session_turn``.
 
-Always user-owned: every row has a ``user_id``, and its own ``connected`` flag
-is the on/off switch (no separate preference table — that existed for skills
-only to override *shared* rows). Connectors offered in the platform catalog
+Always user-owned: every row has a ``user_id``. ``connected`` says whether the
+Connector is usable at all; which sessions get it is ``session_mcp_server``,
+each session's own switch. Connectors offered in the platform catalog
 are **copied** onto a row of the user's own at connect time
 (``catalog_id`` points back), never shared, because everything that makes a
 Connector usable — tokens, credentials, the switch — is per-user anyway.

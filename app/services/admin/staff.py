@@ -17,6 +17,7 @@ convention the customer-facing endpoints follow.
 """
 
 import logging
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,15 +74,25 @@ async def update(
     is the one that matters: given what this transaction is about to
     commit, does an ACTIVE account remain? A name change can't lock
     anyone out, so it skips the guard.
+
+    The active set is locked *before* anything changes. Two operators
+    disabling each other would otherwise each lock their own target first
+    and then wait on the other's — a deadlock Postgres breaks with a
+    generic error. Locked up front, in one order, the second queues behind
+    the first, sees the set it left, and gets the typed refusal.
     """
     if name is not None:
         account.name = name
     if status is not None:
+        await _lock_active_staff(db)
         account.status = status
 
     await db.flush()
-    if status is not None:
-        await _assert_active_staff_remains(db)
+    if status is not None and not await _lock_active_staff(db):
+        raise LastActiveStaffError(
+            "This change would leave the console with no active staff "
+            "account. Add or re-enable another account first."
+        )
 
 
 async def set_password(db: AsyncSession, account: Staff, password: str) -> None:
@@ -97,21 +108,15 @@ async def set_password(db: AsyncSession, account: Staff, password: str) -> None:
     await db.flush()
 
 
-async def _assert_active_staff_remains(db: AsyncSession) -> None:
-    """Refuse a transaction that leaves no ``ACTIVE`` account.
-
-    The active rows are locked ``FOR UPDATE`` rather than merely counted,
-    so two operators disabling each other concurrently serialize instead
-    of both observing the other as the survivor. Cheap: the console has a
-    handful of accounts, and this runs only on a status change.
-    """
-    active_ids = (
+async def _lock_active_staff(db: AsyncSession) -> Sequence[int]:
+    """Lock the ``ACTIVE`` accounts and return their ids — in id order, so
+    every caller takes the locks in the same order. Cheap: the console has
+    a handful of accounts, and this runs only on a status change."""
+    return (
         await db.scalars(
-            select(Staff.id).where(Staff.status == StaffStatus.ACTIVE).with_for_update()
+            select(Staff.id)
+            .where(Staff.status == StaffStatus.ACTIVE)
+            .order_by(Staff.id)
+            .with_for_update()
         )
     ).all()
-    if not active_ids:
-        raise LastActiveStaffError(
-            "This change would leave the console with no active staff "
-            "account. Add or re-enable another account first."
-        )

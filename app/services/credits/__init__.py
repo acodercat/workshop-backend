@@ -7,8 +7,10 @@ PAYG credit ledger sitting in front of the LLM turn pipeline:
   counts that the worker persisted to ``session_turn`` in the same
   fenced transaction as its terminal status flip;
   :func:`refund_reservation` zeros the hold on crash / cancel.
-- :func:`apply_topup` is the admin-only path to add credit balance.
-- :func:`apply_adjust` is the signed correction primitive.
+- :func:`apply_topup` grants credits someone paid for or was given —
+  recharges, commission conversions, the welcome grant, operator grants.
+- :func:`apply_adjust` is the signed correction primitive;
+  :func:`apply_adjust_to` sets the balance to a target through it.
 - :func:`get_balance` + :func:`list_transactions` are the read surface.
 - :func:`settle_open_for_user` is the lazy sweep called from
   user-facing endpoints (``GET /credits/balance``,
@@ -28,7 +30,12 @@ billing, worker-side cost cap, payment-driven top-ups, multi-org
 billing).
 """
 
-from app.services.credits.adjust import AdjustmentAlreadyApplied, apply_adjust
+from app.services.credits.adjust import (
+    AdjustmentAlreadyApplied,
+    BalanceNotSettled,
+    apply_adjust,
+    apply_adjust_to,
+)
 from app.services.credits.balance import get_balance
 from app.services.credits.check_in import (
     CheckInAlreadyClaimed,
@@ -54,12 +61,14 @@ from app.services.credits.transactions import (
 
 __all__ = [
     "AdjustmentAlreadyApplied",
+    "BalanceNotSettled",
     "CheckInAlreadyClaimed",
     "ReferralRewardAlreadyApplied",
     "TopupAlreadyApplied",
     "TransactionKind",
     "TransactionRow",
     "apply_adjust",
+    "apply_adjust_to",
     "apply_check_in_reward",
     "apply_referral_reward",
     "apply_topup",

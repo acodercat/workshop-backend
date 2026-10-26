@@ -15,9 +15,9 @@ WHERE clause, is not this suite's to prove.
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException
 
 from app.api.public import mcp_server as endpoint
+from app.errors import ConnectorNotFoundError
 
 
 def _db_returning(connector):
@@ -48,7 +48,7 @@ class TestTheOwnershipGate:
         # confirms the id, which is the one bit an enumeration wants.
         db = _db_returning(None)
 
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(ConnectorNotFoundError) as caught:
             await endpoint._get_owned_connector(db, connector_id=7, user_id=42)
 
         assert caught.value.status_code == 404

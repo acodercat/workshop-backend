@@ -15,6 +15,7 @@ small and fully trusted, and the audit trail records who did what). If
 tiers are ever needed, this module is where a role gate would return.
 """
 
+from ipaddress import ip_address
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -57,18 +58,26 @@ their actions are recorded against. The only way into an admin endpoint."""
 
 
 def caller_ip(request: Request) -> str | None:
-    """Best-effort caller address for the audit row — public because the
-    sign-in refusal log line records the same address for attempts that
-    never earn a context.
+    """Best-effort caller address — a *parsed* IP, or the socket peer.
+
+    Public because the sign-in refusal log line records the same address
+    for attempts that never earn a context.
 
     Prefers the first ``X-Forwarded-For`` hop because the console is
     expected to sit behind an internal reverse proxy, where the socket
-    peer is the proxy. Unlike the rate limiter — where a spoofable header
-    would let a client dodge a limit — a wrong value here only makes one
-    audit row less informative, so this is not gated on
-    ``trust_proxy_headers``.
+    peer is the proxy. The hop is client-influenced, which is why it is
+    parsed rather than stored as sent: ``admin_audit_log.ip_address`` is
+    ``String(45)`` and commits in the same transaction as the action it
+    records, so an unparsed over-long value would abort the operator's own
+    action. Parsed, the worst a forged header achieves is a wrong but
+    well-formed address in one row, which is why this needs no
+    ``trust_proxy_headers`` gate the way the rate limiter's key does.
+    A hop that is not an address falls back to the socket peer.
     """
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",", 1)[0].strip() or None
+        try:
+            return str(ip_address(forwarded.split(",", 1)[0].strip()))
+        except ValueError:
+            pass
     return request.client.host if request.client else None

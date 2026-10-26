@@ -14,7 +14,7 @@ from app.schemas.admin.connector import (
     ConnectorCatalogEntryCreate,
     ConnectorCatalogEntryUpdate,
 )
-from app.services.mcp.catalog import INSTANTIABLE_AUTH_TYPES
+from app.services.connector.catalog import INSTANTIABLE_AUTH_TYPES
 
 
 def _create(**over) -> ConnectorCatalogEntryCreate:

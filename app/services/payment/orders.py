@@ -170,7 +170,7 @@ async def create_order(
     db: AsyncSession,
     *,
     user_id: int,
-    amount_cny: float,
+    amount_cny: Decimal,
     channel: Channel,
 ) -> PaymentOrder:
     """Create a PENDING order, freeze the credit grant, and place the
@@ -184,7 +184,8 @@ async def create_order(
             f"[¥{settings.payment_min_cny}, ¥{settings.payment_max_cny}]"
         )
 
-    amount_fen = int((Decimal(str(amount_cny)) * 100).to_integral_value())
+    # Exact: the request schema admits at most two decimals.
+    amount_fen = int(amount_cny * 100)
     # Freeze paid base + promo bonus onto the order. ``credit_micro`` is the
     # single grant ``apply_topup`` posts on PAID; the base/bonus split is
     # kept in ``reference`` for audit + the response's "incl. bonus" line.
@@ -298,7 +299,7 @@ async def handle_webhook(db: AsyncSession, event: VerifiedEvent) -> None:
     the row lock + the PAID guard + topup idempotency make a duplicate a
     no-op. Caller commits; the endpoint acks regardless.
     """
-    order = await _lock_order(db, event.out_trade_no)
+    order = await lock_order(db, event.out_trade_no)
     if order is None:
         logger.warning("huifu notify: unknown out_trade_no=%s", event.out_trade_no)
         return
@@ -327,10 +328,18 @@ async def reconcile_paid(db: AsyncSession, order: PaymentOrder, event: VerifiedE
     await _grant_paid(db, order, event)
 
 
-async def _lock_order(db: AsyncSession, out_trade_no: str) -> PaymentOrder | None:
-    """``SELECT ... FOR UPDATE`` an order by its provider-facing id."""
+async def lock_order(db: AsyncSession, out_trade_no: str) -> PaymentOrder | None:
+    """``SELECT ... FOR UPDATE`` an order by its provider-facing id.
+
+    ``populate_existing`` because a caller may already hold this row from an
+    unlocked read — the reconciler asks the provider before it locks — and a
+    locking read would otherwise hand that copy back unrefreshed.
+    """
     return await db.scalar(
-        select(PaymentOrder).where(PaymentOrder.out_trade_no == out_trade_no).with_for_update()
+        select(PaymentOrder)
+        .where(PaymentOrder.out_trade_no == out_trade_no)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -355,6 +364,7 @@ async def _grant_paid(
             amount_micro=order.credit_micro,
             idempotency_key=key,
             reason=_TOPUP_REASON,
+            source="payment",
         )
     except TopupAlreadyApplied:
         # apply_topup rolled back this tx; re-acquire the order + the
@@ -364,7 +374,7 @@ async def _grant_paid(
         # row is re-read rather than still held, and the guard below is what
         # says nothing was found. Reassigning would make that guard read as
         # dead code on a parameter the caller declared non-optional.
-        relocked = await _lock_order(db, out_trade_no)
+        relocked = await lock_order(db, out_trade_no)
         ledger_id = await db.scalar(
             select(CreditLedger.id).where(CreditLedger.idempotency_key == key)
         )

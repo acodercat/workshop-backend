@@ -46,11 +46,13 @@ from sqlalchemy.sql import func
 from app.common.text import printable
 from app.database import AsyncSessionLocal
 from app.errors import (
+    ConcurrentTaskLimitError,
     FileNotOwnedError,
     FileNotUploadedError,
     FileTooLargeError,
     InsufficientCreditsError,
     ModelUnavailableError,
+    UnconfiguredTierError,
 )
 from app.models.schedule import Schedule, ScheduleRun, ScheduleSkipReason, ScheduleStatus
 from app.models.user import User, UserStatus
@@ -63,7 +65,6 @@ from app.services.schedule import (
     render_run_reminder,
 )
 from app.services.session import build_session, queue_user_message
-from app.services.session.exceptions import ConcurrentTaskLimitError, UnconfiguredTierError
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +312,7 @@ async def _process_one(
                 return False
 
             if not _zone_is_resolvable(schedule.timezone):
-                await _pause_unresolvable(db, schedule)
+                await _pause_unresolvable(db, schedule, occurrence)
                 return True
 
             deadline = occurrence + catch_up_grace(schedule.frequency)
@@ -425,33 +426,24 @@ def _zone_is_resolvable(timezone: str) -> bool:
     return True
 
 
-async def _pause_unresolvable(db: AsyncSession, schedule: Schedule) -> None:
-    """Stop a schedule whose zone this process cannot build.
+async def _pause_unresolvable(db: AsyncSession, schedule: Schedule, occurrence: datetime) -> None:
+    """Stop a schedule whose zone this process cannot build, and say why.
 
-    Neither the clock nor the history moves, and both omissions are the
-    point.
+    The clock cannot move: advancing means computing the next occurrence,
+    which is the thing that cannot be done. Pausing is what makes this
+    terminal instead of an every-tick traceback that changes nothing.
 
-    The clock cannot move because advancing means computing the next
-    occurrence, which is the thing that cannot be done. Pausing is what
-    makes this terminal instead of an every-tick traceback that changes
-    nothing.
-
-    No ``schedule_run`` row either, which is the less obvious half. Writing
-    one would claim ``(schedule_id, occurrence)`` in the idempotency index
-    while ``next_run_at`` still points at that same occurrence — so the
-    moment an operator fixed the image and the owner resumed, the first
-    dispatch would collide with the row this call left behind. For a
-    recurring schedule that costs a delivery; for a one-shot the collision
-    path retires it ``COMPLETED`` having never run once. The log line and the
-    ``PAUSED`` status carry the diagnosis without mortgaging the key.
+    The occurrence is recorded ``misconfigured`` — a deployment fault the
+    owner has to notice, like a tier that no longer resolves — so the history
+    explains the gap. It cannot collide with a later run: resuming re-arms
+    the schedule from *now* (``lifecycle.arm``), strictly after this one.
     """
     logger.error(
-        "schedule dispatcher: schedule %s has an unresolvable timezone %r; pausing"
-        " (occurrence %s left unrecorded, so a resume can still run it)",
+        "schedule dispatcher: schedule %s has an unresolvable timezone %r; pausing",
         schedule.id,
         schedule.timezone,
-        schedule.next_run_at,
     )
+    _record(db, schedule, occurrence, skip=ScheduleSkipReason.MISCONFIGURED)
     schedule.status = ScheduleStatus.PAUSED
     await db.commit()
 
@@ -695,15 +687,7 @@ def _settle(
     the reason. Exactly one of ``session_id`` / ``skip`` is set, and
     ``ck_schedule_run_outcome`` rejects a row claiming both.
     """
-    db.add(
-        ScheduleRun(
-            schedule_id=schedule.id,
-            user_id=schedule.user_id,
-            scheduled_for=occurrence,
-            session_id=session_id,
-            skip_reason=skip,
-        )
-    )
+    _record(db, schedule, occurrence, session_id=session_id, skip=skip)
     if skip is None:
         schedule.consecutive_failures = 0
     elif skip.counts_as_failure:
@@ -717,6 +701,26 @@ def _settle(
                 schedule.consecutive_failures,
             )
     _advance(schedule, occurrence, retire_one_shot=skip is None or skip.retires_one_shot)
+
+
+def _record(
+    db: AsyncSession,
+    schedule: Schedule,
+    occurrence: datetime,
+    *,
+    session_id: uuid.UUID | None = None,
+    skip: ScheduleSkipReason | None = None,
+) -> None:
+    """Stage the history row for one occurrence."""
+    db.add(
+        ScheduleRun(
+            schedule_id=schedule.id,
+            user_id=schedule.user_id,
+            scheduled_for=occurrence,
+            session_id=session_id,
+            skip_reason=skip,
+        )
+    )
 
 
 def _advance(schedule: Schedule, occurrence: datetime, *, retire_one_shot: bool) -> None:

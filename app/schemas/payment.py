@@ -9,6 +9,7 @@ as a scannable image.
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -19,10 +20,13 @@ class CreateOrderRequest(BaseModel):
 
     ``amount_cny`` bounds are enforced server-side against
     ``payment_min_cny`` / ``payment_max_cny`` (``gt=0`` here is only a
-    sanity floor). ``channel`` picks which QR to mint — Alipay or WeChat.
+    sanity floor). At most two decimals, so the cents charged and the
+    credits granted are both exact functions of one amount rather than
+    two roundings of it. ``channel`` picks which QR to mint — Alipay or
+    WeChat.
     """
 
-    amount_cny: float = Field(gt=0, description="Top-up amount in RMB")
+    amount_cny: Decimal = Field(gt=0, decimal_places=2, description="Top-up amount in RMB")
     channel: Literal["ALIPAY", "WECHAT"]
 
 

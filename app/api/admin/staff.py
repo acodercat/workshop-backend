@@ -118,6 +118,8 @@ async def update_staff(ctx: StaffContext, staff_id: int, body: StaffUpdate) -> S
         for field, value in (("name", body.name), ("status", body.status))
         if value is not None and getattr(account, field) != value
     }
+    if not changes:
+        return StaffResponse.model_validate(account)
 
     async with audit(
         ctx,
@@ -137,9 +139,9 @@ async def reset_staff_password(
 ) -> Response:
     """Set another operator's password, signing that account out everywhere.
 
-    The new password is never recorded: the audit payload says a reset
-    happened and why, and :func:`app.services.admin.audit` would redact
-    the value even if a caller passed it.
+    The new password is never recorded: the audit row says a reset
+    happened, and :func:`app.services.admin.audit` would redact the value
+    even if a caller passed it.
     """
     account = await _get_or_404(ctx, staff_id)
 

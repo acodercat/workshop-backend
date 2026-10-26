@@ -10,8 +10,7 @@ migration to add a language. A side table needs a join on every read of a
 handful of curated rows, and buys indexing and referential integrity that two
 locales of display text do not need.
 
-The skills catalog reached this shape first (``skill_i18n``, which now spells
-its domain in terms of this module); the Connector catalog uses it too.
+The skills catalog and the Connector catalog both use it.
 
 **Editing the canonical column invalidates the map.** :func:`resolve` reads the
 map's default-locale entry *before* falling back to the column, so a map left

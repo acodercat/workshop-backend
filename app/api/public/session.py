@@ -14,7 +14,7 @@ DB queries live inline in the handlers. What sits at module top is what more
 than one handler needs (``_get_or_404``, ``_load_messages``) plus a guard a
 single handler needs but that is long enough to name —
 ``_owned_connector_or_404``. Validating a whole Connector selection is shared
-with the schedule endpoint, so it lives in :mod:`app.services.mcp.ownership`.
+with the schedule endpoint, so it lives in :mod:`app.services.connector.ownership`.
 Non-trivial logic — message enqueue with its ordering invariants and
 SSE streaming — lives in :mod:`app.services.session`.
 """
@@ -44,9 +44,12 @@ from app.common.pagination import paginate
 from app.common.search import ilike_contains
 from app.database import AsyncSessionLocal
 from app.errors import (
+    ConnectorNotFoundError,
     FileCountQuotaExceededError,
-    FileNotInSessionError,
     FileSizeQuotaExceededError,
+    GenerationInProgressError,
+    MessageNotFoundError,
+    NotAssistantMessageError,
     SessionNotFoundError,
 )
 from app.models.mcp_server import MCPServer
@@ -85,11 +88,11 @@ from app.schemas.session import (
 from app.schemas.session_share import ShareCreate, ShareResponse
 from app.schemas.site import SessionSiteResponse
 from app.services import credits, file_storage
+from app.services.connector import ownership as connector_ownership
 from app.services.file_storage import (
     SESSION_FILE_POLICY,
     InlinePreviewNotAllowedError,
 )
-from app.services.mcp import ownership as mcp_ownership
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import (
     build_session,
@@ -99,14 +102,8 @@ from app.services.session import (
     queue_user_message,
     stream_events,
 )
-from app.services.session.exceptions import (
-    ConcurrentTaskLimitError,
-    GenerationInProgressError,
-    RecipeNotInvokableError,
-    SessionGoneError,
-    UnconfiguredTierError,
-)
 from app.services.session.files import assert_file_belongs_to_session
+from app.services.user import publish_session_status
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -142,7 +139,7 @@ async def _get_or_404(
     ``for_update`` takes a row-level lock held until the transaction
     ends — used by ``delete_session`` so its status check and tombstone
     serialize against ``queue_user_message``'s own ``FOR UPDATE`` lock,
-    closing the race where a turn enqueues onto a session being deleted.
+    and by ``create_share`` so two rotations cannot both insert.
     """
     stmt = select(Session).where(
         Session.id == session_id,
@@ -173,7 +170,7 @@ async def _owned_connector_or_404(db: AsyncSession, connector_id: int, user_id: 
         )
     )
     if exists.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise ConnectorNotFoundError("Connector not found.")
 
 
 async def _turn_start_id(
@@ -303,21 +300,18 @@ async def create_session(
     # Ownership-filter the requested Connectors here: they are this
     # request's untrusted input, and the shared builder takes ids that have
     # already been vetted.
-    configured = await mcp_ownership.require_owned_connectors(
+    configured = await connector_ownership.require_owned_connectors(
         db, user_id=current_user.id, ids=body.connectors
     )
-    try:
-        session = await build_session(
-            db,
-            user_id=current_user.id,
-            title=body.title,
-            tier=body.tier,
-            agent_type=body.agent_type,
-            thinking_enabled=body.thinking_enabled,
-            connector_ids=configured,
-        )
-    except UnconfiguredTierError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    session = await build_session(
+        db,
+        user_id=current_user.id,
+        title=body.title,
+        tier=body.tier,
+        agent_type=body.agent_type,
+        thinking_enabled=body.thinking_enabled,
+        connector_ids=configured,
+    )
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -756,10 +750,7 @@ async def delete_session(
         for_update=True,
     )
     if session.status == SessionStatus.RUNNING:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Cannot delete a session while a generation is in progress",
-        )
+        raise GenerationInProgressError("Cannot delete a session while a generation is in progress")
     await credits.settle_open_for_session(db, session.id)
     session.deleted_at = func.now()
     await db.commit()
@@ -790,43 +781,21 @@ async def create_message(
 ):
     """Create a user message and enqueue LLM generation to the worker.
 
-    Service-layer domain errors translate to HTTP here so the service
-    stays unaware of FastAPI: ``GenerationInProgressError`` → 409,
-    ``ConcurrentTaskLimitError`` → 429 (user at their running-task cap),
-    ``SessionGoneError`` → 404 (the session was deleted between our
-    ownership check and the enqueue's row lock). The DB-lease design has
-    no Redis-enqueue failure path: ``publish_wake`` is best-effort and
+    Every refusal ``queue_user_message`` can make is a typed ``AppError``
+    that reaches the client as its own ``error_type``. The DB-lease design
+    has no Redis-enqueue failure path: ``publish_wake`` is best-effort and
     never raises into this handler.
     """
     session = await _get_or_404(db, session_id, current_user.id)
-    try:
-        await queue_user_message(
-            db,
-            redis,
-            session,
-            content=body.content,
-            files=body.files,
-            skills=body.skills,
-            recipe_id=body.recipe_id,
-            agent_type=body.agent_type,
-        )
-    except GenerationInProgressError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
-        )
-    except ConcurrentTaskLimitError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=str(exc),
-        )
-    except SessionGoneError:
-        raise SessionNotFoundError("Session not found.")
-    except RecipeNotInvokableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
+    await queue_user_message(
+        db,
+        redis,
+        session,
+        content=body.content,
+        files=body.files,
+        skills=body.skills,
+        agent_type=body.agent_type,
+    )
     return MessageQueuedResponse()
 
 
@@ -897,7 +866,14 @@ async def cancel_session(
     if await cancel_unclaimed_turn(db, session_id=session_id):
         await db.commit()
         # Hard-cancelled in the DB with no worker in the picture, so no
-        # ``agent.stopped`` follows this one either.
+        # ``agent.stopped`` follows this one either, and no worker announces
+        # it to the user's other tabs.
+        await publish_session_status(
+            redis,
+            user_id=current_user.id,
+            session_id=session_id,
+            status=SessionStatus.CANCELLED,
+        )
         return CancelAcceptedResponse(already_stopped=True)
     await redis.publish(
         cancel_channel(str(session_id)),
@@ -1010,14 +986,15 @@ async def create_share(
     ``/sessions/{id}/share`` is replaced) but not at the token level —
     each call mints a fresh token, which is the point of "rotate":
     the previous URL stops working. The replace happens in one
-    transaction: any prior row is deleted before the new one is
-    inserted.
+    transaction under the session row lock, so two concurrent rotations
+    serialize and the second deletes the first's row instead of both
+    surviving. bcrypt runs before the lock is taken, so it never holds it.
     """
-    session = await _get_or_404(db, session_id, current_user.id)
+    password_hash = await get_password_hash(body.password) if body.password else None
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
 
     await db.execute(delete(SessionShare).where(SessionShare.session_id == session.id))
 
-    password_hash = await get_password_hash(body.password) if body.password else None
     share = SessionShare(
         session_id=session.id,
         token=secrets.token_urlsafe(32),
@@ -1041,7 +1018,10 @@ async def get_session_share(
     stmt = select(SessionShare).where(SessionShare.session_id == session_id)
     share = (await db.execute(stmt)).scalar_one_or_none()
     if share is None:
-        raise HTTPException(status_code=404, detail="Share not found")
+        # A plain 404, not ``share_not_found``: that type tells a visitor
+        # their link is dead, and a session that has never been shared is
+        # a normal state for its owner.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Share not found")
     return ShareResponse.model_validate(share)
 
 
@@ -1100,17 +1080,11 @@ async def get_download_url(
     their own session.
     """
     session = await _get_or_404(db, session_id, current_user.id)
-    try:
-        await assert_file_belongs_to_session(
-            db,
-            session_id=session.id,
-            file_key=file_key,
-        )
-    except FileNotInSessionError:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="File is not part of this session",
-        )
+    await assert_file_belongs_to_session(
+        db,
+        session_id=session.id,
+        file_key=file_key,
+    )
     url, expires_in = file_storage.generate_download_url(
         file_storage.SESSION_FILE_POLICY,
         file_key,
@@ -1149,17 +1123,11 @@ async def get_preview_url(
     Same two-step authorization as the download variant.
     """
     session = await _get_or_404(db, session_id, current_user.id)
-    try:
-        await assert_file_belongs_to_session(
-            db,
-            session_id=session.id,
-            file_key=file_key,
-        )
-    except FileNotInSessionError:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="File is not part of this session",
-        )
+    await assert_file_belongs_to_session(
+        db,
+        session_id=session.id,
+        file_key=file_key,
+    )
     try:
         url, expires_in = file_storage.generate_inline_url(
             file_storage.SESSION_FILE_POLICY,
@@ -1198,12 +1166,9 @@ async def _resolve_assistant_message(
     stmt = select(Message).where(Message.id == message_id, Message.session_id == session_id)
     message = (await db.execute(stmt)).scalar_one_or_none()
     if message is None:
-        raise HTTPException(status_code=404, detail="Message not found")
+        raise MessageNotFoundError("Message not found.")
     if message.role != MessageRole.ASSISTANT:
-        raise HTTPException(
-            status_code=400,
-            detail="Feedback is only supported on assistant messages",
-        )
+        raise NotAssistantMessageError("Feedback is only supported on assistant messages.")
     return message
 
 

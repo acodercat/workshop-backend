@@ -10,9 +10,9 @@ would otherwise surface as a string of skipped occurrences.
 
 import pytest
 
+from app.errors import UnconfiguredTierError
 from app.models.session import Tier
 from app.services.session.creation import resolve_tier
-from app.services.session.exceptions import UnconfiguredTierError
 from config import settings
 
 

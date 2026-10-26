@@ -119,9 +119,8 @@ def require_matching_issuer(
     the string the metadata document published — see
     :attr:`DiscoveredAuthorization.issuer_as_published`.
 
-    A ``recorded`` of ``None`` only happens for a pending authorization started
-    before this check existed; it fails closed, costing that user one more
-    click on Connect within the state's ten-minute life.
+    A ``recorded`` of ``None`` fails closed. None should reach here:
+    discovery refuses a metadata document that names no ``issuer``.
 
     Not replaceable by the SDK's ``validate_authorization_response_iss``, which
     arrived in 2.x and looks like exactly this function. It compares against
@@ -755,9 +754,9 @@ async def _register_client(
         token_endpoint_auth_method=_preferred_auth_method(metadata),
         client_name=client_name,
     )
-    # The deadline sits outside the ``try`` so its ``TimeoutError`` lands in the
-    # same conversion as every other failure — inside, it would escape as a raw
-    # 500 rather than the 502 a failed registration reads as.
+    # The deadline sits inside the ``try`` so its ``TimeoutError`` lands in the
+    # same conversion as every other failure — outside, it would escape as a
+    # raw 500 rather than the 502 a failed registration reads as.
     try:
         async with (
             asyncio.timeout(_HTTP_TIMEOUT),
@@ -1007,9 +1006,9 @@ async def _send_bounded(
     larger than the cap — so every call site keeps its own reading of status,
     headers and JSON unchanged.
 
-    **Not** folded into ``guarded_client``: that same factory is handed to the
-    SDK as its ``httpx_client_factory`` for the Streamable HTTP transport, whose
-    SSE stream is a legitimately long-lived, legitimately unbounded read. A cap
+    **Not** folded into ``guarded_client``: the same client is handed to the
+    SDK for the Streamable HTTP transport, whose SSE stream is a legitimately
+    long-lived, legitimately unbounded read. A cap
     at the transport would close working MCP sessions. The bound belongs where a
     *document* is fetched, which is here.
 

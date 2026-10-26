@@ -11,8 +11,9 @@ Three origins:
 
 User-facing visibility is ``OFFICIAL`` + the caller's own ``CUSTOM``;
 ``SYSTEM`` is agent-only. ``SYSTEM`` and ``OFFICIAL`` are both
-platform-owned (``user_id IS NULL``). The worker stages all three into
-the sandbox so axon's ``use_skill`` tool can surface them to the LLM.
+platform-owned (``user_id IS NULL``). The worker offers ``use_skill`` the
+published ``SYSTEM`` skills plus the turn's explicit picks, and stages a
+bundle into the sandbox when the model invokes it.
 
 Whether a skill is offered to a given user is two independent questions,
 answered in two places: :class:`SkillStatus` on this row says whether the
@@ -34,7 +35,6 @@ from enum import StrEnum
 from sqlalchemy import (
     TIMESTAMP,
     BigInteger,
-    Boolean,
     CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
@@ -117,7 +117,7 @@ class Skill(Base):
     # bundle's SKILL.md ships a ``metadata.display_name`` map (the platform
     # catalog's localization path; a CUSTOM bundle may carry one too). NULL
     # otherwise. The API resolves it against the request locale (see
-    # ``skill_i18n``); a PATCH rename clears it so explicit edits win.
+    # ``localized_text``); a PATCH rename clears it so explicit edits win.
     # ``none_as_null`` so a Python ``None`` persists as SQL ``NULL`` (the
     # "no map" state) instead of a JSONB ``'null'`` literal, keeping
     # ``IS NULL`` filters honest.
@@ -143,17 +143,6 @@ class Skill(Base):
             values_callable=lambda cls: [m.value for m in cls],
         ),
         nullable=False,
-    )
-    # TRANSITIONAL — dropped in the follow-up migration, do not read.
-    # ``core/agent-worker`` is shared by this deployment and hkgai's, and
-    # queries ``COALESCE(p.enabled, s.enabled)``; it cannot learn about
-    # ``status`` until both databases have the column. Until that worker
-    # ships, every write keeps this column at the value that makes the
-    # old formula agree with the new one — see ``skill_registration``.
-    enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        server_default=text("true"),
     )
     # Browsing taxonomy — a tab on the skills page. Only OFFICIAL rows are
     # browsed that way: a CUSTOM upload lives behind 「个人」 and a SYSTEM

@@ -84,7 +84,7 @@ async def _run() -> None:
     )
     try:
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(settle_sweeper.run_forever())
+            tg.create_task(settle_sweeper.run_forever(redis))
             tg.create_task(settle_subscriber.run_forever(redis))
             tg.create_task(payment_reconciler.run_forever())
             tg.create_task(schedule_dispatcher.run_forever(redis))

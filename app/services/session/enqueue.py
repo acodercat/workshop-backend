@@ -15,6 +15,9 @@ the steps in a specific order:
    - Lazy-sweep this user's open credit reservations into terminal
       state (settles from durable ``session_turn`` usage, or refunds
       if usage is missing);
+   - Bind uploaded files, confirming each size with a HEAD against
+     OSS — before the reservation, so that round trip never holds the
+     user-row lock;
    - INSERT the ``session_turn`` row (status=``pending``) — its
      auto-generated id is the ``turn_id`` carried on the reservation;
    - Reserve credits for this turn (debits ``user.credit_balance``,
@@ -28,11 +31,13 @@ the steps in a specific order:
      don't tail onto stale history. Last, after every fallible step,
      so a failed enqueue never destroys replay history.
 3. After the DB commits, ``PUBLISH notify:worker`` so an idle worker
-   wakes immediately. Best-effort: a missed publish is recovered by
-   the worker's poll fallback.
+   wakes immediately, and announce ``RUNNING`` on the user's
+   notification channel. Both best-effort: a missed wake is recovered
+   by the worker's poll fallback, a missed announcement by the next
+   ``GET /sessions``.
 
 Conversation history is **not** sent — the worker keeps its own
-compacted context file.
+compacted context in ``session_context``.
 """
 
 import logging
@@ -42,10 +47,15 @@ import redis.asyncio as aioredis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors import AgentTypeDowngradeError, FileRetentionFailedError
+from app.errors import (
+    AgentTypeDowngradeError,
+    ConcurrentTaskLimitError,
+    FileRetentionFailedError,
+    GenerationInProgressError,
+    SessionNotFoundError,
+)
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
-from app.models.recipe import Recipe, RecipeOrigin
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
@@ -58,13 +68,8 @@ from app.services.redis import (
     stream_key,
 )
 from app.services.session import connectors as session_connectors
-from app.services.session.exceptions import (
-    ConcurrentTaskLimitError,
-    GenerationInProgressError,
-    RecipeNotInvokableError,
-    SessionGoneError,
-)
 from app.services.session.files import assert_files_owned_by
+from app.services.user import publish_session_status
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -78,7 +83,6 @@ async def queue_user_message(
     content: str,
     files: list[FileRef],
     skills: list[str] | None = None,
-    recipe_id: int | None = None,
     agent_type: AgentType | None = None,
     reminders: list[str] | None = None,
 ) -> None:
@@ -98,28 +102,29 @@ async def queue_user_message(
     2. Lazy-sweep this user's open credit reservations into terminal
        state. Settle reads durable ``session_turn.input_tokens`` /
        ``output_tokens`` / ``terminated_at`` written by the worker,
-       not the Redis stream. Skipped on legacy sessions without a
-       ``user_id``.
-    3. INSERT the ``session_turn`` (status=``pending``) and flush so
+       not the Redis stream.
+    3. Bind uploaded files to the session — before the reservation,
+       so the OSS size checks never run under the user-row lock.
+    4. INSERT the ``session_turn`` (status=``pending``) and flush so
        its auto-generated id is the ``turn_id`` carried on the new
        reservation.
-    4. Reserve credits for this turn — raises
+    5. Reserve credits for this turn — raises
        :class:`~app.errors.InsufficientCreditsError` (→ HTTP 402) if
        the estimate would push the balance negative. The entire tx
        rolls back; no message stored, no worker wake.
-    5. INSERT the user ``message`` row, bind uploaded files to the
-       session, flip ``session.status='RUNNING'``, then DELETE the
+    6. INSERT the user ``message`` row, flip
+       ``session.status='RUNNING'``, then DELETE the
        previous turn's output stream — all before one commit so a
        refetch can't see a half-applied state, and so a 402/skills
        failure above can't destroy replay history for a turn that
        never enqueues.
-    6. ``publish_wake`` so an idle worker doesn't have to wait for
+    7. ``publish_wake`` so an idle worker doesn't have to wait for
        its poll cycle. **After commit** so the worker's claim sees
        the row. Best-effort; poll fallback covers a publish failure.
 
-    ``files`` are bound to the session at step 5; ``skills`` (the
+    ``files`` are bound to the session at step 3; ``skills`` (the
     composer's per-turn selection) is persisted on the ``session_turn``
-    row at step 3 and rides along to the worker through the claim
+    row at step 4 and rides along to the worker through the claim
     query — no separate binding needed (skill rows are already
     user-scoped, the worker re-checks ownership at lookup time).
     ``reminders`` are model-facing context strings a server-side caller
@@ -133,7 +138,7 @@ async def queue_user_message(
 
     Raises:
         GenerationInProgressError: a turn is already streaming.
-        SessionGoneError: the session was deleted between the
+        SessionNotFoundError: the session was deleted between the
             endpoint's ownership check and this lock.
         InsufficientCreditsError: user's balance is below the
             estimated max cost.
@@ -150,17 +155,8 @@ async def queue_user_message(
     # turns whose session is already terminal. Source of truth is
     # ``session_turn.input_tokens`` / ``output_tokens`` (V2 durable
     # storage), so ordering against the Redis stream ``DELETE`` below
-    # doesn't matter. Sessions without a ``user_id`` are treated as
-    # system / legacy and don't bill; logged at WARNING so the case
-    # surfaces if it ever fires in prod (every production path stamps
-    # ``user_id`` at session creation).
-    if session.user_id is None:
-        logger.warning(
-            "queue_user_message: session %s has no user_id — skipping credit reserve",
-            session.id,
-        )
-    else:
-        await credits.settle_open_for_user(db, session.user_id)
+    # doesn't matter.
+    await credits.settle_open_for_user(db, session.user_id)
 
     # Drop ``skills`` the user can't reach: someone else's CUSTOM, a
     # hidden SYSTEM row, or a listing an operator has retired. The user's
@@ -184,14 +180,15 @@ async def queue_user_message(
         await session_connectors.configured_ids(db, session.id),
     )
 
-    # Resolve the picked recipe server-side into a pinned snapshot — the
-    # client only sends ``recipe_id``, never the instruction text. A bad
-    # id (missing / not visible / disabled) raises rather than silently
-    # dropping, since a recipe is a single explicit pick.
-    recipe_snapshot = await _resolve_recipe_snapshot(
+    # Before the reservation, which locks the user row: binding confirms each
+    # file's size with a HEAD against OSS, and that round trip must not hold
+    # the lock every other write for this user — their other enqueues, settle,
+    # top-ups — waits on. The session lock already serializes this session.
+    newly_bound_keys = await _bind_session_files(
         db,
-        session.user_id,
-        recipe_id,
+        session_id=session.id,
+        user_id=session.user_id,
+        files=files,
     )
 
     file_dicts = [f.model_dump() for f in files]
@@ -204,7 +201,6 @@ async def queue_user_message(
         files=file_dicts,
         skills=accepted_skills,
         mcp_servers=accepted_connectors,
-        recipe=recipe_snapshot,
         reminders=reminders or [],
         status=SessionTurnStatus.PENDING,
     )
@@ -216,15 +212,14 @@ async def queue_user_message(
     # balance negative — the whole transaction rolls back, including
     # the session_turn we just inserted, so no message is stored and
     # the worker never sees the turn.
-    if session.user_id is not None:
-        await credits.reserve_for_turn(
-            db,
-            user_id=session.user_id,
-            session_id=session.id,
-            turn_id=session_turn.id,
-            model_id=session.model_id,
-        )
-        await _enforce_concurrent_task_limit(db, session.user_id)
+    await credits.reserve_for_turn(
+        db,
+        user_id=session.user_id,
+        session_id=session.id,
+        turn_id=session_turn.id,
+        model_id=session.model_id,
+    )
+    await _enforce_concurrent_task_limit(db, session.user_id)
 
     user_msg = Message(
         session_id=session.id,
@@ -233,12 +228,6 @@ async def queue_user_message(
     )
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
-    newly_bound_keys = await _bind_session_files(
-        db,
-        session_id=session.id,
-        user_id=session.user_id,
-        files=files,
-    )
 
     # Clear the prior turn's output stream (it lingers post-``agent.stopped``
     # for late SSE replay) here, after every fallible step (see the step
@@ -261,6 +250,14 @@ async def queue_user_message(
             session.id,
             exc_info=True,
         )
+    # The user's other tabs learn the session is running; the worker
+    # announces the terminal the same way.
+    await publish_session_status(
+        redis,
+        user_id=session.user_id,
+        session_id=session.id,
+        status=SessionStatus.RUNNING,
+    )
 
     # Clear the orphan-reaping tag on files this turn just bound (M5), so the
     # bucket lifecycle rule no longer reaps them. Best-effort + post-commit:
@@ -320,10 +317,7 @@ async def _enforce_concurrent_task_limit(db: AsyncSession, user_id: int) -> None
     # ``or 0``: ``COUNT`` never answers NULL, but ``scalar`` is typed as if
     # any query might return nothing.
     if (running_count or 0) >= settings.max_concurrent_running_tasks:
-        raise ConcurrentTaskLimitError(
-            f"user {user_id} already has {running_count} running task(s) "
-            f"(max {settings.max_concurrent_running_tasks})"
-        )
+        raise ConcurrentTaskLimitError(settings.max_concurrent_running_tasks)
 
 
 async def _lock_session(db: AsyncSession, session_id: UUID) -> Session:
@@ -339,7 +333,7 @@ async def _lock_session(db: AsyncSession, session_id: UUID) -> Session:
     ``deleted_at IS NULL`` is part of the locked predicate so a
     ``delete_session`` that committed between the endpoint's
     ``_get_or_404`` and this lock leaves no row to match — we raise
-    :class:`SessionGoneError` rather than enqueue a turn (+ user message
+    :class:`SessionNotFoundError` rather than enqueue a turn (+ user message
     + credit reservation) against a tombstoned session. ``delete_session``
     takes the same row lock before tombstoning, so the two serialize:
     whichever commits first, the other sees the committed state.
@@ -351,7 +345,7 @@ async def _lock_session(db: AsyncSession, session_id: UUID) -> Session:
     )
     session = result.scalar_one_or_none()
     if session is None:
-        raise SessionGoneError(f"session {session_id} no longer exists")
+        raise SessionNotFoundError("Session not found.")
     return session
 
 
@@ -359,13 +353,13 @@ async def _bind_session_files(
     db: AsyncSession,
     *,
     session_id: UUID,
-    user_id: int | None,
+    user_id: int,
     files: list[FileRef],
 ) -> list[str]:
     """Bind uploaded file keys to this session exactly once.
 
-    Each new row records ``user_id`` (the session owner, ``None`` for
-    anonymous sessions) denormalized from the session for per-user queries.
+    Each new row records ``user_id`` (the session owner) denormalized from
+    the session for per-user queries.
 
     Returns the keys that were **newly** bound this call (a fresh
     ``session_files`` row), so the caller can clear their orphan-reaping
@@ -440,7 +434,7 @@ async def _bind_session_files(
 
 async def _filter_invokable_skills(
     db: AsyncSession,
-    user_id: int | None,
+    user_id: int,
     requested: list[str],
 ) -> list[dict[str, str | int]]:
     """Return immutable snapshots of the skills the user can invoke this turn.
@@ -485,7 +479,7 @@ async def _filter_invokable_skills(
     preserved from the request so the worker's reminder lists skills in
     the order the user picked them.
     """
-    if not requested or user_id is None:
+    if not requested:
         return []
     # De-duplicate while preserving order — duplicates would noise both
     # the snapshot list and the LLM reminder.
@@ -510,7 +504,7 @@ async def _filter_invokable_skills(
 
 async def _resolve_mcp_servers(
     db: AsyncSession,
-    user_id: int | None,
+    user_id: int,
     requested: list[int],
 ) -> list[dict[str, str | int]]:
     """Snapshot ``{"id", "name"}`` for each of the session's live Connectors.
@@ -528,56 +522,15 @@ async def _resolve_mcp_servers(
     that no longer exists. (Contrast the skills snapshot, whose
     ``bundle_key`` *is* load-bearing.)
     """
-    if not requested or user_id is None:
+    if not requested:
         return []
-    # De-duplicate; a repeated pick would otherwise repeat in the snapshot.
-    # Request order is kept only so a queued row reads the way the user
-    # picked — the worker connects by its own rule (failed-last), so nothing
-    # downstream depends on it.
-    requested_unique = list(dict.fromkeys(requested))
-
+    # ``requested`` comes from ``session_mcp_server``, whose primary key rules
+    # out a duplicate; the worker connects by its own rule (failed-last), so
+    # the snapshot's order carries no meaning.
     stmt = select(MCPServer.id, MCPServer.name).where(
-        MCPServer.id.in_(requested_unique),
+        MCPServer.id.in_(requested),
         MCPServer.user_id == user_id,
         MCPServer.connected.is_(True),
     )
     result = await db.execute(stmt)
-    by_id = {row_id: {"id": row_id, "name": name} for row_id, name in result.all()}
-    return [by_id[picked] for picked in requested_unique if picked in by_id]
-
-
-async def _resolve_recipe_snapshot(
-    db: AsyncSession,
-    user_id: int | None,
-    recipe_id: int | None,
-) -> dict[str, str | int] | None:
-    """Resolve a picked recipe id into a pinned per-turn snapshot.
-
-    Returns ``{"id", "display_name", "instructions"}`` — the rendered
-    instructions captured at enqueue time so a later edit / delete of the
-    recipe can't change or strand this queued turn. The worker injects
-    ``instructions`` verbatim as an axon system-reminder.
-
-    A recipe is invokable when it's visible to the user (their own
-    CUSTOM, or any OFFICIAL) AND enabled. Unlike skills — silently
-    filtered, since a stale chip shouldn't block a free-text send — a
-    recipe is a single explicit pick, so a missing / hidden / disabled id
-    raises :class:`RecipeNotInvokableError` (→ 400) rather than vanishing.
-
-    Returns ``None`` when no recipe was picked.
-    """
-    if recipe_id is None:
-        return None
-    stmt = select(Recipe.id, Recipe.display_name, Recipe.instructions).where(
-        Recipe.id == recipe_id,
-        Recipe.enabled.is_(True),
-        (Recipe.user_id == user_id) | (Recipe.origin == RecipeOrigin.OFFICIAL),
-    )
-    row = (await db.execute(stmt)).first()
-    if row is None:
-        raise RecipeNotInvokableError(f"recipe {recipe_id} is not available")
-    return {
-        "id": row.id,
-        "display_name": row.display_name,
-        "instructions": row.instructions,
-    }
+    return [{"id": row_id, "name": name} for row_id, name in result.all()]

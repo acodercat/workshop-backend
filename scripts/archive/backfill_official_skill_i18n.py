@@ -12,7 +12,7 @@ Going forward, re-uploading a bundle whose SKILL.md ships a
 of it, and adding a NEW skill's names here is the wrong place (ship them in
 the bundle instead).
 
-Reuses :func:`app.services.skill_i18n.parse_display_name`, so the stored
+Reuses :func:`app.services.localized_text.parse`, so the stored
 ``(display_name, display_name_i18n)`` pair matches exactly what an upload
 would produce. Idempotent: re-running sets the same values.
 
@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models.skill import Skill, SkillOrigin
-from app.services.skill_i18n import parse_display_name
+from app.services import localized_text
 
 # Canonical zh-CN / en-US names for the seeded OFFICIAL catalog, keyed by the
 # skill's ``name`` (slug). Adding a NEW skill does not belong here — ship its
@@ -57,7 +57,8 @@ async def _backfill(db: AsyncSession, *, apply: bool) -> None:
         if slug not in present:
             print(f"  skip  {slug!r} — no OFFICIAL skill with this name")
             continue
-        display_name, display_name_i18n = parse_display_name(names, slug)
+        # 128: the ``skill.display_name`` column width.
+        display_name, display_name_i18n = localized_text.parse(names, slug, max_chars=128)
         print(f"  set   {slug!r} → default {display_name!r}, i18n {display_name_i18n}")
         if apply:
             await db.execute(

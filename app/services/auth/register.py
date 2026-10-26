@@ -1,9 +1,9 @@
 """Register orchestration.
 
-Invite-gated email-OTP registration: the caller supplies ``email`` +
-``code`` + ``name`` + ``invite_code``. A valid invite is the access
-grant, so this module creates the user ``ACTIVE`` and issues a JWT —
-the endpoint logs them straight in. It generates a stable
+Invite-gated OTP registration: the caller supplies an email or phone
+``identifier`` + ``code`` + ``name`` + ``invite_code``. A valid invite
+is the access grant, so this module creates the user ``ACTIVE`` and
+issues a JWT — the endpoint logs them straight in. It generates a stable
 ``axon_${id}`` username and a random password placeholder (the user
 can set a real password later in settings), mints the user's personal
 referral code, and records the invite redemption — all in one
@@ -58,28 +58,35 @@ async def register_user(
 ) -> LoggedInResponse:
     """Redeem an invite code, create an ``ACTIVE`` user, log them in.
 
-    Steps in order — fail-fast cheap checks first so a bad invite or a
-    taken email doesn't burn the verification code:
+    Steps in order — fail-fast checks first so a bad invite or a taken
+    identifier doesn't burn the verification code:
 
-    1. Pre-check ``email`` uniqueness.
-    2. Hash the password placeholder (the one slow, CPU-bound step) —
+    1. Peek-verify the code (wrong guesses still count toward the cap),
+       so only someone holding the identifier learns whether it is
+       already registered — otherwise this endpoint would answer
+       "taken" vs "bad invite" to anyone, code or no code.
+    2. Pre-check identifier uniqueness.
+    3. Hash the password placeholder (the one slow, CPU-bound step) —
        done **before** the invite claim so the claim's row lock isn't
        held across bcrypt.
-    3. Claim an invite slot (fenced ``UPDATE``) — **before** consuming
+    4. Claim an invite slot (fenced ``UPDATE``) — **before** consuming
        the OTP, so a code exhausted by a concurrent registration is
        rejected without burning the verification code. The increment
        rolls back with the transaction if a later step fails.
-    4. Consume the email verification code.
-    5. Reserve the next user id; INSERT the user ``ACTIVE`` (the invite
+    5. Consume the verification code.
+    6. Reserve the next user id; INSERT the user ``ACTIVE`` (the invite
        is the access grant) with the precomputed password hash.
-    6. Create the personal org + OWNER membership, the user's personal
+    7. Create the personal org + OWNER membership, the user's personal
        referral code, and the invite redemption — all in the same
        transaction, so a later failure rolls the whole identity back.
-    7. Issue a JWT and return the logged-in response.
+    8. Issue a JWT and return the logged-in response.
     """
-    # Cheap pre-check — only ``email`` is user-supplied here; the
-    # generated ``axon_${id}`` is unique by construction (id is from a
-    # sequence). Fail fast before the expensive steps below.
+    await verify_verification_code(
+        redis, channel=channel, identifier=identifier, code=code, consume=False
+    )
+
+    # Only the identifier is user-supplied here; the generated
+    # ``axon_${id}`` is unique by construction (id is from a sequence).
     id_column = User.phone if channel == "phone" else User.email
     taken_error = (
         PhoneTakenError("Phone already registered")
@@ -136,7 +143,7 @@ async def register_user(
     db.add(user)
     try:
         # Flush so user.id is visible to the org we're about to insert.
-        # Email uniqueness is the only IntegrityError we expect here —
+        # Identifier uniqueness is the only IntegrityError we expect here —
         # the pre-check above caught the common case; this catches the
         # racing-concurrent-INSERT case where two callers passed the
         # pre-check simultaneously.
@@ -218,6 +225,7 @@ async def register_user(
                 amount_micro=micro_from_credits(welcome_credits),
                 idempotency_key=f"welcome-{user_id}",
                 reason="welcome grant",
+                source="welcome_grant",
             )
             await db.commit()
         except credits.TopupAlreadyApplied:

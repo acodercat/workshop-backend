@@ -1,4 +1,4 @@
-"""Connectors as session configuration (``mcp_ownership.require_owned_connectors``).
+"""Connectors as session configuration (``connector_ownership.require_owned_connectors``).
 
 They used to ride in on every message. A Switch means "from now on", so
 they live on the session now — written once, applied to every turn.
@@ -19,10 +19,9 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 
 from app.api.public.session import _owned_connector_or_404
-from app.errors import ConnectorNotOwnedError
+from app.errors import ConnectorNotFoundError, ConnectorNotOwnedError
 from app.models.session import SessionStatus
 from app.models.session_mcp_server import SessionMCPServer
 from app.schemas.session import (
@@ -34,7 +33,7 @@ from app.schemas.session import (
     SessionUpdate,
     Tier,
 )
-from app.services.mcp.ownership import require_owned_connectors
+from app.services.connector.ownership import require_owned_connectors
 from app.services.session import connectors as session_connectors
 
 
@@ -241,7 +240,7 @@ class TestTheGuardOnTheSubResource:
     async def test_someone_elses_connector_is_a_404_not_a_403(self):
         # 404 rather than 403: the id is in the path, and answering "exists,
         # but not yours" would confirm a neighbour's Connector by its id.
-        with pytest.raises(HTTPException) as excinfo:
+        with pytest.raises(ConnectorNotFoundError) as excinfo:
             await _owned_connector_or_404(self._db_finding(None), 7, 42)
 
         assert excinfo.value.status_code == 404
