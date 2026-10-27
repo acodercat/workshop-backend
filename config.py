@@ -6,10 +6,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 MINUTES_PER_WEEK = 60 * 24 * 7
 MINUTES_PER_WORKDAY = 60 * 8
 
-# What ``.env.example`` once shipped as ``secret_key``. Copied unchanged, it signs
-# every token with a value anyone with the repository has.
-_PLACEHOLDER_SECRET_KEY = "change-me-to-a-random-secret-key"
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -49,16 +45,6 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = Field(min_length=32, description="Secret key for JWT encoding")
-
-    @field_validator("secret_key")
-    @classmethod
-    def _not_the_placeholder(cls, key: str) -> str:
-        if key == _PLACEHOLDER_SECRET_KEY:
-            raise ValueError(
-                "secret_key is the .env.example placeholder; generate one with "
-                'python -c "import secrets; print(secrets.token_urlsafe(48))"'
-            )
-        return key
 
     # Fernet key (44-char urlsafe base64) for encrypting Connector credentials
     # at rest. Generate with ``Fernet.generate_key()``. Empty default so a

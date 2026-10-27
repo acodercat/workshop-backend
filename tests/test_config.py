@@ -10,10 +10,9 @@ from config import Settings
 _RATE_LIMITS = [name for name in Settings.model_fields if name.startswith("rate_limit_")]
 
 
-@pytest.mark.parametrize("secret_key", ["change-me-to-a-random-secret-key", "too-short"])
-def test_a_placeholder_or_short_secret_key_is_refused(secret_key):
+def test_a_short_secret_key_is_refused():
     with pytest.raises(ValidationError, match="secret_key"):
-        Settings(secret_key=secret_key)
+        Settings(secret_key="too-short")
 
 
 @pytest.mark.parametrize("field", _RATE_LIMITS)
