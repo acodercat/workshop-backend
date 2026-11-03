@@ -1328,12 +1328,12 @@ async def _enforce_session_file_quota(
     it creates — while occupying OSS exactly once, so charging it once a day
     would be billing for storage nobody is using. Schedule attachments are
     folded in from ``schedule_file`` so that one still counts before its
-    first firing has bound it anywhere, and project files uploaded on the
-    project's page from ``project_file``, where they may never be bound to
-    a session at all. Those count while both the file and its project are
-    live: deleting either frees the quota, as deleting a session does. A
-    session file added to a project is the same object, and the per-object
-    count already has it.
+    first firing has bound it anywhere, and the files the user added to a
+    project from ``project_file`` — uploaded on its page, or added from a
+    session — which outlive the session they came from. Those count while
+    both the file and its project are live: deleting either frees the
+    quota, as deleting a session does. A file the agent saved to a project
+    does not, for the reason a deliverable does not.
 
     ``size_bytes`` on every row is the size OSS reported when the file was
     bound or attached (``file_storage.confirmed_sizes``), never a client's
@@ -1359,7 +1359,7 @@ async def _enforce_session_file_quota(
         .join(Project, Project.id == ProjectFile.project_id)
         .where(
             ProjectFile.user_id == user_id,
-            ProjectFile.origin == ProjectFileOrigin.UPLOAD,
+            ProjectFile.origin != ProjectFileOrigin.AGENT,
             ProjectFile.deleted_at.is_(None),
             Project.deleted_at.is_(None),
         )

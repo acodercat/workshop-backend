@@ -30,13 +30,14 @@ async def _compiled() -> str:
     return db.sql
 
 
-async def test_project_uploads_count() -> None:
-    # A file uploaded on a project's page may never be bound to a session,
-    # so the session tables alone would let it bypass the quota.
+async def test_files_the_user_added_to_a_project_count() -> None:
+    # An upload on a project's page may never be bound to a session, and a
+    # session file added to a project outlives the session: the session
+    # tables alone would let either bypass the quota once that is deleted.
     sql = await _compiled()
     assert "FROM project_file" in sql
     assert "project_file.user_id = 7" in sql
-    assert "project_file.origin = 'UPLOAD'" in sql
+    assert "project_file.origin != 'AGENT'" in sql
 
 
 async def test_deleting_a_project_file_or_its_project_frees_the_quota() -> None:
