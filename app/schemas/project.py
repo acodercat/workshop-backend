@@ -14,6 +14,10 @@ from app.schemas.session import FileRef
 # every turn, not just storage.
 _INSTRUCTIONS_MAX_LENGTH = 8000
 
+# An icon is named, not drawn, here: a lowercase kebab-case name from the
+# client's catalog (``project.icon``).
+_ICON_PATTERN = r"^[a-z0-9]+(-[a-z0-9]+)*$"
+
 
 def _checked_name(value: str | None) -> str | None:
     """Trim a project name, and refuse one that shows nothing.
@@ -48,6 +52,7 @@ class ProjectCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=100)
     instructions: str = Field(default="", max_length=_INSTRUCTIONS_MAX_LENGTH)
+    icon: str | None = Field(default=None, max_length=32, pattern=_ICON_PATTERN)
 
     _check_name = field_validator("name")(_checked_name)
     _check_instructions = field_validator("instructions")(_checked_instructions)
@@ -58,6 +63,7 @@ class ProjectUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=100)
     instructions: str | None = Field(default=None, max_length=_INSTRUCTIONS_MAX_LENGTH)
+    icon: str | None = Field(default=None, max_length=32, pattern=_ICON_PATTERN)
 
     _check_name = field_validator("name")(_checked_name)
     _check_instructions = field_validator("instructions")(_checked_instructions)
@@ -69,6 +75,7 @@ class ProjectResponse(BaseModel):
     id: UUID
     name: str
     instructions: str
+    icon: str | None
     created_at: datetime
     updated_at: datetime
 

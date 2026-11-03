@@ -54,3 +54,15 @@ def test_a_file_comes_from_exactly_one_source() -> None:
     with pytest.raises(ValidationError):
         ProjectFileCreate(upload=upload, session_file=session_file)
     assert ProjectFileCreate(upload=upload).session_file is None
+
+
+def test_icon_is_optional_and_named_by_the_client() -> None:
+    assert ProjectCreate(name="ok").icon is None
+    assert ProjectCreate(name="ok", icon="number-circle-0").icon == "number-circle-0"
+    assert ProjectUpdate(name="ok").icon is None
+
+
+@pytest.mark.parametrize("icon", ["", "Folder", "folder icon", "-folder", "x" * 33])
+def test_icon_that_is_not_a_catalog_name_is_refused(icon: str) -> None:
+    with pytest.raises(ValidationError):
+        ProjectCreate(name="ok", icon=icon)

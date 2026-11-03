@@ -52,6 +52,11 @@ class Project(Base):
     # What every session in the project runs under, verbatim. Empty when the
     # owner has written none. Its length cap is the API's, not the column's.
     instructions: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    # The icon the client draws for the project, by the client's name for it;
+    # NULL until the owner picks one, and the client draws its default. Only
+    # the name's shape is checked here: which icons exist is the client's
+    # catalog, so adding one is a frontend change.
+    icon: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

@@ -91,7 +91,12 @@ async def create_project(
 ) -> ProjectResponse:
     """Create a project owned by the caller. 403 at the per-account cap."""
     await _assert_headroom(db, current_user.id)
-    project = Project(user_id=current_user.id, name=body.name, instructions=body.instructions)
+    project = Project(
+        user_id=current_user.id,
+        name=body.name,
+        instructions=body.instructions,
+        icon=body.icon,
+    )
     db.add(project)
     await db.commit()
     await db.refresh(project)
@@ -137,8 +142,8 @@ async def update_project(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ProjectResponse:
-    """Rename a project, or replace its instructions. ``None`` leaves a field
-    alone."""
+    """Rename a project, or replace its instructions or icon. ``None`` leaves
+    a field alone."""
     project = await project_ownership.require_owned_project(
         db, user_id=current_user.id, project_id=project_id
     )
@@ -146,6 +151,8 @@ async def update_project(
         project.name = body.name
     if body.instructions is not None:
         project.instructions = body.instructions
+    if body.icon is not None:
+        project.icon = body.icon
     await db.commit()
     await db.refresh(project)
     return ProjectResponse.model_validate(project)
