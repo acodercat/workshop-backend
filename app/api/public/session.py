@@ -1308,8 +1308,8 @@ async def _enforce_session_file_quota(
     db: AsyncSession, user_id: int, incoming_size_bytes: int
 ) -> None:
     """Reject the upload-url mint if this upload would put the user over a
-    per-user quota. Two gates, both scoped to ``UPLOAD``-origin rows on
-    non-soft-deleted sessions (deleting a session frees up quota):
+    per-user quota. Two gates, both over the objects counted below, each
+    once:
 
     - **Total size** (primary): summed ``size_bytes`` plus this upload
       must stay under ``max_session_files_bytes_per_user``. This gate
