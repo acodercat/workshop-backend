@@ -20,9 +20,9 @@ fire this row's ``onupdate``, so those paths set it explicitly.
 
 **The row is the project's lock.** Every write that changes which sessions
 or files belong to a project — deleting it, creating or moving a session
-into it, adding a file — takes ``FOR UPDATE`` on this row first, and only
-then touches ``session`` rows. One order everywhere, and enqueue never
-locks a project, so the order cannot form a cycle.
+into it, adding or removing a file — takes ``FOR UPDATE`` on this row
+first, and only then touches ``session`` rows. One order everywhere, and
+enqueue never locks a project, so the order cannot form a cycle.
 """
 
 import uuid

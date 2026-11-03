@@ -8,14 +8,15 @@ the files it shares. The rules for those live in
 :mod:`app.services.project.files`.
 
 Every write that changes what a project holds locks its row first
-(``require_owned_project(for_update=True)``) — see ``app/models/project.py``
+(``project_ownership.require_owned_project(for_update=True)``) — see
+``app/models/project.py``
 for why that one order is enough.
 """
 
 import uuid
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from sqlalchemy import Update, func, select, update
+from sqlalchemy import ColumnElement, Update, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
@@ -36,8 +37,7 @@ from app.schemas.project import (
     ProjectUpdate,
 )
 from app.services import file_storage
-from app.services.project import files as project_files
-from app.services.project.ownership import require_owned_project
+from app.services.project import files as project_files, ownership as project_ownership
 
 router = APIRouter(tags=["projects"])
 
@@ -47,6 +47,12 @@ router = APIRouter(tags=["projects"])
 _MAX_PROJECTS_PER_USER = 100
 
 
+def _live_projects(user_id: int) -> ColumnElement[bool]:
+    """The caller's live projects — what the list shows and what the cap
+    counts, so the two cannot disagree about which projects there are."""
+    return (Project.user_id == user_id) & Project.deleted_at.is_(None)
+
+
 async def _assert_headroom(db: AsyncSession, user_id: int) -> None:
     """Refuse a project the caller has no room for.
 
@@ -54,12 +60,7 @@ async def _assert_headroom(db: AsyncSession, user_id: int) -> None:
     each pass and put the user one over, which is not worth a row lock for a
     soft policy limit.
     """
-    total = await db.scalar(
-        select(func.count(Project.id)).where(
-            Project.user_id == user_id,
-            Project.deleted_at.is_(None),
-        )
-    )
+    total = await db.scalar(select(func.count(Project.id)).where(_live_projects(user_id)))
     if total is not None and total >= _MAX_PROJECTS_PER_USER:
         raise ProjectLimitError(_MAX_PROJECTS_PER_USER)
 
@@ -104,9 +105,9 @@ async def list_projects(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> PaginatedResponse[ProjectResponse]:
     """The caller's live projects, most recently updated first."""
-    filter_clause = (Project.user_id == current_user.id) & Project.deleted_at.is_(None)
-    base = select(Project).where(filter_clause).order_by(Project.updated_at.desc())
-    total = (await db.execute(select(func.count(Project.id)).where(filter_clause))).scalar() or 0
+    live = _live_projects(current_user.id)
+    base = select(Project).where(live).order_by(Project.updated_at.desc())
+    total = (await db.execute(select(func.count(Project.id)).where(live))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
         items=[ProjectResponse.model_validate(p) for p in rows],
@@ -120,7 +121,9 @@ async def get_project(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ProjectResponse:
-    project = await require_owned_project(db, user_id=current_user.id, project_id=project_id)
+    project = await project_ownership.require_owned_project(
+        db, user_id=current_user.id, project_id=project_id
+    )
     return ProjectResponse.model_validate(project)
 
 
@@ -135,7 +138,9 @@ async def update_project(
 ) -> ProjectResponse:
     """Rename a project, or replace its instructions. ``None`` leaves a field
     alone."""
-    project = await require_owned_project(db, user_id=current_user.id, project_id=project_id)
+    project = await project_ownership.require_owned_project(
+        db, user_id=current_user.id, project_id=project_id
+    )
     if body.name is not None:
         project.name = body.name
     if body.instructions is not None:
@@ -167,7 +172,7 @@ async def delete_project(
     project holds does, so no session can be created in or moved into it
     while it is being emptied.
     """
-    project = await require_owned_project(
+    project = await project_ownership.require_owned_project(
         db, user_id=current_user.id, project_id=project_id, for_update=True
     )
     await db.execute(_moved_out(project.id))
@@ -184,7 +189,9 @@ async def list_project_files(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> PaginatedResponse[ProjectFileResponse]:
     """The current version of each of the project's files, newest first."""
-    project = await require_owned_project(db, user_id=current_user.id, project_id=project_id)
+    project = await project_ownership.require_owned_project(
+        db, user_id=current_user.id, project_id=project_id
+    )
     current = project_files.latest(project.id)
     total = await db.scalar(select(func.count()).select_from(current.subquery())) or 0
     rows = (await db.execute(paginate(current, page, page_size))).scalars().all()
@@ -210,7 +217,7 @@ async def add_project_file(
     storage; a concurrent add to the same project waits that long, which
     is the price of an exact version and cap.
     """
-    project = await require_owned_project(
+    project = await project_ownership.require_owned_project(
         db, user_id=current_user.id, project_id=project_id, for_update=True
     )
     file = await project_files.add(db, project, body)
@@ -233,7 +240,9 @@ async def get_project_file_download_url(
 ) -> DownloadUrlResponse:
     """Mint a presigned GET URL for a project file, the same shape a session
     file's download URL has."""
-    project = await require_owned_project(db, user_id=current_user.id, project_id=project_id)
+    project = await project_ownership.require_owned_project(
+        db, user_id=current_user.id, project_id=project_id
+    )
     file = await project_files.get(db, project.id, file_id)
     url, expires_in = file_storage.generate_download_url(
         file_storage.SESSION_FILE_POLICY, file.file_key, file.filename
@@ -258,7 +267,7 @@ async def delete_project_file(
     The OSS object stays, as a deleted session's uploads do: another
     session or schedule may bind the same key.
     """
-    project = await require_owned_project(
+    project = await project_ownership.require_owned_project(
         db, user_id=current_user.id, project_id=project_id, for_update=True
     )
     file = await project_files.get(db, project.id, file_id)

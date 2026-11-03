@@ -7,7 +7,8 @@ Submodule responsibilities:
 - :mod:`~app.services.project.files` — a project's files: adding one from
   either source, removing one, and reading the current version of each.
 
-``files`` is imported by module path (``from app.services.project import
-files as project_files``), like :mod:`app.services.schedule.files`: its
-verbs read only beside the module's name.
+Both are imported by module path (``from app.services.project import files
+as project_files``), like :mod:`app.services.schedule.files` and
+:mod:`app.services.connector.ownership`: their verbs read only beside the
+module's name.
 """

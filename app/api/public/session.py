@@ -95,7 +95,7 @@ from app.services.file_storage import (
     SESSION_FILE_POLICY,
     InlinePreviewNotAllowedError,
 )
-from app.services.project.ownership import require_owned_project
+from app.services.project import ownership as project_ownership
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import (
     build_session,
@@ -312,7 +312,7 @@ async def create_session(
     # Locked, so the project cannot be deleted while a session is created in
     # it — see ``app/models/project.py``.
     project = (
-        await require_owned_project(
+        await project_ownership.require_owned_project(
             db, user_id=current_user.id, project_id=body.project_id, for_update=True
         )
         if body.project_id is not None
@@ -688,7 +688,7 @@ async def update_session(
     """
     moving = "project_id" in body.model_fields_set
     target = (
-        await require_owned_project(
+        await project_ownership.require_owned_project(
             db, user_id=current_user.id, project_id=body.project_id, for_update=True
         )
         if moving and body.project_id is not None
