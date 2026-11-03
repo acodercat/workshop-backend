@@ -913,6 +913,29 @@ class ScheduleCompletedError(AppError):
         super().__init__("This schedule has already completed; edit its schedule to run it again.")
 
 
+class ProjectNotFoundError(AppError):
+    """No live project with that id that the caller owns. One answer for a
+    deleted project, someone else's and one that never existed, so ids are
+    not leaked."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "project_not_found"
+
+
+class ProjectLimitError(AppError):
+    """The caller is at the per-account cap on live projects. Cleared by
+    deleting one."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "project_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} projects per account; delete some to make room.",
+            details={"limit": limit},
+        )
+
+
 class FileNotInSessionError(AppError):
     """A ``file_key`` was requested against a session it is not bound to.
 
