@@ -195,8 +195,8 @@ async def _next_version(db: AsyncSession, project_id: uuid.UUID, filename: str) 
     """The version a new row of this name takes: one past the highest ever
     written, deleted ones included, so the unique constraint never collides.
 
-    The allocation rule ``app/models/project_file.py`` states for both
-    writers; correct only under the project's row lock.
+    The allocation rule ``app/models/project_file.py`` states; correct
+    only under the project's row lock.
     """
     highest = await db.scalar(
         select(func.max(ProjectFile.version)).where(

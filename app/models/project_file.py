@@ -13,13 +13,12 @@ Deleting a file soft-deletes every version of its name — the owner removed
 numbers on from the highest version ever written, deleted ones included,
 so ``uq_project_file_project_id_filename_version`` never collides.
 
-**How a version is allocated — a contract with the worker.** Two services
-write this table: the backend (uploads, files added from a session) and
-``agent-worker`` (``origin = AGENT``, the agent's ``save_project_file``).
-Both take ``FOR UPDATE`` on the ``project`` row, then insert
-``coalesce(max(version), 0) + 1`` over every row of that
-``(project_id, filename)``. The lock is what makes the read-then-insert
-safe; the unique constraint is the backstop if either side forgets it.
+**Only the owner adds files**, on the project's page or from a session: the
+agent reads them and never writes here, since what a project holds is the
+user's to decide. A version is allocated under ``FOR UPDATE`` on the
+``project`` row, as ``coalesce(max(version), 0) + 1`` over every row of
+that ``(project_id, filename)``; the lock makes the read-then-insert safe,
+and the unique constraint is the backstop.
 
 ``user_id`` is denormalized from the project, as ``schedule_file.user_id``
 is from its schedule: the upload quota and ``assert_files_owned_by`` both
@@ -53,13 +52,10 @@ class ProjectFileOrigin(StrEnum):
 
     - ``UPLOAD`` — uploaded on the project's page.
     - ``SESSION_FILE`` — added from one of the owner's session files.
-    - ``AGENT`` — saved by the agent in one of the project's sessions
-      (written by the worker).
     """
 
     UPLOAD = "UPLOAD"
     SESSION_FILE = "SESSION_FILE"
-    AGENT = "AGENT"
 
 
 class ProjectFile(Base):
@@ -91,10 +87,10 @@ class ProjectFile(Base):
         ),
         nullable=False,
     )
-    # The session a ``SESSION_FILE`` or ``AGENT`` file came from. Provenance,
-    # not a foreign key: it must survive the session, and ``SET NULL`` would
-    # break ``ck_project_file_origin_session_consistent``. Referenced by
-    # value, like ``sandbox.session_id``.
+    # The session a ``SESSION_FILE`` came from. Provenance, not a foreign
+    # key: it must survive the session, and ``SET NULL`` would break
+    # ``ck_project_file_origin_session_consistent``. Referenced by value,
+    # like ``sandbox.session_id``.
     origin_session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False

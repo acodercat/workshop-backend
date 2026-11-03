@@ -37,7 +37,8 @@ async def test_files_the_user_added_to_a_project_count() -> None:
     sql = await _compiled()
     assert "FROM project_file" in sql
     assert "project_file.user_id = 7" in sql
-    assert "project_file.origin != 'AGENT'" in sql
+    # Every origin: each is a file the user chose to keep.
+    assert "project_file.origin" not in sql
 
 
 async def test_deleting_a_project_file_or_its_project_frees_the_quota() -> None:

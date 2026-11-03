@@ -56,7 +56,7 @@ from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.project import Project
-from app.models.project_file import ProjectFile, ProjectFileOrigin
+from app.models.project_file import ProjectFile
 from app.models.schedule_file import ScheduleFile
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
@@ -1328,12 +1328,11 @@ async def _enforce_session_file_quota(
     it creates — while occupying OSS exactly once, so charging it once a day
     would be billing for storage nobody is using. Schedule attachments are
     folded in from ``schedule_file`` so that one still counts before its
-    first firing has bound it anywhere, and the files the user added to a
+    first firing has bound it anywhere, and every file the user added to a
     project from ``project_file`` — uploaded on its page, or added from a
-    session — which outlive the session they came from. Those count while
-    both the file and its project are live: deleting either frees the
-    quota, as deleting a session does. A file the agent saved to a project
-    does not, for the reason a deliverable does not.
+    session, which it outlives. Those count while both the file and its
+    project are live: deleting either frees the quota, as deleting a
+    session does.
 
     ``size_bytes`` on every row is the size OSS reported when the file was
     bound or attached (``file_storage.confirmed_sizes``), never a client's
@@ -1359,7 +1358,6 @@ async def _enforce_session_file_quota(
         .join(Project, Project.id == ProjectFile.project_id)
         .where(
             ProjectFile.user_id == user_id,
-            ProjectFile.origin != ProjectFileOrigin.AGENT,
             ProjectFile.deleted_at.is_(None),
             Project.deleted_at.is_(None),
         )
