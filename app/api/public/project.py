@@ -38,6 +38,7 @@ from app.schemas.project import (
 )
 from app.services import file_storage
 from app.services.project import files as project_files, ownership as project_ownership
+from config import settings
 
 router = APIRouter(tags=["projects"])
 
@@ -202,7 +203,11 @@ async def list_project_files(
 
 
 @router.post("/projects/{project_id}/files", status_code=status.HTTP_201_CREATED)
-@limiter.limit("30/minute")
+# The upload-URL mint's limit, not the 30/minute of other writes: each file
+# uploaded on the project's page is one mint and then one add, so a lower
+# limit here would refuse the second half of uploads the first half took —
+# leaving objects in storage that the project never got.
+@limiter.limit(settings.rate_limit_upload_url)
 async def add_project_file(
     request: Request,
     project_id: uuid.UUID,
