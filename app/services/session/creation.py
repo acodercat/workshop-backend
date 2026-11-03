@@ -75,11 +75,13 @@ async def build_session(
     agent_type: AgentType,
     thinking_enabled: bool,
     connector_ids: list[int],
+    project_id: uuid.UUID | None,
 ) -> Session:
     """Add a new session to *db* and flush it, without committing.
 
-    ``connector_ids`` must already be ownership-filtered — that check reads
-    a request's untrusted input and belongs to whoever accepted it.
+    ``connector_ids`` must already be ownership-filtered, and ``project_id``
+    must name a project the caller owns and has locked — both checks read
+    a request's untrusted input and belong to whoever accepted it.
 
     Raises:
         UnconfiguredTierError: the tier maps to no model, or to one absent
@@ -93,6 +95,7 @@ async def build_session(
         agent_type=agent_type,
         thinking_enabled=thinking_enabled,
         status=SessionStatus.IDLE,
+        project_id=project_id,
     )
     db.add(session)
     # The Connector rows key off ``session.id``, which a Python-side default

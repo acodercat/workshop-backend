@@ -7,8 +7,9 @@ belong to one is ``session.project_id``, set through the session endpoints
 the files it shares. The rules for those live in
 :mod:`app.services.project.files`.
 
-Every write that changes what a project holds locks its row first — see
-``app/models/project.py`` for why that one order is enough.
+Every write that changes what a project holds locks its row first
+(``require_owned_project(for_update=True)``) — see ``app/models/project.py``
+for why that one order is enough.
 """
 
 import uuid
@@ -20,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.common.pagination import paginate
-from app.errors import ProjectLimitError, ProjectNotFoundError
+from app.errors import ProjectLimitError
 from app.models.project import Project
 from app.models.session import Session
 from app.models.user import User
@@ -36,6 +37,7 @@ from app.schemas.project import (
 )
 from app.services import file_storage
 from app.services.project import files as project_files
+from app.services.project.ownership import require_owned_project
 
 router = APIRouter(tags=["projects"])
 
@@ -43,30 +45,6 @@ router = APIRouter(tags=["projects"])
 # read of the whole list: the sidebar, the move-to-project menu and a
 # session's breadcrumb all look projects up in it.
 _MAX_PROJECTS_PER_USER = 100
-
-
-async def _get_or_404(
-    db: AsyncSession, project_id: uuid.UUID, user_id: int, *, for_update: bool = False
-) -> Project:
-    """Load a live project the caller owns.
-
-    Ownership and liveness are folded into the lookup, so someone else's
-    project, a deleted one and a nonexistent one are the same 404.
-
-    ``for_update`` takes the project's lock — the first step of every write
-    that changes what the project holds.
-    """
-    query = select(Project).where(
-        Project.id == project_id,
-        Project.user_id == user_id,
-        Project.deleted_at.is_(None),
-    )
-    if for_update:
-        query = query.with_for_update()
-    project = (await db.execute(query)).scalar_one_or_none()
-    if project is None:
-        raise ProjectNotFoundError("Project not found.")
-    return project
 
 
 async def _assert_headroom(db: AsyncSession, user_id: int) -> None:
@@ -142,7 +120,7 @@ async def get_project(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ProjectResponse:
-    project = await _get_or_404(db, project_id, current_user.id)
+    project = await require_owned_project(db, user_id=current_user.id, project_id=project_id)
     return ProjectResponse.model_validate(project)
 
 
@@ -157,7 +135,7 @@ async def update_project(
 ) -> ProjectResponse:
     """Rename a project, or replace its instructions. ``None`` leaves a field
     alone."""
-    project = await _get_or_404(db, project_id, current_user.id)
+    project = await require_owned_project(db, user_id=current_user.id, project_id=project_id)
     if body.name is not None:
         project.name = body.name
     if body.instructions is not None:
@@ -189,7 +167,9 @@ async def delete_project(
     project holds does, so no session can be created in or moved into it
     while it is being emptied.
     """
-    project = await _get_or_404(db, project_id, current_user.id, for_update=True)
+    project = await require_owned_project(
+        db, user_id=current_user.id, project_id=project_id, for_update=True
+    )
     await db.execute(_moved_out(project.id))
     project.deleted_at = func.now()
     await db.commit()
@@ -204,7 +184,7 @@ async def list_project_files(
     current_user: User = Depends(authenticate_and_get_user),
 ) -> PaginatedResponse[ProjectFileResponse]:
     """The current version of each of the project's files, newest first."""
-    project = await _get_or_404(db, project_id, current_user.id)
+    project = await require_owned_project(db, user_id=current_user.id, project_id=project_id)
     current = project_files.latest(project.id)
     total = await db.scalar(select(func.count()).select_from(current.subquery())) or 0
     rows = (await db.execute(paginate(current, page, page_size))).scalars().all()
@@ -230,7 +210,9 @@ async def add_project_file(
     storage; a concurrent add to the same project waits that long, which
     is the price of an exact version and cap.
     """
-    project = await _get_or_404(db, project_id, current_user.id, for_update=True)
+    project = await require_owned_project(
+        db, user_id=current_user.id, project_id=project_id, for_update=True
+    )
     file = await project_files.add(db, project, body)
     await db.commit()
     await db.refresh(file)
@@ -251,7 +233,7 @@ async def get_project_file_download_url(
 ) -> DownloadUrlResponse:
     """Mint a presigned GET URL for a project file, the same shape a session
     file's download URL has."""
-    project = await _get_or_404(db, project_id, current_user.id)
+    project = await require_owned_project(db, user_id=current_user.id, project_id=project_id)
     file = await project_files.get(db, project.id, file_id)
     url, expires_in = file_storage.generate_download_url(
         file_storage.SESSION_FILE_POLICY, file.file_key, file.filename
@@ -276,7 +258,9 @@ async def delete_project_file(
     The OSS object stays, as a deleted session's uploads do: another
     session or schedule may bind the same key.
     """
-    project = await _get_or_404(db, project_id, current_user.id, for_update=True)
+    project = await require_owned_project(
+        db, user_id=current_user.id, project_id=project_id, for_update=True
+    )
     file = await project_files.get(db, project.id, file_id)
     await project_files.remove(db, project, file)
     await db.commit()
