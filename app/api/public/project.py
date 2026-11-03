@@ -1,9 +1,11 @@
-"""Project CRUD.
+"""Project CRUD, and a project's files.
 
 A project groups sessions under shared instructions and files. Which sessions
 belong to one is ``session.project_id``, set through the session endpoints
 (``POST /sessions``, ``PATCH /sessions/{id}``) and listed through
-``GET /sessions?project_id=``; this surface manages the project itself.
+``GET /sessions?project_id=``; this surface manages the project itself and
+the files it shares. The rules for those live in
+:mod:`app.services.project.files`.
 
 Every write that changes what a project holds locks its row first — see
 ``app/models/project.py`` for why that one order is enough.
@@ -24,7 +26,16 @@ from app.models.session import Session
 from app.models.user import User
 from app.rate_limit import limiter
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.schemas.project import ProjectCreate, ProjectResponse, ProjectUpdate
+from app.schemas.file import DownloadUrlResponse
+from app.schemas.project import (
+    ProjectCreate,
+    ProjectFileCreate,
+    ProjectFileResponse,
+    ProjectResponse,
+    ProjectUpdate,
+)
+from app.services import file_storage
+from app.services.project import files as project_files
 
 router = APIRouter(tags=["projects"])
 
@@ -181,4 +192,91 @@ async def delete_project(
     project = await _get_or_404(db, project_id, current_user.id, for_update=True)
     await db.execute(_moved_out(project.id))
     project.deleted_at = func.now()
+    await db.commit()
+
+
+@router.get("/projects/{project_id}/files")
+async def list_project_files(
+    project_id: uuid.UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> PaginatedResponse[ProjectFileResponse]:
+    """The current version of each of the project's files, newest first."""
+    project = await _get_or_404(db, project_id, current_user.id)
+    current = project_files.latest(project.id)
+    total = await db.scalar(select(func.count()).select_from(current.subquery())) or 0
+    rows = (await db.execute(paginate(current, page, page_size))).scalars().all()
+    return PaginatedResponse(
+        items=[ProjectFileResponse.model_validate(f) for f in rows],
+        meta=PaginationMeta(total=total, page_size=page_size, page=page),
+    )
+
+
+@router.post("/projects/{project_id}/files", status_code=status.HTTP_201_CREATED)
+@limiter.limit("30/minute")
+async def add_project_file(
+    request: Request,
+    project_id: uuid.UUID,
+    body: ProjectFileCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> ProjectFileResponse:
+    """Add an upload or one of the caller's session files to the project.
+
+    A name the project already has becomes its next version. The project
+    is locked for the whole add, which includes two round trips to object
+    storage; a concurrent add to the same project waits that long, which
+    is the price of an exact version and cap.
+    """
+    project = await _get_or_404(db, project_id, current_user.id, for_update=True)
+    file = await project_files.add(db, project, body)
+    await db.commit()
+    await db.refresh(file)
+    return ProjectFileResponse.model_validate(file)
+
+
+@router.get(
+    "/projects/{project_id}/files/{file_id}/download-url",
+    response_model=DownloadUrlResponse,
+)
+@limiter.limit("60/minute")
+async def get_project_file_download_url(
+    request: Request,
+    project_id: uuid.UUID,
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> DownloadUrlResponse:
+    """Mint a presigned GET URL for a project file, the same shape a session
+    file's download URL has."""
+    project = await _get_or_404(db, project_id, current_user.id)
+    file = await project_files.get(db, project.id, file_id)
+    url, expires_in = file_storage.generate_download_url(
+        file_storage.SESSION_FILE_POLICY, file.file_key, file.filename
+    )
+    return DownloadUrlResponse(download_url=url, file_key=file.file_key, expires_in=expires_in)
+
+
+@router.delete(
+    "/projects/{project_id}/files/{file_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@limiter.limit("30/minute")
+async def delete_project_file(
+    request: Request,
+    project_id: uuid.UUID,
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+) -> None:
+    """Remove a file — every version of its name — from the project.
+
+    The OSS object stays, as a deleted session's uploads do: another
+    session or schedule may bind the same key.
+    """
+    project = await _get_or_404(db, project_id, current_user.id, for_update=True)
+    file = await project_files.get(db, project.id, file_id)
+    await project_files.remove(db, project, file)
     await db.commit()

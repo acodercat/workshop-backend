@@ -233,25 +233,32 @@ class TestOwnership:
         await assert_files_owned_by(db, user_id=user_id, file_keys=file_keys)
         return db.sql
 
-    async def test_checks_both_tables_that_can_hold_a_key(self):
+    async def test_checks_every_table_that_can_hold_a_key(self):
         # A schedule attachment reaches ``session_files`` only when the task
-        # first fires — possibly never. Reading one table would leave it
-        # unheld, and a stranger with the key could bind it first.
+        # first fires — possibly never — and a project file uploaded on the
+        # project's page may never reach it at all. Reading one table would
+        # leave either unheld, and a stranger with the key could bind it first.
         sql = await self._compiled(7, ["k"])
         assert "FROM session_files" in sql
         assert "FROM schedule_file" in sql
+        assert "FROM project_file" in sql
         assert "UNION ALL" in sql
 
     async def test_a_null_owner_fails_closed_for_a_logged_in_caller(self):
         # The one thing ``IS DISTINCT FROM`` buys over ``!=``: a row whose
         # owner is NULL is *unknown* to ``!=`` and silently dropped.
         sql = await self._compiled(7, ["k"])
-        assert sql.count("user_id IS DISTINCT FROM 7") == 2
+        assert sql.count("user_id IS DISTINCT FROM 7") == 3
         assert "!= 7" not in sql
+
+    async def test_a_deleted_project_file_still_holds_its_key(self):
+        # The object is still its owner's after the file or its project is
+        # deleted, as a soft-deleted session's uploads are.
+        assert "deleted_at" not in await self._compiled(7, ["k"])
 
     async def test_only_the_requested_keys_are_consulted(self):
         sql = await self._compiled(7, ["a", "b"])
-        assert sql.count("file_key IN ('a', 'b')") == 2
+        assert sql.count("file_key IN ('a', 'b')") == 3
 
     async def test_any_foreign_row_makes_the_key_foreign(self):
         class _Foreign:

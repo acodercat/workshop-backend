@@ -3,9 +3,11 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.common.text import printable
+from app.models.project_file import ProjectFileOrigin
+from app.schemas.session import FileRef
 
 # What the instructions dialog lets the owner type. Every session in the
 # project carries these in its system prompt, so this bounds a cost paid on
@@ -69,3 +71,46 @@ class ProjectResponse(BaseModel):
     instructions: str
     created_at: datetime
     updated_at: datetime
+
+
+class SessionFileRef(BaseModel):
+    """One of the caller's session files, by the identity it has on the
+    wire: the session and the ``file_key`` bound to it."""
+
+    session_id: UUID
+    file_key: str = Field(..., min_length=1, max_length=512)
+
+
+class ProjectFileCreate(BaseModel):
+    """Body of ``POST /api/projects/{id}/files``: exactly one source.
+
+    ``upload`` is a file the caller has just PUT to OSS through
+    ``/sessions/upload-url``, the same shape a message attaches.
+    ``session_file`` is one already bound to one of the caller's sessions.
+    Either way the project references the object; nothing is copied.
+    """
+
+    upload: FileRef | None = None
+    session_file: SessionFileRef | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "ProjectFileCreate":
+        if (self.upload is None) == (self.session_file is None):
+            raise ValueError("Give exactly one of upload or session_file")
+        return self
+
+
+class ProjectFileResponse(BaseModel):
+    """The current version of one file. Listed without its OSS key: the
+    client names a project file by ``id``, never by key."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    filename: str
+    version: int
+    mime_type: str | None
+    size_bytes: int
+    origin: ProjectFileOrigin
+    origin_session_id: UUID | None
+    created_at: datetime

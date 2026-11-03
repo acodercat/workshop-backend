@@ -55,6 +55,8 @@ from app.errors import (
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
+from app.models.project import Project
+from app.models.project_file import ProjectFile, ProjectFileOrigin
 from app.models.schedule_file import ScheduleFile
 from app.models.session import Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
@@ -1280,7 +1282,12 @@ async def _enforce_session_file_quota(
     it creates — while occupying OSS exactly once, so charging it once a day
     would be billing for storage nobody is using. Schedule attachments are
     folded in from ``schedule_file`` so that one still counts before its
-    first firing has bound it anywhere.
+    first firing has bound it anywhere, and project files uploaded on the
+    project's page from ``project_file``, where they may never be bound to
+    a session at all. Those count while both the file and its project are
+    live: deleting either frees the quota, as deleting a session does. A
+    session file added to a project is the same object, and the per-object
+    count already has it.
 
     ``size_bytes`` on every row is the size OSS reported when the file was
     bound or attached (``file_storage.confirmed_sizes``), never a client's
@@ -1301,10 +1308,20 @@ async def _enforce_session_file_quota(
     attached = select(ScheduleFile.file_key, ScheduleFile.size_bytes).where(
         ScheduleFile.user_id == user_id
     )
+    shared = (
+        select(ProjectFile.file_key, ProjectFile.size_bytes)
+        .join(Project, Project.id == ProjectFile.project_id)
+        .where(
+            ProjectFile.user_id == user_id,
+            ProjectFile.origin == ProjectFileOrigin.UPLOAD,
+            ProjectFile.deleted_at.is_(None),
+            Project.deleted_at.is_(None),
+        )
+    )
     # ``max`` rather than ``any``: the same object is the same number of
     # bytes wherever it is bound, so this picks that number deterministically
     # instead of leaving it to the planner.
-    objects = bound.union_all(attached).subquery()
+    objects = bound.union_all(attached, shared).subquery()
     per_object = (
         select(
             objects.c.file_key,

@@ -936,6 +936,28 @@ class ProjectLimitError(AppError):
         )
 
 
+class ProjectFileNotFoundError(AppError):
+    """No live file with that id in the project — the project itself has
+    already been resolved as the caller's."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "project_file_not_found"
+
+
+class ProjectFileLimitError(AppError):
+    """The project already holds the most files it may. Counted by name: a
+    new version of a file the project has is never refused."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "project_file_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} files per project; delete some to make room.",
+            details={"limit": limit},
+        )
+
+
 class FileNotInSessionError(AppError):
     """A ``file_key`` was requested against a session it is not bound to.
 
