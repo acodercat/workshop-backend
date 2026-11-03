@@ -1,11 +1,11 @@
 """A project's files: adding one, removing one, and reading the current
 version of each.
 
-The endpoints call these on a project row they have locked ``FOR UPDATE``
-(see ``app/models/project.py``). That lock is what makes the version
-allocation and the per-project cap exact rather than race-acceptable: two
-adds to one project queue on it. None of these commit; the caller owns the
-transaction.
+:func:`add` and :func:`remove` are called on a project row the endpoint
+has locked ``FOR UPDATE`` (see ``app/models/project.py``). That lock is
+what makes the version allocation and the per-project cap exact rather
+than race-acceptable: two adds to one project queue on it. Reads take no
+lock. Nothing here commits; the caller owns the transaction.
 
 Adding a file mirrors :mod:`app.services.schedule.files`. Ownership is
 checked with the predicates a message attachment uses; the stored size is

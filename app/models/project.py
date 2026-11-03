@@ -15,8 +15,10 @@ when the project itself changes — a rename, new instructions, a file added
 or removed, a session created in it or moved into it — and not when a
 message is sent in one of its sessions. That keeps the list ordered by
 what the owner did to the project, and keeps every enqueue from writing
-and locking a second row. Writes to ``project_file`` or ``session`` do not
-fire this row's ``onupdate``, so those paths set it explicitly.
+and locking a second row. Nor when a session is moved *out*: that is done
+from the session, and takes no lock on the project it leaves. Writes to
+``project_file`` or ``session`` do not fire this row's ``onupdate``, so
+those paths set it explicitly.
 
 **The row is the project's lock.** Every write that changes which sessions
 or files belong to a project — deleting it, creating or moving a session

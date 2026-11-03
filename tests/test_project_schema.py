@@ -1,9 +1,11 @@
-"""What a project's name and instructions may be (``app/schemas/project.py``)."""
+"""What a project, and a file added to one, may be (``app/schemas/project.py``)."""
+
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.project import ProjectCreate, ProjectUpdate
+from app.schemas.project import ProjectCreate, ProjectFileCreate, ProjectUpdate
 
 
 def test_name_is_trimmed() -> None:
@@ -42,3 +44,13 @@ def test_instructions_over_the_cap_are_refused() -> None:
 def test_update_leaves_unsent_fields_alone() -> None:
     body = ProjectUpdate(instructions="Answer in English.")
     assert body.name is None
+
+
+def test_a_file_comes_from_exactly_one_source() -> None:
+    upload = {"file_key": "documents/u/a.md", "filename": "a.md"}
+    session_file = {"session_id": uuid4(), "file_key": "outputs/s/t/0_a.md"}
+    with pytest.raises(ValidationError):
+        ProjectFileCreate()
+    with pytest.raises(ValidationError):
+        ProjectFileCreate(upload=upload, session_file=session_file)
+    assert ProjectFileCreate(upload=upload).session_file is None

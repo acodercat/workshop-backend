@@ -189,14 +189,3 @@ class TestAdd:
         # An older row without a filename is named from its key.
         assert file.filename == "chart.png"
         assert file.mime_type == "image/png"
-
-
-class TestSchema:
-    def test_exactly_one_source(self) -> None:
-        with pytest.raises(ValueError):
-            ProjectFileCreate()
-        with pytest.raises(ValueError):
-            ProjectFileCreate(
-                upload={"file_key": "k", "filename": "a.md"},
-                session_file={"session_id": SESSION_ID, "file_key": "k"},
-            )
