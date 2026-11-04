@@ -20,6 +20,8 @@ from app.models.mcp_server import MCPServer, MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
+from app.models.project import Project
+from app.models.project_file import ProjectFile, ProjectFileOrigin
 from app.models.sandbox import Sandbox
 from app.models.schedule import (
     Schedule,
@@ -55,6 +57,9 @@ __all__ = [
     "MCPServerCatalogEntry",
     "Message",
     "MessageFeedback",
+    "Project",
+    "ProjectFile",
+    "ProjectFileOrigin",
     "Sandbox",
     "Schedule",
     "ScheduleFile",

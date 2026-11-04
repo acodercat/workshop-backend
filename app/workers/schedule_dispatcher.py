@@ -552,6 +552,7 @@ async def _enqueue(
         # An unattended run therefore produces a worse answer rather than an
         # error, and ``schedule_run`` cannot see the difference.
         connector_ids=await schedule_connectors.configured_ids(db, schedule.id),
+        project_id=None,
     )
     _settle(db, schedule, occurrence, session_id=session.id)
     await queue_user_message(

@@ -33,10 +33,31 @@ class SessionCreate(BaseModel):
     # What the session starts configured with; the ``?connector=`` deep
     # link is the one caller that arrives with any.
     connectors: list[int] = Field(default_factory=list, max_length=CONNECTORS_MAX)
+    # Start the session in this project. Ownership is checked in the
+    # endpoint.
+    project_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _project_sessions_are_full(self) -> "SessionCreate":
+        # The agent reads a project's files from its sandbox, which a LITE
+        # session does not have. The composer never offers LITE in a
+        # project, so this is a client bug rather than a choice to honour.
+        if self.project_id is not None and self.agent_type is AgentType.LITE:
+            raise ValueError("A session in a project runs as FULL")
+        return self
 
 
 class SessionUpdate(BaseModel):
+    """Body of ``PATCH /sessions/{id}``.
+
+    ``title``: ``None`` leaves it alone. ``project_id`` is read through
+    ``model_fields_set``, because ``null`` means something there: sent as
+    ``null`` it moves the session out of its project, sent as an id it moves
+    the session into that project, and left out it changes nothing.
+    """
+
     title: str | None = None
+    project_id: UUID | None = None
 
 
 class SessionResponse(BaseModel):
@@ -48,6 +69,7 @@ class SessionResponse(BaseModel):
     status: SessionStatus
     tier: Tier
     agent_type: AgentType
+    project_id: UUID | None
     created_at: datetime
     updated_at: datetime
 
@@ -164,6 +186,7 @@ class SessionDetailResponse(BaseModel):
     status: SessionStatus
     tier: Tier
     agent_type: AgentType
+    project_id: UUID | None
     # What the composer renders its switches from on open.
     connectors: list[int]
     created_at: datetime

@@ -116,6 +116,13 @@ class Session(Base):
     # ``WHERE session_id=? AND status<>'TERMINATED' ORDER BY created_at
     # DESC LIMIT 1`` (worker's ``claim_next_turn`` does exactly that).
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The project the session belongs to, or NULL. Never points at a
+    # soft-deleted project: deleting one moves its sessions out (see
+    # ``app/models/project.py``). ``SET NULL`` only matters when a user's
+    # hard delete cascades through ``project``.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("project.id", ondelete="SET NULL"), nullable=True
+    )
     # Model id used for this session's agent turns. Resolved at creation
     # from the picked ``tier`` via ``settings.session_tier_models``; never
     # mutated. No Python-side ``default=`` — the endpoint passes it
@@ -236,6 +243,16 @@ class Session(Base):
             "ix_session_updated_at",
             text("updated_at DESC"),
             text("id DESC"),
+        ),
+        # Backs ``GET /sessions?project_id=`` (one project's sessions,
+        # ORDER BY updated_at DESC) and moving a deleted project's sessions
+        # out. Partial on ``project_id IS NOT NULL`` — most sessions belong
+        # to no project. Built CONCURRENTLY by migration ``d3a8f5c1e7b2``.
+        Index(
+            "ix_session_project_id_updated_at",
+            "project_id",
+            text("updated_at DESC"),
+            postgresql_where=text("project_id IS NOT NULL"),
         ),
     )
 

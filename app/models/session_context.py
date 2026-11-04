@@ -60,6 +60,12 @@ class SessionContext(Base):
         server_default=text("'[]'::jsonb"),
         default=list,
     )
+    # The project as the agent was last told it — id, name, a digest of the
+    # instructions, and each file's id — or NULL when it was told of none.
+    # The worker compares the next turn's project against it to say only
+    # what changed, and writes it with ``messages`` so the record and the
+    # reminders it describes commit or roll back together.
+    project_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         server_default=func.now(),

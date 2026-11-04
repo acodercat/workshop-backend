@@ -125,6 +125,7 @@ class TestTheWireCarriesItOnTheSession:
             status=SessionStatus.IDLE,
             tier=list(Tier)[0],
             agent_type=list(AgentType)[0],
+            project_id=None,
             created_at=now,
             updated_at=now,
         )
@@ -137,6 +138,7 @@ class TestTheWireCarriesItOnTheSession:
             status=row.status,
             tier=row.tier,
             agent_type=row.agent_type,
+            project_id=row.project_id,
             connectors=[3, 7],
             created_at=now,
             updated_at=now,

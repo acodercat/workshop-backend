@@ -48,7 +48,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
-    AgentTypeDowngradeError,
     ConcurrentTaskLimitError,
     FileRetentionFailedError,
     GenerationInProgressError,
@@ -68,6 +67,7 @@ from app.services.redis import (
     stream_key,
 )
 from app.services.session import connectors as session_connectors
+from app.services.session.agent_type import upgrade_agent_type
 from app.services.session.files import assert_files_owned_by
 from app.services.user import publish_session_status
 from config import settings
@@ -149,7 +149,7 @@ async def queue_user_message(
     session = await _lock_session(db, session.id)
     if session.status == SessionStatus.RUNNING:
         raise GenerationInProgressError("A completion is already in progress for this session")
-    _apply_agent_type_upgrade(session, agent_type)
+    upgrade_agent_type(session, agent_type)
 
     # Lazy sweep: settle any of this user's reservations from prior
     # turns whose session is already terminal. Source of truth is
@@ -272,26 +272,6 @@ async def queue_user_message(
             session.id,
             exc_info=True,
         )
-
-
-def _apply_agent_type_upgrade(
-    session: Session,
-    requested: AgentType | None,
-) -> None:
-    """Apply the send's one-way LITE → FULL mode upgrade, if any.
-
-    ``None`` (no preference) and same-as-current are no-ops, so resends
-    are idempotent. A FULL → LITE request is rejected — only the upgrade
-    exists (a downgrade would strand the session's sandbox and files),
-    and the UI never offers it, so hitting this is a client programming
-    error. Runs on the locked session row, before the turn insert, so
-    the flip commits atomically with the turn.
-    """
-    if requested is None or requested == session.agent_type:
-        return
-    if requested is not AgentType.FULL:
-        raise AgentTypeDowngradeError("A session can only switch from LITE to FULL")
-    session.agent_type = requested
 
 
 async def _enforce_concurrent_task_limit(db: AsyncSession, user_id: int) -> None:

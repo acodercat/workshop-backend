@@ -55,8 +55,10 @@ from app.errors import (
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
+from app.models.project import Project
+from app.models.project_file import ProjectFile
 from app.models.schedule_file import ScheduleFile
-from app.models.session import Session, SessionStatus
+from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_share import SessionShare
 from app.models.session_site import SessionSite
@@ -93,6 +95,7 @@ from app.services.file_storage import (
     SESSION_FILE_POLICY,
     InlinePreviewNotAllowedError,
 )
+from app.services.project import ownership as project_ownership
 from app.services.redis import SESSION_STREAM_PREFIX, cancel_channel, stream_key
 from app.services.session import (
     build_session,
@@ -101,6 +104,7 @@ from app.services.session import (
     generate_title,
     queue_user_message,
     stream_events,
+    upgrade_agent_type,
 )
 from app.services.session.files import assert_file_belongs_to_session
 from app.services.user import publish_session_status
@@ -139,7 +143,9 @@ async def _get_or_404(
     ``for_update`` takes a row-level lock held until the transaction
     ends — used by ``delete_session`` so its status check and tombstone
     serialize against ``queue_user_message``'s own ``FOR UPDATE`` lock,
-    and by ``create_share`` so two rotations cannot both insert.
+    by ``create_share`` so two rotations cannot both insert, and by
+    ``update_session`` when it moves a session between projects, whose
+    LITE → FULL upgrade runs under the lock enqueue takes.
     """
     stmt = select(Session).where(
         Session.id == session_id,
@@ -303,6 +309,15 @@ async def create_session(
     configured = await connector_ownership.require_owned_connectors(
         db, user_id=current_user.id, ids=body.connectors
     )
+    # Locked, so the project cannot be deleted while a session is created in
+    # it — see ``app/models/project.py``.
+    project = (
+        await project_ownership.require_owned_project(
+            db, user_id=current_user.id, project_id=body.project_id, for_update=True
+        )
+        if body.project_id is not None
+        else None
+    )
     session = await build_session(
         db,
         user_id=current_user.id,
@@ -311,7 +326,10 @@ async def create_session(
         agent_type=body.agent_type,
         thinking_enabled=body.thinking_enabled,
         connector_ids=configured,
+        project_id=body.project_id,
     )
+    if project is not None:
+        project.updated_at = func.now()
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -322,6 +340,7 @@ async def list_sessions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: str | None = Query(None),
+    project_id: uuid.UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> PaginatedResponse[SessionResponse]:
@@ -333,6 +352,10 @@ async def list_sessions(
     happens to have loaded. A session with no title never matches — SQL
     ``NULL ILIKE`` is NULL — which is the wanted answer: an untitled row
     has nothing to match against.
+
+    ``project_id`` narrows the list to one project's sessions. Someone
+    else's project needs no check of its own: the owner filter already
+    leaves it empty.
     """
     conditions = [
         Session.user_id == current_user.id,
@@ -340,6 +363,8 @@ async def list_sessions(
     ]
     if search:
         conditions.append(ilike_contains(Session.title, search))
+    if project_id is not None:
+        conditions.append(Session.project_id == project_id)
     filter_clause = sa.and_(*conditions)
     base = select(Session).where(filter_clause).order_by(Session.updated_at.desc())
     total = (await db.execute(select(func.count(Session.id)).where(filter_clause))).scalar() or 0
@@ -635,6 +660,7 @@ async def get_session(
         status=session.status,
         tier=session.tier,
         agent_type=session.agent_type,
+        project_id=session.project_id,
         connectors=await session_connectors.configured_ids(db, session_id),
         created_at=session.created_at,
         updated_at=session.updated_at,
@@ -652,9 +678,31 @@ async def update_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SessionResponse:
-    session = await _get_or_404(db, session_id, current_user.id)
+    """Rename a session, or move it into a project or out of one.
+
+    A move into a project locks the project before the session — the order
+    every write that changes what a project holds takes, so a move cannot
+    land in a project being deleted. The session is locked for any move,
+    because moving in also applies the one-way LITE → FULL upgrade, which
+    runs under the lock enqueue takes.
+    """
+    moving = "project_id" in body.model_fields_set
+    target = (
+        await project_ownership.require_owned_project(
+            db, user_id=current_user.id, project_id=body.project_id, for_update=True
+        )
+        if moving and body.project_id is not None
+        else None
+    )
+    session = await _get_or_404(db, session_id, current_user.id, for_update=moving)
     if body.title is not None:
         session.title = body.title
+    if moving and session.project_id != body.project_id:
+        if target is not None:
+            # The agent reads a project's files from its sandbox.
+            upgrade_agent_type(session, AgentType.FULL)
+            target.updated_at = func.now()
+        session.project_id = body.project_id
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -1260,8 +1308,8 @@ async def _enforce_session_file_quota(
     db: AsyncSession, user_id: int, incoming_size_bytes: int
 ) -> None:
     """Reject the upload-url mint if this upload would put the user over a
-    per-user quota. Two gates, both scoped to ``UPLOAD``-origin rows on
-    non-soft-deleted sessions (deleting a session frees up quota):
+    per-user quota. Two gates, both over the objects counted below, each
+    once:
 
     - **Total size** (primary): summed ``size_bytes`` plus this upload
       must stay under ``max_session_files_bytes_per_user``. This gate
@@ -1280,7 +1328,11 @@ async def _enforce_session_file_quota(
     it creates — while occupying OSS exactly once, so charging it once a day
     would be billing for storage nobody is using. Schedule attachments are
     folded in from ``schedule_file`` so that one still counts before its
-    first firing has bound it anywhere.
+    first firing has bound it anywhere, and every file the user added to a
+    project from ``project_file`` — uploaded on its page, or added from a
+    session, which it outlives. Those count while both the file and its
+    project are live: deleting either frees the quota, as deleting a
+    session does.
 
     ``size_bytes`` on every row is the size OSS reported when the file was
     bound or attached (``file_storage.confirmed_sizes``), never a client's
@@ -1301,10 +1353,19 @@ async def _enforce_session_file_quota(
     attached = select(ScheduleFile.file_key, ScheduleFile.size_bytes).where(
         ScheduleFile.user_id == user_id
     )
+    shared = (
+        select(ProjectFile.file_key, ProjectFile.size_bytes)
+        .join(Project, Project.id == ProjectFile.project_id)
+        .where(
+            ProjectFile.user_id == user_id,
+            ProjectFile.deleted_at.is_(None),
+            Project.deleted_at.is_(None),
+        )
+    )
     # ``max`` rather than ``any``: the same object is the same number of
     # bytes wherever it is bound, so this picks that number deterministically
     # instead of leaving it to the planner.
-    objects = bound.union_all(attached).subquery()
+    objects = bound.union_all(attached, shared).subquery()
     per_object = (
         select(
             objects.c.file_key,

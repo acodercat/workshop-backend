@@ -8,6 +8,7 @@ Submodule responsibilities:
 
 - :mod:`~app.services.session.creation` — building a session row (shared
   by the create endpoint and the scheduled-task dispatcher).
+- :mod:`~app.services.session.agent_type` — the one-way LITE → FULL rule.
 - :mod:`~app.services.session.enqueue` — user-message persist + enqueue.
 - :mod:`~app.services.session.streaming` — SSE replay-then-follow generator.
 - :mod:`~app.services.session.title` — LLM-backed title generation.
@@ -22,6 +23,7 @@ endpoint file itself — they build HTTP concerns (``HTTPException``,
 Pydantic response models) and have no callers outside the endpoint layer.
 """
 
+from app.services.session.agent_type import upgrade_agent_type
 from app.services.session.creation import build_session
 from app.services.session.enqueue import queue_user_message
 from app.services.session.recovery import cancel_unclaimed_turn
@@ -46,4 +48,5 @@ __all__ = [
     "per_session_usage",
     "queue_user_message",
     "stream_events",
+    "upgrade_agent_type",
 ]
