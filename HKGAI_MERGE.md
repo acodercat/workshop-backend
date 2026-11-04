@@ -38,6 +38,15 @@ develop on master → push origin/master
 ```
 Always `--no-ff` so the merge commit stays visible (`git log --merges origin/hkgai`).
 
+**A port must still be recorded as a merge.** When master work comes over by porting —
+cherry-picks or a hand-adapted commit such as `ef1fe63` — the merge base does not move, and the
+next sync replays every ported commit as a conflict against its own port: in the 2026-11 sync,
+replaying 14 already-ported commits conflicted in 45 files, while the 13 new ones conflicted in one. After the port, once the tree differs from the
+ported master commit only by this branch's deltas (`git diff <master-commit> HEAD --stat`),
+record it with `git merge -s ours <master-commit>`: two parents, no file changes, and the base
+advances. `4da59ef` is the example, and its message says what was checked and what was
+deliberately not taken (`e47c14a`, master's brand).
+
 ## What MUST be preserved — run these probes after merge, before push
 
 | Check | Command | Expected |
@@ -304,6 +313,15 @@ reasons — keeping this branch's older `SessionServiceError` copies would leave
 it catching classes the binder no longer raises. The dispatcher is always on
 and spends credits through the ordinary enqueue; this deployment does not sell
 credits, so an owner's balance comes from invites and check-in only.
+
+### Projects (2026-11)
+
+`d3a8f5c1e7b2` (project + project_file, session.project_id) → `f2c7b9e4a1d6`
+(session_context.project_snapshot) → `b8e2d4f6a3c1` (project.icon) → `c7d2e9a4b1f3` (drops the
+`AGENT` file origin) — taken as-is: the first one's parent, `0e2330db080c`, was already this
+branch's head. **`core/agent-worker` depends on all four**: its claim joins `project` and selects
+`session_context.project_snapshot`, so a worker at or past its project support fails every claim
+against a database without them. Apply them before (or with) that worker.
 
 ### Two heads is not the only way a sync breaks the chain
 
