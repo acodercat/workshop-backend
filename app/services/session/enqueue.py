@@ -29,7 +29,8 @@ the steps in a specific order:
      ``running``;
    - DELETE the per-session output stream so the next turn's events
      don't tail onto stale history. Last, after every fallible step,
-     so a failed enqueue never destroys replay history.
+     so a failed enqueue never destroys replay history; best-effort,
+     since the SSE reader drops a stale turn's entries anyway.
 3. After the DB commits, ``PUBLISH notify:worker`` so an idle worker
    wakes immediately, and announce ``RUNNING`` on the user's
    notification channel. Both best-effort: a missed wake is recovered
@@ -117,7 +118,8 @@ async def queue_user_message(
        previous turn's output stream — all before one commit so a
        refetch can't see a half-applied state, and so a 402/skills
        failure above can't destroy replay history for a turn that
-       never enqueues.
+       never enqueues. The DELETE is best-effort: a Redis outage
+       must not refuse the message.
     7. ``publish_wake`` so an idle worker doesn't have to wait for
        its poll cycle. **After commit** so the worker's claim sees
        the row. Best-effort; poll fallback covers a publish failure.
@@ -234,7 +236,20 @@ async def queue_user_message(
     # list above). ``DELETE`` is a no-op on a missing key; before commit so
     # the stream is clean before the worker (woken post-commit) writes the
     # new turn's first event.
-    await redis.delete(stream_key(SESSION_STREAM_PREFIX, session.id))
+    #
+    # Best-effort, like ``publish_wake``: a Redis that cannot take it must
+    # not refuse the message. A stream left behind is harmless — the SSE
+    # reader drops entries stamped with another turn's id — and at worst
+    # its leftover TTL lapses mid-turn, costing a reconnecting client the
+    # replay of the events before; the turn's result is persisted anyway.
+    try:
+        await redis.delete(stream_key(SESSION_STREAM_PREFIX, session.id))
+    except Exception:
+        logger.warning(
+            "stream delete failed for session %s — the SSE reader drops the stale turn",
+            session.id,
+            exc_info=True,
+        )
 
     await db.commit()  # releases the FOR UPDATE lock + makes session_turn visible
 
