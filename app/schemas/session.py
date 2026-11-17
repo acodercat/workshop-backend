@@ -54,10 +54,13 @@ class SessionUpdate(BaseModel):
     ``model_fields_set``, because ``null`` means something there: sent as
     ``null`` it moves the session out of its project, sent as an id it moves
     the session into that project, and left out it changes nothing.
+    ``pinned``: ``True`` pins the session, ``False`` unpins it, ``None``
+    leaves it alone.
     """
 
     title: str | None = None
     project_id: UUID | None = None
+    pinned: bool | None = None
 
 
 class SessionResponse(BaseModel):
@@ -72,6 +75,8 @@ class SessionResponse(BaseModel):
     project_id: UUID | None
     created_at: datetime
     updated_at: datetime
+    # When the owner pinned the session; ``None`` = not pinned.
+    pinned_at: datetime | None
 
     model_config = {"from_attributes": True}
 

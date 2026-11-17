@@ -102,6 +102,7 @@ from app.services.session import (
     cancel_unclaimed_turn,
     connectors as session_connectors,
     generate_title,
+    pinning as session_pinning,
     queue_user_message,
     stream_events,
     upgrade_agent_type,
@@ -344,7 +345,8 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> PaginatedResponse[SessionResponse]:
-    """List the caller's non-deleted sessions, most recently updated first.
+    """List the caller's non-deleted sessions: pinned ones first, the most
+    recently pinned on top, then the rest, most recently updated first.
 
     ``search`` is an optional substring match on the session title,
     applied server-side (like ``GET /sessions/files``) so the client can
@@ -366,7 +368,11 @@ async def list_sessions(
     if project_id is not None:
         conditions.append(Session.project_id == project_id)
     filter_clause = sa.and_(*conditions)
-    base = select(Session).where(filter_clause).order_by(Session.updated_at.desc())
+    base = (
+        select(Session)
+        .where(filter_clause)
+        .order_by(Session.pinned_at.desc().nulls_last(), Session.updated_at.desc())
+    )
     total = (await db.execute(select(func.count(Session.id)).where(filter_clause))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
@@ -678,7 +684,8 @@ async def update_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SessionResponse:
-    """Rename a session, or move it into a project or out of one.
+    """Rename a session, move it into a project or out of one, or pin or
+    unpin it (:mod:`app.services.session.pinning`; 403 past the pin cap).
 
     A move into a project locks the project before the session — the order
     every write that changes what a project holds takes, so a move cannot
@@ -703,6 +710,12 @@ async def update_session(
             upgrade_agent_type(session, AgentType.FULL)
             target.updated_at = func.now()
         session.project_id = body.project_id
+    if body.pinned is not None:
+        await session_pinning.set_pinned(db, session, body.pinned)
+    if body.model_fields_set == {"pinned"}:
+        # Pinning is not activity. Set to itself, or ``onupdate`` would
+        # stamp now() and lift the session to the top of the recent ones.
+        session.updated_at = Session.updated_at
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)

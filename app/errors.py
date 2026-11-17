@@ -725,6 +725,20 @@ class SessionNotFoundError(AppError):
     error_type = "session_not_found"
 
 
+class SessionPinLimitError(AppError):
+    """The caller already has the most pinned sessions allowed. Cleared by
+    unpinning one."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "session_pin_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} pinned sessions; unpin one to pin another.",
+            details={"limit": limit},
+        )
+
+
 class MessageNotFoundError(AppError):
     """No message with that id in the session — the session itself has
     already been resolved as the caller's."""

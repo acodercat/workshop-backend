@@ -128,6 +128,7 @@ class TestTheWireCarriesItOnTheSession:
             project_id=None,
             created_at=now,
             updated_at=now,
+            pinned_at=None,
         )
 
         assert "connectors" not in SessionResponse.model_fields
