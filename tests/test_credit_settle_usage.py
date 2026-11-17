@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.models.session import SessionStatus
 from app.services.credits import settle
@@ -11,6 +12,9 @@ from app.services.credits import settle
 class _Result:
     def __init__(self, row) -> None:
         self._row = row
+
+    def all(self):
+        return self._row
 
     def one_or_none(self):
         return self._row
@@ -166,3 +170,25 @@ async def test_settle_open_for_session_skips_when_session_row_missing(
 
     settle_spy.assert_not_awaited()
     refund_spy.assert_not_awaited()
+
+
+async def test_settle_open_for_user_locks_what_it_settles_before_the_user_row() -> None:
+    """The sweep locks every reservation it will close in its selecting
+    statement, in id order, so it holds them all before any settle takes the
+    user row. Locking them one per iteration would ask for the next
+    reservation while holding the user row — and deadlock against the
+    sweeper or the settle subscriber, which lock a reservation and then the
+    user row. Only terminal or hard-deleted sessions' reservations are
+    selected, so a running turn's is never held."""
+    db = _Db([])
+
+    await settle.settle_open_for_user(db, 7)
+
+    sql = str(
+        db.statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "ORDER BY credit_reservation.id ASC FOR UPDATE OF credit_reservation" in sql
+    assert (
+        "credit_reservation.session_id IS NULL "
+        "OR session.status IN ('COMPLETE', 'FAILED', 'CANCELLED')"
+    ) in sql

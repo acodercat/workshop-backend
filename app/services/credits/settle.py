@@ -29,7 +29,7 @@ the stream for the next turn. V2 removes that dependency entirely.
 import logging
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
@@ -50,15 +50,20 @@ from app.services.credits.rates import (
 logger = logging.getLogger(__name__)
 
 
+# A session in one of these has no more turns coming, so its reservation
+# is safe to settle from ``session_turn``.
+_TERMINAL_SESSION_STATUSES = (
+    SessionStatus.COMPLETE,
+    SessionStatus.FAILED,
+    SessionStatus.CANCELLED,
+)
+
+
 def _is_session_terminal(status: SessionStatus | None) -> bool:
     """Session has no more turns coming — safe to settle from
     ``session_turn``. ``None`` is *not* terminal in this sense;
     deleted-session reservations are handled by their own branch."""
-    return status in (
-        SessionStatus.COMPLETE,
-        SessionStatus.FAILED,
-        SessionStatus.CANCELLED,
-    )
+    return status in _TERMINAL_SESSION_STATUSES
 
 
 async def _load_reservation_for_update(
@@ -343,12 +348,23 @@ async def settle_open_for_user(
     - session hard-deleted (``session_id IS NULL`` after the SET-NULL FK
       kicked in — an operator or test teardown; the app only soft-deletes,
       settling first) → refund, nothing is left to measure;
-    - session non-terminal → leave open, the turn isn't finished;
+    - session non-terminal → not selected, the turn isn't finished;
     - session terminal + usage on ``session_turn`` → settle with that
       usage (a FAILED turn that recorded measured tokens settles here too);
     - session terminal + ``session_turn`` usage NULL (no measurement —
       worker died before the fenced write, or a failure with no captured
       usage) → refund.
+
+    **Lock order.** Every reservation this sweep will close is locked by
+    the selecting statement, in id order, before any of them is settled.
+    Each settle then takes the user-row lock, so the sweep holds its
+    reservations before the user row — the order every single-reservation
+    path keeps (the sweeper, the settle subscriber, recovery). Locking
+    them one per iteration instead would ask for the next reservation
+    while holding the user row, and deadlock against any of those paths
+    holding that reservation and waiting for the user row. The id order
+    keeps two concurrent sweeps for one user (a ``GET /credits`` racing
+    ``queue_user_message``) from crossing each other.
 
     Typical N here is 0 or 1; partial index keeps the lookup cheap.
     """
@@ -363,31 +379,24 @@ async def settle_open_for_user(
         .where(
             CreditReservation.user_id == user_id,
             CreditReservation.state == CreditReservationState.OPEN,
+            or_(
+                CreditReservation.session_id.is_(None),
+                Session.status.in_(_TERMINAL_SESSION_STATUSES),
+            ),
         )
-        # Deterministic lock order. Each iteration below takes the
-        # reservation-row ``FOR UPDATE`` then the user-row lock and holds
-        # both to the caller's commit; without a stable order two
-        # concurrent sweeps for the same user (a ``GET /credits`` racing
-        # ``queue_user_message``) could grab the same two reservations in
-        # opposite orders and deadlock. Mirrors ``settle_sweeper``'s
-        # ordered candidate scan.
         .order_by(CreditReservation.id.asc())
+        .with_for_update(of=CreditReservation)
     )
     for reservation_id, turn_id, session_id, session_status in rows.all():
         if session_id is None:
             # FK was SET NULL by a hard delete — nothing left to
-            # measure cost against, so refund. Must run *before* the
-            # terminal check: ``session_status`` is None on a deleted-
-            # session row and ``None not in (...)`` is True, which
-            # would otherwise route to "still running" → skip → leak.
+            # measure cost against, so refund.
             await refund_reservation(
                 db,
                 reservation_id=reservation_id,
                 reason={"cause": "session_deleted"},
             )
             continue
-        if not _is_session_terminal(session_status):
-            continue  # turn still running — leave reservation open
 
         usage = await _read_usage_and_duration_from_session_turn(db, turn_id)
         if usage is None:
