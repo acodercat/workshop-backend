@@ -104,8 +104,9 @@ class PaymentGateway(Protocol):
         ...
 
     def verify_notify(self, *, resp_data_raw: str, sign: str) -> VerifiedEvent:
-        """Verify an async-notification signature over the raw body string
-        and parse it. Raises on signature failure — an unverifiable
+        """Verify an async notification — its signature over the raw body
+        string, and that it is addressed to our merchant — and parse it.
+        Raises ``NotifyVerificationError`` otherwise: an unverifiable
         notification must never be acted on."""
         ...
 

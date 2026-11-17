@@ -10,10 +10,12 @@ from dg_sdk.core.rsa_utils import rsa_sign
 
 from app.errors import PaymentProviderError
 from app.services.payment import huifu
-from app.services.payment.exceptions import NotifySignatureError
+from app.services.payment.exceptions import NotifyVerificationError
 from app.services.payment.huifu import HuifuGateway
 from app.services.payment.provider import ChargeState
 from config import settings
+
+_OUR_MERCHANT_ID = "6666000123123123"
 
 
 @pytest.fixture
@@ -22,6 +24,7 @@ def keypair(monkeypatch):
     priv_pem = key.export_key(pkcs=8).decode()
     pub_pem = key.publickey().export_key().decode()
     monkeypatch.setattr(settings, "huifu_rsa_public_key", pub_pem)
+    monkeypatch.setattr(settings, "huifu_merchant_id", _OUR_MERCHANT_ID)
     return priv_pem, pub_pem
 
 
@@ -35,6 +38,7 @@ def test_verify_notify_accepts_valid_signature(keypair) -> None:
     priv_pem, _ = keypair
     resp_data = json.dumps(
         {
+            "huifu_id": _OUR_MERCHANT_ID,
             "req_seq_id": "hf1",
             "hf_seq_id": "H9",
             "sub_resp_code": "00000000",
@@ -57,8 +61,26 @@ def test_verify_notify_rejects_tampered_body(keypair) -> None:
     resp_data = json.dumps({"req_seq_id": "hf1", "trans_amt": "1.00"})
     sign = _signed(resp_data, priv_pem)
     tampered = json.dumps({"req_seq_id": "hf1", "trans_amt": "999.00"})
-    with pytest.raises(NotifySignatureError):
+    with pytest.raises(NotifyVerificationError):
         HuifuGateway().verify_notify(resp_data_raw=tampered, sign=sign)
+
+
+@pytest.mark.parametrize(
+    "merchant_fields",
+    [{"huifu_id": "6666000999999999"}, {}],
+    ids=["another merchant", "no merchant"],
+)
+def test_verify_notify_rejects_a_notification_not_for_our_merchant(
+    keypair, merchant_fields
+) -> None:
+    # A valid signature proves only that Huifu sent it, not that the paid
+    # charge is ours.
+    priv_pem, _ = keypair
+    resp_data = json.dumps(
+        {**merchant_fields, "req_seq_id": "hf1", "trans_stat": "S", "trans_amt": "100.00"}
+    )
+    with pytest.raises(NotifyVerificationError):
+        HuifuGateway().verify_notify(resp_data_raw=resp_data, sign=_signed(resp_data, priv_pem))
 
 
 def test_ack_format() -> None:

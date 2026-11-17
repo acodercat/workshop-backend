@@ -20,6 +20,9 @@ Signing/verification facts (read from ``dg_sdk`` 2.0.22):
   ``resp_data`` string** with ``rsa_design`` (Huifu's own helper) — NOT
   by re-serializing a parsed dict, which could differ byte-for-byte from
   what Huifu signed and either spuriously fail or open a tamper gap.
+- A valid signature says Huifu sent the notification, not that it is
+  about one of our charges, so its required ``huifu_id`` must also be
+  our merchant id.
 """
 
 import asyncio
@@ -33,7 +36,7 @@ import dg_sdk
 from dg_sdk.core.rsa_utils import rsa_design
 
 from app.errors import PaymentProviderError
-from app.services.payment.exceptions import NotifySignatureError
+from app.services.payment.exceptions import NotifyVerificationError
 from app.services.payment.provider import Channel, ChargeResult, ChargeState, VerifiedEvent
 from config import settings
 
@@ -185,11 +188,14 @@ class HuifuGateway:
             raise PaymentProviderError("Huifu public key is not configured")
         ok, info = rsa_design(sign, resp_data_raw, settings.huifu_rsa_public_key)
         if not ok:
-            raise NotifySignatureError(f"Huifu notify signature invalid: {info}")
+            raise NotifyVerificationError(f"Huifu notify signature invalid: {info}")
         try:
             data = json.loads(resp_data_raw)
         except (ValueError, TypeError) as exc:
-            raise NotifySignatureError(f"Huifu notify resp_data not JSON: {exc}") from exc
+            raise NotifyVerificationError(f"Huifu notify resp_data not JSON: {exc}") from exc
+        merchant_id = data.get("huifu_id")
+        if merchant_id != settings.huifu_merchant_id:
+            raise NotifyVerificationError(f"Huifu notify is for merchant {merchant_id!r}, not ours")
         return _event_from_business_data(data)
 
     def ack(self, out_trade_no: str) -> str:

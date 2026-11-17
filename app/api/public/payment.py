@@ -39,7 +39,7 @@ from app.schemas.payment import (
 )
 from app.services import commission, payment
 from app.services.credits.rates import credits_from_micro
-from app.services.payment.exceptions import NotifySignatureError
+from app.services.payment.exceptions import NotifyVerificationError
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -129,8 +129,9 @@ async def huifu_webhook(
 ) -> PlainTextResponse:
     """Handle a 汇付 async payment notification.
 
-    Verifies the RSA signature over the raw ``resp_data`` string, applies
-    the verified outcome idempotently, and acks. Never trusts an
+    Verifies the RSA signature over the raw ``resp_data`` string and that
+    the notification names our merchant, applies the verified outcome
+    idempotently, and acks. Never trusts an
     unverifiable body (400, no ack); on a processing failure returns 500
     (no ack) so the provider redelivers.
     """
@@ -145,8 +146,8 @@ async def huifu_webhook(
     provider = payment.get_provider()
     try:
         event = provider.verify_notify(resp_data_raw=resp_data, sign=sign)
-    except NotifySignatureError:
-        logger.warning("huifu webhook: signature verification failed")
+    except NotifyVerificationError as exc:
+        logger.warning("huifu webhook: notification rejected: %s", exc)
         return PlainTextResponse("FAIL", status_code=400)
 
     logger.info(
