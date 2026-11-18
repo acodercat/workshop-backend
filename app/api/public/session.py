@@ -856,6 +856,7 @@ async def create_message(
         files=body.files,
         skills=body.skills,
         agent_type=body.agent_type,
+        timezone=body.timezone,
     )
     return MessageQueuedResponse()
 

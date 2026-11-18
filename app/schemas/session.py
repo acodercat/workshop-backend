@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.common.filenames import validate_input_filename
+from app.common.timezones import is_known_timezone
 from app.models.session import AgentType, SessionStatus, Tier
 from app.schemas.message_feedback import FeedbackResponse
 from config import settings
@@ -120,11 +121,23 @@ class MessageCreate(BaseModel):
     # is rejected. Unlike ``skills`` (a per-turn selection) this persists
     # on the session.
     agent_type: AgentType | None = None
+    # The IANA zone the client is in, for a task the agent schedules on the
+    # user's own clock. ``None`` = not reported, or not a zone this
+    # deployment can compute with; the agent then has no ``create_schedule``
+    # tool this turn.
+    timezone: str | None = None
 
     @field_validator("content")
     @classmethod
     def _strip_content(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("timezone")
+    @classmethod
+    def _drop_unknown_timezone(cls, value: str | None) -> str | None:
+        # Dropped, not refused: where a message was sent from is no reason
+        # to turn the message away.
+        return value if value is not None and is_known_timezone(value) else None
 
     @field_validator("files")
     @classmethod

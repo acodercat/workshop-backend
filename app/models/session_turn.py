@@ -181,6 +181,13 @@ class SessionTurn(Base):
         server_default=text("'[]'::jsonb"),
         default=list,
     )
+    # The IANA zone the user's client was in when it sent the message, which
+    # is what lets the worker's ``create_schedule`` tool read "09:00" as the
+    # user means it. NULL when nobody reported one: a server-side caller (a
+    # scheduled run, which therefore cannot schedule a task of its own) or a
+    # client that does not send it. The worker registers the tool only for a
+    # turn that has it.
+    timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Token usage as reported by axon's ``AgentStoppedEvent.usage``,
     # written by the worker in the same fenced UPDATE that flips
     # ``status`` terminal (see

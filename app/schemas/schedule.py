@@ -12,11 +12,11 @@ enforce, and a flat row is what a renderer wants.
 
 from datetime import date, datetime, time
 from typing import Literal
-from zoneinfo import available_timezones
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.common.text import printable
+from app.common.timezones import is_known_timezone
 from app.models.schedule import ScheduleFrequency, ScheduleSkipReason, ScheduleStatus
 from app.models.session import Tier
 from app.models.session_turn import SessionTurnStatus, TerminationReason
@@ -40,29 +40,6 @@ _SPEC_FIELDS = ("run_date", "weekday", "day_of_month")
 # cap the client cannot see is a 422 the client cannot explain. Nothing
 # enforces the pair, so changing one side means changing the other.
 SCHEDULE_FILES_MAX = 30
-
-# Two entries the tz tree carries that are not zones. ``localtime`` is a
-# symlink to whatever this machine happens to be set to — host-relative,
-# and so the exact opposite of the snapshot this column exists to be.
-# ``Factory`` is a placeholder whose content is the string "no timezone
-# has been set". Python already filters ``posixrules``.
-_NOT_A_ZONE = frozenset({"localtime", "Factory"})
-
-# Built once at import. ``available_timezones()`` rebuilds its set on every
-# call and may walk the filesystem to do it — several milliseconds, on a
-# path that runs for every create and every recurrence edit, and PATCH
-# carries no rate limit of its own.
-_KNOWN_ZONES = frozenset(available_timezones()) - _NOT_A_ZONE
-
-
-def is_known_timezone(value: str) -> bool:
-    """Whether this deployment's tz database carries ``value`` as a zone.
-
-    Public because the endpoint needs the same answer for a zone read back
-    out of the database, where no validator has run — a row can outlive the
-    tz data it was written against.
-    """
-    return value in _KNOWN_ZONES
 
 
 class RecurrenceSpec(BaseModel):
@@ -108,7 +85,7 @@ class RecurrenceSpec(BaseModel):
         a schedule whose zone it cannot resolve, instead of retrying it
         forever (see ``schedule_dispatcher._zone_is_resolvable``).
         """
-        if value not in _KNOWN_ZONES:
+        if not is_known_timezone(value):
             raise ValueError(f"unknown timezone: {value!r}")
         return value
 

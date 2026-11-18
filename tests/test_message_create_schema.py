@@ -44,3 +44,15 @@ def test_whitespace_only_and_no_files_rejected() -> None:
     # Stripped to empty, no files → nothing to act on.
     with pytest.raises(ValidationError):
         MessageCreate(content="   \n  ")
+
+
+def test_timezone_is_optional_and_kept_as_sent() -> None:
+    assert MessageCreate(content="hi").timezone is None
+    assert MessageCreate(content="hi", timezone="Asia/Shanghai").timezone == "Asia/Shanghai"
+
+
+@pytest.mark.parametrize("timezone", ["Mars/Olympus", "localtime", "+08:00", "", "x" * 200])
+def test_a_timezone_the_deployment_cannot_compute_with_is_dropped(timezone: str) -> None:
+    # The worker schedules a task in this zone, so one it could not resolve
+    # is never stored on the turn — but the message itself still goes.
+    assert MessageCreate(content="hi", timezone=timezone).timezone is None
