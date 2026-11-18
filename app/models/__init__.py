@@ -23,6 +23,7 @@ from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
 from app.models.project import Project
 from app.models.project_file import ProjectFile, ProjectFileOrigin
+from app.models.queued_message import QueuedMessage
 from app.models.sandbox import Sandbox
 from app.models.schedule import (
     Schedule,
@@ -61,6 +62,7 @@ __all__ = [
     "Project",
     "ProjectFile",
     "ProjectFileOrigin",
+    "QueuedMessage",
     "Sandbox",
     "Schedule",
     "ScheduleFrequency",

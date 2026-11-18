@@ -50,6 +50,9 @@ from app.errors import (
     GenerationInProgressError,
     MessageNotFoundError,
     NotAssistantMessageError,
+    QueuedMessageLimitError,
+    QueuedMessageNotFoundError,
+    SessionIdleError,
     SessionNotFoundError,
 )
 from app.models.mcp_server import MCPServer
@@ -57,6 +60,7 @@ from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.project import Project
 from app.models.project_file import ProjectFile
+from app.models.queued_message import QueuedMessage
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_share import SessionShare
@@ -74,11 +78,16 @@ from app.schemas.file import (
 )
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
 from app.schemas.session import (
+    QUEUED_MESSAGES_MAX,
     CancelAcceptedResponse,
     MessageCreate,
     MessagePageResponse,
     MessageQueuedResponse,
     MessageResponse,
+    QueuedMessageCreate,
+    QueuedMessageOrder,
+    QueuedMessageResponse,
+    QueuedMessageUpdate,
     SessionCreate,
     SessionDetailResponse,
     SessionResponse,
@@ -107,6 +116,11 @@ from app.services.session import (
     upgrade_agent_type,
 )
 from app.services.session.files import assert_file_belongs_to_session
+from app.services.session.message_queue import (
+    dispatch_queued_message,
+    list_queued_messages,
+    queue_is_moving,
+)
 from app.services.user import publish_session_status
 from config import settings
 
@@ -670,6 +684,7 @@ async def get_session(
         updated_at=session.updated_at,
         messages=messages,
         has_more_messages=has_more,
+        queued_messages=await list_queued_messages(db, session_id),
     )
 
 
@@ -855,7 +870,167 @@ async def create_message(
         skills=body.skills,
         agent_type=body.agent_type,
         timezone=body.timezone,
+        answers=body.answers,
     )
+    return MessageQueuedResponse()
+
+
+async def _queued_message_or_404(
+    db: AsyncSession, session_id: uuid.UUID, queued_message_id: int
+) -> QueuedMessage:
+    """The waiting message, in a session already resolved as the caller's.
+
+    Every queue endpoint takes the session's row lock first, which is the
+    lock a dispatch holds: a message is either still here to edit, or it
+    has gone out and this raises.
+    """
+    queued = (
+        await db.execute(
+            select(QueuedMessage).where(
+                QueuedMessage.id == queued_message_id,
+                QueuedMessage.session_id == session_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if queued is None:
+        raise QueuedMessageNotFoundError("Queued message not found.")
+    return queued
+
+
+@router.post(
+    "/sessions/{session_id}/queued-messages",
+    response_model=QueuedMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit(settings.rate_limit_message_create)
+async def create_queued_message(
+    request: Request,
+    session_id: uuid.UUID,
+    body: QueuedMessageCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Queue a message behind the session's running turn, or behind the
+    queued messages about to go out once it has completed.
+
+    See ``app/workers/message_queue_dispatcher.py`` for what carries a queue
+    on and what holds it. The state is read under the row lock the worker's
+    terminal write and the dispatcher also take, so a session with nothing
+    to wait on answers 409 ``session_idle`` — the message is then an
+    ordinary one for the client to send — rather than leaving it queued
+    behind nothing.
+    """
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queue = await list_queued_messages(db, session_id)
+    if session.status != SessionStatus.RUNNING and not queue_is_moving(session, queue):
+        raise SessionIdleError("Nothing in this session to wait for.")
+    if len(queue) >= QUEUED_MESSAGES_MAX:
+        raise QueuedMessageLimitError(QUEUED_MESSAGES_MAX)
+    queued = QueuedMessage(
+        session_id=session_id,
+        position=queue[-1].position + 1 if queue else 0,
+        content=body.content,
+        files=[file_ref.model_dump() for file_ref in body.files],
+        skills=body.skills,
+        timezone=body.timezone,
+    )
+    db.add(queued)
+    await db.commit()
+    return queued
+
+
+@router.put(
+    "/sessions/{session_id}/queued-messages/order",
+    response_model=list[QueuedMessageResponse],
+)
+async def reorder_queued_messages(
+    session_id: uuid.UUID,
+    body: QueuedMessageOrder,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Put the session's queue in the order of ``body.ids``.
+
+    The client orders the queue it last saw, which may no longer be the
+    queue: a message can have gone out since. So the request is read as an
+    ordering rather than checked as a permutation — ids no longer waiting
+    are ignored, and a waiting message the client did not name keeps its
+    place after the ones it did. The answer is the queue as it now stands.
+    """
+    await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queue = await list_queued_messages(db, session_id)
+    rank = {queued_message_id: index for index, queued_message_id in enumerate(body.ids)}
+    # A stable sort: unnamed messages all rank last and keep their order.
+    queue.sort(key=lambda queued: rank.get(queued.id, len(rank)))
+    for position, queued in enumerate(queue):
+        queued.position = position
+    await db.commit()
+    return queue
+
+
+@router.patch(
+    "/sessions/{session_id}/queued-messages/{queued_message_id}",
+    response_model=QueuedMessageResponse,
+)
+async def update_queued_message(
+    session_id: uuid.UUID,
+    queued_message_id: int,
+    body: QueuedMessageUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Reword a waiting message. 404 ``queued_message_not_found`` once it
+    has gone out — the client then has an edit with nowhere to land, and
+    keeps the text for the user rather than dropping it."""
+    await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queued = await _queued_message_or_404(db, session_id, queued_message_id)
+    queued.content = body.content
+    await db.commit()
+    return queued
+
+
+@router.delete(
+    "/sessions/{session_id}/queued-messages/{queued_message_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_queued_message(
+    session_id: uuid.UUID,
+    queued_message_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Take a waiting message back. Nothing was reserved or bound for it,
+    so there is nothing else to undo."""
+    await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queued = await _queued_message_or_404(db, session_id, queued_message_id)
+    await db.delete(queued)
+    await db.commit()
+
+
+@router.post(
+    "/sessions/{session_id}/queued-messages/{queued_message_id}/dispatch",
+    response_model=MessageQueuedResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit(settings.rate_limit_message_create)
+async def dispatch_queued_message_now(
+    request: Request,
+    session_id: uuid.UUID,
+    queued_message_id: int,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Send a waiting message now, whichever place it holds in the queue.
+
+    For a queue that is not moving on its own — its last turn was stopped
+    or failed, or the queue is held. Refused exactly as ``POST /messages``
+    would be, ``generation_in_progress`` included, and the message stays
+    queued.
+    """
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queued = await _queued_message_or_404(db, session_id, queued_message_id)
+    await dispatch_queued_message(db, redis, session, queued)
     return MessageQueuedResponse()
 
 

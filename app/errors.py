@@ -756,6 +756,38 @@ class NotAssistantMessageError(AppError):
     error_type = "not_assistant_message"
 
 
+class SessionIdleError(AppError):
+    """A message was sent to wait in a queue that is not waiting on anything:
+    no turn runs and no queued message is about to go out — the turn ended
+    between the client's last look and this request. 409: nothing is in the
+    way any more, so the message can simply be sent."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "session_idle"
+
+
+class QueuedMessageNotFoundError(AppError):
+    """No waiting message with that id in the session. The usual cause is
+    not a bad id: the message went out, and stopped being a queued one."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "queued_message_not_found"
+
+
+class QueuedMessageLimitError(AppError):
+    """The session's queue is full. Cleared as the queue drains, or by
+    deleting a waiting message."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "queued_message_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} messages may wait in one session.",
+            details={"limit": limit},
+        )
+
+
 class ShareNotFoundError(AppError):
     """No live share behind that token: never created, revoked, or its
     session is gone. One type for all of them, because the visitor's next

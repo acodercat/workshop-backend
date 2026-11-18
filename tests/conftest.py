@@ -249,6 +249,7 @@ def run_enqueue(monkeypatch) -> Callable[[AsyncMock], Awaitable[list[str]]]:
         (enqueue, "_resolve_mcp_servers", []),
         (enqueue, "_bind_session_files", []),
         (enqueue, "_enforce_concurrent_task_limit", None),
+        (enqueue, "_release_held_queue", None),
         (enqueue.session_connectors, "configured_ids", []),
         (enqueue.credits, "settle_open_for_user", None),
         (enqueue.credits, "reserve_for_turn", None),

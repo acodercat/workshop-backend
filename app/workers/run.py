@@ -11,10 +11,11 @@ multi-node deploys run this on every host and rely on Postgres
 advisory locks (``app.workers.settle_sweeper._LOCK_KEY``) to ensure
 exactly one host actually polls per tick.
 
-This process owns up to **five** concurrent background tasks. Two are
+This process owns up to **six** concurrent background tasks. Two are
 the push and pull halves of the same settle responsibility; the third
 is the pull backstop for payment notifications; the fourth fires scheduled
-tasks; the fifth (flag-gated) enforces mid-turn spend:
+tasks; the fifth sends queued messages on; the sixth (flag-gated) enforces
+mid-turn spend:
 
 - :mod:`app.workers.settle_sweeper` — periodic 60s poll, the
   correctness backstop. Catches missed pub/sub messages, expired
@@ -31,6 +32,9 @@ tasks; the fifth (flag-gated) enforces mid-turn spend:
   enqueues scheduled tasks whose time has come, through the same
   ``queue_user_message`` the message endpoint uses. Its own advisory lock
   as well.
+- :mod:`app.workers.message_queue_dispatcher` — periodic 2s poll that
+  sends a session's queued messages on as its turns complete, again
+  through ``queue_user_message``. Its own advisory lock as well.
 - :mod:`app.workers.budget_enforcer` — only when
   ``budget_enforcer_enabled``: prices each running turn's
   heartbeat-reported interim usage and cancels turns outrunning their
@@ -56,6 +60,7 @@ import redis.asyncio as aioredis
 from app.logging_config import setup_logging
 from app.workers import (
     budget_enforcer,
+    message_queue_dispatcher,
     payment_reconciler,
     schedule_dispatcher,
     settle_subscriber,
@@ -88,6 +93,7 @@ async def _run() -> None:
             tg.create_task(settle_subscriber.run_forever(redis))
             tg.create_task(payment_reconciler.run_forever())
             tg.create_task(schedule_dispatcher.run_forever(redis))
+            tg.create_task(message_queue_dispatcher.run_forever(redis))
             # Flag-gated (on by default; set False to fall back to the
             # reserve gate alone). Log the resolved state either way so a
             # restart makes it unambiguous whether enforcement is live — the
@@ -109,7 +115,7 @@ def main() -> None:
     setup_logging(log_dir="logs", level="INFO")
     logger.info(
         "background process starting (settle sweeper + subscriber + reconciler"
-        " + schedule dispatcher%s)",
+        " + schedule dispatcher + message queue dispatcher%s)",
         " + budget enforcer" if settings.budget_enforcer_enabled else "",
     )
     try:

@@ -45,7 +45,7 @@ import logging
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
@@ -56,11 +56,12 @@ from app.errors import (
 )
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
+from app.models.queued_message import QueuedMessage
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_turn import SessionTurn, SessionTurnStatus
 from app.models.skill import Skill, SkillOrigin, SkillStatus
-from app.schemas.session import FileRef
+from app.schemas.session import AnsweredQuestion, FileRef
 from app.services import credits, file_storage
 from app.services.redis import (
     SESSION_STREAM_PREFIX,
@@ -87,6 +88,7 @@ async def queue_user_message(
     agent_type: AgentType | None = None,
     reminders: list[str] | None = None,
     timezone: str | None = None,
+    answers: list[AnsweredQuestion] | None = None,
 ) -> None:
     """Persist the user message + session_turn, flip status, wake worker.
 
@@ -115,7 +117,8 @@ async def queue_user_message(
        the estimate would push the balance negative. The entire tx
        rolls back; no message stored, no worker wake.
     6. INSERT the user ``message`` row, flip
-       ``session.status='RUNNING'``, then DELETE the
+       ``session.status='RUNNING'``, release the session's held message
+       queue (the queue now waits on this turn), then DELETE the
        previous turn's output stream — all before one commit so a
        refetch can't see a half-applied state, and so a 402/skills
        failure above can't destroy replay history for a turn that
@@ -136,6 +139,9 @@ async def queue_user_message(
     pass client-supplied text here. ``timezone`` is the zone the user's
     client reported with the message, stored on the turn for the worker's
     ``create_schedule`` tool; a server-side caller has none to give.
+    ``answers`` are the questions and answers of a reply to an
+    ``ask_user`` card, of which ``content`` is the model's rendering;
+    they are kept on the user message for the conversation to draw.
 
     Sandbox ownership lives on ``sandbox.session_id``. The worker
     resumes the latest non-TERMINATED sandbox for this session, or
@@ -227,13 +233,17 @@ async def queue_user_message(
     )
     await _enforce_concurrent_task_limit(db, session.user_id)
 
+    text_block = {"type": "text", "content": content, "files": file_dicts}
+    if answers:
+        text_block["answers"] = [answer.model_dump() for answer in answers]
     user_msg = Message(
         session_id=session.id,
         role=MessageRole.USER,
-        blocks=[{"type": "text", "content": content, "files": file_dicts}],
+        blocks=[text_block],
     )
     session.status = SessionStatus.RUNNING
     db.add(user_msg)
+    await _release_held_queue(db, session.id)
 
     # Clear the prior turn's output stream (it lingers post-``agent.stopped``
     # for late SSE replay) here, after every fallible step (see the step
@@ -291,6 +301,20 @@ async def queue_user_message(
             session.id,
             exc_info=True,
         )
+
+
+async def _release_held_queue(db: AsyncSession, session_id: UUID) -> None:
+    """Release the session's message queue if the dispatcher held it.
+
+    A held queue waits for the session's next turn to start, which is this
+    one; it now waits on this turn and moves on if it completes. See
+    ``app/workers/message_queue_dispatcher.py``.
+    """
+    await db.execute(
+        update(QueuedMessage)
+        .where(QueuedMessage.session_id == session_id, QueuedMessage.held_at.is_not(None))
+        .values(held_at=None)
+    )
 
 
 async def _enforce_concurrent_task_limit(db: AsyncSession, user_id: int) -> None:

@@ -1,4 +1,4 @@
-"""Validation for ``MessageCreate`` — a turn needs text or a file.
+"""Validation for ``MessageCreate`` — a turn needs text, a file or answers.
 
 The composer diverts a huge paste to a ``.txt`` attachment, leaving the
 typed text empty; an attachments-only send is legal (the file is the
@@ -8,7 +8,7 @@ content). Only the truly-empty case (no text, no files) is rejected.
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.session import FileRef, MessageCreate
+from app.schemas.session import AnsweredQuestion, FileRef, MessageCreate
 
 
 def _file() -> FileRef:
@@ -56,3 +56,27 @@ def test_a_timezone_the_deployment_cannot_compute_with_is_dropped(timezone: str)
     # The worker schedules a task in this zone, so one it could not resolve
     # is never stored on the turn — but the message itself still goes.
     assert MessageCreate(content="hi", timezone=timezone).timezone is None
+
+
+def _answered(question: str, answer: list[str]) -> AnsweredQuestion:
+    return AnsweredQuestion(question=question, answer=answer)
+
+
+def test_answers_become_the_text_the_model_reads() -> None:
+    msg = MessageCreate(
+        answers=[
+            _answered("Which format?", ["PDF", "Word"]),
+            _answered("Add files?", []),
+        ]
+    )
+    assert msg.content == "Which format?\n→ PDF, Word\n\nAdd files?\n→ (skipped)"
+
+
+def test_answers_carry_no_text_of_their_own() -> None:
+    with pytest.raises(ValidationError):
+        MessageCreate(content="hi", answers=[_answered("Which format?", ["PDF"])])
+
+
+def test_a_card_asks_at_most_four_questions() -> None:
+    with pytest.raises(ValidationError):
+        MessageCreate(answers=[_answered(f"Question {i}?", []) for i in range(5)])
