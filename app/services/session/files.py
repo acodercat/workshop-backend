@@ -3,8 +3,8 @@
 Two questions, both answered from the tables that record a binding:
 whether a key is bound to a given session (the download and preview
 endpoints ask), and whether anyone other than the caller holds a key they
-are about to store (every write path asks — a message attachment, a
-schedule attachment and a project file alike).
+are about to store (every write path asks — a message attachment and a
+project file alike).
 
 Pure DB queries — no FastAPI / HTTP concerns. Both raise
 :class:`~app.errors.FileNotInSessionError` and
@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import FileNotInSessionError, FileNotOwnedError
 from app.models.project_file import ProjectFile
-from app.models.schedule_file import ScheduleFile
 from app.models.session_files import SessionFile
 
 
@@ -56,17 +55,14 @@ async def assert_files_owned_by(
 
     The one definition of "may this caller reference this upload", read by
     every path that stores a ``file_key`` on the caller's behalf — a message
-    attachment, a schedule attachment and a project file alike. It is load-bearing: a share
+    attachment and a project file alike. It is load-bearing: a share
     viewer legitimately holds the ``file_key`` of a file in the session
     shared with them, and a path that let them store it would let them keep
     minting download URLs after the share was revoked.
 
-    "Held" means any of the three tables. A schedule attachment lives in
-    ``schedule_file`` from the moment it is saved and only reaches
-    ``session_files`` when the task first fires, which may be never for a
-    paused one; a project file uploaded on the project's page is in
-    ``project_file`` alone. A check that read only ``session_files`` would
-    treat either as unbound indefinitely, and the first stranger to learn
+    "Held" means either table. A project file uploaded on the project's page
+    is in ``project_file`` alone; a check that read only ``session_files``
+    would treat it as unbound indefinitely, and the first stranger to learn
     the key could bind it and lock its real owner out of their own file.
     Deleted project files still count: the object is still their owner's,
     as a soft-deleted session's uploads are.
@@ -88,10 +84,6 @@ async def assert_files_owned_by(
             SessionFile.user_id.is_distinct_from(user_id),
         )
         .union_all(
-            select(ScheduleFile.file_key).where(
-                ScheduleFile.file_key.in_(file_keys),
-                ScheduleFile.user_id.is_distinct_from(user_id),
-            ),
             select(ProjectFile.file_key).where(
                 ProjectFile.file_key.in_(file_keys),
                 ProjectFile.user_id.is_distinct_from(user_id),

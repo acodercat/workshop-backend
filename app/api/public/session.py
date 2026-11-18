@@ -57,7 +57,6 @@ from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.project import Project
 from app.models.project_file import ProjectFile
-from app.models.schedule_file import ScheduleFile
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_share import SessionShare
@@ -493,10 +492,9 @@ async def list_files(
         .join(Session, Session.id == SessionFile.session_id)
         .where(filter_clause)
         # One row per *file*, not per binding. A file can be bound to several
-        # sessions — a scheduled task re-attaches the same upload to every
-        # session it creates — and listing one object once a day is not a
-        # library. The most recent binding wins, so the entry is attributed
-        # to the run its owner is most likely looking for.
+        # of its owner's sessions, and listing one object once per session is
+        # not a library. The most recent binding wins, so the entry is
+        # attributed to the session its owner is most likely looking for.
         .distinct(SessionFile.file_key)
         .order_by(
             SessionFile.file_key,
@@ -1338,15 +1336,12 @@ async def _enforce_session_file_quota(
     silently exhaust a user's upload headroom.
 
     Counted per *object*, not per binding. One upload can be bound to many
-    sessions — a scheduled task re-attaches the same file to every session
-    it creates — while occupying OSS exactly once, so charging it once a day
-    would be billing for storage nobody is using. Schedule attachments are
-    folded in from ``schedule_file`` so that one still counts before its
-    first firing has bound it anywhere, and every file the user added to a
-    project from ``project_file`` — uploaded on its page, or added from a
-    session, which it outlives. Those count while both the file and its
-    project are live: deleting either frees the quota, as deleting a
-    session does.
+    sessions while occupying OSS exactly once, so charging it per binding
+    would be billing for storage nobody is using. Every file the user added
+    to a project is folded in from ``project_file`` — uploaded on its page,
+    or added from a session, which it outlives. Those count while both the
+    file and its project are live: deleting either frees the quota, as
+    deleting a session does.
 
     ``size_bytes`` on every row is the size OSS reported when the file was
     bound or attached (``file_storage.confirmed_sizes``), never a client's
@@ -1364,9 +1359,6 @@ async def _enforce_session_file_quota(
             SessionFile.origin == SessionFileOrigin.UPLOAD,
         )
     )
-    attached = select(ScheduleFile.file_key, ScheduleFile.size_bytes).where(
-        ScheduleFile.user_id == user_id
-    )
     shared = (
         select(ProjectFile.file_key, ProjectFile.size_bytes)
         .join(Project, Project.id == ProjectFile.project_id)
@@ -1379,7 +1371,7 @@ async def _enforce_session_file_quota(
     # ``max`` rather than ``any``: the same object is the same number of
     # bytes wherever it is bound, so this picks that number deterministically
     # instead of leaving it to the planner.
-    objects = bound.union_all(attached, shared).subquery()
+    objects = bound.union_all(shared).subquery()
     per_object = (
         select(
             objects.c.file_key,

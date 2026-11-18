@@ -114,9 +114,6 @@ class ScheduleSkipReason(StrEnum):
     # The stored tier no longer resolves to a runnable model — a deployment
     # fault, but one the owner has to notice.
     MISCONFIGURED = "misconfigured"
-    # An attachment cannot be bound: its object is gone, it is over the cap,
-    # or its key is held by someone else.
-    ATTACHMENT_UNAVAILABLE = "attachment_unavailable"
 
     @property
     def counts_as_failure(self) -> bool:
@@ -129,7 +126,6 @@ class ScheduleSkipReason(StrEnum):
         return self in {
             ScheduleSkipReason.INSUFFICIENT_CREDITS,
             ScheduleSkipReason.MISCONFIGURED,
-            ScheduleSkipReason.ATTACHMENT_UNAVAILABLE,
         }
 
     @property

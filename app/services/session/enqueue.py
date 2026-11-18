@@ -367,8 +367,7 @@ async def _bind_session_files(
 
     Reusing a file already bound to this same session is idempotent.
     Reusing one bound to a **different owner** is rejected; reusing one of
-    your own in another session is allowed, and is how a scheduled task
-    re-attaches the same upload to every session it creates.
+    your own in another session is allowed.
 
     That ownership test is load-bearing, and it is the whole reason it is
     spelled out rather than left to the schema. Until ``e1c6a8d40b73`` the

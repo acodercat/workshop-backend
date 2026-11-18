@@ -18,12 +18,11 @@ from pydantic import ValidationError
 
 from app.models.schedule import ScheduleFrequency
 from app.schemas.schedule import (
-    SCHEDULE_FILES_MAX,
     RecurrenceSpec,
     ScheduleCreate,
     ScheduleUpdate,
 )
-from app.schemas.session import CONNECTORS_MAX, SKILLS_MAX, FileRef
+from app.schemas.session import CONNECTORS_MAX, SKILLS_MAX
 
 # frequency → the one optional field it requires (None = requires none).
 OWNED_FIELD = {
@@ -173,13 +172,6 @@ class TestCarriedContext:
         [
             ("skills", ["s"] * (SKILLS_MAX + 1)),
             ("connectors", list(range(CONNECTORS_MAX + 1))),
-            (
-                "files",
-                [
-                    FileRef(file_key=f"k{i}", filename="f.pdf", size_bytes=1)
-                    for i in range(SCHEDULE_FILES_MAX + 1)
-                ],
-            ),
         ],
     )
     def test_the_per_turn_cost_is_bounded(self, field, value):

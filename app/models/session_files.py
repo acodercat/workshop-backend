@@ -94,9 +94,8 @@ class SessionFile(Base):
     # use ``session-files/{uuid4}/...`` — older rows still have the legacy
     # ``documents/...`` prefix; tool outputs use
     # ``outputs/{session_uuid}/{tool_use_id}/{idx}_{filename}``), but a key
-    # is no longer unique *here*: one object can be bound to several
-    # sessions, which is how a scheduled task re-attaches the same file to
-    # every session it creates. See ``uq_session_files_session_id_file_key``
+    # is no longer unique *here*: one object can be bound to several of its
+    # owner's sessions. See ``uq_session_files_session_id_file_key``
     # below for what replaced the old column-level UNIQUE, and
     # ``_bind_session_files`` for the ownership check that took over the
     # protection it was incidentally providing.

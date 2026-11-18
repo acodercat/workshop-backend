@@ -2,8 +2,8 @@
 
 The worker mirrors a project's files into each of its sessions' sandboxes
 at ``/workspace/project/``. Rows reference an OSS object by ``file_key``
-rather than copying it, like ``schedule_file``: the object is stored once
-and may be bound many times. Nothing deletes a user's objects — a session's
+rather than copying it, as ``session_files`` does: the object is stored
+once and may be bound many times. Nothing deletes a user's objects — a session's
 soft delete keeps them — so a file added from a session outlives it.
 
 **One row per version.** Writing a name the project already has adds a row
@@ -20,8 +20,8 @@ user's to decide. A version is allocated under ``FOR UPDATE`` on the
 that ``(project_id, filename)``; the lock makes the read-then-insert safe,
 and the unique constraint is the backstop.
 
-``user_id`` is denormalized from the project, as ``schedule_file.user_id``
-is from its schedule: the upload quota and ``assert_files_owned_by`` both
+``user_id`` is denormalized from the project, as ``session_files.user_id``
+is from its session: the upload quota and ``assert_files_owned_by`` both
 look rows up by owner and should not join ``project`` to do it.
 """
 

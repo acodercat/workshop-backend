@@ -47,20 +47,15 @@ from app.common.text import printable
 from app.database import AsyncSessionLocal
 from app.errors import (
     ConcurrentTaskLimitError,
-    FileNotOwnedError,
-    FileNotUploadedError,
-    FileTooLargeError,
     InsufficientCreditsError,
     ModelUnavailableError,
     UnconfiguredTierError,
 )
 from app.models.schedule import Schedule, ScheduleRun, ScheduleSkipReason, ScheduleStatus
 from app.models.user import User, UserStatus
-from app.schemas.session import FileRef
 from app.services.schedule import (
     catch_up_grace,
     connectors as schedule_connectors,
-    files as schedule_files,
     next_run_after,
     render_run_reminder,
 )
@@ -119,19 +114,16 @@ _SESSION_TITLE_CHARS = 40
 _UNTITLED_SESSION = "定时任务"
 
 # Refusals that will not resolve by trying again soon: no credits now means
-# no credits in thirty seconds, a misconfigured tier needs an operator, a
-# missing attachment will not reappear. Each is recorded as its reason and
-# the clock moves on; what else the reason implies is the reason's own
-# business (``ScheduleSkipReason.counts_as_failure``). The running-task cap
-# is absent on purpose — it is congestion, handled by ``_defer_congestion``.
+# no credits in thirty seconds, and a misconfigured tier needs an operator.
+# Each is recorded as its reason and the clock moves on; what else the
+# reason implies is the reason's own business
+# (``ScheduleSkipReason.counts_as_failure``). The running-task cap is absent
+# on purpose — it is congestion, handled by ``_defer_congestion``.
 _REFUSAL_REASONS: dict[type[Exception], ScheduleSkipReason] = {
     InsufficientCreditsError: ScheduleSkipReason.INSUFFICIENT_CREDITS,
     # A tier that does not resolve, or one whose model has no rate-card entry.
     UnconfiguredTierError: ScheduleSkipReason.MISCONFIGURED,
     ModelUnavailableError: ScheduleSkipReason.MISCONFIGURED,
-    FileNotUploadedError: ScheduleSkipReason.ATTACHMENT_UNAVAILABLE,
-    FileTooLargeError: ScheduleSkipReason.ATTACHMENT_UNAVAILABLE,
-    FileNotOwnedError: ScheduleSkipReason.ATTACHMENT_UNAVAILABLE,
 }
 
 # What the ``except`` clause catches and what ``_skip_reason_for`` can classify are
@@ -562,26 +554,7 @@ async def _enqueue(
         redis,
         session,
         content=schedule.prompt,
-        # The same objects every firing, bound afresh to each new session —
-        # which is what ``uq_session_files_session_id_file_key`` replaced a
-        # globally unique ``file_key`` to allow.
-        #
-        # ``model_construct``, not the validating constructor: ``FileRef`` is
-        # a request model whose ``size_bytes`` cap exists to refuse a client's
-        # oversized *claim*. This size is OSS's own, read back off the row,
-        # and may exceed a cap an operator has since lowered — in which case
-        # the binder's re-HEAD raises ``FileTooLargeError`` and the occurrence
-        # is recorded as ``attachment_unavailable``. Validating here would
-        # raise first, land in the generic retry, and never record anything.
-        files=[
-            FileRef.model_construct(
-                file_key=row.file_key,
-                filename=row.filename,
-                mime_type=row.mime_type,
-                size_bytes=row.size_bytes,
-            )
-            for row in await schedule_files.attached(db, schedule.id)
-        ],
+        files=[],
         # Names, resolved fresh every firing. Since the worker's listing
         # narrowed to live SYSTEM skills plus the turn's own picks, this
         # argument is the only thing that puts an OFFICIAL or CUSTOM skill

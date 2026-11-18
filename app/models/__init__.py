@@ -31,7 +31,6 @@ from app.models.schedule import (
     ScheduleSkipReason,
     ScheduleStatus,
 )
-from app.models.schedule_file import ScheduleFile
 from app.models.schedule_mcp_server import ScheduleMCPServer
 from app.models.session import Session
 from app.models.session_context import SessionContext
@@ -64,7 +63,6 @@ __all__ = [
     "ProjectFileOrigin",
     "Sandbox",
     "Schedule",
-    "ScheduleFile",
     "ScheduleFrequency",
     "ScheduleMCPServer",
     "ScheduleRun",

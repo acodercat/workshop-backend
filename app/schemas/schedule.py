@@ -20,7 +20,7 @@ from app.common.timezones import is_known_timezone
 from app.models.schedule import ScheduleFrequency, ScheduleSkipReason, ScheduleStatus
 from app.models.session import Tier
 from app.models.session_turn import SessionTurnStatus, TerminationReason
-from app.schemas.session import CONNECTORS_MAX, SKILLS_MAX, FileRef
+from app.schemas.session import CONNECTORS_MAX, SKILLS_MAX
 
 # Which optional column each frequency requires, and which it forbids.
 # Mirrors ``ck_schedule_frequency_fields``; this copy exists so the caller
@@ -33,13 +33,6 @@ _REQUIRED_FIELD: dict[ScheduleFrequency, str | None] = {
     ScheduleFrequency.MONTHLY: "day_of_month",
 }
 _SPEC_FIELDS = ("run_date", "weekday", "day_of_month")
-
-# The schedule form is the conversation's composer, verbatim, and the
-# composer stops accepting attachments at thirty (``MAX_MESSAGE_FILES`` in
-# ``frontend/hooks/use-file-upload.ts``). This must not sit below that: a
-# cap the client cannot see is a 422 the client cannot explain. Nothing
-# enforces the pair, so changing one side means changing the other.
-SCHEDULE_FILES_MAX = 30
 
 
 class RecurrenceSpec(BaseModel):
@@ -148,10 +141,6 @@ class ScheduleCreate(BaseModel):
     # not checked at all here, because a Connector disconnected today may
     # well be reconnected before this task next fires.
     connectors: list[int] = Field(default_factory=list, max_length=CONNECTORS_MAX)
-    # Uploads to attach, the same shape a message sends. The declared
-    # ``size_bytes`` is not trusted: it is reconciled against OSS when the
-    # attachment is stored.
-    files: list[FileRef] = Field(default_factory=list, max_length=SCHEDULE_FILES_MAX)
 
     _check_prompt = field_validator("prompt")(_checked_prompt)
 
@@ -172,30 +161,9 @@ class ScheduleUpdate(BaseModel):
     # anyway, and the form has no per-item control to justify it.
     skills: list[str] | None = Field(default=None, max_length=SKILLS_MAX)
     connectors: list[int] | None = Field(default=None, max_length=CONNECTORS_MAX)
-    files: list[FileRef] | None = Field(default=None, max_length=SCHEDULE_FILES_MAX)
     status: Literal[ScheduleStatus.ACTIVE, ScheduleStatus.PAUSED] | None = None
 
     _check_prompt = field_validator("prompt")(_checked_prompt)
-
-
-class ScheduleFileResponse(BaseModel):
-    """One stored attachment, as the form re-renders it.
-
-    Its own model rather than :class:`FileRef` because that one is a
-    *request* model: its ``size_bytes`` carries ``le=max_file_bytes`` to
-    refuse an oversized claim early. A stored size is not a claim — it is
-    what OSS reported — and it can legitimately exceed a cap an operator has
-    since lowered. Rendering it through the request model turned that into
-    a 500 on the whole list, on exactly the page that lets the owner remove
-    the attachment.
-    """
-
-    model_config = ConfigDict(from_attributes=True)
-
-    file_key: str
-    filename: str
-    mime_type: str | None
-    size_bytes: int
 
 
 class ScheduleRunResponse(BaseModel):
@@ -258,15 +226,13 @@ class ScheduleResponse(BaseModel):
     next_run_at: datetime | None
     # The most recent occurrence, whole — its time and its outcome together,
     # rendered exactly as the history renders it. ``None`` before the first.
-    # Assembled by the endpoint, like ``connectors`` and ``files``.
+    # Assembled by the endpoint, like ``connectors``.
     last_run: ScheduleRunResponse | None = None
     tier: Tier
     # What each firing will carry. ``skills`` reads straight off the row;
     # ``connectors`` is assembled from ``schedule_mcp_server``.
     skills: list[str]
     connectors: list[int] = Field(default_factory=list)
-    # Assembled from ``schedule_file`` by the endpoint, like ``connectors``.
-    files: list[ScheduleFileResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
