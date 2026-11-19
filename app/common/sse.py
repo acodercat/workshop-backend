@@ -105,21 +105,6 @@ class AgentToolUseStartedEvent(_EventBase):
     tool_use_id: str
 
 
-class AgentToolUseArgsChunkEvent(_EventBase):
-    """``agent.tool_use_args_chunk`` — one fragment of the tool call's
-    arguments JSON. Concatenating every ``delta`` for one
-    ``tool_use_id`` reconstructs the final args JSON.
-
-    The fragment is opaque text — partial JSON at chunk boundaries
-    (``'{"command":"ec'``) does not parse on its own. Same
-    orphan-allowed contract as ``agent.tool_use_started``.
-    """
-
-    type: Literal["agent.tool_use_args_chunk"]
-    tool_use_id: str
-    delta: str
-
-
 class AgentToolUseEvent(_EventBase):
     """``agent.tool_use`` — the model is invoking a tool.
 
@@ -257,7 +242,6 @@ StreamEvent = (
     | AgentThinkingEvent
     | AgentMessageEvent
     | AgentToolUseStartedEvent
-    | AgentToolUseArgsChunkEvent
     | AgentToolUseEvent
     | AgentToolProgressEvent
     | AgentToolResultEvent

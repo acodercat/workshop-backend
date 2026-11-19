@@ -38,7 +38,6 @@ class EventType(StrEnum):
     AGENT_THINKING = "agent.thinking"
     AGENT_MESSAGE = "agent.message"
     AGENT_TOOL_USE_STARTED = "agent.tool_use_started"
-    AGENT_TOOL_USE_ARGS_CHUNK = "agent.tool_use_args_chunk"
     AGENT_TOOL_USE = "agent.tool_use"
     AGENT_TOOL_PROGRESS = "agent.tool_progress"
     AGENT_TOOL_RESULT = "agent.tool_result"
