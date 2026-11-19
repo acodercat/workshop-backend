@@ -210,7 +210,8 @@ class MessageCreate(MessageInput):
 
 class QueuedMessageCreate(MessageInput):
     """Body of ``POST /sessions/{id}/queued-messages``: a message sent
-    while a turn runs, to go out once it ends."""
+    while a turn runs or a queue is about to go out, to go out after
+    them."""
 
     @model_validator(mode="after")
     def _has_content(self) -> "QueuedMessageCreate":

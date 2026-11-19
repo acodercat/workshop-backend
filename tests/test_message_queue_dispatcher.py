@@ -40,7 +40,8 @@ class _CapturingDb:
 async def test_selects_completed_sessions_whose_queue_nobody_holds() -> None:
     db = _CapturingDb()
 
-    await dispatcher._list_candidates(db)
+    owner = 7
+    await dispatcher._list_candidates(db, skip_sessions=set(), skip_owners={owner}, limit=50)
 
     sql = _sql(db.statement)
     # Driven from the queue, so only sessions that have one are read.
@@ -51,6 +52,8 @@ async def test_selects_completed_sessions_whose_queue_nobody_holds() -> None:
     # Reached without authentication, so a suspended owner is filtered here.
     assert "\"user\".status = 'ACTIVE'" in sql
     assert "queued_message.held_at IS NOT NULL" in sql
+    # What this tick is already done with is left out of the scan itself.
+    assert "session.user_id NOT IN (7)" in sql
     assert sql.index("WHERE") < sql.index("LIMIT")
 
 
@@ -162,29 +165,56 @@ async def test_the_running_task_cap_is_tried_again_not_held(monkeypatch) -> None
     assert wired.db.commits == 0
 
 
+class _LockDb:
+    """Grants the tick's advisory lock."""
+
+    async def execute(self, _statement, _params=None):
+        return SimpleNamespace(scalar=lambda: True)
+
+
+def _patch_tick(monkeypatch, candidates: list[tuple], congested_owners: set[int]) -> list:
+    """Run ``_tick`` over ``candidates`` (oldest first), with every session
+    of ``congested_owners`` at the running-task cap. Returns the sessions
+    attempted, in order."""
+    attempts: list = []
+
+    async def list_candidates(_db, *, skip_sessions, skip_owners, limit):
+        return [
+            (session_id, owner)
+            for session_id, owner in candidates
+            if session_id not in skip_sessions and owner not in skip_owners
+        ][:limit]
+
+    async def dispatch_next(session_id, _redis):
+        attempts.append(session_id)
+        if dict(candidates)[session_id] in congested_owners:
+            raise ConcurrentTaskLimitError(3)
+        return True
+
+    monkeypatch.setattr(dispatcher, "AsyncSessionLocal", lambda: _FakeSession(_LockDb()))
+    monkeypatch.setattr(dispatcher, "_list_candidates", list_candidates)
+    monkeypatch.setattr(dispatcher, "_dispatch_next", dispatch_next)
+    return attempts
+
+
 async def test_a_congested_owners_other_sessions_wait_for_the_next_tick(monkeypatch) -> None:
     # The cap is per owner: once one session meets it, the owner's others
     # would too, and each attempt costs a whole enqueue.
     congested, other, free = uuid4(), uuid4(), uuid4()
-    attempts: list = []
-
-    async def dispatch_next(session_id, _redis):
-        attempts.append(session_id)
-        if session_id == congested:
-            raise ConcurrentTaskLimitError(3)
-        return True
-
-    class _LockDb:
-        async def execute(self, _statement, _params=None):
-            return SimpleNamespace(scalar=lambda: True)
-
-    monkeypatch.setattr(dispatcher, "AsyncSessionLocal", lambda: _FakeSession(_LockDb()))
-    monkeypatch.setattr(
-        dispatcher,
-        "_list_candidates",
-        AsyncMock(return_value=[(congested, 1), (other, 1), (free, 2)]),
+    attempts = _patch_tick(
+        monkeypatch, [(congested, 1), (other, 1), (free, 2)], congested_owners={1}
     )
-    monkeypatch.setattr(dispatcher, "_dispatch_next", dispatch_next)
 
     assert await dispatcher._tick("redis") == 1
     assert attempts == [congested, free]
+
+
+async def test_a_congested_owner_cannot_fill_the_batch(monkeypatch) -> None:
+    # A whole batch of the oldest candidates belongs to an owner at the cap;
+    # the session behind them, whose owner has room, still goes out.
+    crowd = [(uuid4(), 1) for _ in range(dispatcher._DISPATCH_BATCH)]
+    behind = uuid4()
+    attempts = _patch_tick(monkeypatch, [*crowd, (behind, 2)], congested_owners={1})
+
+    assert await dispatcher._tick("redis") == 1
+    assert attempts == [crowd[0][0], behind]

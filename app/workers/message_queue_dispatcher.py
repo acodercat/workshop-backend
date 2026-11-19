@@ -28,8 +28,10 @@ client reads ``held_at`` to tell a held queue from a moving one.
 
 The running-task cap is the exception, as it is for a scheduled task: that
 is congestion, a slot frees on its own, so nothing is held and the message
-is tried again next tick. The rest of that owner's sessions are skipped for
-the tick, since the cap is per owner and each attempt costs an enqueue.
+is tried again next tick. The rest of that owner's sessions are left out of
+the tick, since the cap is per owner and each attempt costs an enqueue —
+left out of the scan itself, so that a congested owner's sessions cannot
+fill every batch and keep other owners' queues from being reached.
 
 **Polling, not pub/sub.** The condition is a state, not an event: a
 completed session with a queue nobody holds. Reading it every tick needs no
@@ -74,8 +76,8 @@ _LOCK_KEY = 0x4D53475155455545
 # their own messages, and the scan it buys is a handful of rows.
 _TICK_SECONDS = 2
 
-# Sessions handled per tick, so one burst cannot hold the advisory lock for
-# long; the next tick takes the rest.
+# Sessions attempted per tick, so one burst cannot hold the advisory lock
+# for long; the next tick takes the rest.
 _DISPATCH_BATCH = 50
 
 
@@ -125,25 +127,53 @@ async def _tick(redis: aioredis.Redis) -> int:
         if not got:
             return 0
         dispatched = 0
+        attempted: set[UUID] = set()
         # Owners found at their running-task cap this tick: their other
         # sessions would be turned away the same way.
         congested: set[int] = set()
-        for session_id, user_id in await _list_candidates(lock_db):
-            if user_id in congested:
-                continue
-            try:
-                if await _dispatch_next(session_id, redis):
-                    dispatched += 1
-            except ConcurrentTaskLimitError:
-                congested.add(user_id)
-            except Exception:
-                logger.exception("message queue: session %s failed — next tick retries", session_id)
+        # Scanned again, past them, whenever an owner turns out congested:
+        # their sessions left in the scan were skipped, and the batch is
+        # meant for sessions that can still be sent. Each scan attempts at
+        # least its first candidate, so the loop ends.
+        while len(attempted) < _DISPATCH_BATCH:
+            candidates = await _list_candidates(
+                lock_db,
+                skip_sessions=attempted,
+                skip_owners=congested,
+                limit=_DISPATCH_BATCH - len(attempted),
+            )
+            if not candidates:
+                break
+            rescan = False
+            for session_id, user_id in candidates:
+                if user_id in congested:
+                    continue
+                attempted.add(session_id)
+                try:
+                    if await _dispatch_next(session_id, redis):
+                        dispatched += 1
+                except ConcurrentTaskLimitError:
+                    congested.add(user_id)
+                    rescan = True
+                except Exception:
+                    logger.exception(
+                        "message queue: session %s failed — next tick retries", session_id
+                    )
+            if not rescan:
+                break
         return dispatched
 
 
-async def _list_candidates(db: AsyncSession) -> list[tuple[UUID, int]]:
+async def _list_candidates(
+    db: AsyncSession,
+    *,
+    skip_sessions: set[UUID],
+    skip_owners: set[int],
+    limit: int,
+) -> list[tuple[UUID, int]]:
     """The sessions whose queue moves, with their owners: the last turn
-    completed and nothing holds the queue — ``queue_is_moving``, in SQL.
+    completed and nothing holds the queue — ``queue_is_moving``, in SQL —
+    leaving out the sessions and owners this tick is already done with.
 
     The owner's account has to still be live. Like the schedule dispatcher,
     this reaches ``queue_user_message`` without passing authentication, the
@@ -161,9 +191,11 @@ async def _list_candidates(db: AsyncSession) -> list[tuple[UUID, int]]:
             Session.deleted_at.is_(None),
             User.status == UserStatus.ACTIVE,
             ~held,
+            Session.id.not_in(skip_sessions),
+            Session.user_id.not_in(skip_owners),
         )
         .order_by(Session.updated_at)
-        .limit(_DISPATCH_BATCH)
+        .limit(limit)
     )
     return [(session_id, user_id) for session_id, user_id in rows.all()]
 
