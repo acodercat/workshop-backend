@@ -59,11 +59,15 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
-    """Body of ``PATCH /api/projects/{id}``. ``None`` leaves a field alone."""
+    """Body of ``PATCH /api/projects/{id}``. ``None`` leaves a field alone.
+
+    ``pinned``: ``True`` pins the project, ``False`` unpins it.
+    """
 
     name: str | None = Field(default=None, min_length=1, max_length=100)
     instructions: str | None = Field(default=None, max_length=_INSTRUCTIONS_MAX_LENGTH)
     icon: str | None = Field(default=None, max_length=32, pattern=_ICON_PATTERN)
+    pinned: bool | None = None
 
     _check_name = field_validator("name")(_checked_name)
     _check_instructions = field_validator("instructions")(_checked_instructions)
@@ -78,6 +82,8 @@ class ProjectResponse(BaseModel):
     icon: str | None
     created_at: datetime
     updated_at: datetime
+    # When the owner pinned the project; ``None`` = not pinned.
+    pinned_at: datetime | None
 
 
 class SessionFileRef(BaseModel):

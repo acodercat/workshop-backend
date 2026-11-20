@@ -142,8 +142,11 @@ async def update_project(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ProjectResponse:
-    """Rename a project, or replace its instructions or icon. ``None`` leaves
-    a field alone."""
+    """Rename a project, replace its instructions or icon, or pin or unpin
+    it. ``None`` leaves a field alone.
+
+    Re-pinning a pinned project keeps its place among the pinned.
+    """
     project = await project_ownership.require_owned_project(
         db, user_id=current_user.id, project_id=project_id
     )
@@ -153,6 +156,12 @@ async def update_project(
         project.instructions = body.instructions
     if body.icon is not None:
         project.icon = body.icon
+    if body.pinned is not None and body.pinned != (project.pinned_at is not None):
+        project.pinned_at = func.now() if body.pinned else None
+    if body.model_fields_set == {"pinned"}:
+        # Pinning is not a change to the project. Set to itself, or
+        # ``onupdate`` would stamp now() and lift it to the top of the list.
+        project.updated_at = Project.updated_at
     await db.commit()
     await db.refresh(project)
     return ProjectResponse.model_validate(project)

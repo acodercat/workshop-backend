@@ -38,6 +38,7 @@ from app.models.session_context import SessionContext
 from app.models.session_files import SessionFile
 from app.models.session_mcp_server import SessionMCPServer
 from app.models.session_share import SessionShare
+from app.models.sidebar_layout import SidebarLayout
 from app.models.skill import Skill, SkillOrigin
 from app.models.skill_category import SkillCategory
 from app.models.staff import Staff, StaffStatus
@@ -75,6 +76,7 @@ __all__ = [
     "SessionFile",
     "SessionMCPServer",
     "SessionShare",
+    "SidebarLayout",
     "Skill",
     "SkillCategory",
     "SkillOrigin",
