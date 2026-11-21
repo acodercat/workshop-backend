@@ -344,7 +344,11 @@ def _leaves(exc: BaseException) -> Iterator[BaseException]:
             queue.extend(current.exceptions)
         else:
             yield current
-        queue.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+        queue.extend(
+            chained_error
+            for chained_error in (current.__cause__, current.__context__)
+            if chained_error is not None
+        )
 
 
 def _describe(exc: BaseException) -> str:

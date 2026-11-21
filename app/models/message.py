@@ -49,7 +49,7 @@ class Message(Base):
             # (names == values today, so this is convention alignment, not
             # a behavior change — it keeps a future member rename from
             # silently changing what's stored).
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )

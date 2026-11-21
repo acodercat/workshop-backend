@@ -215,7 +215,7 @@ class SessionTurn(Base):
         SAEnum(
             SessionTurnStatus,
             name="session_turn_status",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
         default=SessionTurnStatus.PENDING,
@@ -231,7 +231,7 @@ class SessionTurn(Base):
             native_enum=False,
             create_constraint=False,
             length=32,
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=True,
     )

@@ -299,6 +299,6 @@ def event_to_sse(event: StreamEvent, entry_id: str) -> SSEMessage:
     clients can resume from a known position via ``Last-Event-ID``.
     """
     event_type = event["type"]
-    fields = {k: v for k, v in event.items() if k not in _INTERNAL_FIELDS}
+    fields = {key: value for key, value in event.items() if key not in _INTERNAL_FIELDS}
     data = orjson.dumps(fields).decode() if fields else None
     return sse_event(event_type, data, entry_id)

@@ -6,7 +6,7 @@ from app.models.withdrawal_request import WithdrawalStatus
 
 
 def test_ledger_kind_values_are_uppercase() -> None:
-    values = [m.value for m in CommissionLedgerKind]
+    values = [member.value for member in CommissionLedgerKind]
     assert values == [
         "COMMISSION",
         "WITHDRAW",
@@ -15,11 +15,11 @@ def test_ledger_kind_values_are_uppercase() -> None:
         "CLAWBACK",
         "ADJUST",
     ]
-    assert all(v == v.upper() for v in values)
+    assert all(value == value.upper() for value in values)
 
 
 def test_withdrawal_status_values() -> None:
-    assert [m.value for m in WithdrawalStatus] == ["PENDING", "PAID", "REJECTED"]
+    assert [member.value for member in WithdrawalStatus] == ["PENDING", "PAID", "REJECTED"]
 
 
 def test_ledger_row_carries_signed_fen() -> None:

@@ -202,7 +202,7 @@ async def queue_user_message(
         files=files,
     )
 
-    file_dicts = [f.model_dump() for f in files]
+    file_dicts = [attachment.model_dump() for attachment in files]
     # Insert the session_turn first so we have a stable ``turn_id`` to
     # attach to the credit reservation. The flush below populates
     # ``session_turn.id`` without committing.
@@ -434,7 +434,7 @@ async def _bind_session_files(
     # value becomes trustworthy. ``head_size`` is blocking oss2; thread it
     # and fan out so N attachments cost ~one HEAD's latency, not N serial.
     sizes = await file_storage.confirmed_sizes(
-        file_storage.SESSION_FILE_POLICY, [f.file_key for f in to_insert]
+        file_storage.SESSION_FILE_POLICY, [session_file.file_key for session_file in to_insert]
     )
 
     newly_bound: list[str] = []

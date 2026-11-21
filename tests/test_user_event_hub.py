@@ -56,8 +56,8 @@ class TestUserEventHub:
         hub = UserEventHub(redis=None)
         queue = hub.subscribe(7)
 
-        for n in range(_QUEUE_MAXSIZE + 5):
-            hub._dispatch(_payload(7, type="x", n=n))
+        for sequence in range(_QUEUE_MAXSIZE + 5):
+            hub._dispatch(_payload(7, type="x", n=sequence))
 
         # Queue caps at maxsize; the 5 oldest events were dropped.
         assert queue.qsize() == _QUEUE_MAXSIZE

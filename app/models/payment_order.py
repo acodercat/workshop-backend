@@ -123,7 +123,7 @@ class PaymentOrder(Base):
         SAEnum(
             PaymentProvider,
             name="payment_provider",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -145,7 +145,7 @@ class PaymentOrder(Base):
         SAEnum(
             PaymentOrderStatus,
             name="payment_order_status",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
         server_default=text("'PENDING'"),

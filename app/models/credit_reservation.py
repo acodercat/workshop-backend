@@ -78,7 +78,7 @@ class CreditReservation(Base):
         SAEnum(
             CreditReservationState,
             name="credit_reservation_state",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
         default=CreditReservationState.OPEN,

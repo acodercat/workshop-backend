@@ -79,4 +79,4 @@ def test_answers_carry_no_text_of_their_own() -> None:
 
 def test_a_card_asks_at_most_four_questions() -> None:
     with pytest.raises(ValidationError):
-        MessageCreate(answers=[_answered(f"Question {i}?", []) for i in range(5)])
+        MessageCreate(answers=[_answered(f"Question {index}?", []) for index in range(5)])

@@ -80,7 +80,7 @@ async def test_full_session_lifecycle(
         session_id,
         timeout=_SSE_TIMEOUT_SECONDS,
     )
-    event_types = [t for t, _ in events]
+    event_types = [event_type for event_type, _ in events]
 
     # 4. Wire-shape contracts that hold for every well-formed turn.
     assert_event_envelope_clean(events)
@@ -91,16 +91,16 @@ async def test_full_session_lifecycle(
     # before any model call). ``agent.message_chunk`` is the streamed
     # text path; ``agent.message`` is the post-stream rollup; either
     # is sufficient evidence.
-    assert any(t in {"agent.message_chunk", "agent.message"} for t in event_types), (
-        f"no agent message events in stream: {event_types}"
-    )
+    assert any(
+        event_type in {"agent.message_chunk", "agent.message"} for event_type in event_types
+    ), f"no agent message events in stream: {event_types}"
 
     # 5. Verify persisted DB state matches what the stream told us.
     resp = await http_client.get(f"/sessions/{session_id}")
     assert resp.status_code == 200, resp.text
     detail = resp.json()
     assert detail["status"] == "COMPLETE", f"expected COMPLETE post-stop, got {detail['status']}"
-    roles = [m["role"] for m in detail["messages"]]
+    roles = [message["role"] for message in detail["messages"]]
     assert roles == ["USER", "ASSISTANT"], roles
 
     # 6. Soft-delete: 204, then the session 404s on direct access AND
@@ -112,7 +112,7 @@ async def test_full_session_lifecycle(
     assert resp.status_code == 404, resp.text
     resp = await http_client.get("/sessions", params={"page": 1, "page_size": 100})
     assert resp.status_code == 200, resp.text
-    listed_ids = [s["id"] for s in resp.json()["items"]]
+    listed_ids = [session["id"] for session in resp.json()["items"]]
     assert session_id not in listed_ids, (
         f"soft-deleted session still listed: {session_id} in {listed_ids}"
     )

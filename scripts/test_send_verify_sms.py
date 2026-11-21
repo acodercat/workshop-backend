@@ -115,14 +115,14 @@ def _query(to: str, send_date: str, biz_id: str | None) -> None:
         print(f"无记录：{to} 在 {send_date} 没有发送明细（日期/号码对不上？）")
         return
     status_label = {"1": "待运营商回执", "2": "失败", "3": "成功"}
-    for d in details:
-        status = status_label.get(str(d.send_status), str(d.send_status))
+    for detail in details:
+        status = status_label.get(str(detail.send_status), str(detail.send_status))
         print(f"send_status : {status}")
-        print(f"  receive_date : {d.receive_date}")
-        print(f"  err_code     : {d.err_code}")  # DELIVERED=成功，其余见下方提示
-        print(f"  content      : {d.content}")
-        if d.err_code and d.err_code != "DELIVERED":
-            _hint(d.err_code)
+        print(f"  receive_date : {detail.receive_date}")
+        print(f"  err_code     : {detail.err_code}")  # DELIVERED=成功，其余见下方提示
+        print(f"  content      : {detail.content}")
+        if detail.err_code and detail.err_code != "DELIVERED":
+            _hint(detail.err_code)
 
 
 def _hint(message: str) -> None:

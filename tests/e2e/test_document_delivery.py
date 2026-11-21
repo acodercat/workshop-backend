@@ -147,15 +147,21 @@ async def test_document_generation_and_delivery(
         for type_, payload in events
         if type_ == "agent.tool_use" and payload.get("tool") == "deliver_file"
     ]
-    called_tools = [p.get("tool") for t, p in events if t == "agent.tool_use"]
+    called_tools = [
+        payload.get("tool") for event_type, payload in events if event_type == "agent.tool_use"
+    ]
     assert deliver_calls, f"agent did not invoke deliver_file; tools called: {called_tools}"
 
     # 5. At least one delivered file matches the requested extension.
     delivered_files = _flatten_delivered_files(events)
-    matching = [f for f in delivered_files if f.get("filename", "").lower().endswith(f".{ext}")]
+    matching = [
+        delivered_file
+        for delivered_file in delivered_files
+        if delivered_file.get("filename", "").lower().endswith(f".{ext}")
+    ]
     assert matching, (
         f"no delivered .{ext} file found; "
-        f"delivered={[f.get('filename') for f in delivered_files]}, "
+        f"delivered={[delivered_file.get('filename') for delivered_file in delivered_files]}, "
         f"tools_called={called_tools}"
     )
 
@@ -198,7 +204,7 @@ async def test_document_generation_and_delivery(
     assert resp.status_code == 200
     detail = resp.json()
     assert detail["status"] == "COMPLETE", detail["status"]
-    roles = [m["role"] for m in detail["messages"]]
+    roles = [message["role"] for message in detail["messages"]]
     assert roles == ["USER", "ASSISTANT"], roles
 
     resp = await http_client.delete(f"/sessions/{session_id}")

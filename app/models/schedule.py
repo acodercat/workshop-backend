@@ -157,7 +157,7 @@ class Schedule(Base):
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     # Skill *names*, not ids, and not a snapshot — the same shape the
     # composer sends (``MessageCreate.skills``), re-resolved at every
-    # firing by ``_filter_invokable_skills``. Storing names is what makes
+    # firing by ``filter_invokable_skills``. Storing names is what makes
     # a skill the owner re-uploads take effect on the next run instead of
     # pinning the run to bytes chosen months ago.
     #
@@ -181,7 +181,7 @@ class Schedule(Base):
         SAEnum(
             ScheduleStatus,
             name="schedule_status",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -192,7 +192,7 @@ class Schedule(Base):
         SAEnum(
             ScheduleFrequency,
             name="schedule_frequency",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -235,7 +235,7 @@ class Schedule(Base):
         SAEnum(
             Tier,
             name="session_tier",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -243,7 +243,7 @@ class Schedule(Base):
         SAEnum(
             AgentType,
             name="agent_type",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -333,7 +333,7 @@ class ScheduleRun(Base):
             native_enum=False,
             create_constraint=False,
             length=32,
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=True,
     )

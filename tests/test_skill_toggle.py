@@ -170,7 +170,7 @@ def test_a_rename_clears_the_locale_map() -> None:
     _client(db).patch("/skills/5", json={"display_name": "Notes v2"})
 
     assert _written_tables(db) == {"skill"}
-    (update,) = [s for s in db.statements if s.startswith("UPDATE")]
+    (update,) = [statement for statement in db.statements if statement.startswith("UPDATE")]
     assert "display_name_i18n=NULL" in update.replace(" ", "")
 
 

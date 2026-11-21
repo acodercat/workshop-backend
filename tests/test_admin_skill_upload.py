@@ -239,7 +239,7 @@ def test_turning_a_listing_agent_only_drops_what_users_said_about_it() -> None:
 
     _post(_client(db), _bundle(), origin="SYSTEM")
 
-    deletes = [str(s) for s in db.executed if str(s).startswith("DELETE")]
+    deletes = [str(statement) for statement in db.executed if str(statement).startswith("DELETE")]
     assert len(deletes) == 1
     assert "user_skill_preference" in deletes[0]
 
@@ -250,4 +250,4 @@ def test_replacing_within_the_same_origin_leaves_preferences_alone() -> None:
 
     _post(_client(db), _bundle(), origin="OFFICIAL")
 
-    assert not [s for s in db.executed if str(s).startswith("DELETE")]
+    assert not [statement for statement in db.executed if str(statement).startswith("DELETE")]

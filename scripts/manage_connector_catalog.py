@@ -283,7 +283,7 @@ def _parse_args() -> argparse.Namespace:
     add.add_argument(
         "--auth-type",
         default=MCPServerAuthType.NONE.value,
-        choices=sorted(m.value for m in INSTANTIABLE_AUTH_TYPES),
+        choices=sorted(auth_type.value for auth_type in INSTANTIABLE_AUTH_TYPES),
     )
     add.add_argument("--oauth-scope", default=None)
     add.add_argument("--description", default=None)

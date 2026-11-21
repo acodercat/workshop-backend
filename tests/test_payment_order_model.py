@@ -12,13 +12,13 @@ from app.services.payment.huifu import _fen_to_yuan, _yuan_to_fen
 def test_enum_values_are_uppercase_member_names() -> None:
     # The Postgres enum stores the member *values*; values_callable in the
     # model relies on these being the UPPERCASE labels.
-    assert [m.value for m in PaymentOrderStatus] == [
+    assert [member.value for member in PaymentOrderStatus] == [
         "PENDING",
         "PAID",
         "EXPIRED",
         "FAILED",
     ]
-    assert [m.value for m in PaymentProvider] == ["HUIFU"]
+    assert [member.value for member in PaymentProvider] == ["HUIFU"]
 
 
 def test_fen_yuan_roundtrip() -> None:

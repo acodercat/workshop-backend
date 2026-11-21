@@ -163,7 +163,7 @@ def _excerpt(raw: dict[str, Any]) -> dict[str, Any]:
         "trans_stat",
         "trans_amt",
     )
-    return {k: raw[k] for k in keep if k in raw}
+    return {key: raw[key] for key in keep if key in raw}
 
 
 async def create_order(

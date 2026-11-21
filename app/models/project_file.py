@@ -83,7 +83,7 @@ class ProjectFile(Base):
         SAEnum(
             ProjectFileOrigin,
             name="project_file_origin",
-            values_callable=lambda cls: [m.value for m in cls],
+            values_callable=lambda cls: [member.value for member in cls],
         ),
         nullable=False,
     )

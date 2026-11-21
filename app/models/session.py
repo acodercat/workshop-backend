@@ -140,7 +140,7 @@ class Session(Base):
         SAEnum(
             Tier,
             name="session_tier",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -161,7 +161,7 @@ class Session(Base):
         SAEnum(
             AgentType,
             name="agent_type",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -181,7 +181,7 @@ class Session(Base):
         SAEnum(
             SessionStatus,
             name="session_status",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )

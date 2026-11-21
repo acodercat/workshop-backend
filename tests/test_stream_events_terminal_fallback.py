@@ -60,7 +60,7 @@ async def _collect(gen, limit: int = 20) -> list[dict]:
 
 
 def _terminals(events: list[dict]) -> list[dict]:
-    return [e for e in events if e["event"] == EventType.AGENT_STOPPED.value]
+    return [event for event in events if event["event"] == EventType.AGENT_STOPPED.value]
 
 
 async def test_idle_stream_with_terminal_db_synthesizes_stopped(monkeypatch):
@@ -119,7 +119,9 @@ async def test_connect_does_not_answer_from_the_db_before_following(monkeypatch)
     liveness.assert_not_awaited()  # never consulted: Redis had data
     # The turn's real tail survived, and nothing synthetic was injected.
     chunks = [
-        json.loads(e["data"])["content"] for e in events if e["event"] == "agent.message_chunk"
+        json.loads(event["data"])["content"]
+        for event in events
+        if event["event"] == "agent.message_chunk"
     ]
     assert chunks == ["tail"]
     assert len(_terminals(events)) == 1
@@ -141,7 +143,7 @@ async def test_synthetic_terminal_for_a_cancelled_row_says_so(monkeypatch):
     events = await _collect(streaming.stream_events(redis, "sess-1"))
 
     assert json.loads(events[-1]["data"]) == {"content": "", "stop_reason": "cancelled"}
-    assert all(e["event"] != EventType.AGENT_ERROR.value for e in events)
+    assert all(event["event"] != EventType.AGENT_ERROR.value for event in events)
 
 
 async def test_synthetic_terminal_for_a_failed_row_is_the_error_alone(monkeypatch):
@@ -241,7 +243,7 @@ async def test_blind_dual_outage_trips_the_fuse(monkeypatch):
 
     # Closed (under the cap) and never fabricated a terminal under the outage.
     assert len(events) < 20
-    assert all(e["event"] != EventType.AGENT_STOPPED.value for e in events)
+    assert all(event["event"] != EventType.AGENT_STOPPED.value for event in events)
 
 
 def test_safe_cursor_passes_valid_entry_id():
@@ -257,9 +259,13 @@ def test_safe_cursor_rejects_malformed_id():
         assert _safe_cursor(bad) is None
 
 
-def _chunk(i: int) -> tuple[str, dict]:
+def _chunk(entry_number: int) -> tuple[str, dict]:
     """A replay entry shaped ``(entry_id, fields)`` as Redis xrange returns it."""
-    return f"{i}-0", {"type": "agent.message_chunk", "content": f"c{i}", "ts": "1"}
+    return f"{entry_number}-0", {
+        "type": "agent.message_chunk",
+        "content": f"c{entry_number}",
+        "ts": "1",
+    }
 
 
 async def test_replay_spans_multiple_pages_in_order(monkeypatch):
@@ -285,13 +291,15 @@ async def test_replay_spans_multiple_pages_in_order(monkeypatch):
 
     # All five replayed chunks, in order.
     contents = [
-        json.loads(e["data"])["content"] for e in events if e["event"] == "agent.message_chunk"
+        json.loads(event["data"])["content"]
+        for event in events
+        if event["event"] == "agent.message_chunk"
     ]
     assert contents == ["c1", "c2", "c3", "c4", "c5"]
     # Three pages read; the short final page skipped a fourth (empty) call.
     assert redis.xrange.await_count == 3
     # Each call resumed strictly after the previous page's last entry.
-    mins = [c.kwargs["min"] for c in redis.xrange.await_args_list]
+    mins = [call.kwargs["min"] for call in redis.xrange.await_args_list]
     assert mins == ["-", "(2-0", "(4-0"]
 
 
@@ -336,14 +344,16 @@ async def test_replay_drops_stale_turn_entries(monkeypatch):
     events = await _collect(streaming.stream_events(redis, "sess-1"))
 
     contents = [
-        json.loads(e["data"])["content"] for e in events if e["event"] == "agent.message_chunk"
+        json.loads(event["data"])["content"]
+        for event in events
+        if event["event"] == "agent.message_chunk"
     ]
     assert contents == ["real"]  # turn-19 ghost dropped
-    terminals = [e for e in events if e["event"] == EventType.AGENT_STOPPED.value]
+    terminals = [event for event in events if event["event"] == EventType.AGENT_STOPPED.value]
     assert len(terminals) == 1  # stale terminal didn't close us
     assert json.loads(terminals[0]["data"])["content"] == "done"
     # The routing stamp is stripped from every forwarded payload.
-    assert all("turn_id" not in json.loads(e["data"]) for e in events if e.get("data"))
+    assert all("turn_id" not in json.loads(event["data"]) for event in events if event.get("data"))
 
 
 async def test_replay_terminal_returns_before_paging_on(monkeypatch):

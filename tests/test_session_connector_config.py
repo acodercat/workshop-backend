@@ -168,7 +168,7 @@ class TestWhyItIsATableAndNotAnArray:
     def test_the_same_connector_cannot_be_configured_twice(self):
         # Deduplication happens in ``require_owned_connectors`` too; this is the
         # backstop that does not depend on remembering to call it.
-        assert [c.name for c in SessionMCPServer.__table__.primary_key] == [
+        assert [column.name for column in SessionMCPServer.__table__.primary_key] == [
             "session_id",
             "mcp_server_id",
         ]

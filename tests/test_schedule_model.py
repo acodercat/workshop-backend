@@ -43,7 +43,7 @@ class TestDispatcherScan:
         # walks paused and completed rows too — which on a long-lived
         # deployment is most of the table and none of it ever due.
         index = _indexes(Schedule)["ix_schedule_due"]
-        assert [c.name for c in index.columns] == ["next_run_at"]
+        assert [column.name for column in index.columns] == ["next_run_at"]
         assert _predicate(index) == "status = 'ACTIVE'"
 
 
@@ -54,7 +54,7 @@ class TestIdempotency:
         # crash-and-retry run the user's task a second time.
         index = _indexes(ScheduleRun)["uq_schedule_run_occurrence"]
         assert index.unique is True
-        assert [c.name for c in index.columns] == ["schedule_id", "scheduled_for"]
+        assert [column.name for column in index.columns] == ["schedule_id", "scheduled_for"]
 
     def test_unread_index_is_partial_on_unread(self):
         index = _indexes(ScheduleRun)["ix_schedule_run_unread"]
@@ -114,11 +114,11 @@ class TestConnectorBinding:
         # the reference check Postgres runs when an ``mcp_server`` row is
         # deleted. Without this index that check seq-scans.
         index = _indexes(ScheduleMCPServer)["ix_schedule_mcp_server_mcp_server_id"]
-        assert [c.name for c in index.columns] == ["mcp_server_id"]
+        assert [column.name for column in index.columns] == ["mcp_server_id"]
 
     def test_one_connector_cannot_be_bound_twice(self):
         pk = ScheduleMCPServer.__table__.primary_key  # type: ignore[attr-defined]
-        assert [c.name for c in pk.columns] == ["schedule_id", "mcp_server_id"]
+        assert [column.name for column in pk.columns] == ["schedule_id", "mcp_server_id"]
 
 
 class TestSkillPicks:

@@ -116,7 +116,7 @@ async def list_projects(
     total = (await db.execute(select(func.count(Project.id)).where(live))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
-        items=[ProjectResponse.model_validate(p) for p in rows],
+        items=[ProjectResponse.model_validate(project) for project in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 
@@ -213,7 +213,7 @@ async def list_project_files(
     total = await db.scalar(select(func.count()).select_from(current.subquery())) or 0
     rows = (await db.execute(paginate(current, page, page_size))).scalars().all()
     return PaginatedResponse(
-        items=[ProjectFileResponse.model_validate(f) for f in rows],
+        items=[ProjectFileResponse.model_validate(project_file) for project_file in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 

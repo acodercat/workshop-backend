@@ -389,7 +389,7 @@ async def list_sessions(
     total = (await db.execute(select(func.count(Session.id)).where(filter_clause))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
-        items=[SessionResponse.model_validate(s) for s in rows],
+        items=[SessionResponse.model_validate(session) for session in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 

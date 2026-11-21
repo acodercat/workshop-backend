@@ -47,7 +47,9 @@ def test_each_frequency_accepts_exactly_its_own_field(frequency):
     assert spec.frequency is frequency
 
 
-@pytest.mark.parametrize("frequency", [f for f in ScheduleFrequency if OWNED_FIELD[f]])
+@pytest.mark.parametrize(
+    "frequency", [frequency for frequency in ScheduleFrequency if OWNED_FIELD[frequency]]
+)
 def test_a_frequency_missing_its_field_is_refused(frequency):
     with pytest.raises(ValidationError, match=OWNED_FIELD[frequency]):
         _spec(frequency)

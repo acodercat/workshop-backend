@@ -108,14 +108,14 @@ async def list_payment_orders(
     return PaginatedResponse(
         items=[
             PaymentOrderEntry(
-                order_id=o.id,
-                amount_cny=o.amount_fen / 100,
-                credits=credits_from_micro(o.credit_micro),
-                channel=o.reference.get("channel", ""),
-                out_trade_no=o.out_trade_no,
-                created_at=o.created_at,
+                order_id=order.id,
+                amount_cny=order.amount_fen / 100,
+                credits=credits_from_micro(order.credit_micro),
+                channel=order.reference.get("channel", ""),
+                out_trade_no=order.out_trade_no,
+                created_at=order.created_at,
             )
-            for o in rows
+            for order in rows
         ],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

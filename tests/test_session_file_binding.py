@@ -296,7 +296,7 @@ class TestSchema:
         column = SessionFile.__table__.c.file_key  # type: ignore[attr-defined]
         assert not column.unique
         uniques = {
-            tuple(c.name for c in constraint.columns)
+            tuple(column.name for column in constraint.columns)
             for constraint in SessionFile.__table__.constraints  # type: ignore[attr-defined]
             if isinstance(constraint, UniqueConstraint)
         }

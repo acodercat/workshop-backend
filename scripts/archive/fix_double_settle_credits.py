@@ -80,11 +80,11 @@ async def main(args: argparse.Namespace) -> int:
     async with AsyncSessionLocal() as db:
         plan = (await db.execute(_PLAN_SQL)).all()
 
-    total = sum(int(r.correction_micro) for r in plan)
+    total = sum(int(row.correction_micro) for row in plan)
     print(f"affected users: {len(plan)}   net correction: {_fmt(total)} credits")
-    for r in plan:
+    for row in plan:
         print(
-            f"  user {r.user_id:>5}: {r.n_res:>3} res   {_fmt(int(r.correction_micro)):>13} credits"
+            f"  user {row.user_id:>5}: {row.n_res:>3} res   {_fmt(int(row.correction_micro)):>13} credits"
         )
 
     if not args.apply:
@@ -93,24 +93,24 @@ async def main(args: argparse.Namespace) -> int:
 
     applied = skipped = 0
     async with AsyncSessionLocal() as db:
-        for r in plan:
-            key = _IDEMPOTENCY_KEY.format(user_id=r.user_id)
+        for row in plan:
+            key = _IDEMPOTENCY_KEY.format(user_id=row.user_id)
             try:
                 entry = await credits.apply_adjust(
                     db,
-                    user_id=r.user_id,
-                    amount_micro=int(r.correction_micro),
+                    user_id=row.user_id,
+                    amount_micro=int(row.correction_micro),
                     idempotency_key=key,
-                    reason=_REASON.format(n_res=r.n_res),
+                    reason=_REASON.format(n_res=row.n_res),
                 )
                 await db.commit()
                 applied += 1
                 print(
-                    f"  OK    user {r.user_id:>5}: {_fmt(int(r.correction_micro))} credits (ledger {entry.id})"
+                    f"  OK    user {row.user_id:>5}: {_fmt(int(row.correction_micro))} credits (ledger {entry.id})"
                 )
             except AdjustmentAlreadyApplied:
                 skipped += 1
-                print(f"  SKIP  user {r.user_id:>5}: already corrected ({key})")
+                print(f"  SKIP  user {row.user_id:>5}: already corrected ({key})")
 
     print(f"\ndone: applied={applied} skipped={skipped}")
     return 0
