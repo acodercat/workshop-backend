@@ -97,7 +97,7 @@ class SessionFile(Base):
     # is no longer unique *here*: one object can be bound to several of its
     # owner's sessions. See ``uq_session_files_session_id_file_key``
     # below for what replaced the old column-level UNIQUE, and
-    # ``_bind_session_files`` for the ownership check that took over the
+    # ``bind_session_files`` for the ownership check that took over the
     # protection it was incidentally providing.
     file_key: Mapped[str] = mapped_column(String, nullable=False)
     # Presentation metadata, denormalized from the message blocks so the
@@ -132,7 +132,7 @@ class SessionFile(Base):
         # serves ``assert_file_belongs_to_session``, which filters on both.
         UniqueConstraint("session_id", "file_key", name="uq_session_files_session_id_file_key"),
         Index("ix_session_files_session_id", "session_id"),
-        # ``_bind_session_files`` looks a batch of keys up with no session
+        # ``bind_session_files`` looks a batch of keys up with no session
         # filter, to find who already owns them. That read used to ride the
         # column-level UNIQUE on ``file_key``; with that gone it needs an
         # index of its own or it degrades to a sequential scan.

@@ -174,7 +174,7 @@ async def queue_user_message(
     # own toggle is deliberately not consulted — it governs which skills
     # the composer offers, and an explicit per-turn pick is its own
     # authorization however the request came by the name.
-    accepted_skills = await _filter_invokable_skills(
+    accepted_skills = await filter_invokable_skills(
         db,
         session.user_id,
         skills or [],
@@ -195,7 +195,7 @@ async def queue_user_message(
     # file's size with a HEAD against OSS, and that round trip must not hold
     # the lock every other write for this user — their other enqueues, settle,
     # top-ups — waits on. The session lock already serializes this session.
-    newly_bound_keys = await _bind_session_files(
+    newly_bound_keys = await bind_session_files(
         db,
         session_id=session.id,
         user_id=session.user_id,
@@ -288,19 +288,7 @@ async def queue_user_message(
         status=SessionStatus.RUNNING,
     )
 
-    # Clear the orphan-reaping tag on files this turn just bound (M5), so the
-    # bucket lifecycle rule no longer reaps them. Best-effort + post-commit:
-    # the binding is already durable, so a tag-clear blip must not fail the
-    # send (mirrors publish_wake / stream-delete). A genuinely stuck clear is
-    # logged loudly — the ~1-day lifecycle window leaves room to react.
-    try:
-        await file_storage.clear_orphan_tags(file_storage.SESSION_FILE_POLICY, newly_bound_keys)
-    except FileRetentionFailedError:
-        logger.error(
-            "session %s: files bound but still tagged for reaping; re-clear within the window",
-            session.id,
-            exc_info=True,
-        )
+    await retain_bound_files(session.id, newly_bound_keys)
 
 
 async def _release_held_queue(db: AsyncSession, session_id: UUID) -> None:
@@ -372,7 +360,24 @@ async def _lock_session(db: AsyncSession, session_id: UUID) -> Session:
     return session
 
 
-async def _bind_session_files(
+async def retain_bound_files(session_id: UUID, newly_bound_keys: list[str]) -> None:
+    """Clear the orphan-reaping tag on files just bound (M5), so the bucket
+    lifecycle rule no longer reaps them. Called once the binding has
+    committed, and best-effort: the binding is already durable, so a
+    tag-clear blip must not fail the request (mirrors publish_wake /
+    stream-delete). A genuinely stuck clear is logged loudly — the ~1-day
+    lifecycle window leaves room to react."""
+    try:
+        await file_storage.clear_orphan_tags(file_storage.SESSION_FILE_POLICY, newly_bound_keys)
+    except FileRetentionFailedError:
+        logger.error(
+            "session %s: files bound but still tagged for reaping; re-clear within the window",
+            session_id,
+            exc_info=True,
+        )
+
+
+async def bind_session_files(
     db: AsyncSession,
     *,
     session_id: UUID,
@@ -386,7 +391,7 @@ async def _bind_session_files(
 
     Returns the keys that were **newly** bound this call (a fresh
     ``session_files`` row), so the caller can clear their orphan-reaping
-    tag (M5). Keys already bound to this session are not returned (their
+    tag once it has committed (:func:`retain_bound_files`). Keys already bound to this session are not returned (their
     tag was cleared on first bind).
 
     Reusing a file already bound to this same session is idempotent.
@@ -454,15 +459,16 @@ async def _bind_session_files(
     return newly_bound
 
 
-async def _filter_invokable_skills(
+async def filter_invokable_skills(
     db: AsyncSession,
     user_id: int,
     requested: list[str],
 ) -> list[dict[str, str | int]]:
-    """Return immutable snapshots of the skills the user can invoke this turn.
+    """Return immutable snapshots of the skills the user can invoke this turn
+    — at enqueue, or when they steer a running turn with a queued message.
 
     Each element is ``{"id", "name", "bundle_key"}`` — pinned to the
-    skill row that existed at enqueue time so the worker loads the
+    skill row that existed then so the worker loads the
     exact bundle bytes the user picked, even if the row is later
     mutated (delete / re-upload / a same-named CUSTOM appearing and
     overriding an OFFICIAL skill). The ``id`` pins the lineage; the

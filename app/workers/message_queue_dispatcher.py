@@ -29,17 +29,18 @@ client reads ``held_at`` to tell a held queue from a moving one.
 The running-task cap is the exception, as it is for a scheduled task: that
 is congestion, a slot frees on its own, so nothing is held and the message
 is tried again next tick. The rest of that owner's sessions are left out of
-the tick, since the cap is per owner and each attempt costs an enqueue —
-left out of the scan itself, so that a congested owner's sessions cannot
-fill every batch and keep other owners' queues from being reached.
+the tick, since the cap is per owner and each attempt costs an enqueue.
 
-**Polling, not pub/sub.** The condition is a state, not an event: a
-completed session with a queue nobody holds. Reading it every tick needs no
-delivery guarantee and has no missed-notification case to backstop, at the
-cost of a wait of up to ``_TICK_SECONDS`` between two turns — a wait the
-client covers by queueing what the user sends meanwhile behind it
-(``queue_is_moving``). The scan is driven from ``queued_message``, so it
-reads only sessions that have a queue.
+**A poll, woken early.** The condition is a state, not an event: a
+completed session with a queue nobody holds. The tick reads it every
+``_TICK_SECONDS``, which needs no delivery guarantee. So that a queue does
+not wait out that gap, the worker's announcement of a terminal turn
+(``settle:notify``) starts the next tick at once. The announcement carries
+no work of its own — it only ends the wait — so one that is lost costs the
+rest of the gap and nothing else, and every rule below has the one path.
+The client covers the gap that remains by queueing what the user sends
+meanwhile behind the queue (``queue_is_moving``). The scan is driven from
+``queued_message``, so it reads only sessions that have a queue.
 
 Concurrency follows the other standing tasks: every host runs this, a
 transaction-scoped advisory lock lets one of them scan per tick, and the
@@ -47,6 +48,7 @@ session row lock makes each dispatch safe against the owner's own requests.
 """
 
 import asyncio
+import contextlib
 import logging
 from uuid import UUID
 
@@ -60,20 +62,23 @@ from app.models.message import Message, MessageRole
 from app.models.queued_message import QueuedMessage
 from app.models.session import Session, SessionStatus
 from app.models.user import User, UserStatus
+from app.services.redis import SETTLE_NOTIFY_CHANNEL
 from app.services.session.message_queue import (
     awaits_answer,
     dispatch_queued_message,
     list_queued_messages,
 )
+from app.workers.pubsub import subscribe_forever
 
 logger = logging.getLogger(__name__)
 
 # 64-bit key for the Postgres advisory lock: the bytes ``b"MSGQUEUE"``.
 _LOCK_KEY = 0x4D53475155455545
 
-# The longest a completed turn's queue waits before its head goes out. A
-# constant, not a setting: it is the gap a user watches between two of
-# their own messages, and the scan it buys is a handful of rows.
+# The longest a completed turn's queue waits before its head goes out, when
+# the worker's announcement of that turn was lost. A constant, not a
+# setting: it is the gap a user watches between two of their own messages,
+# and the scan it buys is a handful of rows.
 _TICK_SECONDS = 2
 
 # Sessions attempted per tick, so one burst cannot hold the advisory lock
@@ -82,9 +87,25 @@ _DISPATCH_BATCH = 50
 
 
 async def run_forever(redis: aioredis.Redis) -> None:
-    """Periodic dispatch loop. Cancel-safe via :class:`asyncio.CancelledError`."""
+    """Dispatch every tick, and at once when a turn ends. Cancel-safe via
+    :class:`asyncio.CancelledError`."""
+    turn_ended = asyncio.Event()
+
+    async def note_turn_ended(_session_id: str) -> None:
+        turn_ended.set()
+
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(subscribe_forever(redis, SETTLE_NOTIFY_CHANNEL, note_turn_ended))
+        tasks.create_task(_dispatch_forever(redis, turn_ended))
+
+
+async def _dispatch_forever(redis: aioredis.Redis, turn_ended: asyncio.Event) -> None:
+    """Tick, then wait out the gap or until ``turn_ended`` is set."""
     consecutive_failures = 0
     while True:
+        # Cleared before the scan: a turn that ends during it is scanned for
+        # again rather than left to the gap.
+        turn_ended.clear()
         try:
             dispatched = await _tick(redis)
             consecutive_failures = 0
@@ -106,7 +127,9 @@ async def run_forever(redis: aioredis.Redis) -> None:
             if consecutive_failures
             else _TICK_SECONDS
         )
-        await asyncio.sleep(delay)
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(delay):
+                await turn_ended.wait()
 
 
 async def _tick(redis: aioredis.Redis) -> int:
@@ -127,53 +150,26 @@ async def _tick(redis: aioredis.Redis) -> int:
         if not got:
             return 0
         dispatched = 0
-        attempted: set[UUID] = set()
         # Owners found at their running-task cap this tick: their other
         # sessions would be turned away the same way.
         congested: set[int] = set()
-        # Scanned again, past them, whenever an owner turns out congested:
-        # their sessions left in the scan were skipped, and the batch is
-        # meant for sessions that can still be sent. Each scan attempts at
-        # least its first candidate, so the loop ends.
-        while len(attempted) < _DISPATCH_BATCH:
-            candidates = await _list_candidates(
-                lock_db,
-                skip_sessions=attempted,
-                skip_owners=congested,
-                limit=_DISPATCH_BATCH - len(attempted),
-            )
-            if not candidates:
-                break
-            rescan = False
-            for session_id, user_id in candidates:
-                if user_id in congested:
-                    continue
-                attempted.add(session_id)
-                try:
-                    if await _dispatch_next(session_id, redis):
-                        dispatched += 1
-                except ConcurrentTaskLimitError:
-                    congested.add(user_id)
-                    rescan = True
-                except Exception:
-                    logger.exception(
-                        "message queue: session %s failed — next tick retries", session_id
-                    )
-            if not rescan:
-                break
+        for session_id, user_id in await _list_candidates(lock_db):
+            if user_id in congested:
+                continue
+            try:
+                if await _dispatch_next(session_id, redis):
+                    dispatched += 1
+            except ConcurrentTaskLimitError:
+                congested.add(user_id)
+            except Exception:
+                logger.exception("message queue: session %s failed — next tick retries", session_id)
         return dispatched
 
 
-async def _list_candidates(
-    db: AsyncSession,
-    *,
-    skip_sessions: set[UUID],
-    skip_owners: set[int],
-    limit: int,
-) -> list[tuple[UUID, int]]:
-    """The sessions whose queue moves, with their owners: the last turn
-    completed and nothing holds the queue — ``queue_is_moving``, in SQL —
-    leaving out the sessions and owners this tick is already done with.
+async def _list_candidates(db: AsyncSession) -> list[tuple[UUID, int]]:
+    """The sessions whose queue moves, with their owners, longest idle
+    first: the last turn completed and nothing holds the queue —
+    ``queue_is_moving``, in SQL.
 
     The owner's account has to still be live. Like the schedule dispatcher,
     this reaches ``queue_user_message`` without passing authentication, the
@@ -191,11 +187,9 @@ async def _list_candidates(
             Session.deleted_at.is_(None),
             User.status == UserStatus.ACTIVE,
             ~held,
-            Session.id.not_in(skip_sessions),
-            Session.user_id.not_in(skip_owners),
         )
         .order_by(Session.updated_at)
-        .limit(limit)
+        .limit(_DISPATCH_BATCH)
     )
     return [(session_id, user_id) for session_id, user_id in rows.all()]
 

@@ -34,7 +34,8 @@ mid-turn spend:
   as well.
 - :mod:`app.workers.message_queue_dispatcher` — periodic 2s poll that
   sends a session's queued messages on as its turns complete, again
-  through ``queue_user_message``. Its own advisory lock as well.
+  through ``queue_user_message``; ``settle:notify`` starts a tick early.
+  Its own advisory lock as well.
 - :mod:`app.workers.budget_enforcer` — only when
   ``budget_enforcer_enabled``: prices each running turn's
   heartbeat-reported interim usage and cancels turns outrunning their

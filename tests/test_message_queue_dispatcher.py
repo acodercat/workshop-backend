@@ -7,6 +7,7 @@ against a fake session, with ``dispatch_queued_message`` replaced so the
 point is the dispatcher's own decisions.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -40,8 +41,7 @@ class _CapturingDb:
 async def test_selects_completed_sessions_whose_queue_nobody_holds() -> None:
     db = _CapturingDb()
 
-    owner = 7
-    await dispatcher._list_candidates(db, skip_sessions=set(), skip_owners={owner}, limit=50)
+    await dispatcher._list_candidates(db)
 
     sql = _sql(db.statement)
     # Driven from the queue, so only sessions that have one are read.
@@ -52,8 +52,6 @@ async def test_selects_completed_sessions_whose_queue_nobody_holds() -> None:
     # Reached without authentication, so a suspended owner is filtered here.
     assert "\"user\".status = 'ACTIVE'" in sql
     assert "queued_message.held_at IS NOT NULL" in sql
-    # What this tick is already done with is left out of the scan itself.
-    assert "session.user_id NOT IN (7)" in sql
     assert sql.index("WHERE") < sql.index("LIMIT")
 
 
@@ -178,12 +176,8 @@ def _patch_tick(monkeypatch, candidates: list[tuple], congested_owners: set[int]
     attempted, in order."""
     attempts: list = []
 
-    async def list_candidates(_db, *, skip_sessions, skip_owners, limit):
-        return [
-            (session_id, owner)
-            for session_id, owner in candidates
-            if session_id not in skip_sessions and owner not in skip_owners
-        ][:limit]
+    async def list_candidates(_db):
+        return candidates
 
     async def dispatch_next(session_id, _redis):
         attempts.append(session_id)
@@ -209,12 +203,25 @@ async def test_a_congested_owners_other_sessions_wait_for_the_next_tick(monkeypa
     assert attempts == [congested, free]
 
 
-async def test_a_congested_owner_cannot_fill_the_batch(monkeypatch) -> None:
-    # A whole batch of the oldest candidates belongs to an owner at the cap;
-    # the session behind them, whose owner has room, still goes out.
-    crowd = [(uuid4(), 1) for _ in range(dispatcher._DISPATCH_BATCH)]
-    behind = uuid4()
-    attempts = _patch_tick(monkeypatch, [*crowd, (behind, 2)], congested_owners={1})
+async def test_a_turn_ending_starts_the_next_tick_at_once(monkeypatch) -> None:
+    # The gap is far longer than the test: only the announcement ends it.
+    monkeypatch.setattr(dispatcher, "_TICK_SECONDS", 3600)
+    ticks = asyncio.Queue()
 
-    assert await dispatcher._tick("redis") == 1
-    assert attempts == [crowd[0][0], behind]
+    async def tick(_redis) -> int:
+        ticks.put_nowait(None)
+        return 0
+
+    monkeypatch.setattr(dispatcher, "_tick", tick)
+    turn_ended = asyncio.Event()
+    task = asyncio.create_task(dispatcher._dispatch_forever("redis", turn_ended))
+    try:
+        async with asyncio.timeout(1):
+            await ticks.get()
+            assert ticks.empty()
+            turn_ended.set()
+            await ticks.get()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

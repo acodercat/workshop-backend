@@ -1,6 +1,7 @@
 """A session's message queue: the body a queued message takes, how one goes
 out, when a finished turn waits on the user instead, and the endpoints'
-own rules (only a running session takes one; a reorder is an ordering).
+own rules (only a running session takes one; a reorder is an ordering; only
+text steers a running turn).
 
 No DB — fakes stand in for the session, and ``queue_user_message`` is
 replaced where the point is what it is handed.
@@ -12,16 +13,20 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 
 from app.api.public import session as endpoint
-from app.errors import QueuedMessageLimitError, SessionIdleError
+from app.errors import (
+    QueuedMessageLimitError,
+    QueuedMessageNotFoundError,
+    SessionIdleError,
+)
 from app.models.queued_message import QueuedMessage
 from app.models.session import SessionStatus
 from app.schemas.session import (
     QUEUED_MESSAGES_MAX,
     QueuedMessageCreate,
     QueuedMessageOrder,
-    QueuedMessageUpdate,
 )
 from app.services.session import message_queue
 from app.services.session.message_queue import (
@@ -43,6 +48,7 @@ def _queued(queued_id: int, position: int = 0, **overrides) -> QueuedMessage:
         "skills": [],
         "timezone": None,
         "held_at": None,
+        "steer": False,
     }
     return QueuedMessage(**{**values, **overrides})
 
@@ -64,11 +70,6 @@ class TestBody:
 
     def test_attachments_alone_are_a_message(self) -> None:
         assert QueuedMessageCreate(files=[_FILE]).content == ""
-
-    def test_a_reworded_message_must_have_text(self) -> None:
-        assert QueuedMessageUpdate(content=" new ").content == "new"
-        with pytest.raises(ValidationError):
-            QueuedMessageUpdate(content="  ")
 
 
 class TestDispatch:
@@ -153,7 +154,7 @@ class TestQueueIsMoving:
 
 def _endpoint_db(monkeypatch, *, status: SessionStatus, queue: list[QueuedMessage]) -> MagicMock:
     """A request whose session is the caller's, with ``queue`` waiting."""
-    session = SimpleNamespace(id=uuid4(), status=status)
+    session = SimpleNamespace(id=uuid4(), user_id=7, status=status)
     monkeypatch.setattr(endpoint, "_get_or_404", AsyncMock(return_value=session))
     monkeypatch.setattr(endpoint, "list_queued_messages", AsyncMock(return_value=queue))
     return MagicMock(add=MagicMock(), commit=AsyncMock())
@@ -241,3 +242,99 @@ class TestReorder:
         queue = [_queued(1, 0), _queued(2, 1), _queued(3, 2), _queued(4, 3)]
 
         assert await self._reorder(monkeypatch, queue, [2, 1]) == [2, 1, 3, 4]
+
+
+_PDF_SNAPSHOT = {"id": 3, "name": "pdf", "bundle_key": "skills/pdf.zip"}
+
+
+class TestSteer:
+    async def _steer(self, monkeypatch, queued: QueuedMessage, status: SessionStatus) -> MagicMock:
+        db = _endpoint_db(monkeypatch, status=status, queue=[])
+        monkeypatch.setattr(endpoint, "_queued_message_or_404", AsyncMock(return_value=queued))
+        self.session = endpoint._get_or_404.return_value
+        self.bind = AsyncMock(return_value=[_FILE["file_key"]])
+        self.retain = AsyncMock()
+        self.resolve_skills = AsyncMock(return_value=[_PDF_SNAPSHOT] if queued.skills else [])
+        monkeypatch.setattr(message_queue, "bind_session_files", self.bind)
+        monkeypatch.setattr(message_queue, "retain_bound_files", self.retain)
+        monkeypatch.setattr(message_queue, "filter_invokable_skills", self.resolve_skills)
+        # ``__wrapped__``: the handler beneath the rate limiter.
+        await endpoint.steer_with_queued_message.__wrapped__(
+            request=None,
+            session_id=uuid4(),
+            queued_message_id=queued.id,
+            db=db,
+            current_user=SimpleNamespace(id=7),
+        )
+        return db
+
+    async def test_a_text_message_steers_the_running_turn(self, monkeypatch) -> None:
+        queued = _queued(1)
+
+        db = await self._steer(monkeypatch, queued, SessionStatus.RUNNING)
+
+        assert queued.steer is True
+        db.commit.assert_awaited_once()
+
+    async def test_its_files_are_bound_for_the_worker_to_stage(self, monkeypatch) -> None:
+        # No ``queue_user_message`` stands between this row and the turn
+        # that takes it, so the binding it would do is done here.
+        queued = _queued(1, files=[_FILE])
+
+        db = await self._steer(monkeypatch, queued, SessionStatus.RUNNING)
+
+        assert queued.steer is True
+        bound = self.bind.await_args.kwargs
+        assert [file.file_key for file in bound["files"]] == [_FILE["file_key"]]
+        assert (bound["session_id"], bound["user_id"]) == (self.session.id, 7)
+        # Kept from the reaper only once the binding stands.
+        db.commit.assert_awaited_once()
+        self.retain.assert_awaited_once_with(self.session.id, [_FILE["file_key"]])
+
+    async def test_its_skills_are_resolved_for_the_worker_to_load(self, monkeypatch) -> None:
+        # Resolved as ``queue_user_message`` would: the same authorization,
+        # the same snapshot, so the turn loads the bytes picked now.
+        queued = _queued(1, skills=["pdf"])
+
+        await self._steer(monkeypatch, queued, SessionStatus.RUNNING)
+
+        assert queued.steer is True
+        self.resolve_skills.assert_awaited_once()
+        assert self.resolve_skills.await_args.args[1:] == (7, ["pdf"])
+        assert queued.skill_snapshots == [_PDF_SNAPSHOT]
+
+    async def test_with_no_turn_running_there_is_nothing_to_steer(self, monkeypatch) -> None:
+        queued = _queued(1)
+
+        with pytest.raises(SessionIdleError):
+            await self._steer(monkeypatch, queued, SessionStatus.COMPLETE)
+
+        assert queued.steer is False
+
+
+class TestDelete:
+    async def _delete(self, monkeypatch, *, deleted_id: int | None) -> MagicMock:
+        db = _endpoint_db(monkeypatch, status=SessionStatus.RUNNING, queue=[])
+        db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: deleted_id))
+        await endpoint.delete_queued_message(
+            session_id=uuid4(),
+            queued_message_id=1,
+            db=db,
+            current_user=SimpleNamespace(id=7),
+        )
+        return db
+
+    async def test_deletes_only_a_message_still_waiting(self, monkeypatch) -> None:
+        # The delete states the condition itself: the worker's take holds no
+        # session lock, so a check made before the delete could go stale.
+        db = await self._delete(monkeypatch, deleted_id=1)
+
+        statement = str(db.execute.await_args.args[0].compile(dialect=postgresql.dialect()))
+        assert statement.startswith("DELETE FROM queued_message")
+        assert "NOT (EXISTS" in statement
+        assert "session_turn.id = queued_message.steered_turn_id" in statement
+        db.commit.assert_awaited_once()
+
+    async def test_one_the_running_turn_took_is_not_found(self, monkeypatch) -> None:
+        with pytest.raises(QueuedMessageNotFoundError):
+            await self._delete(monkeypatch, deleted_id=None)

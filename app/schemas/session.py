@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.common.filenames import validate_input_filename
 from app.common.timezones import is_known_timezone
@@ -219,17 +219,6 @@ class QueuedMessageCreate(MessageInput):
         return self
 
 
-class QueuedMessageUpdate(BaseModel):
-    """Body of ``PATCH /sessions/{id}/queued-messages/{id}``: the message
-    reworded. Its attachments and skill picks stay as they were sent."""
-
-    # Stripped first, so whitespace alone is not text: the message keeps
-    # its attachments, but rewording it to nothing is a delete, not an edit.
-    content: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100000)
-    ]
-
-
 class QueuedMessageOrder(BaseModel):
     """Body of ``PUT /sessions/{id}/queued-messages/order``: the queue's
     message ids in the order they should go out."""
@@ -247,6 +236,9 @@ class QueuedMessageResponse(BaseModel):
     # Set while the queue is held: the dispatcher declined to send it on,
     # and nothing goes out until the session's next turn starts.
     held_at: datetime | None
+    # The owner asked for it to reach the running turn, which takes it before
+    # the agent's next model call.
+    steer: bool
 
     model_config = {"from_attributes": True}
 

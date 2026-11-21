@@ -10,7 +10,7 @@ from app.models.session_files import SessionFile
 from app.schemas.session import FileRef
 from app.services import file_storage
 from app.services.session import enqueue
-from app.services.session.enqueue import _bind_session_files
+from app.services.session.enqueue import bind_session_files
 from app.services.session.files import assert_files_owned_by
 
 
@@ -97,7 +97,7 @@ async def test_bind_session_files_inserts_each_new_key_once(stub_head_size) -> N
     session_id = uuid4()
     db = _Db()
 
-    newly_bound = await _bind_session_files(
+    newly_bound = await bind_session_files(
         db,
         session_id=session_id,
         user_id=7,
@@ -121,7 +121,7 @@ async def test_bind_persists_real_oss_size_not_client_declared(
     stub_head_size["size"] = 100
     db = _Db()
 
-    await _bind_session_files(
+    await bind_session_files(
         db,
         session_id=uuid4(),
         user_id=7,
@@ -136,7 +136,7 @@ async def test_bind_rejects_object_over_per_file_cap(stub_head_size) -> None:
     db = _Db()
 
     with pytest.raises(file_storage.FileTooLargeError):
-        await _bind_session_files(
+        await bind_session_files(
             db,
             session_id=uuid4(),
             user_id=7,
@@ -151,7 +151,7 @@ async def test_bind_rejects_never_uploaded_object(stub_head_size) -> None:
     db = _Db()
 
     with pytest.raises(FileNotUploadedError, match="was not uploaded"):
-        await _bind_session_files(
+        await bind_session_files(
             db,
             session_id=uuid4(),
             user_id=7,
@@ -166,7 +166,7 @@ async def test_bind_session_files_skips_key_already_bound_to_same_session(
 ) -> None:
     db = _Db(bound_here=["documents/a"])
 
-    newly_bound = await _bind_session_files(
+    newly_bound = await bind_session_files(
         db,
         session_id=uuid4(),
         user_id=7,
@@ -189,7 +189,7 @@ async def test_bind_session_files_lets_an_owner_rebind_in_another_session(
     session_id = uuid4()
     db = _Db(bound_here=[])
 
-    newly_bound = await _bind_session_files(
+    newly_bound = await bind_session_files(
         db,
         session_id=session_id,
         user_id=7,
@@ -209,7 +209,7 @@ async def test_bind_session_files_rejects_a_key_owned_by_someone_else(
     db = _Db()
 
     with pytest.raises(FileNotOwnedError, match="another user"):
-        await _bind_session_files(
+        await bind_session_files(
             db,
             session_id=uuid4(),
             user_id=7,
@@ -286,7 +286,7 @@ async def test_files_are_bound_before_the_user_row_is_locked(run_enqueue) -> Non
     # lock, that round trip would hold up every other write for the user.
     steps = await run_enqueue(AsyncMock())
 
-    assert steps.index("_bind_session_files") < steps.index("reserve_for_turn")
+    assert steps.index("bind_session_files") < steps.index("reserve_for_turn")
 
 
 class TestSchema:
@@ -303,7 +303,7 @@ class TestSchema:
         assert ("session_id", "file_key") in uniques
 
     def test_the_owner_lookup_has_an_index(self):
-        # ``_bind_session_files`` looks keys up with no session filter to
+        # ``bind_session_files`` looks keys up with no session filter to
         # find who holds them; the composite unique cannot serve that.
         indexes = {
             item.name

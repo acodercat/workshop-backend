@@ -87,7 +87,6 @@ from app.schemas.session import (
     QueuedMessageCreate,
     QueuedMessageOrder,
     QueuedMessageResponse,
-    QueuedMessageUpdate,
     SessionCreate,
     SessionDetailResponse,
     SessionResponse,
@@ -119,7 +118,9 @@ from app.services.session.files import assert_file_belongs_to_session
 from app.services.session.message_queue import (
     dispatch_queued_message,
     list_queued_messages,
+    mark_for_steering,
     queue_is_moving,
+    waiting,
 )
 from app.services.user import publish_session_status
 from config import settings
@@ -881,14 +882,17 @@ async def _queued_message_or_404(
     """The waiting message, in a session already resolved as the caller's.
 
     Every queue endpoint takes the session's row lock first, which is the
-    lock a dispatch holds: a message is either still here to edit, or it
-    has gone out and this raises.
+    lock a dispatch holds: a message read here cannot go out as a turn
+    before the caller commits. The worker's take holds no such lock, so the
+    running turn may still take it in between — a write that must not land
+    on a taken message states the condition itself, as the delete does.
     """
     queued = (
         await db.execute(
             select(QueuedMessage).where(
                 QueuedMessage.id == queued_message_id,
                 QueuedMessage.session_id == session_id,
+                waiting(),
             )
         )
     ).scalar_one_or_none()
@@ -968,27 +972,6 @@ async def reorder_queued_messages(
     return queue
 
 
-@router.patch(
-    "/sessions/{session_id}/queued-messages/{queued_message_id}",
-    response_model=QueuedMessageResponse,
-)
-async def update_queued_message(
-    session_id: uuid.UUID,
-    queued_message_id: int,
-    body: QueuedMessageUpdate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(authenticate_and_get_user),
-):
-    """Reword a waiting message. 404 ``queued_message_not_found`` once it
-    has gone out — the client then has an edit with nowhere to land, and
-    keeps the text for the user rather than dropping it."""
-    await _get_or_404(db, session_id, current_user.id, for_update=True)
-    queued = await _queued_message_or_404(db, session_id, queued_message_id)
-    queued.content = body.content
-    await db.commit()
-    return queued
-
-
 @router.delete(
     "/sessions/{session_id}/queued-messages/{queued_message_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -999,11 +982,27 @@ async def delete_queued_message(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
-    """Take a waiting message back. Nothing was reserved or bound for it,
-    so there is nothing else to undo."""
+    """Take a waiting message back. Nothing was reserved for it; files
+    bound when its owner steered with it stay the session's, as any file
+    sent to the session does.
+
+    One statement, waiting or not decided by the delete itself: a message
+    the running turn took a moment ago is the agent's, and a 404 here, never
+    deleted under it — the owner would be told it was taken back, and
+    editing it would send it twice.
+    """
     await _get_or_404(db, session_id, current_user.id, for_update=True)
-    queued = await _queued_message_or_404(db, session_id, queued_message_id)
-    await db.delete(queued)
+    deleted = await db.execute(
+        delete(QueuedMessage)
+        .where(
+            QueuedMessage.id == queued_message_id,
+            QueuedMessage.session_id == session_id,
+            waiting(),
+        )
+        .returning(QueuedMessage.id)
+    )
+    if deleted.scalar_one_or_none() is None:
+        raise QueuedMessageNotFoundError("Queued message not found.")
     await db.commit()
 
 
@@ -1032,6 +1031,33 @@ async def dispatch_queued_message_now(
     queued = await _queued_message_or_404(db, session_id, queued_message_id)
     await dispatch_queued_message(db, redis, session, queued)
     return MessageQueuedResponse()
+
+
+@router.post(
+    "/sessions/{session_id}/queued-messages/{queued_message_id}/steer",
+    response_model=QueuedMessageResponse,
+)
+@limiter.limit(settings.rate_limit_message_create)
+async def steer_with_queued_message(
+    request: Request,
+    session_id: uuid.UUID,
+    queued_message_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Have a waiting message reach the running turn instead of waiting for
+    it to end: the worker takes it before the agent's next model call, and
+    it leaves the queue then. Its files and skills go with it.
+
+    409 ``session_idle`` when no turn runs: there is nothing to steer, and
+    the queue sends it on as it is.
+    """
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queued = await _queued_message_or_404(db, session_id, queued_message_id)
+    if session.status != SessionStatus.RUNNING:
+        raise SessionIdleError("No turn is running to steer.")
+    await mark_for_steering(db, session, queued)
+    return queued
 
 
 @router.post(
