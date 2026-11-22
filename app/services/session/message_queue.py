@@ -18,12 +18,13 @@ from typing import Any
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from sqlalchemy import ColumnElement, exists, select
+from sqlalchemy import ColumnElement, and_, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import SessionIdleError
 from app.models.queued_message import QueuedMessage
 from app.models.session import Session, SessionStatus
-from app.models.session_turn import SessionTurn, SessionTurnStatus
+from app.models.session_turn import OPEN_TURN_STATUSES, SessionTurn, SessionTurnStatus
 from app.schemas.session import FileRef
 from app.services.session.enqueue import (
     bind_session_files,
@@ -39,13 +40,16 @@ _ASK_USER_TOOL = "ask_user"
 
 def waiting() -> ColumnElement[bool]:
     """Whether a queued message is waiting: not taken by a turn that is still
-    running. A message a turn took to steer is in flight while that turn
-    runs; the turn's terminal write deletes it with the record that holds
-    it, and a turn that ended without that write — a sweep failed it —
-    leaves it waiting again, with nothing to undo."""
-    return ~exists().where(
-        SessionTurn.id == QueuedMessage.steered_turn_id,
-        SessionTurn.status == SessionTurnStatus.RUNNING,
+    running. A message the turn it was steered into took is in flight while
+    that turn runs; the turn's terminal write deletes it with the record
+    that holds it, and a turn that ended without that write — a sweep failed
+    it — leaves it waiting again, with nothing to undo."""
+    return ~and_(
+        QueuedMessage.steer_taken,
+        exists().where(
+            SessionTurn.id == QueuedMessage.steer_turn_id,
+            SessionTurn.status == SessionTurnStatus.RUNNING,
+        ),
     )
 
 
@@ -101,8 +105,10 @@ async def dispatch_queued_message(
 
 
 async def mark_for_steering(db: AsyncSession, session: Session, queued: QueuedMessage) -> None:
-    """Mark ``queued`` for the running turn to take, before the agent's next
-    model call, and commit.
+    """Mark ``queued`` for the session's open turn to take, before the
+    agent's next model call, and commit. Raises :class:`SessionIdleError`
+    when no turn is open: there is nothing to steer, and the queue sends
+    the message on as it is.
 
     What ``queue_user_message`` would do for its files and skills is done
     here: a message the worker takes into a running turn passes through no
@@ -110,8 +116,18 @@ async def mark_for_steering(db: AsyncSession, session: Session, queued: QueuedMe
     what the row names; its skills are resolved and snapshotted
     (``skill_snapshots``), for the worker to load. Both again without harm
     if the turn ends first and the message goes out as a turn of its own
-    after all.
+    after all. ``queued`` comes back with ``steer`` read, under the lock.
     """
+    open_turn_id = (
+        await db.execute(
+            select(SessionTurn.id).where(
+                SessionTurn.session_id == session.id,
+                SessionTurn.status.in_(OPEN_TURN_STATUSES),
+            )
+        )
+    ).scalar_one_or_none()
+    if open_turn_id is None:
+        raise SessionIdleError("No turn is running to steer.")
     newly_bound_keys = await bind_session_files(
         db,
         session_id=session.id,
@@ -119,7 +135,12 @@ async def mark_for_steering(db: AsyncSession, session: Session, queued: QueuedMe
         files=[FileRef.model_validate(file) for file in queued.files],
     )
     queued.skill_snapshots = await filter_invokable_skills(db, session.user_id, queued.skills)
-    queued.steer = True
+    queued.steer_turn_id = open_turn_id
+    # A new request: what an earlier turn took and never recorded is this
+    # turn's to take.
+    queued.steer_taken = False
+    await db.flush()
+    await db.refresh(queued, ["steer"])
     await db.commit()
     await retain_bound_files(session.id, newly_bound_keys)
 

@@ -28,8 +28,9 @@ client reads ``held_at`` to tell a held queue from a moving one.
 
 The running-task cap is the exception, as it is for a scheduled task: that
 is congestion, a slot frees on its own, so nothing is held and the message
-is tried again next tick. The rest of that owner's sessions are left out of
-the tick, since the cap is per owner and each attempt costs an enqueue.
+is tried again next tick. A tick takes one session per owner, the cap
+being per owner: a congested owner costs one attempt a tick. And it takes
+every owner whose queue moves, so none waits behind owners at their cap.
 
 **A poll, woken early.** The condition is a state, not an event: a
 completed session with a queue nobody holds. The tick reads it every
@@ -80,10 +81,6 @@ _LOCK_KEY = 0x4D53475155455545
 # setting: it is the gap a user watches between two of their own messages,
 # and the scan it buys is a handful of rows.
 _TICK_SECONDS = 2
-
-# Sessions attempted per tick, so one burst cannot hold the advisory lock
-# for long; the next tick takes the rest.
-_DISPATCH_BATCH = 50
 
 
 async def run_forever(redis: aioredis.Redis) -> None:
@@ -139,7 +136,7 @@ async def _tick(redis: aioredis.Redis) -> int:
     Two session lifetimes, as in the settle sweeper: ``lock_db`` holds the
     transaction-scoped advisory lock for the tick and only reads, while each
     session's queue gets its own :class:`AsyncSession`, so a failure on one
-    does not poison the rest of the batch.
+    does not poison the rest of the tick.
     """
     async with AsyncSessionLocal() as lock_db:
         got = (
@@ -150,26 +147,21 @@ async def _tick(redis: aioredis.Redis) -> int:
         if not got:
             return 0
         dispatched = 0
-        # Owners found at their running-task cap this tick: their other
-        # sessions would be turned away the same way.
-        congested: set[int] = set()
-        for session_id, user_id in await _list_candidates(lock_db):
-            if user_id in congested:
-                continue
+        for session_id in await _list_candidates(lock_db):
             try:
                 if await _dispatch_next(session_id, redis):
                     dispatched += 1
             except ConcurrentTaskLimitError:
-                congested.add(user_id)
+                pass  # congestion: a slot frees on its own, and the next tick tries again
             except Exception:
                 logger.exception("message queue: session %s failed — next tick retries", session_id)
         return dispatched
 
 
-async def _list_candidates(db: AsyncSession) -> list[tuple[UUID, int]]:
-    """The sessions whose queue moves, with their owners, longest idle
-    first: the last turn completed and nothing holds the queue —
-    ``queue_is_moving``, in SQL.
+async def _list_candidates(db: AsyncSession) -> list[UUID]:
+    """The sessions whose queue moves — the last turn completed and nothing
+    holds the queue, ``queue_is_moving`` in SQL — one per owner, the one
+    longest idle, and those longest idle first.
 
     The owner's account has to still be live. Like the schedule dispatcher,
     this reaches ``queue_user_message`` without passing authentication, the
@@ -178,8 +170,8 @@ async def _list_candidates(db: AsyncSession) -> list[tuple[UUID, int]]:
     held = exists().where(
         QueuedMessage.session_id == Session.id, QueuedMessage.held_at.is_not(None)
     )
-    rows = await db.execute(
-        select(Session.id, Session.user_id)
+    each_owners_oldest = (
+        select(Session.id, Session.updated_at)
         .join(User, User.id == Session.user_id)
         .where(
             Session.id.in_(select(QueuedMessage.session_id)),
@@ -188,10 +180,14 @@ async def _list_candidates(db: AsyncSession) -> list[tuple[UUID, int]]:
             User.status == UserStatus.ACTIVE,
             ~held,
         )
-        .order_by(Session.updated_at)
-        .limit(_DISPATCH_BATCH)
+        .distinct(Session.user_id)
+        .order_by(Session.user_id, Session.updated_at)
+        .subquery()
     )
-    return [(session_id, user_id) for session_id, user_id in rows.all()]
+    rows = await db.execute(
+        select(each_owners_oldest.c.id).order_by(each_owners_oldest.c.updated_at)
+    )
+    return list(rows.scalars().all())
 
 
 async def _dispatch_next(session_id: UUID, redis: aioredis.Redis) -> bool:

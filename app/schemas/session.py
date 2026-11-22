@@ -237,7 +237,8 @@ class QueuedMessageResponse(BaseModel):
     # and nothing goes out until the session's next turn starts.
     held_at: datetime | None
     # The owner asked for it to reach the running turn, which takes it before
-    # the agent's next model call.
+    # the agent's next model call. For that turn alone: false again once it
+    # ends without taking the message.
     steer: bool
 
     model_config = {"from_attributes": True}

@@ -7,10 +7,11 @@ turn only when it goes out, through the same ``queue_user_message`` a message
 sent to an idle session takes; while it only waits, nothing is reserved and
 nothing is bound.
 
-Or its owner steers the running turn with it (``steer``): its files are
-bound to the session and its skills resolved then (``skill_snapshots``), the
-worker takes it into that turn before the agent's next model call, and it
-never becomes a turn of its own.
+Or its owner steers the session's open turn with it (``steer_turn_id``):
+its files are bound to the session and its skills resolved then
+(``skill_snapshots``), and the worker takes it into that turn before the
+agent's next model call. The request is for that turn alone: once it ends
+untaken, the message waits as any other.
 
 Not a ``session_turn`` status: that table is the worker's claim contract,
 and a row the user can still take back is no turn yet.
@@ -30,13 +31,15 @@ from sqlalchemy import (
     String,
     Text,
     Uuid,
+    exists,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, column_property, mapped_column
 from sqlalchemy.sql import func
 
 from app.database import Base
+from app.models.session_turn import OPEN_TURN_STATUSES, SessionTurn
 
 
 class QueuedMessage(Base):
@@ -80,10 +83,18 @@ class QueuedMessage(Base):
     # until the session's next turn starts, which clears it (see
     # ``app/workers/message_queue_dispatcher.py``). NULL = not held.
     held_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    # The owner asked for this message to reach the running turn rather than
-    # wait for it to end.
-    steer: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"), default=False
+    # The turn the owner asked this message to reach rather than wait for:
+    # the session's open turn when they steered with it.
+    steer_turn_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("session_turn.id", ondelete="SET NULL"), nullable=True
+    )
+    # Whether the message is still to reach that turn: it has not ended.
+    # Derived, so a turn that ends untaken leaves nothing to clear.
+    steer: Mapped[bool] = column_property(
+        exists().where(
+            SessionTurn.id == steer_turn_id,
+            SessionTurn.status.in_(OPEN_TURN_STATUSES),
+        )
     )
     # ``skills`` resolved when the owner steered with this message, as
     # ``session_turn.skills`` snapshots them — the worker takes a steered
@@ -96,13 +107,13 @@ class QueuedMessage(Base):
         server_default=text("'[]'::jsonb"),
         default=list,
     )
-    # The turn that took this message to steer it (the worker's write).
-    # While that turn runs the message is in flight, off the queue; the
-    # turn's terminal write deletes it with the record that holds it, and a
-    # turn that ended without one — a sweep failed it — leaves it waiting
-    # again (``app.services.session.message_queue.waiting``).
-    steered_turn_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("session_turn.id", ondelete="SET NULL"), nullable=True
+    # The turn it was steered into has taken it (the worker's write). While
+    # that turn runs the message is in flight, off the queue; the turn's
+    # terminal write deletes it with the record that holds it, and a turn
+    # that ended without one — a sweep failed it — leaves it waiting again
+    # (``app.services.session.message_queue.waiting``).
+    steer_taken: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

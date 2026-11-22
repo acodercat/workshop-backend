@@ -61,6 +61,11 @@ class SessionTurnStatus(StrEnum):
     FAILED = "FAILED"
 
 
+# A turn not yet closed out: enqueued and never claimed, or claimed and
+# still running. A session has at most one (``uq_session_turn_open_session``).
+OPEN_TURN_STATUSES = (SessionTurnStatus.PENDING, SessionTurnStatus.RUNNING)
+
+
 class TerminationReason(StrEnum):
     """Why a turn reached its terminal status — the *why* to
     :class:`SessionTurnStatus`'s *what*.

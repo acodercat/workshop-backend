@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
 from app.api.public import session as endpoint
@@ -48,7 +49,8 @@ def _queued(queued_id: int, position: int = 0, **overrides) -> QueuedMessage:
         "skills": [],
         "timezone": None,
         "held_at": None,
-        "steer": False,
+        "steer_turn_id": None,
+        "steer_taken": False,
     }
     return QueuedMessage(**{**values, **overrides})
 
@@ -157,7 +159,12 @@ def _endpoint_db(monkeypatch, *, status: SessionStatus, queue: list[QueuedMessag
     session = SimpleNamespace(id=uuid4(), user_id=7, status=status)
     monkeypatch.setattr(endpoint, "_get_or_404", AsyncMock(return_value=session))
     monkeypatch.setattr(endpoint, "list_queued_messages", AsyncMock(return_value=queue))
-    return MagicMock(add=MagicMock(), commit=AsyncMock())
+    return MagicMock(add=MagicMock(), flush=AsyncMock(), commit=AsyncMock(), refresh=AsyncMock())
+
+
+def _writes(db: MagicMock) -> list[str]:
+    """The order ``db`` was flushed, refreshed and committed in."""
+    return [name for name, _, _ in db.mock_calls if name in ("flush", "refresh", "commit")]
 
 
 async def _create(db: MagicMock) -> QueuedMessage:
@@ -180,7 +187,9 @@ class TestCreate:
 
         assert queued.position == 5
         assert queued.content == "next"
-        db.commit.assert_awaited_once()
+        # ``steer`` is derived: read before the commit, while the lock holds.
+        db.refresh.assert_awaited_once_with(queued, ["steer"])
+        assert _writes(db) == ["flush", "refresh", "commit"]
 
     async def test_an_idle_session_takes_none(self, monkeypatch) -> None:
         # The turn ended first: queued now, the message would wait behind
@@ -243,13 +252,46 @@ class TestReorder:
 
         assert await self._reorder(monkeypatch, queue, [2, 1]) == [2, 1, 3, 4]
 
+    async def test_answers_with_the_queue_read_back_after_the_commit(self, monkeypatch) -> None:
+        # A moved row's flush expires its derived ``steer``, which the
+        # answer reads: the objects just written cannot be answered as is.
+        db = _endpoint_db(monkeypatch, status=SessionStatus.RUNNING, queue=[])
+        read_back = [_queued(2, 0), _queued(1, 1)]
+        endpoint.list_queued_messages.side_effect = [[_queued(1, 0), _queued(2, 1)], read_back]
+
+        answer = await endpoint.reorder_queued_messages(
+            session_id=uuid4(),
+            body=QueuedMessageOrder(ids=[2, 1]),
+            db=db,
+            current_user=SimpleNamespace(id=7),
+        )
+
+        assert answer is read_back
+        db.commit.assert_awaited_once()
+
 
 _PDF_SNAPSHOT = {"id": 3, "name": "pdf", "bundle_key": "skills/pdf.zip"}
 
 
+def test_steer_holds_only_while_the_turn_asked_for_is_open() -> None:
+    # Derived, so a turn that ends untaken leaves the message an ordinary
+    # one with nothing to clear.
+    sql = str(
+        select(QueuedMessage).compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+
+    assert "session_turn.id = queued_message.steer_turn_id" in sql
+    assert "session_turn.status IN ('PENDING', 'RUNNING')" in sql
+
+
 class TestSteer:
-    async def _steer(self, monkeypatch, queued: QueuedMessage, status: SessionStatus) -> MagicMock:
-        db = _endpoint_db(monkeypatch, status=status, queue=[])
+    async def _steer(
+        self, monkeypatch, queued: QueuedMessage, open_turn_id: int | None = 31
+    ) -> MagicMock:
+        db = _endpoint_db(monkeypatch, status=SessionStatus.RUNNING, queue=[])
+        db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: open_turn_id))
         monkeypatch.setattr(endpoint, "_queued_message_or_404", AsyncMock(return_value=queued))
         self.session = endpoint._get_or_404.return_value
         self.bind = AsyncMock(return_value=[_FILE["file_key"]])
@@ -268,22 +310,27 @@ class TestSteer:
         )
         return db
 
-    async def test_a_text_message_steers_the_running_turn(self, monkeypatch) -> None:
+    async def test_a_text_message_steers_the_open_turn(self, monkeypatch) -> None:
         queued = _queued(1)
 
-        db = await self._steer(monkeypatch, queued, SessionStatus.RUNNING)
+        db = await self._steer(monkeypatch, queued)
 
-        assert queued.steer is True
-        db.commit.assert_awaited_once()
+        # That turn and no other: once it ends untaken, the message waits.
+        assert queued.steer_turn_id == 31
+        assert queued.steer_taken is False
+        # ``steer`` is derived from the turn: read before the commit, while
+        # the lock holds.
+        db.refresh.assert_awaited_once_with(queued, ["steer"])
+        assert _writes(db) == ["flush", "refresh", "commit"]
 
     async def test_its_files_are_bound_for_the_worker_to_stage(self, monkeypatch) -> None:
         # No ``queue_user_message`` stands between this row and the turn
         # that takes it, so the binding it would do is done here.
         queued = _queued(1, files=[_FILE])
 
-        db = await self._steer(monkeypatch, queued, SessionStatus.RUNNING)
+        db = await self._steer(monkeypatch, queued)
 
-        assert queued.steer is True
+        assert queued.steer_turn_id == 31
         bound = self.bind.await_args.kwargs
         assert [file.file_key for file in bound["files"]] == [_FILE["file_key"]]
         assert (bound["session_id"], bound["user_id"]) == (self.session.id, 7)
@@ -296,20 +343,30 @@ class TestSteer:
         # the same snapshot, so the turn loads the bytes picked now.
         queued = _queued(1, skills=["pdf"])
 
-        await self._steer(monkeypatch, queued, SessionStatus.RUNNING)
+        await self._steer(monkeypatch, queued)
 
-        assert queued.steer is True
+        assert queued.steer_turn_id == 31
         self.resolve_skills.assert_awaited_once()
         assert self.resolve_skills.await_args.args[1:] == (7, ["pdf"])
         assert queued.skill_snapshots == [_PDF_SNAPSHOT]
 
-    async def test_with_no_turn_running_there_is_nothing_to_steer(self, monkeypatch) -> None:
+    async def test_one_an_earlier_turn_took_is_this_turns_to_take(self, monkeypatch) -> None:
+        # That turn ended without recording it — stopped, or its lease lost
+        # — so the message waited again, still bearing the take.
+        queued = _queued(1, steer_turn_id=30, steer_taken=True)
+
+        await self._steer(monkeypatch, queued)
+
+        assert (queued.steer_turn_id, queued.steer_taken) == (31, False)
+
+    async def test_with_no_turn_open_there_is_nothing_to_steer(self, monkeypatch) -> None:
         queued = _queued(1)
 
         with pytest.raises(SessionIdleError):
-            await self._steer(monkeypatch, queued, SessionStatus.COMPLETE)
+            await self._steer(monkeypatch, queued, open_turn_id=None)
 
-        assert queued.steer is False
+        assert queued.steer_turn_id is None
+        self.bind.assert_not_awaited()
 
 
 class TestDelete:
@@ -331,8 +388,8 @@ class TestDelete:
 
         statement = str(db.execute.await_args.args[0].compile(dialect=postgresql.dialect()))
         assert statement.startswith("DELETE FROM queued_message")
-        assert "NOT (EXISTS" in statement
-        assert "session_turn.id = queued_message.steered_turn_id" in statement
+        assert "queued_message.steer_taken" in statement
+        assert "session_turn.id = queued_message.steer_turn_id" in statement
         db.commit.assert_awaited_once()
 
     async def test_one_the_running_turn_took_is_not_found(self, monkeypatch) -> None:

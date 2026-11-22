@@ -939,6 +939,10 @@ async def create_queued_message(
         timezone=body.timezone,
     )
     db.add(queued)
+    await db.flush()
+    # ``steer`` is derived, so the database answers it — before the commit,
+    # while the row is still this transaction's alone.
+    await db.refresh(queued, ["steer"])
     await db.commit()
     return queued
 
@@ -969,7 +973,8 @@ async def reorder_queued_messages(
     for position, queued in enumerate(queue):
         queued.position = position
     await db.commit()
-    return queue
+    # Read back: ``steer`` is derived, and a row's flush expires it.
+    return await list_queued_messages(db, session_id)
 
 
 @router.delete(
@@ -1045,17 +1050,17 @@ async def steer_with_queued_message(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ):
-    """Have a waiting message reach the running turn instead of waiting for
-    it to end: the worker takes it before the agent's next model call, and
-    it leaves the queue then. Its files and skills go with it.
+    """Have a waiting message reach the session's open turn instead of
+    waiting for it to end: the worker takes it before the agent's next model
+    call, and it leaves the queue then. Its files and skills go with it. The
+    request is for that turn alone; one that ends first leaves the message
+    waiting as any other.
 
     409 ``session_idle`` when no turn runs: there is nothing to steer, and
     the queue sends it on as it is.
     """
     session = await _get_or_404(db, session_id, current_user.id, for_update=True)
     queued = await _queued_message_or_404(db, session_id, queued_message_id)
-    if session.status != SessionStatus.RUNNING:
-        raise SessionIdleError("No turn is running to steer.")
     await mark_for_steering(db, session, queued)
     return queued
 

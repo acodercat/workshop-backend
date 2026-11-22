@@ -26,6 +26,9 @@ def _sql(statement) -> str:
 
 
 class _Rows:
+    def scalars(self) -> "_Rows":
+        return self
+
     def all(self) -> list:
         return []
 
@@ -52,7 +55,10 @@ async def test_selects_completed_sessions_whose_queue_nobody_holds() -> None:
     # Reached without authentication, so a suspended owner is filtered here.
     assert "\"user\".status = 'ACTIVE'" in sql
     assert "queued_message.held_at IS NOT NULL" in sql
-    assert sql.index("WHERE") < sql.index("LIMIT")
+    # One session per owner, the cap being per owner — and every owner: a
+    # fixed batch could be filled, tick after tick, by owners at their cap.
+    assert "DISTINCT ON (session.user_id)" in sql
+    assert "LIMIT" not in sql
 
 
 class _FakeDb:
@@ -170,9 +176,9 @@ class _LockDb:
         return SimpleNamespace(scalar=lambda: True)
 
 
-def _patch_tick(monkeypatch, candidates: list[tuple], congested_owners: set[int]) -> list:
-    """Run ``_tick`` over ``candidates`` (oldest first), with every session
-    of ``congested_owners`` at the running-task cap. Returns the sessions
+def _patch_tick(monkeypatch, candidates: list, congested: set) -> list:
+    """Run ``_tick`` over ``candidates`` (oldest first), with the sessions in
+    ``congested`` at their owner's running-task cap. Returns the sessions
     attempted, in order."""
     attempts: list = []
 
@@ -181,7 +187,7 @@ def _patch_tick(monkeypatch, candidates: list[tuple], congested_owners: set[int]
 
     async def dispatch_next(session_id, _redis):
         attempts.append(session_id)
-        if dict(candidates)[session_id] in congested_owners:
+        if session_id in congested:
             raise ConcurrentTaskLimitError(3)
         return True
 
@@ -191,13 +197,10 @@ def _patch_tick(monkeypatch, candidates: list[tuple], congested_owners: set[int]
     return attempts
 
 
-async def test_a_congested_owners_other_sessions_wait_for_the_next_tick(monkeypatch) -> None:
-    # The cap is per owner: once one session meets it, the owner's others
-    # would too, and each attempt costs a whole enqueue.
-    congested, other, free = uuid4(), uuid4(), uuid4()
-    attempts = _patch_tick(
-        monkeypatch, [(congested, 1), (other, 1), (free, 2)], congested_owners={1}
-    )
+async def test_a_congested_owner_is_passed_over_for_the_next_tick(monkeypatch) -> None:
+    # Congestion, not a refusal: nothing is held, and the others go out.
+    congested, free = uuid4(), uuid4()
+    attempts = _patch_tick(monkeypatch, [congested, free], congested={congested})
 
     assert await dispatcher._tick("redis") == 1
     assert attempts == [congested, free]
