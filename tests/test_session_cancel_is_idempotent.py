@@ -53,10 +53,7 @@ def _app(monkeypatch, status: SessionStatus, redis) -> TestClient:
     """
     row = Session(id=SESSION_ID, user_id=7, status=status)
 
-    async def _found(_db, _session_id, _user_id, **_kw):
-        return row
-
-    monkeypatch.setattr(session_api, "_get_or_404", _found)
+    monkeypatch.setattr(session_api, "_get_or_404", AsyncMock(return_value=row))
     # No turn is ever PENDING here: the terminal cases have no turn at
     # all, and the RUNNING case is the claimed one that takes pub/sub.
     monkeypatch.setattr(
@@ -64,6 +61,7 @@ def _app(monkeypatch, status: SessionStatus, redis) -> TestClient:
         "cancel_unclaimed_turn",
         AsyncMock(return_value=False),
     )
+    monkeypatch.setattr(session_api, "hold_queue", AsyncMock())
 
     app = FastAPI()
     install_error_handlers(app)
@@ -92,6 +90,8 @@ def test_cancelling_a_stopped_session_is_accepted_silently(status, monkeypatch):
     assert response.status_code == 202
     assert response.json() == {"already_stopped": True}
     redis.publish.assert_not_awaited()
+    # Nothing was stopped, so the session's queue is left as it is.
+    session_api.hold_queue.assert_not_awaited()
 
 
 def test_an_unclaimed_turn_is_hard_cancelled_and_says_already_stopped(monkeypatch):
@@ -120,6 +120,7 @@ def test_an_unclaimed_turn_is_hard_cancelled_and_says_already_stopped(monkeypatc
     event = json.loads(payload)["event"]
     assert event["session_id"] == str(SESSION_ID)
     assert event["status"] == "CANCELLED"
+    session_api.hold_queue.assert_awaited_once()
 
 
 def test_cancelling_a_running_session_still_signals_the_worker(monkeypatch):
@@ -140,3 +141,27 @@ def test_cancelling_a_running_session_still_signals_the_worker(monkeypatch):
     channel, payload = redis.publish.await_args.args
     assert str(SESSION_ID) in channel
     assert payload == "user_cancelled"
+
+
+def test_stopping_a_running_session_holds_its_queue(monkeypatch):
+    """A stop is not followed by the next queued message going out on its
+    own. Held here, and committed before the worker hears of the stop: the
+    turn may still end ``COMPLETE``, its answer finishing first, and that
+    alone would move the queue on."""
+    calls = []
+    db, redis = AsyncMock(), AsyncMock()
+    db.commit.side_effect = lambda: calls.append("commit")
+    redis.publish.side_effect = lambda *_args: calls.append("publish")
+    client = _app(monkeypatch, SessionStatus.RUNNING, redis)
+    client.app.dependency_overrides[get_db] = lambda: db
+    session_api.hold_queue.side_effect = lambda *_args: calls.append("hold")
+
+    response = client.post(f"/sessions/{SESSION_ID}/cancel")
+
+    assert response.status_code == 202
+    # Under the session's row lock, which the turn's terminal write and the
+    # dispatcher both wait for: neither can fall between the status read
+    # here and the hold.
+    assert session_api._get_or_404.await_args.kwargs == {"for_update": True}
+    session_api.hold_queue.assert_awaited_once_with(db, SESSION_ID)
+    assert calls == ["hold", "commit", "publish"]

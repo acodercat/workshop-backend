@@ -88,6 +88,11 @@ class QueuedMessage(Base):
     steer_turn_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("session_turn.id", ondelete="SET NULL"), nullable=True
     )
+    # That turn has taken it (the worker's write): off the queue while the
+    # turn runs (``app.services.session.message_queue.waiting``).
+    steer_taken: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
     # Whether the message is still to reach that turn: it has not ended.
     # Derived, so a turn that ends untaken leaves nothing to clear.
     steer: Mapped[bool] = column_property(
@@ -106,14 +111,6 @@ class QueuedMessage(Base):
         nullable=False,
         server_default=text("'[]'::jsonb"),
         default=list,
-    )
-    # The turn it was steered into has taken it (the worker's write). While
-    # that turn runs the message is in flight, off the queue; the turn's
-    # terminal write deletes it with the record that holds it, and a turn
-    # that ended without one — a sweep failed it — leaves it waiting again
-    # (``app.services.session.message_queue.waiting``).
-    steer_taken: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"), default=False
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

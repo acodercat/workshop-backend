@@ -11,9 +11,12 @@ has the session open.
 **What a finished turn does to a queue.** Only a turn that ``COMPLETE``d
 carries it on. A cancelled or failed one leaves the session in a status
 this task does not select, so the queue stays for the user to decide — and
-moves again once a turn they start completes. Two more cases hold a queue
-although the turn completed, by stamping ``held_at`` on its head:
+moves again once a turn they start completes. Three more cases hold a queue
+although the turn completed, by stamping ``held_at``:
 
+- the owner stopped the turn as its answer finished: the cancel endpoint
+  holds the queue itself (``hold_queue``), so the stop holds however the
+  turn ends;
 - the turn ended on a question to the user (``awaits_answer``): the queued
   message is not the answer;
 - the send failed — ``queue_user_message`` refused it (out of credits, a

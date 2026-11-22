@@ -395,3 +395,20 @@ class TestDelete:
     async def test_one_the_running_turn_took_is_not_found(self, monkeypatch) -> None:
         with pytest.raises(QueuedMessageNotFoundError):
             await self._delete(monkeypatch, deleted_id=None)
+
+
+class TestHoldQueue:
+    async def test_holds_every_message_of_the_session(self) -> None:
+        # Every message, not the head: the head may be one the turn was
+        # steered with, deleted when the turn records it.
+        db = AsyncMock()
+        session_id = uuid4()
+
+        await message_queue.hold_queue(db, session_id)
+
+        statement = db.execute.await_args.args[0]
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        assert "UPDATE queued_message SET held_at=now()" in sql
+        assert "WHERE queued_message.session_id = " in sql
+        assert statement.compile().params["session_id_1"] == session_id
+        db.commit.assert_not_awaited()

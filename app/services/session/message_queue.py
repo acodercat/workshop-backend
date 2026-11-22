@@ -18,7 +18,7 @@ from typing import Any
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from sqlalchemy import ColumnElement, and_, exists, select
+from sqlalchemy import ColumnElement, and_, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import SessionIdleError
@@ -63,6 +63,23 @@ async def list_queued_messages(db: AsyncSession, session_id: UUID) -> list[Queue
     return list(rows.scalars().all())
 
 
+async def hold_queue(db: AsyncSession, session_id: UUID) -> None:
+    """Hold the session's queue until its next turn starts: the owner
+    stopped the running turn, and a stop is not followed by the next
+    message going out on its own. The caller holds the session's row lock,
+    as the dispatcher does to send, and commits.
+
+    Held whatever the turn then ends as — a stop that lands as the answer
+    finishes leaves the turn ``COMPLETE``, which alone would move the queue
+    on. Every message is stamped, not the head: the head may be one the
+    turn was steered with, deleted when the turn records it."""
+    await db.execute(
+        update(QueuedMessage)
+        .where(QueuedMessage.session_id == session_id)
+        .values(held_at=func.now())
+    )
+
+
 def queue_is_moving(session: Session, queue: list[QueuedMessage]) -> bool:
     """Whether ``queue`` is about to go out with no one doing anything: its
     session's last turn completed and nothing holds it. The dispatcher may
@@ -104,11 +121,11 @@ async def dispatch_queued_message(
     )
 
 
-async def mark_for_steering(db: AsyncSession, session: Session, queued: QueuedMessage) -> None:
-    """Mark ``queued`` for the session's open turn to take, before the
-    agent's next model call, and commit. Raises :class:`SessionIdleError`
-    when no turn is open: there is nothing to steer, and the queue sends
-    the message on as it is.
+async def steer_open_turn(db: AsyncSession, session: Session, queued: QueuedMessage) -> None:
+    """Steer the session's open turn with ``queued``: mark it for that turn
+    to take, before the agent's next model call, and commit. Raises
+    :class:`SessionIdleError` when no turn is open: there is nothing to
+    steer, and the queue sends the message on as it is.
 
     What ``queue_user_message`` would do for its files and skills is done
     here: a message the worker takes into a running turn passes through no
@@ -127,7 +144,7 @@ async def mark_for_steering(db: AsyncSession, session: Session, queued: QueuedMe
         )
     ).scalar_one_or_none()
     if open_turn_id is None:
-        raise SessionIdleError("No turn is running to steer.")
+        raise SessionIdleError("No open turn to steer.")
     newly_bound_keys = await bind_session_files(
         db,
         session_id=session.id,

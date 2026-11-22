@@ -117,9 +117,10 @@ from app.services.session import (
 from app.services.session.files import assert_file_belongs_to_session
 from app.services.session.message_queue import (
     dispatch_queued_message,
+    hold_queue,
     list_queued_messages,
-    mark_for_steering,
     queue_is_moving,
+    steer_open_turn,
     waiting,
 )
 from app.services.user import publish_session_status
@@ -158,7 +159,8 @@ async def _get_or_404(
     ``for_update`` takes a row-level lock held until the transaction
     ends — used by ``delete_session`` so its status check and tombstone
     serialize against ``queue_user_message``'s own ``FOR UPDATE`` lock,
-    by ``create_share`` so two rotations cannot both insert, and by
+    by ``cancel_session`` so the queue it holds is held before the turn
+    can end, by ``create_share`` so two rotations cannot both insert, and by
     ``update_session`` when it moves a session between projects, whose
     LITE → FULL upgrade runs under the lock enqueue takes.
     """
@@ -1061,7 +1063,7 @@ async def steer_with_queued_message(
     """
     session = await _get_or_404(db, session_id, current_user.id, for_update=True)
     queued = await _queued_message_or_404(db, session_id, queued_message_id)
-    await mark_for_steering(db, session, queued)
+    await steer_open_turn(db, session, queued)
     return queued
 
 
@@ -1120,8 +1122,17 @@ async def cancel_session(
     later claimed and billed. :func:`cancel_unclaimed_turn` hard-cancels
     (and refunds) that case directly in the DB; only a claimed/``RUNNING``
     turn takes the pub/sub path for graceful mid-turn shutdown.
+
+    **The session's queue is held** (:func:`hold_queue`), before either
+    path: a stop is not followed by the next queued message going out on
+    its own, even when it lands as the answer finishes and the turn ends
+    ``COMPLETE`` after all. The queue moves again as any held one does.
+    The session's row is locked for it, so the turn's terminal write and
+    the queue's dispatcher come wholly before this stop or wholly after:
+    a turn that ended first reads as already stopped, and one that ends
+    after finds its queue held.
     """
-    session = await _get_or_404(db, session_id, current_user.id)
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
     if session.status != SessionStatus.RUNNING:
         logger.info(
             "cancel: session %s is already %s — nothing to stop",
@@ -1129,6 +1140,7 @@ async def cancel_session(
             session.status.value,
         )
         return CancelAcceptedResponse(already_stopped=True)
+    await hold_queue(db, session_id)
     if await cancel_unclaimed_turn(db, session_id=session_id):
         await db.commit()
         # Hard-cancelled in the DB with no worker in the picture, so no
@@ -1141,6 +1153,7 @@ async def cancel_session(
             status=SessionStatus.CANCELLED,
         )
         return CancelAcceptedResponse(already_stopped=True)
+    await db.commit()
     await redis.publish(
         cancel_channel(str(session_id)),
         TerminationReason.USER_CANCELLED.value,
