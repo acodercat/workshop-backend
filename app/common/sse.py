@@ -227,13 +227,16 @@ class AgentStoppedEvent(_EventBase):
     total_model_latency: NotRequired[str]
 
 
-#: Discriminated union of every event sent over the per-session SSE stream.
+#: Discriminated union of the per-session SSE events typed here — not all
+#: of them: :class:`~app.common.event_types.EventType` is the catalog, and
+#: an event with no variant here (``agent.todo_update``, ``sandbox.*``,
+#: ``user.steering``) is forwarded as is.
 #:
-#: Most variants are produced by the worker (``agent.*`` + ``user.*``) and
-#: replayed from Redis. ``session.ready`` is produced by the backend SSE
-#: forwarder itself on every (re)connect. Narrow with
-#: ``match event["type"]:`` / ``if event["type"] == "...":``. Most
-#: backend code doesn't need to narrow — :func:`event_to_sse` just
+#: The ``agent.*`` variants are produced by the worker and replayed from
+#: Redis, read back by a cast, never validated. ``session.ready`` is
+#: produced by the backend SSE forwarder itself on every (re)connect.
+#: Narrow with ``match event["type"]:`` / ``if event["type"] == "...":``.
+#: Most backend code doesn't need to narrow — :func:`event_to_sse` just
 #: forwards non-header fields to the frontend as JSON.
 StreamEvent = (
     SessionReadyEvent
