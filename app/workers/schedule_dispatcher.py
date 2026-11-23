@@ -49,10 +49,12 @@ from app.errors import (
     ConcurrentTaskLimitError,
     InsufficientCreditsError,
     ModelUnavailableError,
+    ProjectNotFoundError,
     UnconfiguredTierError,
 )
 from app.models.schedule import Schedule, ScheduleRun, ScheduleSkipReason, ScheduleStatus
 from app.models.user import User, UserStatus
+from app.services.project import ownership as project_ownership
 from app.services.schedule import (
     catch_up_grace,
     connectors as schedule_connectors,
@@ -546,7 +548,7 @@ async def _enqueue(
         # An unattended run therefore produces a worse answer rather than an
         # error, and ``schedule_run`` cannot see the difference.
         connector_ids=await schedule_connectors.configured_ids(db, schedule.id),
-        project_id=None,
+        project_id=await _project_to_run_in(db, schedule),
     )
     _settle(db, schedule, occurrence, session_id=session.id)
     await queue_user_message(
@@ -566,6 +568,27 @@ async def _enqueue(
         # the owner's zone at the occurrence, not the host clock at enqueue.
         reminders=[render_run_reminder(schedule, occurrence)],
     )
+
+
+async def _project_to_run_in(db: AsyncSession, schedule: Schedule) -> uuid.UUID | None:
+    """The project the occurrence's session is created in: the schedule's,
+    while it is live, and none once it is deleted (see ``Schedule.project_id``).
+
+    Locked, as every write that creates a session in a project locks it
+    first, so the project cannot be deleted before the session lands in it.
+    The schedule is already locked, and no path locks a project and then a
+    schedule. ``updated_at`` is left alone: it tracks what the owner did to
+    the project, and a firing is not that.
+    """
+    if schedule.project_id is None:
+        return None
+    try:
+        project = await project_ownership.require_owned_project(
+            db, user_id=schedule.user_id, project_id=schedule.project_id, for_update=True
+        )
+    except ProjectNotFoundError:
+        return None
+    return project.id
 
 
 async def _defer_congestion(

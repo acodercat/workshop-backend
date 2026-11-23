@@ -179,7 +179,8 @@ async def delete_project(
 
     The sessions are kept (:func:`_moved_out`): deleting a grouping is not
     discarding the conversations in it, and the owner can still delete
-    those one by one.
+    those one by one. Schedules naming the project are left alone; to them a
+    deleted project counts as none (see ``Schedule.project_id``).
 
     The project's files go with it: their rows stay, unreadable behind the
     deleted project, and their OSS objects stay too, as a deleted session's

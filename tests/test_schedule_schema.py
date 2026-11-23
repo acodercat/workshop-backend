@@ -191,3 +191,9 @@ class TestCarriedContext:
         assert ScheduleUpdate(skills=[]).skills == []
         assert ScheduleUpdate().connectors is None
         assert ScheduleUpdate(connectors=[]).connectors == []
+
+    def test_update_tells_leave_alone_apart_from_moving_out(self):
+        # As on ``PATCH /sessions/{id}``: ``null`` moves the schedule out of
+        # its project, and only leaving the field out leaves it alone.
+        assert "project_id" not in ScheduleUpdate().model_fields_set
+        assert "project_id" in ScheduleUpdate(project_id=None).model_fields_set

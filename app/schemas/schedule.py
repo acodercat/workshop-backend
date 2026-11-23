@@ -12,6 +12,7 @@ enforce, and a flat row is what a renderer wants.
 
 from datetime import date, datetime, time
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -141,6 +142,8 @@ class ScheduleCreate(BaseModel):
     # not checked at all here, because a Connector disconnected today may
     # well be reconnected before this task next fires.
     connectors: list[int] = Field(default_factory=list, max_length=CONNECTORS_MAX)
+    # Run each firing in this project. Ownership is checked in the endpoint.
+    project_id: UUID | None = None
 
     _check_prompt = field_validator("prompt")(_checked_prompt)
 
@@ -150,6 +153,10 @@ class ScheduleUpdate(BaseModel):
 
     ``status`` accepts only the two states an owner can choose. COMPLETED is
     reached by a one-shot firing, never by asking.
+
+    ``project_id`` is read through ``model_fields_set``, as on
+    ``PATCH /sessions/{id}``: an id moves the schedule into that project,
+    ``null`` moves it out, and leaving it out changes nothing.
     """
 
     prompt: str | None = Field(default=None, min_length=1, max_length=8000)
@@ -162,6 +169,7 @@ class ScheduleUpdate(BaseModel):
     skills: list[str] | None = Field(default=None, max_length=SKILLS_MAX)
     connectors: list[int] | None = Field(default=None, max_length=CONNECTORS_MAX)
     status: Literal[ScheduleStatus.ACTIVE, ScheduleStatus.PAUSED] | None = None
+    project_id: UUID | None = None
 
     _check_prompt = field_validator("prompt")(_checked_prompt)
 
@@ -233,6 +241,10 @@ class ScheduleResponse(BaseModel):
     # ``connectors`` is assembled from ``schedule_mcp_server``.
     skills: list[str]
     connectors: list[int] = Field(default_factory=list)
+    # The live project each firing runs in, or ``None`` — also when the row
+    # names a project since deleted (see ``Schedule.project_id``). Assembled
+    # by the endpoint, like ``connectors``.
+    project_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 

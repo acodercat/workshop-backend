@@ -121,6 +121,17 @@ class TestConnectorBinding:
         assert [column.name for column in pk.columns] == ["schedule_id", "mcp_server_id"]
 
 
+class TestProject:
+    def test_a_users_hard_delete_unlinks_through_an_index(self):
+        # ``SET NULL`` for the one hard delete that reaches ``project``, a
+        # user's; partial, as most schedules belong to no project.
+        (fk,) = Schedule.__table__.c.project_id.foreign_keys
+        assert fk.ondelete == "SET NULL"
+        index = _indexes(Schedule)["ix_schedule_project_id"]
+        assert [column.name for column in index.columns] == ["project_id"]
+        assert _predicate(index) == "project_id IS NOT NULL"
+
+
 class TestSkillPicks:
     def test_no_skills_is_an_empty_array_never_null(self):
         # Readers iterate without a null-guard, matching

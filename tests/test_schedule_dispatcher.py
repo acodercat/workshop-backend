@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from app.errors import (
     ConcurrentTaskLimitError,
     InsufficientCreditsError,
+    ProjectNotFoundError,
     UnconfiguredTierError,
 )
 from app.models.schedule import (
@@ -245,7 +246,54 @@ class TestCarriedContext:
 
         assert calls["queue"][0]["skills"] == []
         assert calls["build"][0]["connector_ids"] == []
+        assert calls["build"][0]["project_id"] is None
         assert calls["queue"][0]["files"] == []
+
+
+class TestProject:
+    """The project a firing's session is created in."""
+
+    @staticmethod
+    def _projects(monkeypatch, *, live: bool) -> list[dict]:
+        lookups: list[dict] = []
+
+        async def fake_require_owned_project(_db, **kwargs):
+            lookups.append(kwargs)
+            if not live:
+                raise ProjectNotFoundError("Project not found.")
+            return SimpleNamespace(id=kwargs["project_id"])
+
+        monkeypatch.setattr(
+            schedule_dispatcher.project_ownership,
+            "require_owned_project",
+            fake_require_owned_project,
+        )
+        return lookups
+
+    async def test_runs_in_the_schedules_project_under_its_lock(self, monkeypatch):
+        # Locked as every write that creates a session in a project is, so
+        # a delete cannot slip between the check and the session.
+        project_id = uuid4()
+        schedule = _schedule(project_id=project_id)
+        _, calls = _patch(monkeypatch, schedule)
+        lookups = self._projects(monkeypatch, live=True)
+
+        await schedule_dispatcher._process_one(7, redis=None)
+
+        assert lookups == [{"user_id": 42, "project_id": project_id, "for_update": True}]
+        assert calls["build"][0]["project_id"] == project_id
+
+    async def test_a_deleted_project_runs_in_none(self, monkeypatch):
+        # Deleting a project leaves its schedules naming it; the occurrence
+        # still runs, outside any project.
+        schedule = _schedule(project_id=uuid4())
+        _, calls = _patch(monkeypatch, schedule)
+        self._projects(monkeypatch, live=False)
+
+        await schedule_dispatcher._process_one(7, redis=None)
+
+        assert calls["build"][0]["project_id"] is None
+        assert len(calls["queue"]) == 1
 
 
 class TestHappyPath:

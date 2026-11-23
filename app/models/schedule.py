@@ -229,8 +229,7 @@ class Schedule(Base):
         Integer, nullable=False, server_default=text("0")
     )
 
-    # --- Session construction. Every column here is required to build a
-    # --- Session; only ``tier`` is exposed by the v1 create form.
+    # --- Session construction: what each firing's session is built with.
     tier: Mapped[Tier] = mapped_column(
         SAEnum(
             Tier,
@@ -248,6 +247,19 @@ class Schedule(Base):
         nullable=False,
     )
     thinking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The project each firing's session is created in, so the run works
+    # under the project's instructions and files; NULL for none.
+    #
+    # **Only a live project counts.** Unlike ``session.project_id``, this may
+    # point at a soft-deleted project: deleting a project does not touch its
+    # schedules, because the dispatcher locks a schedule before the project
+    # its session goes into, and a delete that locked the project and then
+    # the schedule would be the opposite order. A deleted project is never
+    # restored, so naming one means naming none: the dispatcher creates the
+    # session outside any project, and the API reports ``null``.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("project.id", ondelete="SET NULL"), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
@@ -268,6 +280,14 @@ class Schedule(Base):
         # The management list: mine, newest first. Also the index Postgres
         # does not create for the FK, so deleting a user does not seq-scan.
         Index("ix_schedule_user_id_created_at", "user_id", text("created_at DESC")),
+        # The ``project_id`` FK's index, for the ``SET NULL`` a user's hard
+        # delete cascades through ``project``. Partial: most schedules belong
+        # to no project.
+        Index(
+            "ix_schedule_project_id",
+            "project_id",
+            postgresql_where=text("project_id IS NOT NULL"),
+        ),
         # Each frequency owns exactly one shape. Without this a WEEKLY row
         # with no weekday is storable, and the recurrence math would have
         # to invent an answer for it at dispatch time — in a background

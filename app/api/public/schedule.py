@@ -36,6 +36,7 @@ from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.common.pagination import paginate
 from app.errors import ScheduleActiveLimitError, ScheduleLimitError
+from app.models.project import Project
 from app.models.schedule import Schedule, ScheduleRun, ScheduleStatus
 from app.models.session import AgentType, Session
 from app.models.session_turn import SessionTurn, SessionTurnStatus, TerminationReason
@@ -53,6 +54,7 @@ from app.schemas.schedule import (
     UnreadCountResponse,
 )
 from app.services.connector import ownership as connector_ownership
+from app.services.project import ownership as project_ownership
 from app.services.schedule import connectors as schedule_connectors, lifecycle
 from app.services.session.creation import resolve_tier
 
@@ -282,18 +284,27 @@ async def _schedule_responses(
     this session does not expire on commit, so without it the identity map
     would hand back the object as the request left it.
 
-    Four round trips however many rows: the schedules, their latest runs,
-    then each side table batched by id.
+    A schedule's project is reported only while it is live (see
+    ``Schedule.project_id``), joined here so a deleted one reads as none.
+
+    Four round trips however many rows: the schedules with their projects,
+    their latest runs, then each side table batched by id.
     """
     query = (
-        select(Schedule)
+        select(Schedule, Project.id.label("live_project_id"))
+        .outerjoin(
+            Project,
+            and_(Project.id == Schedule.project_id, Project.deleted_at.is_(None)),
+        )
         .where(Schedule.user_id == user_id)
         .order_by(Schedule.created_at.desc(), Schedule.id.desc())
         .execution_options(populate_existing=True)
     )
     if schedule_id is not None:
         query = query.where(Schedule.id == schedule_id)
-    schedules = list((await db.execute(query)).scalars())
+    rows = list(await db.execute(query))
+    schedules = [row.Schedule for row in rows]
+    live_project_ids = {row.Schedule.id: row.live_project_id for row in rows}
     ids = [schedule.id for schedule in schedules]
     if not ids:
         return []
@@ -313,6 +324,7 @@ async def _schedule_responses(
             update={
                 "last_run": last_runs.get(schedule.id),
                 "connectors": connectors.get(schedule.id, []),
+                "project_id": live_project_ids[schedule.id],
             }
         )
         for schedule in schedules
@@ -355,12 +367,19 @@ async def create_schedule(
         # checked against the live skill table at every firing, not once at
         # creation, so a schedule can name a skill uploaded later.
         skills=body.skills,
+        project_id=body.project_id,
     )
     lifecycle.assign_recurrence(schedule, body.recurrence)
     lifecycle.arm(schedule, datetime.now(UTC))
     connector_ids = await connector_ownership.require_owned_connectors(
         db, user_id=current_user.id, ids=body.connectors
     )
+    if body.project_id is not None:
+        # Unlocked: a schedule is not something a project holds, and one
+        # left naming a project deleted meanwhile simply runs in none.
+        await project_ownership.require_owned_project(
+            db, user_id=current_user.id, project_id=body.project_id
+        )
     await _assert_row_headroom(db, current_user.id)
     await _assert_activation_headroom(db, current_user.id)
     db.add(schedule)
@@ -416,7 +435,8 @@ async def update_schedule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ScheduleResponse:
-    """Edit, pause, or resume a schedule.
+    """Edit, pause, or resume a schedule, or move it into a project or out
+    of one.
 
     ``None`` leaves a field alone; ``[]`` clears a list. What the edit does to
     the status and the clock is :func:`lifecycle.apply_owner_edit`'s to
@@ -431,6 +451,12 @@ async def update_schedule(
     if body.connectors is not None:
         connector_ids = await connector_ownership.require_owned_connectors(
             db, user_id=current_user.id, ids=body.connectors
+        )
+    moving = "project_id" in body.model_fields_set
+    if moving and body.project_id is not None:
+        # Unlocked, for the reason ``create`` gives.
+        await project_ownership.require_owned_project(
+            db, user_id=current_user.id, project_id=body.project_id
         )
 
     schedule = await _get_or_404(db, schedule_id, current_user.id, for_update=True)
@@ -447,6 +473,8 @@ async def update_schedule(
         schedule.skills = body.skills
     if connector_ids is not None:
         await schedule_connectors.replace(db, schedule.id, connector_ids)
+    if moving:
+        schedule.project_id = body.project_id
     if body.model_fields_set:
         # Explicit because an edit that only touched the Connectors changes
         # no column the ``onupdate`` would see.
