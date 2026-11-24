@@ -60,12 +60,15 @@ class SessionUpdate(BaseModel):
     ``null`` it moves the session out of its project, sent as an id it moves
     the session into that project, and left out it changes nothing.
     ``pinned``: ``True`` pins the session, ``False`` unpins it, ``None``
-    leaves it alone.
+    leaves it alone. ``thinking_enabled``: the agent's thinking from the
+    next turn on (the worker reads it at claim time, so a running turn
+    keeps what it started with); ``None`` leaves it alone.
     """
 
     title: str | None = None
     project_id: UUID | None = None
     pinned: bool | None = None
+    thinking_enabled: bool | None = None
 
 
 class SessionResponse(BaseModel):
@@ -295,6 +298,7 @@ class SessionDetailResponse(BaseModel):
     project_id: UUID | None
     # What the composer renders its switches from on open.
     connectors: list[int]
+    thinking_enabled: bool
     created_at: datetime
     updated_at: datetime
     messages: list[MessageResponse]

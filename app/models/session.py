@@ -146,8 +146,9 @@ class Session(Base):
     )
     # Whether the agent's thinking is on for this session (surfaced to users
     # as "deep think"). Stamped at creation from the composer toggle (default
-    # on); the worker reads it at claim time to toggle the model's thinking
-    # config. No Python-side ``default=`` — ``build_session`` sets it
+    # on), switched later by ``PATCH /sessions/{id}``; the worker reads it at
+    # claim time to toggle the model's thinking config, so a switch applies
+    # from the next turn. No Python-side ``default=`` — ``build_session`` sets it
     # explicitly (the migration backfilled existing rows to FALSE).
     thinking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # Which agent kind this session runs (FULL = sandbox agent, LITE =

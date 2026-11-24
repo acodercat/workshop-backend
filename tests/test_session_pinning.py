@@ -1,4 +1,5 @@
-"""Pinning a session: the cap, the list order, and that it is not activity."""
+"""Pinning a session: the cap, the list order, and that it is not activity
+(nor is switching the agent's thinking, the other setting ``PATCH`` takes)."""
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ def _session(*, pinned: bool) -> Session:
         status=SessionStatus.IDLE,
         tier=Tier.STANDARD,
         agent_type=AgentType.FULL,
+        thinking_enabled=True,
         created_at=now,
         updated_at=now,
         pinned_at=now if pinned else None,
@@ -86,7 +88,8 @@ class TestSetPinned:
 
 
 class TestUpdateSession:
-    """``PATCH /sessions/{id}``: pinning is not activity on the session."""
+    """``PATCH /sessions/{id}``: pinning and the thinking switch are not
+    activity on the session."""
 
     @staticmethod
     async def _patch(monkeypatch, session: Session, body: SessionUpdate) -> SimpleNamespace:
@@ -143,6 +146,21 @@ class TestUpdateSession:
 
         assert written.pinned_at == pinned_at
         assert written.updated_at is not Session.updated_at
+
+    async def test_switching_thinking_keeps_updated_at(self, monkeypatch) -> None:
+        session = _session(pinned=False)
+
+        written = await self._patch(monkeypatch, session, SessionUpdate(thinking_enabled=False))
+
+        assert session.thinking_enabled is False
+        assert written.updated_at is Session.updated_at
+
+    async def test_a_rename_leaves_thinking_alone(self, monkeypatch) -> None:
+        session = _session(pinned=False)
+
+        await self._patch(monkeypatch, session, SessionUpdate(title="renamed"))
+
+        assert session.thinking_enabled is True
 
 
 class _ListDb:

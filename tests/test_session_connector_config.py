@@ -141,6 +141,7 @@ class TestTheWireCarriesItOnTheSession:
             agent_type=row.agent_type,
             project_id=row.project_id,
             connectors=[3, 7],
+            thinking_enabled=True,
             created_at=now,
             updated_at=now,
             messages=[],

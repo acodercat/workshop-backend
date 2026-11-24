@@ -138,6 +138,10 @@ MAX_TURN_LIMIT = 50
 #: are looking for something, and one exchange per request is a grind.
 DEFAULT_HISTORY_TURNS = 5
 
+#: ``PATCH`` fields that are not activity on the session: sent on their own,
+#: they leave its place among the recent ones alone.
+_NOT_ACTIVITY = frozenset({"pinned", "thinking_enabled"})
+
 router = APIRouter(tags=["sessions"])
 
 
@@ -683,6 +687,7 @@ async def get_session(
         agent_type=session.agent_type,
         project_id=session.project_id,
         connectors=await session_connectors.configured_ids(db, session_id),
+        thinking_enabled=session.thinking_enabled,
         created_at=session.created_at,
         updated_at=session.updated_at,
         messages=messages,
@@ -700,8 +705,9 @@ async def update_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SessionResponse:
-    """Rename a session, move it into a project or out of one, or pin or
-    unpin it (:mod:`app.services.session.pinning`; 403 past the pin cap).
+    """Rename a session, move it into a project or out of one, pin or unpin
+    it (:mod:`app.services.session.pinning`; 403 past the pin cap), or switch
+    the agent's thinking on or off.
 
     A move into a project locks the project before the session — the order
     every write that changes what a project holds takes, so a move cannot
@@ -728,9 +734,11 @@ async def update_session(
         session.project_id = body.project_id
     if body.pinned is not None:
         await session_pinning.set_pinned(db, session, body.pinned)
-    if body.model_fields_set == {"pinned"}:
-        # Pinning is not activity. Set to itself, or ``onupdate`` would
-        # stamp now() and lift the session to the top of the recent ones.
+    if body.thinking_enabled is not None:
+        session.thinking_enabled = body.thinking_enabled
+    if body.model_fields_set <= _NOT_ACTIVITY:
+        # Set to itself, or ``onupdate`` would stamp now() and lift the
+        # session to the top of the recent ones.
         session.updated_at = Session.updated_at
     await db.commit()
     await db.refresh(session)
