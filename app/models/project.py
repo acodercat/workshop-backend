@@ -63,6 +63,11 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    # When the owner pinned the project; NULL = not pinned. A time rather
+    # than a flag, like ``session.pinned_at``: pinned projects list most
+    # recently pinned first. Pinning is not a change to the project, so it
+    # leaves ``updated_at`` alone.
+    pinned_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     # Soft-delete tombstone. NULL = live.
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 

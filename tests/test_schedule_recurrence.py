@@ -273,9 +273,13 @@ class TestMonthlyExhaustive:
         for day in range(1, 32):
             for year in range(2024, 2101):
                 for month in range(1, 13):
-                    steps, y, m = 0, year, month
-                    while monthrange(y, m)[1] < day:
+                    steps, probe_year, probe_month = 0, year, month
+                    while monthrange(probe_year, probe_month)[1] < day:
                         steps += 1
-                        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+                        probe_year, probe_month = (
+                            (probe_year + 1, 1)
+                            if probe_month == 12
+                            else (probe_year, probe_month + 1)
+                        )
                     worst = max(worst, steps)
         assert worst == 1, f"expected at most one step, measured {worst}"

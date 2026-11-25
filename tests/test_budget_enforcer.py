@@ -164,7 +164,7 @@ async def test_priced_turns_grouped_per_user_with_frozen_snapshot() -> None:
     by_user = await _priced_turns_by_user(db)
 
     assert set(by_user) == {1, 2}
-    assert [t.session_id for t in by_user[1]] == [sid_a, sid_b]
+    assert [turn.session_id for turn in by_user[1]] == [sid_a, sid_b]
     # (1000/1k · 0.001 + 200/1k · 0.005) · 1.0 · 1e9 = 2_000_000 µ-credits —
     # the same cost_micro_credits settle uses, fed from the frozen snapshot.
     assert by_user[1][0].priced == 2_000_000

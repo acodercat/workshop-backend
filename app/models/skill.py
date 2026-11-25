@@ -104,7 +104,7 @@ class Skill(Base):
         SAEnum(
             SkillOrigin,
             name="skill_origin",
-            values_callable=lambda cls: [m.value for m in cls],
+            values_callable=lambda cls: [member.value for member in cls],
         ),
         nullable=False,
         server_default=text("'CUSTOM'"),
@@ -140,7 +140,7 @@ class Skill(Base):
         SAEnum(
             SkillStatus,
             name="skill_status",
-            values_callable=lambda cls: [m.value for m in cls],
+            values_callable=lambda cls: [member.value for member in cls],
         ),
         nullable=False,
     )

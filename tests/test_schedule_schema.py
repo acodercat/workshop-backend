@@ -18,12 +18,11 @@ from pydantic import ValidationError
 
 from app.models.schedule import ScheduleFrequency
 from app.schemas.schedule import (
-    SCHEDULE_FILES_MAX,
     RecurrenceSpec,
     ScheduleCreate,
     ScheduleUpdate,
 )
-from app.schemas.session import CONNECTORS_MAX, SKILLS_MAX, FileRef
+from app.schemas.session import CONNECTORS_MAX, SKILLS_MAX
 
 # frequency → the one optional field it requires (None = requires none).
 OWNED_FIELD = {
@@ -48,7 +47,9 @@ def test_each_frequency_accepts_exactly_its_own_field(frequency):
     assert spec.frequency is frequency
 
 
-@pytest.mark.parametrize("frequency", [f for f in ScheduleFrequency if OWNED_FIELD[f]])
+@pytest.mark.parametrize(
+    "frequency", [frequency for frequency in ScheduleFrequency if OWNED_FIELD[frequency]]
+)
 def test_a_frequency_missing_its_field_is_refused(frequency):
     with pytest.raises(ValidationError, match=OWNED_FIELD[frequency]):
         _spec(frequency)
@@ -173,13 +174,6 @@ class TestCarriedContext:
         [
             ("skills", ["s"] * (SKILLS_MAX + 1)),
             ("connectors", list(range(CONNECTORS_MAX + 1))),
-            (
-                "files",
-                [
-                    FileRef(file_key=f"k{i}", filename="f.pdf", size_bytes=1)
-                    for i in range(SCHEDULE_FILES_MAX + 1)
-                ],
-            ),
         ],
     )
     def test_the_per_turn_cost_is_bounded(self, field, value):
@@ -197,3 +191,9 @@ class TestCarriedContext:
         assert ScheduleUpdate(skills=[]).skills == []
         assert ScheduleUpdate().connectors is None
         assert ScheduleUpdate(connectors=[]).connectors == []
+
+    def test_update_tells_leave_alone_apart_from_moving_out(self):
+        # As on ``PATCH /sessions/{id}``: ``null`` moves the schedule out of
+        # its project, and only leaving the field out leaves it alone.
+        assert "project_id" not in ScheduleUpdate().model_fields_set
+        assert "project_id" in ScheduleUpdate(project_id=None).model_fields_set

@@ -90,7 +90,7 @@ class Organization(Base):
         SAEnum(
             OrganizationKind,
             name="organization_kind",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -148,7 +148,7 @@ class OrganizationMember(Base):
         SAEnum(
             OrganizationMemberRole,
             name="organization_member_role",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )

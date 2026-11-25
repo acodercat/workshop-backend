@@ -16,10 +16,9 @@ Submodule responsibilities:
   scheduled task it is running. Pure too.
 - :mod:`~app.services.schedule.connectors` — reading and writing which
   Connectors a schedule hands to the sessions it creates.
-- :mod:`~app.services.schedule.files` — the same for its attachments.
 
-``lifecycle``, ``connectors`` and ``files`` are not re-exported: their
-functions read as ``schedule_connectors.replace(...)`` at the call sites,
+``lifecycle`` and ``connectors`` are not re-exported: their functions read
+as ``schedule_connectors.replace(...)`` at the call sites,
 which is how the session package's twins are used and what keeps each
 distinct from the session-level call sitting next to it in the dispatcher.
 """

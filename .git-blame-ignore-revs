@@ -14,3 +14,6 @@
 
 # ruff format over scripts/seed_users.py, which the sweep above excluded
 7c28d637b161fececb7a1beb0fc17b7d84124b0e
+
+# local names written in full
+26ab8ccc4d6feab0bc6d8d79665b5567ee4a8eb3

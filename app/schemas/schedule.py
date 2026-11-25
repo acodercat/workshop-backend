@@ -12,15 +12,16 @@ enforce, and a flat row is what a renderer wants.
 
 from datetime import date, datetime, time
 from typing import Literal
-from zoneinfo import available_timezones
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.common.text import printable
+from app.common.timezones import is_known_timezone
 from app.models.schedule import ScheduleFrequency, ScheduleSkipReason, ScheduleStatus
 from app.models.session import Tier
 from app.models.session_turn import SessionTurnStatus, TerminationReason
-from app.schemas.session import CONNECTORS_MAX, SKILLS_MAX, FileRef
+from app.schemas.session import CONNECTORS_MAX, SKILLS_MAX
 
 # Which optional column each frequency requires, and which it forbids.
 # Mirrors ``ck_schedule_frequency_fields``; this copy exists so the caller
@@ -33,36 +34,6 @@ _REQUIRED_FIELD: dict[ScheduleFrequency, str | None] = {
     ScheduleFrequency.MONTHLY: "day_of_month",
 }
 _SPEC_FIELDS = ("run_date", "weekday", "day_of_month")
-
-# The schedule form is the conversation's composer, verbatim, and the
-# composer stops accepting attachments at thirty (``MAX_MESSAGE_FILES`` in
-# ``frontend/hooks/use-file-upload.ts``). This must not sit below that: a
-# cap the client cannot see is a 422 the client cannot explain. Nothing
-# enforces the pair, so changing one side means changing the other.
-SCHEDULE_FILES_MAX = 30
-
-# Two entries the tz tree carries that are not zones. ``localtime`` is a
-# symlink to whatever this machine happens to be set to — host-relative,
-# and so the exact opposite of the snapshot this column exists to be.
-# ``Factory`` is a placeholder whose content is the string "no timezone
-# has been set". Python already filters ``posixrules``.
-_NOT_A_ZONE = frozenset({"localtime", "Factory"})
-
-# Built once at import. ``available_timezones()`` rebuilds its set on every
-# call and may walk the filesystem to do it — several milliseconds, on a
-# path that runs for every create and every recurrence edit, and PATCH
-# carries no rate limit of its own.
-_KNOWN_ZONES = frozenset(available_timezones()) - _NOT_A_ZONE
-
-
-def is_known_timezone(value: str) -> bool:
-    """Whether this deployment's tz database carries ``value`` as a zone.
-
-    Public because the endpoint needs the same answer for a zone read back
-    out of the database, where no validator has run — a row can outlive the
-    tz data it was written against.
-    """
-    return value in _KNOWN_ZONES
 
 
 class RecurrenceSpec(BaseModel):
@@ -108,7 +79,7 @@ class RecurrenceSpec(BaseModel):
         a schedule whose zone it cannot resolve, instead of retrying it
         forever (see ``schedule_dispatcher._zone_is_resolvable``).
         """
-        if value not in _KNOWN_ZONES:
+        if not is_known_timezone(value):
             raise ValueError(f"unknown timezone: {value!r}")
         return value
 
@@ -171,10 +142,8 @@ class ScheduleCreate(BaseModel):
     # not checked at all here, because a Connector disconnected today may
     # well be reconnected before this task next fires.
     connectors: list[int] = Field(default_factory=list, max_length=CONNECTORS_MAX)
-    # Uploads to attach, the same shape a message sends. The declared
-    # ``size_bytes`` is not trusted: it is reconciled against OSS when the
-    # attachment is stored.
-    files: list[FileRef] = Field(default_factory=list, max_length=SCHEDULE_FILES_MAX)
+    # Run each firing in this project. Ownership is checked in the endpoint.
+    project_id: UUID | None = None
 
     _check_prompt = field_validator("prompt")(_checked_prompt)
 
@@ -184,6 +153,10 @@ class ScheduleUpdate(BaseModel):
 
     ``status`` accepts only the two states an owner can choose. COMPLETED is
     reached by a one-shot firing, never by asking.
+
+    ``project_id`` is read through ``model_fields_set``, as on
+    ``PATCH /sessions/{id}``: an id moves the schedule into that project,
+    ``null`` moves it out, and leaving it out changes nothing.
     """
 
     prompt: str | None = Field(default=None, min_length=1, max_length=8000)
@@ -195,30 +168,10 @@ class ScheduleUpdate(BaseModel):
     # anyway, and the form has no per-item control to justify it.
     skills: list[str] | None = Field(default=None, max_length=SKILLS_MAX)
     connectors: list[int] | None = Field(default=None, max_length=CONNECTORS_MAX)
-    files: list[FileRef] | None = Field(default=None, max_length=SCHEDULE_FILES_MAX)
     status: Literal[ScheduleStatus.ACTIVE, ScheduleStatus.PAUSED] | None = None
+    project_id: UUID | None = None
 
     _check_prompt = field_validator("prompt")(_checked_prompt)
-
-
-class ScheduleFileResponse(BaseModel):
-    """One stored attachment, as the form re-renders it.
-
-    Its own model rather than :class:`FileRef` because that one is a
-    *request* model: its ``size_bytes`` carries ``le=max_file_bytes`` to
-    refuse an oversized claim early. A stored size is not a claim — it is
-    what OSS reported — and it can legitimately exceed a cap an operator has
-    since lowered. Rendering it through the request model turned that into
-    a 500 on the whole list, on exactly the page that lets the owner remove
-    the attachment.
-    """
-
-    model_config = ConfigDict(from_attributes=True)
-
-    file_key: str
-    filename: str
-    mime_type: str | None
-    size_bytes: int
 
 
 class ScheduleRunResponse(BaseModel):
@@ -281,15 +234,17 @@ class ScheduleResponse(BaseModel):
     next_run_at: datetime | None
     # The most recent occurrence, whole — its time and its outcome together,
     # rendered exactly as the history renders it. ``None`` before the first.
-    # Assembled by the endpoint, like ``connectors`` and ``files``.
+    # Assembled by the endpoint, like ``connectors``.
     last_run: ScheduleRunResponse | None = None
     tier: Tier
     # What each firing will carry. ``skills`` reads straight off the row;
     # ``connectors`` is assembled from ``schedule_mcp_server``.
     skills: list[str]
     connectors: list[int] = Field(default_factory=list)
-    # Assembled from ``schedule_file`` by the endpoint, like ``connectors``.
-    files: list[ScheduleFileResponse] = Field(default_factory=list)
+    # The live project each firing runs in, or ``None`` — also when the row
+    # names a project since deleted (see ``Schedule.project_id``). Assembled
+    # by the endpoint, like ``connectors``.
+    project_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 

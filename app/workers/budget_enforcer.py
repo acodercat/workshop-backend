@@ -103,10 +103,10 @@ def select_turn_to_stop(
     stopping one recovers nothing, and the reserve gate is what blocks
     new turns).
     """
-    projected = balance_micro - sum(t.overrun for t in turns)
+    projected = balance_micro - sum(turn.overrun for turn in turns)
     if projected > buffer_micro:
         return None
-    worst = max(turns, key=lambda t: t.overrun)
+    worst = max(turns, key=lambda turn: turn.overrun)
     if worst.overrun <= 0:
         return None
     return worst

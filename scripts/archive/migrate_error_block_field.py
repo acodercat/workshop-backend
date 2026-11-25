@@ -77,7 +77,7 @@ def migrate_blocks(blocks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
     renamed = 0
     for block in blocks:
         if block.get("type") == "error" and "message" in block and "content" not in block:
-            rewritten = {k: v for k, v in block.items() if k != "message"}
+            rewritten = {key: value for key, value in block.items() if key != "message"}
             rewritten["content"] = block["message"]
             out.append(rewritten)
             renamed += 1

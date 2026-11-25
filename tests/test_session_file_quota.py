@@ -51,4 +51,4 @@ async def test_an_object_counts_once_wherever_it_is_bound() -> None:
     # A session file added to a project is the same object.
     sql = await _compiled()
     assert "GROUP BY" in sql
-    assert sql.count("UNION ALL") == 2
+    assert sql.count("UNION ALL") == 1

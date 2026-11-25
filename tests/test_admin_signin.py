@@ -96,14 +96,16 @@ def test_a_refused_attempt_is_uniform_outside_and_specific_inside(monkeypatch, c
 
     # Outside: byte-for-byte the same refusal, so probing cannot tell a
     # dead password from a disabled account.
-    assert [r.status_code for r in refusals] == [401, 401]
+    assert [response.status_code for response in refusals] == [401, 401]
     assert refusals[0].json() == refusals[1].json()
     assert refusals[0].json()["error"]["type"] == "staff_invalid_credentials"
 
     # Inside: one warning per attempt, naming the target and the cause
     # the response withheld. Brute-forcing the console's front door must
     # not be silent — this is the trace incident review greps for.
-    lines = [r.getMessage() for r in caplog.records if "sign-in refused" in r.getMessage()]
+    lines = [
+        record.getMessage() for record in caplog.records if "sign-in refused" in record.getMessage()
+    ]
     assert len(lines) == 2
     assert all("'mallory'" in line for line in lines)
     assert "unknown account or wrong password" in lines[0]

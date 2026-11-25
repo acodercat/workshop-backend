@@ -1,8 +1,9 @@
 """Deleting a CUSTOM skill keeps the bundle a live turn has pinned.
 
-A pick snapshots ``bundle_key`` at enqueue and the worker stages the bundle
-only when the model invokes the skill, so removing the object while that
-turn is queued or running would fail it.
+A pick snapshots ``bundle_key`` at enqueue — or at steering, on the queue
+row — and the worker stages the bundle only when the model invokes the
+skill, so removing the object while that turn is queued or running would
+fail it.
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -45,3 +46,15 @@ async def test_only_live_turns_count_as_pinning():
     sql = str(db.scalar.await_args.args[0].compile(dialect=postgresql.dialect()))
     assert "session_turn.status IN" in sql
     assert "session_turn.skills @>" in sql
+
+
+async def test_a_message_steered_into_a_live_turn_pins_too():
+    # Its snapshot is on the queue row, not the turn's, until the turn ends.
+    db = AsyncMock()
+    db.scalar.return_value = False
+
+    await endpoint._pinned_by_a_live_turn(db, "custom/7/x/u/x.zip")
+
+    sql = str(db.scalar.await_args.args[0].compile(dialect=postgresql.dialect()))
+    assert "session_turn.id = queued_message.steer_turn_id" in sql
+    assert "queued_message.skill_snapshots @>" in sql

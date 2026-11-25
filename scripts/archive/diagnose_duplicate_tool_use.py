@@ -190,7 +190,7 @@ def _run_intra_message(cur: psycopg.Cursor, args: argparse.Namespace) -> int:
         occ,
         idx,
     ) in rows:
-        idx_str = ",".join(str(i) for i in idx)
+        idx_str = ",".join(str(block_index) for block_index in idx)
         print(
             f"  {message_id:>11}  {tool:<14}  {tool_use_id:<32}  "
             f"{occ:>3}  [{idx_str:<22}] {created_at:%Y-%m-%d %H:%M:%S}  {session_id}"
@@ -221,7 +221,7 @@ def _run_cross_message(cur: psycopg.Cursor, args: argparse.Namespace) -> int:
         first_seen,
         last_seen,
     ) in rows:
-        ids = ",".join(str(i) for i in message_ids)
+        ids = ",".join(str(message_id) for message_id in message_ids)
         print(
             f"  {session_id:<38}  {tool_use_id:<32}  {messages_with_id:>4}  "
             f"{first_seen:%Y-%m-%d %H:%M:%S}  {last_seen:%Y-%m-%d %H:%M:%S}"
@@ -248,10 +248,10 @@ def _run_message_detail(cur: psycopg.Cursor, message_id: int) -> int:
     print(f"  block_count = {len(blocks)}")
     # Group by tool_use_id so byte-identical-vs-different is obvious.
     by_id: dict[str, list[tuple[int, dict]]] = {}
-    for i, block in enumerate(blocks):
+    for block_index, block in enumerate(blocks):
         if block.get("type") != "tool_use":
             continue
-        by_id.setdefault(block.get("tool_use_id", "<missing>"), []).append((i, block))
+        by_id.setdefault(block.get("tool_use_id", "<missing>"), []).append((block_index, block))
     dupes = {tid: items for tid, items in by_id.items() if len(items) > 1}
     if not dupes:
         print("\n  This message has no duplicate tool_use_id. ✓")

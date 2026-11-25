@@ -61,6 +61,11 @@ class SessionTurnStatus(StrEnum):
     FAILED = "FAILED"
 
 
+# A turn not yet closed out: enqueued and never claimed, or claimed and
+# still running. A session has at most one (``uq_session_turn_open_session``).
+OPEN_TURN_STATUSES = (SessionTurnStatus.PENDING, SessionTurnStatus.RUNNING)
+
+
 class TerminationReason(StrEnum):
     """Why a turn reached its terminal status — the *why* to
     :class:`SessionTurnStatus`'s *what*.
@@ -181,6 +186,13 @@ class SessionTurn(Base):
         server_default=text("'[]'::jsonb"),
         default=list,
     )
+    # The IANA zone the user's client was in when it sent the message, which
+    # is what lets the worker's ``create_schedule`` tool read "09:00" as the
+    # user means it. NULL when nobody reported one: a server-side caller (a
+    # scheduled run, which therefore cannot schedule a task of its own) or a
+    # client that does not send it. The worker registers the tool only for a
+    # turn that has it.
+    timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Token usage as reported by axon's ``AgentStoppedEvent.usage``,
     # written by the worker in the same fenced UPDATE that flips
     # ``status`` terminal (see
@@ -208,7 +220,7 @@ class SessionTurn(Base):
         SAEnum(
             SessionTurnStatus,
             name="session_turn_status",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
         default=SessionTurnStatus.PENDING,
@@ -224,7 +236,7 @@ class SessionTurn(Base):
             native_enum=False,
             create_constraint=False,
             length=32,
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=True,
     )

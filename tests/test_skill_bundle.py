@@ -63,7 +63,7 @@ def _skill_md(frontmatter: dict[str, str] | None, body: str) -> str:
     """Render a SKILL.md with optional YAML-ish frontmatter."""
     if frontmatter is None:
         return body
-    fm = "\n".join(f"{k}: {v}" for k, v in frontmatter.items())
+    fm = "\n".join(f"{key}: {value}" for key, value in frontmatter.items())
     return f"---\n{fm}\n---\n{body}"
 
 
@@ -296,7 +296,7 @@ class TestZipBombRejections:
         from app.services.skill_bundle import _MAX_ENTRY_COUNT
 
         entries = {"SKILL.md": _skill_md({"name": "n"}, "body")}
-        entries.update({f"f{i}.txt": "x" for i in range(_MAX_ENTRY_COUNT)})
+        entries.update({f"f{index}.txt": "x" for index in range(_MAX_ENTRY_COUNT)})
         data = _zip(entries)
         with pytest.raises(SkillBundleTooLargeError):
             validate_zip_structure(data)
@@ -318,8 +318,8 @@ class TestZipBombRejections:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("SKILL.md", _skill_md({"name": "n"}, "body"))
-            for i in range(count):
-                zf.writestr(f"big{i}.bin", entry)
+            for index in range(count):
+                zf.writestr(f"big{index}.bin", entry)
         with pytest.raises(InvalidSkillBundleError, match="uncompressed"):
             validate_zip_structure(buf.getvalue())
 
@@ -480,8 +480,8 @@ class TestTheFrontmatterIsReadNarrowly:
         # would be ~3**8 copies of the first list. Neither value is a string,
         # so neither is looked at — the name simply reads as missing.
         bomb = "a: &a [x, x, x]\n" + "".join(
-            f"{chr(98 + i)}: &{chr(98 + i)} [*{chr(97 + i)}, *{chr(97 + i)}, *{chr(97 + i)}]\n"
-            for i in range(8)
+            f"{chr(98 + index)}: &{chr(98 + index)} [*{chr(97 + index)}, *{chr(97 + index)}, *{chr(97 + index)}]\n"
+            for index in range(8)
         )
         started = time.monotonic()
         with pytest.raises(SkillFrontmatterInvalidError, match="'name'"):

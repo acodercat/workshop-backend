@@ -78,7 +78,7 @@ async def consume_sse_until_stopped(
     pytest.fail(
         f"SSE stream closed without an agent.stopped event "
         f"(collected {len(events)} events: "
-        f"{[t for t, _ in events]})"
+        f"{[event_type for event_type, _ in events]})"
     )
 
 
@@ -103,7 +103,11 @@ def assert_event_envelope_clean(events: list[tuple[str, dict]]) -> None:
     """
     assert events, "no events collected"
 
-    worker_events = [(t, p) for t, p in events if t not in _TRANSPORT_HANDSHAKES]
+    worker_events = [
+        (event_type, payload)
+        for event_type, payload in events
+        if event_type not in _TRANSPORT_HANDSHAKES
+    ]
     assert worker_events, "no worker-side events collected (only handshakes)"
 
     first_type, first_payload = worker_events[0]

@@ -61,7 +61,7 @@ class MessageFeedback(Base):
             name="message_feedback_rating",
             # Persist by value, matching the schema-wide native-enum
             # convention (names == values, so purely convention alignment).
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )

@@ -52,6 +52,7 @@ from sqlalchemy.sql import func
 
 from app.models.session import Session, SessionStatus
 from app.models.session_turn import (
+    OPEN_TURN_STATUSES,
     SessionTurn,
     SessionTurnStatus,
     TerminationReason,
@@ -59,11 +60,6 @@ from app.models.session_turn import (
 from app.services.credits import settle_open_for_session
 
 logger = logging.getLogger(__name__)
-
-# Turn statuses that mean "not yet closed out" — the only ones a recovery
-# flip should touch. PENDING = enqueued, never claimed; RUNNING = claimed
-# but the worker never wrote a terminal.
-_NON_TERMINAL_TURN = (SessionTurnStatus.PENDING, SessionTurnStatus.RUNNING)
 
 
 async def fail_abandoned_turn(
@@ -96,7 +92,7 @@ async def fail_abandoned_turn(
         update(SessionTurn)
         .where(
             SessionTurn.session_id == session_id,
-            SessionTurn.status.in_(_NON_TERMINAL_TURN),
+            SessionTurn.status.in_(OPEN_TURN_STATUSES),
             or_(
                 SessionTurn.lease_expires_at.is_(None),
                 SessionTurn.lease_expires_at < func.now(),

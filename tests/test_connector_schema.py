@@ -15,8 +15,8 @@ class TestResponseHidesCredential:
 
 class TestCreateAuthValidation:
     def test_none_needs_no_credential(self):
-        c = ConnectorCreate(name="gh", url="https://mcp.gh.dev/x")
-        assert c.auth_type == MCPServerAuthType.NONE
+        connector = ConnectorCreate(name="gh", url="https://mcp.gh.dev/x")
+        assert connector.auth_type == MCPServerAuthType.NONE
 
     def test_bearer_requires_credential(self):
         with pytest.raises(ValidationError):
@@ -44,8 +44,8 @@ class TestCreateSourceValidation:
     """A Connector comes from exactly one source: the catalog or a custom URL."""
 
     def test_catalog_id_alone_is_valid(self):
-        c = ConnectorCreate(catalog_id=3)
-        assert c.catalog_id == 3 and c.name is None and c.url is None
+        connector = ConnectorCreate(catalog_id=3)
+        assert connector.catalog_id == 3 and connector.name is None and connector.url is None
 
     def test_neither_source_rejected(self):
         with pytest.raises(ValidationError):
@@ -73,8 +73,8 @@ class TestCreateSourceValidation:
 
 class TestUpdateAuthValidation:
     def test_auth_untouched_when_type_omitted(self):
-        u = ConnectorUpdate(name="renamed")  # no auth_type → no credential needed
-        assert u.auth_type is None
+        update = ConnectorUpdate(name="renamed")  # no auth_type → no credential needed
+        assert update.auth_type is None
 
     def test_bearer_change_requires_credential(self):
         with pytest.raises(ValidationError):

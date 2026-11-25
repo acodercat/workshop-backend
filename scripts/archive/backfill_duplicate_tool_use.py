@@ -128,12 +128,12 @@ def rename_duplicates(
         if type_counts is None or not isinstance(raw_id, str):
             out.append(block)
             continue
-        n = type_counts[raw_id]
-        type_counts[raw_id] = n + 1
-        if n == 0:
+        occurrence = type_counts[raw_id]
+        type_counts[raw_id] = occurrence + 1
+        if occurrence == 0:
             out.append(block)
             continue
-        new_id = f"{raw_id}#{n}"
+        new_id = f"{raw_id}#{occurrence}"
         out.append({**block, "tool_use_id": new_id})  # copy-on-write
         renames.append((index, raw_id, new_id))
     return out, renames
@@ -166,7 +166,7 @@ def _summarize_renames(renames: list[tuple[int, str, str]]) -> str:
     grouped: dict[tuple[str, str], int] = defaultdict(int)
     for _, old, new in renames:
         grouped[(old, new)] += 1
-    return ", ".join(f"{old}→{new} ({n}x)" for (old, new), n in sorted(grouped.items()))
+    return ", ".join(f"{old}→{new} ({count}x)" for (old, new), count in sorted(grouped.items()))
 
 
 def _process_message(
@@ -288,15 +288,15 @@ def main() -> int:
         total_renames = 0
         batch_renames = 0
         for batch_pos, (message_id, session_id, _, blocks) in enumerate(rows):
-            n = _process_message(
+            message_renames = _process_message(
                 cur,
                 message_id,
                 session_id,
                 blocks,
                 apply=args.apply,
             )
-            total_renames += n
-            batch_renames += n
+            total_renames += message_renames
+            batch_renames += message_renames
             if args.apply and (batch_pos + 1) % args.batch_size == 0:
                 conn.commit()
                 print(f"  -- committed batch ({batch_renames} renames) --")

@@ -94,11 +94,10 @@ class SessionFile(Base):
     # use ``session-files/{uuid4}/...`` — older rows still have the legacy
     # ``documents/...`` prefix; tool outputs use
     # ``outputs/{session_uuid}/{tool_use_id}/{idx}_{filename}``), but a key
-    # is no longer unique *here*: one object can be bound to several
-    # sessions, which is how a scheduled task re-attaches the same file to
-    # every session it creates. See ``uq_session_files_session_id_file_key``
+    # is no longer unique *here*: one object can be bound to several of its
+    # owner's sessions. See ``uq_session_files_session_id_file_key``
     # below for what replaced the old column-level UNIQUE, and
-    # ``_bind_session_files`` for the ownership check that took over the
+    # ``bind_session_files`` for the ownership check that took over the
     # protection it was incidentally providing.
     file_key: Mapped[str] = mapped_column(String, nullable=False)
     # Presentation metadata, denormalized from the message blocks so the
@@ -116,7 +115,7 @@ class SessionFile(Base):
         SAEnum(
             SessionFileOrigin,
             name="session_file_origin",
-            values_callable=lambda cls: [m.value for m in cls],
+            values_callable=lambda cls: [member.value for member in cls],
         ),
         nullable=False,
     )
@@ -133,7 +132,7 @@ class SessionFile(Base):
         # serves ``assert_file_belongs_to_session``, which filters on both.
         UniqueConstraint("session_id", "file_key", name="uq_session_files_session_id_file_key"),
         Index("ix_session_files_session_id", "session_id"),
-        # ``_bind_session_files`` looks a batch of keys up with no session
+        # ``bind_session_files`` looks a batch of keys up with no session
         # filter, to find who already owns them. That read used to ride the
         # column-level UNIQUE on ``file_key``; with that gone it needs an
         # index of its own or it degrades to a sequential scan.

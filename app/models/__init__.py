@@ -22,6 +22,7 @@ from app.models.message import Message
 from app.models.message_feedback import MessageFeedback
 from app.models.project import Project
 from app.models.project_file import ProjectFile, ProjectFileOrigin
+from app.models.queued_message import QueuedMessage
 from app.models.sandbox import Sandbox
 from app.models.schedule import (
     Schedule,
@@ -30,13 +31,13 @@ from app.models.schedule import (
     ScheduleSkipReason,
     ScheduleStatus,
 )
-from app.models.schedule_file import ScheduleFile
 from app.models.schedule_mcp_server import ScheduleMCPServer
 from app.models.session import Session
 from app.models.session_context import SessionContext
 from app.models.session_files import SessionFile
 from app.models.session_mcp_server import SessionMCPServer
 from app.models.session_share import SessionShare
+from app.models.sidebar_layout import SidebarLayout
 from app.models.skill import Skill, SkillOrigin
 from app.models.skill_category import SkillCategory
 from app.models.staff import Staff, StaffStatus
@@ -60,9 +61,9 @@ __all__ = [
     "Project",
     "ProjectFile",
     "ProjectFileOrigin",
+    "QueuedMessage",
     "Sandbox",
     "Schedule",
-    "ScheduleFile",
     "ScheduleFrequency",
     "ScheduleMCPServer",
     "ScheduleRun",
@@ -73,6 +74,7 @@ __all__ = [
     "SessionFile",
     "SessionMCPServer",
     "SessionShare",
+    "SidebarLayout",
     "Skill",
     "SkillCategory",
     "SkillOrigin",

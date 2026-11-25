@@ -116,7 +116,7 @@ async def list_projects(
     total = (await db.execute(select(func.count(Project.id)).where(live))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
-        items=[ProjectResponse.model_validate(p) for p in rows],
+        items=[ProjectResponse.model_validate(project) for project in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 
@@ -142,8 +142,11 @@ async def update_project(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ProjectResponse:
-    """Rename a project, or replace its instructions or icon. ``None`` leaves
-    a field alone."""
+    """Rename a project, replace its instructions or icon, or pin or unpin
+    it. ``None`` leaves a field alone.
+
+    Re-pinning a pinned project keeps its place among the pinned.
+    """
     project = await project_ownership.require_owned_project(
         db, user_id=current_user.id, project_id=project_id
     )
@@ -153,6 +156,12 @@ async def update_project(
         project.instructions = body.instructions
     if body.icon is not None:
         project.icon = body.icon
+    if body.pinned is not None and body.pinned != (project.pinned_at is not None):
+        project.pinned_at = func.now() if body.pinned else None
+    if body.model_fields_set == {"pinned"}:
+        # Pinning is not a change to the project. Set to itself, or
+        # ``onupdate`` would stamp now() and lift it to the top of the list.
+        project.updated_at = Project.updated_at
     await db.commit()
     await db.refresh(project)
     return ProjectResponse.model_validate(project)
@@ -170,7 +179,8 @@ async def delete_project(
 
     The sessions are kept (:func:`_moved_out`): deleting a grouping is not
     discarding the conversations in it, and the owner can still delete
-    those one by one.
+    those one by one. Schedules naming the project are left alone; to them a
+    deleted project counts as none (see ``Schedule.project_id``).
 
     The project's files go with it: their rows stay, unreadable behind the
     deleted project, and their OSS objects stay too, as a deleted session's
@@ -204,7 +214,7 @@ async def list_project_files(
     total = await db.scalar(select(func.count()).select_from(current.subquery())) or 0
     rows = (await db.execute(paginate(current, page, page_size))).scalars().all()
     return PaginatedResponse(
-        items=[ProjectFileResponse.model_validate(f) for f in rows],
+        items=[ProjectFileResponse.model_validate(project_file) for project_file in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 

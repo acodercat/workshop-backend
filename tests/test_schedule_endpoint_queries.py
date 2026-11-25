@@ -426,6 +426,28 @@ class TestLatestRun:
         assert "populate_existing=True" in inspect.getsource(endpoint._schedule_responses)
 
 
+class TestProject:
+    class _CapturingDb:
+        statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return []
+
+    async def test_only_a_live_project_is_reported(self):
+        # Deleting a project leaves its schedules naming it (see
+        # ``Schedule.project_id``); the list must report those as in none,
+        # or the edit form would send back a project the API refuses.
+        db = self._CapturingDb()
+
+        await endpoint._schedule_responses(db, 7)
+
+        assert (
+            "LEFT OUTER JOIN project ON project.id = schedule.project_id"
+            " AND project.deleted_at IS NULL"
+        ) in _sql(db.statement)
+
+
 class TestRunDuration:
     def test_a_finished_turn_reports_its_seconds(self):
         started = datetime(2026, 9, 11, 1, 0, tzinfo=UTC)
