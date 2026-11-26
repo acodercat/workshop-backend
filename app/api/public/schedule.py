@@ -356,12 +356,12 @@ async def create_schedule(
         prompt=body.prompt,
         status=ScheduleStatus.ACTIVE,
         tier=body.tier,
-        # Not exposed by the create form: a scheduled task runs the
-        # platform default agent shape. Both are stored columns rather than
-        # constants at the dispatch site because a Session cannot be built
-        # without them, and surfacing them later must not need a migration.
+        thinking_enabled=body.thinking_enabled,
+        # Not exposed by the create form: a scheduled task runs the sandbox
+        # agent. A stored column rather than a constant at the dispatch site
+        # because a Session cannot be built without it, and surfacing it
+        # later must not need a migration.
         agent_type=AgentType.FULL,
-        thinking_enabled=True,
         # Names as given, order preserved: the worker's reminder lists them
         # the way the owner picked. Nothing is resolved here — a name is
         # checked against the live skill table at every firing, not once at
@@ -469,6 +469,8 @@ async def update_schedule(
         schedule.prompt = body.prompt
     if body.tier is not None:
         schedule.tier = body.tier
+    if body.thinking_enabled is not None:
+        schedule.thinking_enabled = body.thinking_enabled
     if body.skills is not None:
         schedule.skills = body.skills
     if connector_ids is not None:
