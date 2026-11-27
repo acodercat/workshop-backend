@@ -45,8 +45,6 @@ from app.common.search import ilike_contains
 from app.database import AsyncSessionLocal
 from app.errors import (
     ConnectorNotFoundError,
-    FileCountQuotaExceededError,
-    FileSizeQuotaExceededError,
     GenerationInProgressError,
     MessageNotFoundError,
     NotAssistantMessageError,
@@ -58,8 +56,6 @@ from app.errors import (
 from app.models.mcp_server import MCPServer
 from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
-from app.models.project import Project
-from app.models.project_file import ProjectFile
 from app.models.queued_message import QueuedMessage
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
@@ -114,7 +110,7 @@ from app.services.session import (
     stream_events,
     upgrade_agent_type,
 )
-from app.services.session.files import assert_file_belongs_to_session
+from app.services.session.files import assert_file_belongs_to_session, assert_upload_quota
 from app.services.session.message_queue import (
     dispatch_queued_message,
     hold_queue,
@@ -426,7 +422,7 @@ async def create_session_upload_url(
     (``services/session/enqueue.py`` inserts the ``session_files`` row);
     this endpoint is purely the "mint me a presigned URL" step.
     """
-    await _enforce_session_file_quota(db, current_user.id, body.size_bytes)
+    await assert_upload_quota(db, user_id=current_user.id, incoming_size_bytes=body.size_bytes)
     try:
         return file_storage.generate_upload_url(
             body.filename,
@@ -1541,90 +1537,3 @@ async def delete_feedback(
         )
     )
     await db.commit()
-
-
-async def _enforce_session_file_quota(
-    db: AsyncSession, user_id: int, incoming_size_bytes: int
-) -> None:
-    """Reject the upload-url mint if this upload would put the user over a
-    per-user quota. Two gates, both over the objects counted below, each
-    once:
-
-    - **Total size** (primary): summed ``size_bytes`` plus this upload
-      must stay under ``max_session_files_bytes_per_user``. This gate
-      tracks real OSS storage cost.
-    - **Count** (backstop): guards against many-tiny-files row explosion
-      that the size gate alone wouldn't catch.
-
-    Only ``UPLOAD`` rows count — files the user uploaded directly.
-    ``DELIVERABLE`` (tool outputs) and ``INTERNAL`` (``read_image``
-    inputs, office→PDF preview sidecars) are written by the worker with
-    no upload-time gate, so counting them here would let heavy agent use
-    silently exhaust a user's upload headroom.
-
-    Counted per *object*, not per binding. One upload can be bound to many
-    sessions while occupying OSS exactly once, so charging it per binding
-    would be billing for storage nobody is using. Every file the user added
-    to a project is folded in from ``project_file`` — uploaded on its page,
-    or added from a session, which it outlives. Those count while both the
-    file and its project are live: deleting either frees the quota, as
-    deleting a session does.
-
-    ``size_bytes`` on every row is the size OSS reported when the file was
-    bound or attached (``file_storage.confirmed_sizes``), never a client's
-    declaration; pre-backfill rows with a null size contribute 0 to the
-    sum. Race-acceptable: two concurrent mints
-    at the boundary can both pass, leaving the user slightly over — not
-    worth a row lock for a soft policy limit.
-    """
-    bound = (
-        select(SessionFile.file_key, SessionFile.size_bytes)
-        .join(Session, Session.id == SessionFile.session_id)
-        .where(
-            Session.user_id == user_id,
-            Session.deleted_at.is_(None),
-            SessionFile.origin == SessionFileOrigin.UPLOAD,
-        )
-    )
-    shared = (
-        select(ProjectFile.file_key, ProjectFile.size_bytes)
-        .join(Project, Project.id == ProjectFile.project_id)
-        .where(
-            ProjectFile.user_id == user_id,
-            ProjectFile.deleted_at.is_(None),
-            Project.deleted_at.is_(None),
-        )
-    )
-    # ``max`` rather than ``any``: the same object is the same number of
-    # bytes wherever it is bound, so this picks that number deterministically
-    # instead of leaving it to the planner.
-    objects = bound.union_all(shared).subquery()
-    per_object = (
-        select(
-            objects.c.file_key,
-            func.max(objects.c.size_bytes).label("size_bytes"),
-        )
-        .group_by(objects.c.file_key)
-        .subquery()
-    )
-    count, used_bytes = (
-        await db.execute(
-            select(
-                func.count(per_object.c.file_key),
-                func.coalesce(func.sum(per_object.c.size_bytes), 0),
-            )
-        )
-    ).one()
-
-    size_cap = settings.max_session_files_bytes_per_user
-    if used_bytes + incoming_size_bytes > size_cap:
-        raise FileSizeQuotaExceededError(
-            f"upload would put the user at "
-            f"{(used_bytes + incoming_size_bytes) / 1024**3:.2f} GB of "
-            f"uploaded files; per-user limit is {size_cap / 1024**3:.1f} GB"
-        )
-    if count >= settings.max_session_files_per_user:
-        raise FileCountQuotaExceededError(
-            f"user already has {count} uploaded files; "
-            f"per-user limit is {settings.max_session_files_per_user}"
-        )
