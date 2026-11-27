@@ -2,8 +2,8 @@
 
 The console has no self-registration and no invite flow: staff accounts
 are created here, by someone who already holds database credentials. That
-is the same admin-gating posture as ``create_invite_code`` and
-``topup_credits`` — process auth is DB credentials.
+is the same admin-gating posture as ``topup_credits`` — process auth is
+DB credentials.
 
 Password rotation lives here too, rather than only in the console, so a
 fully locked-out console is recoverable without a working account.

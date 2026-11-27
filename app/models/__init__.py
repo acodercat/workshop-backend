@@ -14,6 +14,7 @@ for module_info in pkgutil.iter_modules(__path__):
 
 from app.models.check_in import CheckIn  # re-exports for convenience
 from app.models.connector_category import ConnectorCategory
+from app.models.identity_session import IdentitySession
 from app.models.invite_code import InviteCode, InviteCodeOrigin
 from app.models.invite_redemption import InviteRedemption
 from app.models.mcp_server import MCPServer, MCPServerAuthType
@@ -42,6 +43,7 @@ from app.models.skill_category import SkillCategory
 from app.models.staff import Staff, StaffStatus
 from app.models.user import User, UserStatus
 from app.models.user_feedback import FeedbackStatus, UserFeedback
+from app.models.user_identity import UserIdentity
 from app.models.user_skill_preference import UserSkillPreference
 
 __all__ = [
@@ -49,6 +51,7 @@ __all__ = [
     "CheckIn",
     "ConnectorCategory",
     "FeedbackStatus",
+    "IdentitySession",
     "InviteCode",
     "InviteCodeOrigin",
     "InviteRedemption",
@@ -80,6 +83,7 @@ __all__ = [
     "StaffStatus",
     "User",
     "UserFeedback",
+    "UserIdentity",
     "UserSkillPreference",
     "UserStatus",
 ]

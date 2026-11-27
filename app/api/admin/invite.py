@@ -1,21 +1,15 @@
-"""Invite codes and redemptions — the console's view of the front door.
+"""Invite codes and redemptions, read-only history.
 
-- ``GET  /invite-codes?origin=&q=``  — every code, operator and referral.
-- ``POST /invite-codes``             — issue a ``SYSTEM`` code.
-- ``GET  /invite-redemptions``       — who joined on whose code.
+- ``GET /invite-codes?origin=&q=`` — every code, operator and referral.
+- ``GET /invite-redemptions``      — who joined on whose code.
 
-Registration is invite-gated, so this is the growth funnel: issuing is
-the only way to let someone in, and the redemption list is the referral
-trail behind every commission.
-
-Issuing replaces day-to-day use of ``scripts/create_invite_code.py`` and
-goes through :func:`app.services.auth.invite.create_invite_code` — the
-same funnel registration uses, so code generation, the origin/owner
-consistency check and collision retry are not re-implemented here.
+Registration now happens at the Meeting service with Meeting's own
+invitation codes, so nothing here is redeemed or issued any more. What
+remains is the record of who joined on which code before that.
 """
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import aliased
 
@@ -24,13 +18,8 @@ from app.common.pagination import paginate
 from app.models.invite_code import InviteCode, InviteCodeOrigin
 from app.models.invite_redemption import InviteRedemption
 from app.models.user import User
-from app.schemas.admin.invite import (
-    InviteCodeCreate,
-    InviteCodeResponse,
-    InviteRedemptionResponse,
-)
+from app.schemas.admin.invite import InviteCodeResponse, InviteRedemptionResponse
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.services.auth import invite as invite_service
 
 router = APIRouter(tags=["invites"])
 
@@ -62,8 +51,7 @@ async def list_invite_codes(
     """Return one page of invite codes, newest first.
 
     ``?origin=SYSTEM`` is the operator view — the codes the platform
-    issued, as opposed to the per-user referral codes registration mints
-    automatically and which outnumber them.
+    issued, as opposed to the per-user referral codes, which outnumber them.
     """
     filters = []
     if origin is not None:
@@ -90,25 +78,6 @@ async def list_invite_codes(
         items=[_to_code_response(code, username) for code, username in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
-
-
-@router.post(
-    "/invite-codes",
-    response_model=InviteCodeResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_invite_code(ctx: StaffContext, body: InviteCodeCreate) -> InviteCodeResponse:
-    """Issue a ``SYSTEM`` invite code."""
-    code = await invite_service.create_invite_code(
-        ctx.db,
-        origin=InviteCodeOrigin.SYSTEM,
-        max_uses=body.max_uses,
-        note=body.note,
-    )
-    await ctx.db.commit()
-
-    await ctx.db.refresh(code)
-    return _to_code_response(code, None)
 
 
 @router.get(

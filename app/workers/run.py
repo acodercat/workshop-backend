@@ -11,9 +11,10 @@ multi-node deploys run this on every host and rely on Postgres
 advisory locks (``app.workers.settle_sweeper._LOCK_KEY``) to ensure
 exactly one host actually polls per tick.
 
-This process owns up to **four** concurrent background tasks. Two are
+This process owns up to **five** concurrent background tasks. Two are
 the push and pull halves of the same settle responsibility; the third
-fires scheduled tasks; the fourth (flag-gated) enforces mid-turn spend:
+fires scheduled tasks; the fourth (flag-gated) enforces mid-turn spend;
+the fifth hands finished meeting recordings to Meeting:
 
 - :mod:`app.workers.settle_sweeper` — periodic 60s poll, the
   correctness backstop. Catches missed pub/sub messages, expired
@@ -30,6 +31,9 @@ fires scheduled tasks; the fourth (flag-gated) enforces mid-turn spend:
   ``budget_enforcer_enabled``: prices each running turn's
   heartbeat-reported interim usage and cancels turns outrunning their
   user's balance. Its own advisory lock as well.
+- :mod:`app.workers.meeting_archiver` — uploads closed meeting recordings
+  to Meeting and files them as meetings. Rows are claimed with ``SKIP
+  LOCKED`` and a lease, so every host can run it.
 
 All are wrapped in :class:`asyncio.TaskGroup` so a fatal exception in
 either tears the process down (systemd / scripts/deploy.sh restart
@@ -51,6 +55,7 @@ import redis.asyncio as aioredis
 from app.logging_config import setup_logging
 from app.workers import (
     budget_enforcer,
+    meeting_archiver,
     schedule_dispatcher,
     settle_subscriber,
     settle_sweeper,
@@ -81,6 +86,7 @@ async def _run() -> None:
             tg.create_task(settle_sweeper.run_forever(redis))
             tg.create_task(settle_subscriber.run_forever(redis))
             tg.create_task(schedule_dispatcher.run_forever(redis))
+            tg.create_task(meeting_archiver.run_forever())
             # Flag-gated (on by default; set False to fall back to the
             # reserve gate alone). Log the resolved state either way so a
             # restart makes it unambiguous whether enforcement is live — the
@@ -101,7 +107,8 @@ async def _run() -> None:
 def main() -> None:
     setup_logging(log_dir="logs", level="INFO")
     logger.info(
-        "background process starting (settle sweeper + subscriber + schedule dispatcher%s)",
+        "background process starting (settle sweeper + subscriber + schedule dispatcher"
+        " + meeting archiver%s)",
         " + budget enforcer" if settings.budget_enforcer_enabled else "",
     )
     try:

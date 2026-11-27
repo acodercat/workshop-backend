@@ -670,6 +670,17 @@ wheels = [
 ]
 
 [[package]]
+name = "esdk-obs-python"
+version = "3.26.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "crcmod" },
+    { name = "pycryptodome" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e1/d4/c9a2b33935c620678bd5acf5e32feda70ef09f384b24eb17a5719f72f5fe/esdk_obs_python-3.26.6.tar.gz", hash = "sha256:5014e76e85ffa9eda821169302e74868991867ac947da73bc28eb0e6dfba3ab1", size = 116430, upload-time = "2026-07-12T07:09:36.698Z" }
+
+[[package]]
 name = "fastapi"
 version = "0.141.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1347,6 +1358,7 @@ dependencies = [
     { name = "certifi" },
     { name = "cryptography" },
     { name = "email-validator" },
+    { name = "esdk-obs-python" },
     { name = "fastapi" },
     { name = "greenlet" },
     { name = "gunicorn" },
@@ -1355,6 +1367,7 @@ dependencies = [
     { name = "loguru" },
     { name = "mcp" },
     { name = "openai" },
+    { name = "opencc-python-reimplemented" },
     { name = "orjson" },
     { name = "oss2" },
     { name = "prometheus-fastapi-instrumentator" },
@@ -1389,6 +1402,7 @@ requires-dist = [
     { name = "certifi", specifier = ">=2026.7.22" },
     { name = "cryptography", specifier = ">=46.0.7" },
     { name = "email-validator", specifier = ">=2.3.0" },
+    { name = "esdk-obs-python", specifier = ">=3.26.6" },
     { name = "fastapi", specifier = ">=0.135.3" },
     { name = "greenlet", specifier = ">=3.4.0" },
     { name = "gunicorn", specifier = ">=25.3.0" },
@@ -1397,6 +1411,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mcp", specifier = ">=2,<3" },
     { name = "openai", specifier = ">=2.32.0" },
+    { name = "opencc-python-reimplemented", specifier = ">=0.1.7" },
     { name = "orjson", specifier = ">=3.11.9" },
     { name = "oss2", specifier = ">=2.19.1" },
     { name = "prometheus-fastapi-instrumentator", specifier = ">=7.1.0" },
@@ -1508,6 +1523,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/58/9b/d45911bf9abfc5a754d800d79fe56e4dcf6e7b679d6ff4b7e9689b56bc02/openai-3.1.0.tar.gz", hash = "sha256:3ae7190da63f718727f9c525740d3f713e85553d2bf1d0cc9247346bd9063a4d", size = 1131016, upload-time = "2026-08-14T23:49:46.325Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d3/45/84b9e909968c0f4c3112a828bba9aa8be6a5ee322fcb3d781145ee53d88e/openai-3.1.0-py3-none-any.whl", hash = "sha256:f06d5a5c8d06a0aead3a67d33fe5a3c3c31540a0f7a8017b02ba8cd99bc5c736", size = 1670762, upload-time = "2026-08-14T23:49:43.998Z" },
+]
+
+[[package]]
+name = "opencc-python-reimplemented"
+version = "0.1.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8d/6d/c6f37eed651dd6b752e50f80a93396cdaa42a6acc6ce05ad7452303ea511/opencc-python-reimplemented-0.1.7.tar.gz", hash = "sha256:4f777ea3461a25257a7b876112cfa90bb6acabc6dfb843bf4d11266e43579dee", size = 482566, upload-time = "2023-02-11T03:58:42.25Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/30/6b/055b7806f320cc8f2cdf23c5f70221c0dc1683fca9ffaf76dfc2ad4b91b6/opencc_python_reimplemented-0.1.7-py2.py3-none-any.whl", hash = "sha256:41b3b92943c7bed291f448e9c7fad4b577c8c2eae30fcfe5a74edf8818493aa6", size = 481813, upload-time = "2023-02-11T03:58:39.66Z" },
 ]
 
 [[package]]

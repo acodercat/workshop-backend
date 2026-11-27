@@ -16,10 +16,13 @@ input-queue concepts. Redis still owns:
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from typing import Any, cast
 from uuid import UUID
 
 import redis.asyncio as aioredis
+from redis.exceptions import LockNotOwnedError
 
 # Pause before treating a Redis ``ConnectionError`` as an empty block, so a
 # persistently-unreachable Redis can't hot-spin the SSE follow loop (which
@@ -70,25 +73,6 @@ CANCEL_CHANNEL_PREFIX = "cancel"
 # any message lost to a disconnect.
 SETTLE_NOTIFY_CHANNEL = "settle:notify"
 
-# Per-email registration verification code prefix. Plain string keys
-# (not streams), one per pending registration. JSON value carries the
-# code + send timestamp + attempt counter; TTL controls the validity
-# window. See :mod:`app.services.auth.verification`.
-EMAIL_VERIFY_PREFIX = "email_verify"
-
-
-# Per-(new-email) email-change verification code prefix. Same JSON
-# shape as the registration prefix, but namespaced separately so a
-# pending registration can't be hijacked by an email-change request
-# (or vice versa) targeting the same address.
-EMAIL_CHANGE_PREFIX = "email_change"
-
-# Per-user sudo code prefix: a code sent to the address the account already
-# has, standing in for the current password before a credential changes.
-# Keyed by user rather than address: the account has one pending code.
-SUDO_CODE_PREFIX = "sudo_code"
-
-
 # Per-``state`` pending OAuth-authorization state for MCP Connectors. Holds the
 # PKCE code_verifier + connector_id + user_id for the redirect round-trip; the
 # opaque random ``state`` is the key. One-shot: deleted on callback consume.
@@ -114,27 +98,6 @@ def oauth_current_state_key(connector_id: int) -> str:
     started last, which is the one they meant.
     """
     return f"{OAUTH_STATE_PREFIX}:current:{connector_id}"
-
-
-def email_verify_key(email: str) -> str:
-    """Redis key holding the active registration verification state
-    for ``email``. Lowercased so casing variations of the same address
-    can't be used to bypass the resend cooldown."""
-    return f"{EMAIL_VERIFY_PREFIX}:{email.lower()}"
-
-
-def email_change_key(user_id: int, email: str) -> str:
-    """Redis key holding the pending email-change verification state for
-    ``user_id`` switching to the *new* address. Bound to the requesting
-    user (not the address alone) so two users targeting the same new
-    address can't consume each other's code. Lowercased for the same
-    reason as :func:`email_verify_key`."""
-    return f"{EMAIL_CHANGE_PREFIX}:{user_id}:{email.lower()}"
-
-
-def sudo_code_key(user_id: int) -> str:
-    """Redis key holding ``user_id``'s pending sudo code."""
-    return f"{SUDO_CODE_PREFIX}:{user_id}"
 
 
 def cancel_channel(session_id: str) -> str:
@@ -202,3 +165,31 @@ async def read_stream(
     except aioredis.ConnectionError:
         await asyncio.sleep(_CONNECTION_ERROR_BACKOFF_SECONDS)
         return []
+
+
+class LockHeld(Exception):
+    """Someone else holds the lock."""
+
+
+@asynccontextmanager
+async def short_lock(redis: aioredis.Redis, key: str, *, ttl_seconds: int) -> AsyncIterator[None]:
+    """Hold ``key`` for the block, or raise :class:`LockHeld` at once.
+
+    For keeping two requests from interleaving a check-then-act, not for
+    correctness under partition: the TTL bounds how long a crashed holder
+    blocks others, so the guarded work must fit in it. A holder whose lock
+    expired mid-way has nothing left to release.
+    """
+    lock = redis.lock(key, timeout=ttl_seconds, blocking=False)
+    if not await lock.acquire():
+        raise LockHeld(key)
+    try:
+        yield
+    finally:
+        with suppress(LockNotOwnedError):
+            await lock.release()
+
+
+async def lock_held(redis: aioredis.Redis, key: str) -> bool:
+    """Whether someone holds the :func:`short_lock` on ``key``."""
+    return await redis.lock(key).locked()

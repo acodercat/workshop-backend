@@ -25,9 +25,9 @@ nobody, and ``credit_balance == SUM(credit_ledger.amount)`` held on both rows.
 
 import asyncio
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 
-from app import auth, models
+from app import models
 from app.database import AsyncSessionLocal
 from app.services import credits
 
@@ -60,10 +60,7 @@ async def main() -> None:
             raise SystemExit("missing user")
 
         amount = loser.credit_balance
-        print(
-            f"before  {LOSER}: email={loser.email!r} "
-            f"balance={amount} token_version={loser.token_version}"
-        )
+        print(f"before  {LOSER}: email={loser.email!r} balance={amount}")
         print(f"before {WINNER}: email={winner.email!r} balance={winner.credit_balance}")
         print(f"moving    : {amount} micro ( = {amount / 10_000_000:,.2f} credits )")
 
@@ -89,10 +86,17 @@ async def main() -> None:
         else:
             print("balance already zero — no ledger movement")
 
-        # Free the address for the surviving row, and sign the dead one out:
-        # an email change revokes tokens (app/auth.py revoke_user_tokens).
+        # Free the address for the surviving row, and sign the dead one out
+        # by revoking its sessions (app/services/identity/sessions.py).
         loser.email = None
-        auth.revoke_user_tokens(loser)
+        await db.execute(
+            update(models.IdentitySession)
+            .where(
+                models.IdentitySession.user_id == LOSER,
+                models.IdentitySession.revoked_at.is_(None),
+            )
+            .values(revoked_at=func.now())
+        )
 
         await db.commit()
 
@@ -106,14 +110,12 @@ async def main() -> None:
 
         rows = (
             await db.execute(
-                text(
-                    'SELECT id, email, token_version FROM "user" WHERE id IN (:a, :b) ORDER BY id'
-                ),
+                text('SELECT id, email FROM "user" WHERE id IN (:a, :b) ORDER BY id'),
                 {"a": LOSER, "b": WINNER},
             )
         ).all()
         for row in rows:
-            print(f"after  {row.id:3}: email={row.email!r} token_version={row.token_version}")
+            print(f"after  {row.id:3}: email={row.email!r}")
 
         groups = await db.scalar(
             text(

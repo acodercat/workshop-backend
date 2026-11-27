@@ -6,7 +6,7 @@ and burn real LLM tokens. Apply :data:`requires_e2e` to gate them.
 
 This file is loaded by pytest **before** any test module imports, which
 matters: ``config`` instantiates a module-level ``settings`` singleton at
-import time and seven of its fields are mandatory. The environment
+import time and eight of its fields are mandatory. The environment
 defaults below let the suite run on a fresh checkout with no ``.env`` —
 production deploys still get a fail-loud ``ValidationError`` when any of
 them is missing. Mirrors ``agent-worker/tests/conftest.py``.
@@ -41,6 +41,9 @@ _TEST_DEFAULTS = {
     "oss_access_key_secret": "test-oss-secret",
     "llm_base_url": "https://test.llm.example.com/v1",
     "llm_api_key": "test-llm-key",
+    # A well-formed Fernet key (``Settings`` refuses anything else at boot),
+    # fixed so ciphertext written by one test can be read by another.
+    "identity_credential_encryption_key": "dGVzdC1pZGVudGl0eS1jcmVkZW50aWFsLWtleS0zMmI=",
 }
 
 # ``Settings`` reads ``env_file=".env"`` relative to the process's working
@@ -57,7 +60,6 @@ import uuid  # noqa: E402
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
-import bcrypt  # noqa: E402
 import httpx  # noqa: E402
 import psycopg  # noqa: E402
 import pytest  # noqa: E402
@@ -72,6 +74,14 @@ requires_e2e = pytest.mark.skipif(
         "Set RUN_E2E_TESTS=1 to run E2E tests against a live backend + "
         "worker + Redis + Postgres + sandbox."
     ),
+)
+
+# Tests of code whose correctness lives in the database — row locks,
+# ``SKIP LOCKED`` claims, unique-constraint races. Opt-in, and only against
+# a scratch database migrated to head: they write and delete rows.
+requires_database = pytest.mark.skipif(
+    os.environ.get("RUN_DB_TESTS") != "1",
+    reason="needs RUN_DB_TESTS=1 and db_uri pointing at a scratch database at alembic head",
 )
 
 
@@ -100,11 +110,10 @@ def _psycopg_uri() -> str:
 def test_user() -> Iterator[dict]:
     """Provision a unique throwaway user; tear down everything they own.
 
-    Insert via raw psycopg because the public registration endpoint
-    goes through email verification, which is not test-friendly.
-    ``status='ACTIVE'`` overrides the ``PENDING`` server default so the
-    seeded account can log in immediately — mirrors
-    :mod:`scripts.seed_users`.
+    Insert via raw psycopg because accounts are created by signing in at
+    the identity provider, which a test cannot do. Federated accounts
+    have no password; see :func:`_open_session` for how this one gets a
+    token.
 
     The test body is expected to ``DELETE`` any sessions it created
     via the API; teardown sweeps any stragglers plus the user row.
@@ -112,23 +121,18 @@ def test_user() -> Iterator[dict]:
     so leftover sessions would otherwise block the user delete.
     """
     username = f"e2e-{secrets.token_hex(4)}"
-    password = "e2e-test-pw"
-    password_hash = bcrypt.hashpw(
-        password.encode("utf-8"),
-        bcrypt.gensalt(rounds=settings.bcrypt_rounds),
-    ).decode("utf-8")
 
     with psycopg.connect(_psycopg_uri()) as conn:
         with conn.cursor() as cur:
             # User + personal organization + OWNER membership, mirroring
             # the production registration flow (see
-            # :mod:`app.services.auth.register`). Done in one transaction
+            # :mod:`app.services.identity.provisioning`). Done in one transaction
             # so a teardown crash leaves no half-created state.
             cur.execute(
                 'INSERT INTO "user" '
-                "(name, username, password_hash, token_version, status) "
-                "VALUES (%s, %s, %s, 0, 'ACTIVE') RETURNING id",
-                (username, username, password_hash),
+                "(name, username, status) "
+                "VALUES (%s, %s, 'ACTIVE') RETURNING id",
+                (username, username),
             )
             user_id = cur.fetchone()[0]
             cur.execute(
@@ -152,7 +156,6 @@ def test_user() -> Iterator[dict]:
     yield {
         "id": user_id,
         "username": username,
-        "password": password,
         "organization_id": organization_id,
     }
 
@@ -190,11 +193,42 @@ def test_user() -> Iterator[dict]:
         conn.commit()
 
 
+def _open_session(user: dict) -> str:
+    """Sign ``user`` in without an identity provider and return a token.
+
+    Customer sign-in is federated (``app/services/identity``) and has no
+    password endpoint, so the throwaway user is given an identity and a
+    session row directly — the same rows a real sign-in writes — and a
+    token naming that session. The session is never re-verified within a
+    test's few seconds; its credential is a placeholder for that reason.
+    Rows go with the user (``ON DELETE CASCADE``).
+    """
+    from app.auth import create_access_token
+    from app.services.identity.credentials import seal
+
+    session_id = uuid.uuid4()
+    with psycopg.connect(_psycopg_uri()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_identity (user_id, provider, issuer, subject) "
+                "VALUES (%s, 'e2e', 'tests', %s) RETURNING id",
+                (user["id"], user["username"]),
+            )
+            identity_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO identity_session (id, user_id, identity_id, credential, expires_at) "
+                "VALUES (%s, %s, %s, %s, now() + interval '1 hour')",
+                (session_id, user["id"], identity_id, seal({})),
+            )
+        conn.commit()
+    return create_access_token({"sub": user["username"], "sid": str(session_id)})
+
+
 @pytest.fixture
 async def http_client(test_user: dict) -> AsyncIterator[httpx.AsyncClient]:
     """Authenticated httpx client bound to the backend.
 
-    Logs in once, sets the Bearer header for the rest of the session.
+    Opens a session once, sets the Bearer header for the rest of the test.
     Generous default timeout so SSE consumers in individual tests can
     still override per-request via ``client.stream(..., timeout=...)``.
     """
@@ -202,15 +236,7 @@ async def http_client(test_user: dict) -> AsyncIterator[httpx.AsyncClient]:
         base_url=BACKEND_BASE_URL,
         timeout=30.0,
     ) as client:
-        resp = await client.post(
-            "/auth/access-tokens",
-            data={
-                "username": test_user["username"],
-                "password": test_user["password"],
-            },
-        )
-        assert resp.status_code == 200, f"login failed: {resp.status_code} {resp.text}"
-        token = resp.json()["access_token"]
+        token = _open_session(test_user)
         client.headers["Authorization"] = f"Bearer {token}"
         yield client
 

@@ -41,3 +41,20 @@ async def get_user_event_hub(request: Request):
     channel out in-process to every ``/me/events`` SSE connection.
     """
     return request.app.state.user_event_hub
+
+
+async def get_identity_provider(request: Request):
+    """Process-wide :class:`~app.services.identity.provider.MeetingIdentityProvider`.
+
+    Built once in the app lifespan, which also owns its HTTP connections.
+    Untyped here for the same reason as the hub above: this module is
+    imported by :mod:`app.auth`, and annotating with a service type would
+    pull the service layer in underneath it.
+    """
+    return request.app.state.identity_provider
+
+
+async def get_meeting_clients(request: Request):
+    """Process-wide :class:`~app.services.meeting.clients.MeetingClients`,
+    built in the app lifespan. Untyped for the same reason as above."""
+    return request.app.state.meeting_clients

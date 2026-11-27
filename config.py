@@ -1,6 +1,8 @@
+from urllib.parse import urlsplit
+
 from cryptography.fernet import Fernet
 from limits import parse_many
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MINUTES_PER_WEEK = 60 * 24 * 7
@@ -60,6 +62,14 @@ class Settings(BaseSettings):
     def _a_fernet_key_when_set(cls, key: str) -> str:
         if key:
             Fernet(key.encode())  # refuses anything but a Fernet key, at boot rather than first use
+        return key
+
+    @field_validator("identity_credential_encryption_key")
+    @classmethod
+    def _a_fernet_key(cls, key: str) -> str:
+        # Required, so empty is refused too: a copied ``.env.example`` must
+        # fail at boot, not at the first sign-in.
+        Fernet(key.encode())
         return key
 
     # OAuth Connector redirect URI — the public callback the provider sends the
@@ -134,6 +144,145 @@ class Settings(BaseSettings):
         description="Staff access token lifetime in minutes",
     )
 
+    # Identity provider — sign-in is federated to the Meeting service; see
+    # ``app/services/identity``. The backend is the only party that talks
+    # to it: the browser and the frontend proxy hold a backend-issued token
+    # and never a Meeting credential.
+    meeting_service_url: str = Field(
+        default="https://hkmeeting.net",
+        description=(
+            "Origin of the Meeting service. Also the ``issuer`` every identity "
+            "it vouches for is filed under, so repointing it at a different "
+            "deployment starts a new, empty account namespace rather than "
+            "inheriting the old one's users"
+        ),
+    )
+
+    @field_validator("meeting_service_url")
+    @classmethod
+    def _a_bare_https_origin(cls, url: str) -> str:
+        # Passwords and session cookies travel to this host, and its exact
+        # spelling is stored as every identity's issuer — so it is held to
+        # one canonical form: https, no path, no trailing slash.
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.netloc or url != f"https://{parts.netloc}":
+            raise ValueError("must be a bare https origin, e.g. https://hkmeeting.net")
+        return url
+
+    meeting_app_id: str = Field(
+        default="2",
+        description="The application id Meeting knows this backend's requests by",
+    )
+    meeting_session_cookie_name: str = Field(
+        default="passport",
+        description="Name of the cookie Meeting carries its session in",
+    )
+    meeting_accept_language: str = Field(
+        default="zh-HK",
+        description="Language Meeting writes its own emails and messages in",
+    )
+    # Meeting's sign-in takes the password RSA-encrypted under this key
+    # (PKCS#1 v1.5, base64). It is a public key, so it is not a secret —
+    # but it is Meeting's to rotate, which is why it is configuration and
+    # not a constant: a rotation is an ``.env`` edit, not a release.
+    meeting_login_public_key: str = Field(
+        default=(
+            "-----BEGIN PUBLIC KEY-----\n"
+            "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsH3ScEMwVN6DD6S9BgdU\n"
+            "mUV/oI/J23zoAQsIgNhOjSLsav9TOWuJ3oQ35VfNrP+LKnEX+YL1x6/QJHhxNm2l\n"
+            "s/ljV/VyNE7Y0KslZp/p/XAh55fQu6JYzG9chd+wHeW3SyiEplxdQZXqAeh/X7z4\n"
+            "VWp3jJfSZ+qDjlr8v/xA4x6Ksd/N/Wlz4B8VE15g9sZ4e+lnDmErJsMSFSDbXmMa\n"
+            "RV3GFGuMmQ+EPBVgps7tIj/Wd+RlBGQS0wAarI0SjzA1miwq7QUbUifQyEvmmsVX\n"
+            "UTM7WCGv/UGb2YbhgFMaAWT0Cz8f4PSIusNr9q/TEJP4l9oDeDqGzoLVZSPVU2Qu\n"
+            "NwIDAQAB\n"
+            "-----END PUBLIC KEY-----\n"
+        ),
+        description="PEM public key Meeting's sign-in expects passwords encrypted under",
+    )
+    meeting_request_timeout_seconds: float = Field(
+        default=45.0,
+        gt=0,
+        description="Timeout for one ordinary call to Meeting",
+    )
+    # Meeting's generation endpoints stream for minutes, not seconds.
+    meeting_overview_timeout_seconds: float = Field(
+        default=180.0, gt=0, description="Timeout for Meeting writing a meeting's minutes"
+    )
+    meeting_translate_timeout_seconds: float = Field(
+        default=120.0, gt=0, description="Timeout for Meeting translating a meeting's minutes"
+    )
+    # The system model for meetings: an OpenAI-compatible endpoint, which is
+    # the backend's own LLM unless set. ``meeting_models`` lists the models
+    # an administrator may choose between; the first is the default.
+    meeting_llm_base_url: str = Field(
+        default="", description="OpenAI-compatible base URL for meeting AI; empty → llm_base_url"
+    )
+    meeting_llm_api_key: str = Field(
+        default="", description="API key for meeting_llm_base_url; empty → llm_api_key"
+    )
+    meeting_models: list[str] = Field(
+        default_factory=list,
+        description="Models administrators may choose for meetings; empty → [llm_model]",
+    )
+    meeting_llm_timeout_seconds: float = Field(
+        default=120.0, gt=0, description="Timeout for one meeting-AI completion"
+    )
+    # Recordings are read whole into memory to be handed to Meeting.
+    meeting_max_upload_bytes: int = Field(
+        default=200 * 1024 * 1024,
+        gt=0,
+        description="Largest meeting recording that can be uploaded",
+    )
+    # A live recording that receives no audio for this long without being
+    # finished — the browser closed, the network died — is closed by the
+    # archiver and archived with what arrived.
+    meeting_abandoned_recording_hours: int = Field(
+        default=6, gt=0, description="Close an unfinished live recording idle this long"
+    )
+    # Fernet key for the provider credential each ``identity_session`` row
+    # holds. Its own key rather than ``mcp_credential_encryption_key``: that
+    # one is shared with the worker, and the worker has no business being
+    # able to read a user's Meeting session. Required — without it nobody
+    # can sign in — so there is no empty default to boot on.
+    identity_credential_encryption_key: str = Field(
+        description="Fernet key for encrypting identity-provider credentials at rest",
+    )
+    # How stale the provider's word about a live session may get. Every
+    # ``interval`` a request re-asks Meeting whether the session still
+    # stands, so a sign-out or a ban over there reaches us within that
+    # long. While Meeting cannot be reached a session keeps working on its
+    # last confirmation for ``grace``, then is refused until Meeting
+    # answers — an outage of theirs should not sign everyone out, and
+    # should not suspend revocation indefinitely either.
+    identity_reverify_interval_seconds: int = Field(
+        default=300,
+        gt=0,
+        description="Re-confirm a session with the identity provider this often",
+    )
+    identity_reverify_grace_seconds: int = Field(
+        default=1800,
+        gt=0,
+        description="Longest a session may run unconfirmed while the provider is unreachable",
+    )
+    identity_reverify_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Timeout for a re-confirmation. Shorter than the interactive one: it "
+            "runs inside an ordinary request, whose caller did not ask for it"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _grace_covers_an_interval(self) -> "Settings":
+        # A session is only re-asked every interval; a grace shorter than
+        # that would refuse sessions nobody had tried to confirm.
+        if self.identity_reverify_grace_seconds < self.identity_reverify_interval_seconds:
+            raise ValueError(
+                "identity_reverify_grace_seconds must be at least identity_reverify_interval_seconds"
+            )
+        return self
+
     # CORS — explicit allowlist; wildcard is forbidden because we use
     # ``allow_credentials=True`` (browsers reject the combination).
     cors_origins: list[str] = Field(
@@ -201,18 +350,16 @@ class Settings(BaseSettings):
     rate_limit_register_code: str = Field(
         default="3/minute;20/hour",
         description=(
-            "Verification-code send limit — per IP on the pre-login endpoint, "
-            "per user on the signed-in ones (email change, sudo). Two "
-            "layered limits per OWASP OTP guidance: a 3/minute burst cap + a "
-            "20/hour ceiling — generous "
-            "enough not to false-positive NAT/CGNAT-shared IPs, on top of the "
-            "per-identity 60s resend cooldown and Aliyun's own per-number flow "
-            "control. slowapi enforces every ';'-separated limit."
+            "Per-IP limit on asking the identity provider to send a "
+            "verification code. Two layered limits per OWASP OTP guidance: a "
+            "3/minute burst cap + a 20/hour ceiling — generous enough not to "
+            "false-positive NAT/CGNAT-shared IPs, on top of the provider's own "
+            "throttling. slowapi enforces every ';'-separated limit."
         ),
     )
     rate_limit_register: str = Field(
         default="20/hour",
-        description="Per-IP registration completion attempts",
+        description="Per-IP registration and password-reset attempts",
     )
 
     @field_validator(
@@ -229,24 +376,6 @@ class Settings(BaseSettings):
     def _a_rate_limit(cls, rate: str) -> str:
         parse_many(rate)  # slowapi parses it per request; a typo fails boot instead
         return rate
-
-    # Registration / email verification — values picked to match
-    # mainstream consumer products (60s resend cooldown, 10min code
-    # TTL, 5 wrong-attempt cap before invalidation). Tweak to taste;
-    # all on one config knob avoids hardcoded magic numbers in service
-    # code.
-    register_code_ttl_seconds: int = Field(
-        default=600,
-        description="Registration verification code lifetime (s)",
-    )
-    register_code_resend_cooldown_seconds: int = Field(
-        default=60,
-        description="Min seconds between two send-code calls for the same email",
-    )
-    register_code_max_attempts: int = Field(
-        default=5,
-        description="Wrong code attempts allowed per code; exceeding invalidates the code",
-    )
 
     # Redis — two pools, sized differently because their workloads
     # don't mix safely. ``redis_pool_size`` serves short ops (XADD,
@@ -691,14 +820,6 @@ class Settings(BaseSettings):
     credit_welcome_grant_credits: int = Field(
         default=1000,
         description="Whole credits granted to every new user at registration. Set to 0 to disable.",
-    )
-    invite_referral_max_uses: int = Field(
-        default=20,
-        description="Max successful registrations per user's personal referral code. Growth-control cap; raise to widen referral reach.",
-    )
-    invite_referral_reward_credits: int = Field(
-        default=500,
-        description="Whole credits granted to the referrer for each successful registration via their referral code. Set to 0 to disable referral rewards.",
     )
     # Daily check-in: a user claims a fixed credit reward once per business
     # day. Set the reward to 0 to disable the feature (403 on claim). The

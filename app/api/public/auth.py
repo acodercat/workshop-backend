@@ -1,26 +1,32 @@
-from datetime import UTC, datetime
+"""Sign-in, sign-out, and the account requests around them.
 
-import redis.asyncio as aioredis
+Accounts belong to the identity provider (Meeting); every endpoint here
+relays to it through :class:`~app.services.identity.provider.MeetingIdentityProvider`,
+and none of them touches a password beyond passing it on. What the backend adds is
+the local half: the account row a provider identity maps to, and the
+session a successful sign-in opens.
+
+All failure paths raise ``AppError`` subclasses (:mod:`app.errors`) that
+bubble up to ``app_error_handler`` — ``status_code`` and ``error_type``
+live on each subclass, so this layer carries no reason → status table.
+"""
+
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_db, get_redis
-from app.auth import authenticate_user, create_access_token, is_user_active
-from app.errors import InvalidCredentialsError
+from app.api.dependencies import get_db, get_identity_provider
+from app.auth import Principal, authenticate_session
 from app.rate_limit import limiter
 from app.schemas.auth import (
     AccessTokenResponse,
-    CodeLoginRequest,
     LoggedInResponse,
-    RegisterCodeRequest,
+    PasswordResetRequest,
     RegisterRequest,
+    VerificationCodeRequest,
 )
-from app.services.auth import (
-    login_by_code,
-    register_user,
-    request_verification_code,
-)
+from app.services.identity.provider import MeetingIdentityProvider
+from app.services.identity.signin import sign_in, sign_out
 from config import settings
 
 router = APIRouter()
@@ -31,97 +37,49 @@ router = APIRouter()
 async def login_for_access_token(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    provider: MeetingIdentityProvider = Depends(get_identity_provider),
     form_data: OAuth2PasswordRequestForm = Depends(),
 ):
-    """Authenticate the user and issue a JWT access token.
+    """Sign in with the account's identity-provider credentials.
 
-    Username + password sign-in. Coexists with the email-OTP flow;
-    the frontend's auth dialog opens on the email tab by default
-    and offers a "用户名密码登录" link to swap to this flow. Useful
-    for accounts without an email on file or users who prefer
-    password-based sign-in.
+    The OAuth2 password-grant shape: ``username`` is whatever the provider
+    accepts as an account name (for Meeting, the email). The first
+    successful sign-in for an identity creates its local account.
     """
-    user = await authenticate_user(db, form_data.username, form_data.password)
-    # A disabled account answers exactly like a bad password.
-    if user is None or not is_user_active(user):
-        raise InvalidCredentialsError("Incorrect username or password")
-
-    user.last_login_at = datetime.now(UTC)
-    access_token = create_access_token(
-        data={"sub": user.username, "token_version": user.token_version},
-    )
-    await db.commit()
-
-    return AccessTokenResponse(access_token=access_token, token_type="bearer")
+    signed_in = await sign_in(db, provider, account=form_data.username, password=form_data.password)
+    return AccessTokenResponse(access_token=signed_in.access_token, token_type="bearer")
 
 
-#
-# Login and registration are separate flows over a shared code
-# dispatch: ``POST /auth/verification-codes`` (send) feeds either
-# ``POST /auth/access-tokens-by-code`` (login only — peek-verify +
-# issue a JWT for an existing ACTIVE user, else ``not_registered``) or
-# ``POST /users`` (invite-gated registration — validate invite +
-# consume code + create ACTIVE user + issue a JWT).
-#
-# Registration is invite-gated and a valid invite is the access grant,
-# so new users are created ``ACTIVE`` and both endpoints return the
-# same ``kind="logged_in"`` response with a token.
-#
-# All failure paths raise ``AppError`` subclasses (defined in
-# :mod:`app.errors`) that bubble up to ``app_error_handler`` —
-# ``status_code`` and ``error_type`` live on each subclass, so this
-# layer carries no reason → status translation table.
+@router.delete("/auth/sessions/current", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    db: AsyncSession = Depends(get_db),
+    provider: MeetingIdentityProvider = Depends(get_identity_provider),
+    principal: Principal = Depends(authenticate_session),
+):
+    """Sign out: revoke this session, then the provider's side of it.
+
+    Only the session the request's own token names — other devices stay
+    signed in. The token is dead once this returns, whether or not the
+    provider could be reached.
+    """
+    await sign_out(db, provider, session_id=principal.session_id)
 
 
 @router.post("/auth/verification-codes", status_code=status.HTTP_204_NO_CONTENT)
 @limiter.limit(settings.rate_limit_register_code)
 async def create_verification_code(
     request: Request,
-    body: RegisterCodeRequest,
-    redis: aioredis.Redis = Depends(get_redis),
+    body: VerificationCodeRequest,
+    provider: MeetingIdentityProvider = Depends(get_identity_provider),
 ):
-    """Dispatch a 6-digit verification code to ``email``.
+    """Have the provider send a verification code to ``email``.
 
-    Returns 204 regardless of whether the email is already a
-    registered user — telling the caller "this address is registered"
-    here would leak account existence. The unified flow's branching
-    happens at :func:`access_token_by_code` after the code is
-    proven; until then, the endpoint is indistinguishable for new
-    and returning users.
-
-    ``CooldownError`` / ``EmailSendFailedError`` from
-    ``request_verification_code`` propagate to ``app_error_handler``.
+    The provider sends it and the provider checks it; nothing about the
+    code is stored here.
     """
-    await request_verification_code(
-        redis,
-        identifier=body.email,
-        locale=body.locale,
+    await provider.send_verification_code(
+        email=body.email, purpose=body.purpose, invite_code=body.invite_code
     )
-
-
-@router.post(
-    "/auth/access-tokens-by-code",
-    response_model=LoggedInResponse,
-)
-@limiter.limit(settings.rate_limit_login)
-async def access_token_by_code(
-    request: Request,
-    body: CodeLoginRequest,
-    db: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis),
-):
-    """Log an existing user in by email + verification code.
-
-    **Login only** — peek-verifies the code, then:
-
-    - Email maps to an existing ``ACTIVE`` user → consume the code
-      now (we're committing to log them in), issue a JWT.
-    - Email isn't registered → ``NotRegisteredError`` (404); the
-      frontend steers the user to the invite-gated register tab.
-    - Email maps to ``DISABLED`` / ``SUSPENDED`` → ``AccountInactiveError``
-      (401) — said plainly, since the code proved the caller holds it.
-    """
-    return await login_by_code(db, redis, identifier=body.email, code=body.code)
 
 
 @router.post(
@@ -134,29 +92,43 @@ async def create_user(
     request: Request,
     body: RegisterRequest,
     db: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis),
+    provider: MeetingIdentityProvider = Depends(get_identity_provider),
 ):
-    """Invite-gated registration via the email-OTP flow.
+    """Register at the provider, then sign in to the new account.
 
-    Validates the invite code, consumes the verification code,
-    generates the ``axon_${id}`` username + a random password
-    placeholder, INSERTs the user ``ACTIVE``, mints their personal
-    referral code, records the redemption, and issues a JWT — a valid
-    invite is the access grant, so the response logs the user straight
-    in (``kind="logged_in"``).
-
-    ``register_user`` raises typed ``AppError`` subclasses
-    (``InvalidInviteCodeError``, ``InviteExpiredError``,
-    ``InviteExhaustedError``, ``EmailTakenError``,
-    ``InvalidVerificationCodeError``, ``TooManyVerificationAttemptsError``)
-    on any failure path; they bubble straight up to
-    ``app_error_handler``.
+    Two steps on purpose. Registration creates the provider's account and
+    nothing else; the sign-in that follows is the *same* one every
+    returning user goes through, and is what creates the local account.
+    So there is one way an account comes to exist here, not two that have
+    to be kept equivalent — and if the second step fails, the provider
+    account still exists and signing in normally completes the job.
     """
-    return await register_user(
-        db,
-        redis,
-        identifier=body.email,
+    await provider.register(
+        email=body.email,
+        password=body.password,
         code=body.code,
-        invite_code=body.invite_code,
         name=body.name,
+        invite_code=body.invite_code,
     )
+    signed_in = await sign_in(db, provider, account=body.email, password=body.password)
+    return LoggedInResponse(
+        access_token=signed_in.access_token,
+        token_type="bearer",
+        user=signed_in.user,
+    )
+
+
+@router.post("/auth/password-resets", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(settings.rate_limit_register)
+async def reset_password(
+    request: Request,
+    body: PasswordResetRequest,
+    provider: MeetingIdentityProvider = Depends(get_identity_provider),
+):
+    """Set a new password at the provider, proven by a ``recover`` code.
+
+    Signs nobody in and ends no session here: sessions opened with the
+    old password are the provider's to invalidate, and each one stops
+    working at its next re-confirmation if the provider does.
+    """
+    await provider.reset_password(email=body.email, password=body.password, code=body.code)

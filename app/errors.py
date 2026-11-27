@@ -26,7 +26,7 @@ errors here without a circular dependency.
 How many kinds is the right number: one per distinct thing the user
 would *do next*, not one per place a check fails. Two conditions that
 send someone to the same fix belong under one type — see
-:class:`InvalidVerificationCodeError`, which folds two. Two that send
+:class:`InvalidCredentialsError`, which folds two. Two that send
 them to different fixes must not, or the client is left writing copy
 vague enough to cover both, which is copy that helps with neither.
 
@@ -74,99 +74,86 @@ class AppError(Exception):
         self.details = details
 
 
-class EmailTakenError(AppError):
-    status_code = status.HTTP_409_CONFLICT
-    error_type = "email_taken"
-
-
 class InvalidCredentialsError(AppError):
-    """Username / password sign-in refused. A wrong password, an unknown
-    username and a disabled account all answer this, identically, so a
-    lockout never tells anyone the account exists."""
+    """Sign-in refused by the identity provider: wrong password or no such
+    account. The provider answers both the same way and so do we, so a
+    refusal never says whether an account exists."""
 
     status_code = status.HTTP_401_UNAUTHORIZED
     error_type = "invalid_credentials"
 
 
 class AccountInactiveError(AppError):
-    """Code sign-in for a disabled or suspended account. Said plainly here,
-    unlike password sign-in: the caller has just proved they hold the
-    account's own email."""
+    """The account may not sign in: disabled or suspended here, or not yet
+    activated at the identity provider. Said plainly, unlike a wrong
+    password — the caller has just proved the account is theirs."""
 
     status_code = status.HTTP_401_UNAUTHORIZED
     error_type = "account_inactive"
 
 
-class NotRegisteredError(AppError):
-    """Login attempt for an email with no account. The frontend steers
-    the user to the (invite-gated) register tab rather than auto-creating."""
+class AccountFrozenError(AppError):
+    """The identity provider has frozen the account. Distinct from
+    :class:`AccountInactiveError` because the way out differs: nothing the
+    user does here or there lifts it — they contact whoever froze it."""
 
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "not_registered"
-
-
-class InvalidInviteCodeError(AppError):
-    """Invite code doesn't exist or is disabled."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "invalid_invite_code"
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "account_frozen"
 
 
-class InviteExpiredError(AppError):
-    """Invite code's ``expires_at`` has passed."""
+class AccountLockedError(AppError):
+    """Too many failed sign-ins; the identity provider has locked the
+    account for a while. The fix is to wait, which is why it is a 429
+    and not the 401 a wrong password gets."""
 
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "invite_expired"
-
-
-class InviteExhaustedError(AppError):
-    """Invite code has reached its ``max_uses`` cap."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "invite_exhausted"
-
-
-class CooldownError(AppError):
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
-    error_type = "cooldown"
+    error_type = "account_locked"
 
 
-class EmailSendFailedError(AppError):
-    status_code = status.HTTP_502_BAD_GATEWAY
-    error_type = "email_send_failed"
+class PasswordPolicyError(AppError):
+    """A new password the identity provider would not accept. Checked here
+    first because the provider answers a bad one with nothing a user can
+    act on. ``details`` carries the bounds, in bytes."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "password_policy"
 
 
-class InvalidVerificationCodeError(AppError):
-    """``not_found`` and ``mismatch`` collapse to one client-facing
-    reason — recovery is identical (request a new code), so giving
-    the client two distinct codes would be needless complexity."""
+class IdentityProviderUnavailableError(AppError):
+    """The identity provider could not be reached, or answered with
+    something that is not an answer. Nothing is wrong with the request —
+    trying again later is the whole remedy.
 
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "invalid_verification_code"
+    A 503 and never a 401: a client that took this for a dead session
+    would sign the user out over somebody else's outage."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    error_type = "identity_provider_unavailable"
 
 
-class TooManyVerificationAttemptsError(AppError):
+class IdentityProviderRejectedError(AppError):
+    """The identity provider understood an account request — a
+    registration, a code, a password reset — and declined it.
+
+    One type for every such refusal because the provider's reasons are its
+    own vocabulary, not a contract of ours: ``details["code"]`` carries its
+    code for whoever reads the logs, and a reason earns a type of its own
+    here once it is known to need different copy."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "identity_provider_rejected"
+
+
+class IdentityProviderRateLimitedError(AppError):
+    """The identity provider is throttling this caller."""
+
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
-    error_type = "too_many_verification_attempts"
+    error_type = "identity_provider_rate_limited"
 
 
 class IncorrectPasswordError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "incorrect_password"
-
-
-class VerificationChannelUnboundError(AppError):
-    """A sudo code was asked for by an account with no email to send it
-    to. The client offers the code only to accounts that have one, so
-    this is a stale form."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "verification_channel_unbound"
-
-
-class SameEmailError(AppError):
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "same_email"
 
 
 class SamePasswordError(AppError):
@@ -945,3 +932,189 @@ class ConnectorNotOwnedError(AppError):
 
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "connector_not_owned"
+
+
+#
+# Meetings. The workspace acts as the user at the Meeting service, so most
+# of these name something Meeting did or said; the ones that do not are
+# conflicts between two edits of the same record.
+
+
+class MeetingServiceUnavailableError(AppError):
+    """Meeting could not be reached, or answered with something that is not
+    an answer. Retrying later is the whole remedy."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "meeting_service_unavailable"
+
+
+class MeetingRateLimitedError(AppError):
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    error_type = "meeting_rate_limited"
+
+
+class MeetingSessionExpiredError(AppError):
+    """Meeting no longer honours the session behind this sign-in. The local
+    session has been ended with it; the user signs in again."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "meeting_session_expired"
+
+
+class MeetingRefusedError(AppError):
+    """Meeting understood the request and declined it. ``details["code"]``
+    carries its code, for whoever reads the logs."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "meeting_refused"
+
+
+class MeetingRecordUnreadableError(AppError):
+    """Meeting answered with a record whose shape cannot be read without
+    guessing — a transcript that would lose segments, two recognitions for
+    one meeting, a record for a different meeting. Refused rather than
+    shown with parts missing."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "meeting_record_unreadable"
+
+
+class MeetingNotFoundError(AppError):
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "meeting_not_found"
+
+
+class MeetingChangedError(AppError):
+    """The record changed since the client read it — another edit, here or
+    in Meeting's own app — or another edit of it is in flight. Reload, then
+    edit again."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "meeting_changed"
+
+
+class MeetingNotEditableError(AppError):
+    """The meeting has no recognition yet, so there is no transcript or
+    minutes record to write to."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "meeting_not_editable"
+
+
+class TranscriptEditUnsafeError(AppError):
+    """The transcript's shape does not allow changing one segment without
+    disturbing others; nothing was saved."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "transcript_edit_unsafe"
+
+
+class MeetingSaveUnconfirmedError(AppError):
+    """Meeting accepted the write but reading the record back does not show
+    it. The edit may or may not have landed; reload to see."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "meeting_save_unconfirmed"
+
+
+class MeetingNoTranscriptError(AppError):
+    """Nothing to write minutes from or answer questions about yet."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "meeting_no_transcript"
+
+
+class MeetingGenerationFailedError(AppError):
+    """Meeting or the model did not produce a usable answer — cut short,
+    empty, or refused. ``details["reason"]`` says which."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "meeting_generation_failed"
+
+
+class MeetingModelUnavailableError(AppError):
+    """The system model is not configured for meetings, or did not answer."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    error_type = "meeting_model_unavailable"
+
+
+class MeetingSettingsInvalidError(AppError):
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "meeting_settings_invalid"
+
+
+class MeetingTemplateNotFoundError(AppError):
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "meeting_template_not_found"
+
+
+class TemplateImportUnsupportedError(AppError):
+    """Only ``.docx``, ``.md`` and ``.txt`` documents can be read as templates."""
+
+    status_code = status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    error_type = "template_import_unsupported"
+
+
+class TemplateImportTooLargeError(AppError):
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    error_type = "template_import_too_large"
+
+
+class TemplateImportUnreadableError(AppError):
+    """The document could not be read as a template — malformed, not UTF-8,
+    no recognizable structure, or too complex to parse safely."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "template_import_unreadable"
+
+
+class VocabularyInvalidError(AppError):
+    """A vocabulary change that cannot be made as asked — a duplicate name,
+    one spelling corrected two ways, too many categories."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "vocabulary_invalid"
+
+
+class VocabularyCategoryNotFoundError(AppError):
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "vocabulary_category_not_found"
+
+
+class RecordingMediaUnsupportedError(AppError):
+    """Only audio and video files can be uploaded as meeting recordings."""
+
+    status_code = status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    error_type = "recording_media_unsupported"
+
+
+class RecordingTooLargeError(AppError):
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    error_type = "recording_too_large"
+
+
+class RecordingWindowInvalidError(AppError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "recording_window_invalid"
+
+
+class LibraryChangedError(AppError):
+    """A template or vocabulary changed since the editor read it — another
+    tab, another device. Reload, then edit again."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "library_changed"
+
+
+class RecordingNotFoundError(AppError):
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "recording_not_found"
+
+
+class RecordingConflictError(AppError):
+    """The request does not fit the recording's state: it is already
+    closed, a window is missing or differs, or it cannot be retried."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "recording_conflict"

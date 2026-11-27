@@ -1,4 +1,5 @@
-"""Multipart reading shared by both surfaces.
+"""Request-body reading shared by the API surfaces: multipart forms, and
+raw bodies with a size cap.
 
 Lives at the surface-agnostic level (like ``app/api/dependencies.py``)
 because a skill bundle arrives the same way whether a user or an
@@ -20,7 +21,7 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from starlette.datastructures import FormData, UploadFile
 
-from app.errors import SkillBundleTooLargeError
+from app.errors import AppError, SkillBundleTooLargeError
 
 UPLOAD_FIELD = "file"
 _READ_CHUNK_BYTES = 1024 * 1024
@@ -96,3 +97,21 @@ async def read_capped(file: UploadFile, max_bytes: int) -> bytes:
             raise SkillBundleTooLargeError(f"upload exceeds the {max_bytes}-byte limit")
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+async def read_capped_body(request: Request, max_bytes: int, *, too_large: AppError) -> bytes:
+    """Read a raw request body into memory, refusing past ``max_bytes``.
+
+    The declared ``Content-Length`` is checked first so an honest oversized
+    request is refused before any of it is read; the stream is counted
+    anyway, because the header is the client's claim.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > max_bytes:
+        raise too_large
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise too_large
+    return bytes(body)

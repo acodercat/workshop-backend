@@ -94,9 +94,9 @@ automated path does.
 | `GET /users/{id}` | Profile + credit balance + session count. |
 | `PATCH /users/{id}` | `{status}` — ACTIVE / DISABLED / SUSPENDED. Takes effect on the user's next request (status is checked per request; no token bump needed). |
 
-Not included: editing email (the sudo-gated self-serve flow owns
-it), password resets (OTP owns recovery), user deletion,
-impersonation, user creation (invite flow owns it).
+Not included: editing email, password resets and user creation (the
+identity provider owns accounts; a user is created by their first
+sign-in), user deletion, impersonation.
 
 ### Credits (same module — sub-resources of a user)
 
@@ -206,27 +206,26 @@ the rest of one. This slice is the whole of what the console can see of a
 conversation, which is why it is worth keeping it to the single reply
 being judged.
 
+### Meeting settings (`app/api/admin/meeting_settings.py` — `/meeting-settings`)
+
+The deployment's one `meeting_settings` row: who writes minutes (`auto` —
+Meeting, falling back to the system model; `meeting`; `system`) and which
+of `settings.meeting_models` the system model is. `PUT` is a
+compare-and-swap on `revision`, so two operators editing at once get a
+409 rather than a silent overwrite.
+
 ### Invites (`app/api/admin/invite.py` — `/invite-codes`, `/invite-redemptions`)
 
-Issuing a cold-start code, and seeing who came in through whom.
-Replaces reaching for `scripts/create_invite_code.py` over SSH.
+Read-only history. Registration moved to the Meeting service, which has
+invitation codes of its own, so no code here is issued or redeemed any
+more; what remains is the record of who came in through whom before that.
 
 | Route | What |
 |---|---|
 | `GET /invite-codes?origin=&q=` | Codes, newest first; `REFERRAL` rows carry their owner. `used_count` / `max_uses` is the whole state. |
-| `POST /invite-codes` | Mint a `SYSTEM` code (`max_uses` 1–10000, or `null` for unlimited) |
 | `GET /invite-redemptions` | Who redeemed what, invitee and referrer both resolved through aliased joins |
 
-**Only `SYSTEM` codes are mintable here.** A `REFERRAL` code is a
-user's own, minted at registration and capped by
-`invite_referral_max_uses`; letting an operator conjure one would hand
-out someone else's referral credit. The endpoint calls the same
-`invite_service.create_invite_code` the script does — the console is a
-second caller of one code path, never a second implementation of it.
-
-The redemption history names every account a code let through. No
-delete and no edit: exhausting a code is setting `max_uses`, and that history is
-itself the record.
+No delete and no edit: the history is itself the record.
 
 ### Dashboard (`app/api/admin/stats.py`, `app/services/credits/analytics.py`)
 
@@ -370,8 +369,8 @@ is logged at INFO by the endpoint, which is the only pointer back to it.
 **One funnel, two front doors.**
 `skill_registration.register_platform_skill_bundle` is what both the
 console and `scripts/upload_skill.py` call; the script previously
-carried its own raw-SQL upsert, and the duplicate is gone. Like
-`create_invite_code`, the service **flushes without committing** — the
+carried its own raw-SQL upsert, and the duplicate is gone. The
+service **flushes without committing** — the
 endpoint owns the commit, so a failure anywhere in the block leaves the
 bundle unwritten. That is the general rule for any service the console
 calls. The script stays as the path that still works when the console

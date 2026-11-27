@@ -421,7 +421,7 @@ that as success and prints the current balance.
 
 ### 6.2 Welcome grant (auto, post-registration)
 
-Path: `app/services/auth/register.register_user` → `credits.apply_topup`.
+Path: `app/services/identity/signin.sign_in` → `provisioning.grant_welcome_credits` → `credits.apply_topup`, after the first sign-in commits.
 
 Same as 6.1, with `idempotency_key = f"welcome-{user.id}"`,
 `reason = "welcome grant"` and `source = "welcome_grant"`. **Runs in a separate transaction** from
@@ -860,7 +860,7 @@ deferred — see [`credits-future.md`](credits-future.md):
 | Background process entry | `app/workers/run.py` |
 | Lazy-sweep call site (enqueue) | `app/services/session/enqueue.py::queue_user_message` |
 | Lazy-sweep call site (read) | `app/api/public/credits.py` |
-| Welcome grant call site | `app/services/auth/register.py::register_user` |
+| Welcome grant call site | `app/services/identity/provisioning.py::grant_welcome_credits` |
 | Organization model | `app/models/organization.py` |
 | Rate card config | `config.py::Settings.credit_*` keys |
 | Migrations | `alembic/versions/9e3a8b714f02_*` (V1 schema), `b1c7e29f4d8a_*` (cosmetic drift fix), `c2f4a8d1e9b3_*` (V2 token columns), `d8f3b2e6a1c9_*` (V3 organization) |

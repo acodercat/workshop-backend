@@ -31,8 +31,7 @@ async def apply_check_in_reward(
     the user lock.
 
     Does **not** commit on success — the caller owns the transaction (it
-    also inserts the paired ``check_in`` row). Mirrors
-    :func:`app.services.credits.referral.apply_referral_reward`: on a
+    also inserts the paired ``check_in`` row). On a
     duplicate ``idempotency_key`` it rolls the session back itself
     (Postgres aborts the tx on the UNIQUE violation) before raising
     :class:`CheckInAlreadyClaimed`, so the caller can resume.

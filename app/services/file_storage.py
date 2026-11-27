@@ -166,6 +166,29 @@ SESSION_FILE_POLICY = UploadPolicy(
     },
 )
 
+# Meeting recordings uploaded to be handed to Meeting. Kept only until the
+# archiver has put them into Meeting's own storage, or the recording fails
+# for good; deleted either way. Unlike session files, ``allowed_types`` is
+# an allow-list here (``recordings.media_extension`` enforces it): Meeting
+# transcribes audio and video, nothing else.
+MEETING_MEDIA_POLICY = UploadPolicy(
+    bucket_name=settings.oss_document_bucket_name,
+    key_prefix="meeting-media",
+    max_bytes=settings.meeting_max_upload_bytes,
+    allowed_types={
+        ".mp3": "audio/mpeg",
+        ".mpga": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".wav": "audio/wav",
+        ".ogg": "audio/ogg",
+        ".flac": "audio/flac",
+        ".webm": "video/webm",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".mpeg": "video/mpeg",
+    },
+)
+
 # Skill uploads (zip bundle or bare SKILL.md, separate bucket). 50 MiB cap
 # matches the Agent Skills standard's maximum upload size.
 SKILL_POLICY = UploadPolicy(

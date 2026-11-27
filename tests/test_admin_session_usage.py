@@ -75,10 +75,8 @@ class _FakeDb:
             id=42,
             username="axon_42",
             email="a@example.com",
-            password_hash="x",
             status=UserStatus.ACTIVE,
             credit_balance=0,
-            token_version=0,
         )
 
     async def scalar(self, _stmt):

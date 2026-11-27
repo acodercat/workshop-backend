@@ -47,18 +47,21 @@ class User(Base):
     # the user can change their display name freely; ``username`` is
     # the stable login identifier.
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Stable login identifier. ``UNIQUE`` enforced; case-sensitive
-    # storage but the registration validator caps to alphanumeric +
-    # ``_``/``-`` so casing collisions are unlikely in practice.
+    # Always ``NULL`` for an account created by sign-in: identity is federated
+    # (see :class:`~app.models.user_identity.UserIdentity`) and the provider
+    # holds the credential. Rows that predate federation keep the hash they
+    # had; nothing verifies it any more.
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Not a credential — sign-in names an account by its
+    # :class:`~app.models.user_identity.UserIdentity`, which is where the
+    # ``UNIQUE`` lives. Kept so the API has something to return.
     username: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
-    # Used for verification email + future contact. ``NULL`` for legacy
-    # users created before the email-verification flow existed; new
-    # registrations always populate it. ``12dc6d69a9ad`` made it unique through a
-    # partial index (non-NULL rows only); ``b1c7e29f4d8a`` replaced that with the
-    # plain ``user_email_key`` constraint this declaration renders, which allows
-    # multiple NULLs anyway (Postgres treats them as distinct).
-    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    # The address the identity provider reports, refreshed at each sign-in.
+    # A copy for display and contact, not an identifier: uniqueness is the
+    # provider's to enforce, and enforcing it again here would refuse a
+    # sign-in whenever a row from before federation still holds the same
+    # address.
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # No ``phone``: the channel was removed on this branch and the column went
     # with it in ``b7e2d9a4c1f5``. Master still has both — a merge that brings
     # the field back is bringing back a column this database does not have, and
@@ -90,7 +93,6 @@ class User(Base):
         server_default=UserStatus.ACTIVE.value,
     )
     last_login_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # The user's current default organization (mirrors OpenAI's
     # ``default_organization``). Set to the user's personal org at
     # registration. The column is nullable purely because of the

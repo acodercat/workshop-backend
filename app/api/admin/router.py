@@ -20,6 +20,7 @@ from app.api.admin import (
     feedback,
     invite,
     me,
+    meeting_settings,
     message_feedback,
     session,
     skill,
@@ -42,3 +43,4 @@ admin_router.include_router(invite.router)
 admin_router.include_router(skill.router)
 admin_router.include_router(connector.router)
 admin_router.include_router(category.router)
+admin_router.include_router(meeting_settings.router)

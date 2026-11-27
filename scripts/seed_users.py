@@ -31,7 +31,16 @@ from config import settings
 
 USERS = [
     # ("tianlan", "tianlan20260518"),
-    ("jinsheng", "jinsheng20260603"),
+    # ("crrs1", "crrs20261028"),
+    # ("crrs2", "crrs20261028"),
+    ("crrs3", "crrs20261028"),
+    ("crrs4", "crrs20261028"),
+    ("crrs5", "crrs20261028"),
+    # ("ha02", "ha0220260722"),
+    # ("ha03", "ha0320260722"),
+    # ("liyangmin", "liyangmin20260604"),
+    # ("wangjian", "wangjian20260604"),
+    # ("ligang", "ligang20260604"),
     # ("andy", "andy123"),
     # ("zhou", "zhou123"),
     # ("jun", "jun123"),
@@ -40,7 +49,7 @@ USERS = [
 ]
 
 
-WELCOME_CREDITS = 5000
+WELCOME_CREDITS = 500000
 
 
 def _create_user_with_personal_org(

@@ -7,9 +7,9 @@
 - ``POST  /users/{id}/credits/adjustments``     — manual signed correction.
 - ``GET   /users/{id}/sessions``                — session list, soft-deleted included.
 
-Deliberately absent: email edits (the sudo-gated self-serve flow
-owns those), password resets (OTP owns recovery), user creation (the
-invite flow owns it), deletion, impersonation.
+Deliberately absent: email edits, password resets and user creation
+(the identity provider owns accounts; a user is created by their first
+sign-in), deletion, impersonation.
 """
 
 import sqlalchemy as sa
@@ -129,9 +129,8 @@ async def read_user(ctx: StaffContext, user_id: int) -> UserDetailResponse:
 async def update_user(ctx: StaffContext, user_id: int, body: UserUpdate) -> UserResponse:
     """Change a user's account status (ACTIVE / DISABLED / SUSPENDED).
 
-    Takes effect on the user's next request — status is checked per
-    request in the token decoder, so no ``token_version`` bump is
-    involved. The write is inline, the same way the customer surface
+    Takes effect on the user's next request: status is checked per
+    request in the token decoder. The write is inline, the same way the customer surface
     PATCHes ``session.title``: a single invariant-free column has no
     service funnel to call.
 

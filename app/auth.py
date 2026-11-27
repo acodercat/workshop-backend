@@ -2,6 +2,7 @@ import asyncio
 import functools
 import logging
 import secrets
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -14,11 +15,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
-from app.api.dependencies import get_db
+from app.api.dependencies import get_db, get_identity_provider
 from app.common.password import BCRYPT_MAX_BYTES
 from app.database import AsyncSessionLocal
 from app.errors import StaffAuthenticationError
 from app.rate_limit import set_rate_limit_principal
+from app.services.identity import sessions as identity_sessions
+from app.services.identity.provider import MeetingIdentityProvider
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -75,39 +78,15 @@ async def _password_matches(password: str, password_hash: str | None) -> bool:
     return await verify_password(password, password_hash)
 
 
-async def get_user_by_username(db: AsyncSession, username: str) -> models.User | None:
-    """Look up a user by their username — the login identifier."""
-    stmt = select(models.User).where(models.User.username == username)
-    result = await db.execute(stmt)
-    return result.scalar()
-
-
-async def authenticate_user(db: AsyncSession, username: str, password: str) -> models.User | None:
-    """Return the user iff the credentials are valid, regardless of
-    status.
-
-    Status checking is left to the caller via :func:`is_user_active` —
-    the password flow collapses ``DISABLED`` / ``SUSPENDED`` into the same
-    401 as wrong credentials so admin-initiated lockouts don't leak account
-    state. A status flip
-    also blocks any *existing* JWT at its next request (see the status
-    gate in :func:`_decode_and_get_user`); ``token_version`` is still the
-    lever for force-logout on a password / email change.
-    """
-    user = await get_user_by_username(db, username)
-    if not await _password_matches(password, user.password_hash if user else None):
-        return None
-    return user
-
-
 def is_user_active(user: models.User) -> bool:
     """Whether the account may sign in and hold a session right now.
 
     Checked at sign-in *and* on every authenticated request, so a flip to
-    ``DISABLED`` / ``SUSPENDED`` takes effect on the next call without a
-    ``token_version`` bump. What a refusal looks like is the caller's: the
-    password flow keeps it indistinguishable from wrong credentials, the code
-    flow can say it plainly. Mirrors :func:`is_staff_active`.
+    ``DISABLED`` / ``SUSPENDED`` takes effect on the next call. What a
+    refusal looks like is the caller's:
+    sign-in says it plainly (the provider has just vouched for the caller),
+    a request with a token gets the same opaque 401 as a bad one. Mirrors
+    :func:`is_staff_active`.
     """
     return user.status is models.UserStatus.ACTIVE
 
@@ -175,71 +154,148 @@ def decode_share_view_token(token: str) -> str | None:
     return sub if isinstance(sub, str) else None
 
 
-async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
-    """Decode the JWT, verify its token_version, and return the matching user.
+@dataclass(frozen=True)
+class Principal:
+    """Who a request is, and which session says so.
 
-    Tokens carrying ``scope`` are rejected — those are share-view tokens
-    that have no user identity bound to them and must never be accepted
-    on a user-auth path.
+    Most endpoints want only the user and depend on
+    :func:`authenticate_and_get_user`. The session id matters to the few
+    that act on the session itself — signing out is the one today.
     """
-    credentials_exception = HTTPException(
+
+    user: models.User
+    session_id: uuid.UUID
+
+
+def _credentials_exception() -> HTTPException:
+    return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+async def _authenticate(
+    db: AsyncSession, token: str, provider: MeetingIdentityProvider
+) -> Principal:
+    """Resolve an access token to the user and session it stands for.
+
+    A user token is a claim about a row, not a credential in itself: it
+    names an ``identity_session`` (``sid``), and is honoured only while
+    that row is live *and* the identity provider still stands behind it.
+    The checks, in order:
+
+    1. Signature and expiry.
+    2. No ``scope`` — share-view and staff tokens carry one and have no
+       user bound to them; they must never be accepted here.
+    3. The session row exists, is not revoked, has not expired, and
+       belongs to the user the token names. Revoking sessions is how a
+       user is signed out, from one device or all of them.
+    4. The account is ``ACTIVE``, so a status flip takes effect on the
+       next request.
+    5. The provider's confirmation is recent enough
+       (:func:`~app.services.identity.sessions.ensure_confirmed`). When it
+       is due, the read transaction is ended first: the provider may take
+       seconds to answer, and a pooled connection must not idle in a
+       transaction for that long.
+
+    Every failure of 1–4 is the same opaque 401, so nothing here tells a
+    forged token from a revoked session or a disabled account.
+    """
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except InvalidTokenError as exc:
         logger.info("Rejected token: %s: %s", type(exc).__name__, exc)
-        raise credentials_exception
+        raise _credentials_exception()
 
     if "scope" in payload:
-        # A scoped token (share-view) reaching the user-auth path is a
-        # caller mistake at best, an attempted privilege escalation at
+        # A scoped token (share-view, staff) reaching the user-auth path is
+        # a caller mistake at best, an attempted privilege escalation at
         # worst. Refuse without distinguishing the two.
-        raise credentials_exception
+        raise _credentials_exception()
 
-    # ``sub`` carries the username. Older tokens carried another
-    # identifier, backfilled into ``username`` 1:1, so they keep working
-    # unchanged after the rename.
-    username: str | None = payload.get("sub")
-    token_version: int = payload.get("token_version", 0)
-    if username is None:
-        raise credentials_exception
+    username = payload.get("sub")
+    sid = payload.get("sid")
+    if not isinstance(username, str) or not isinstance(sid, str):
+        raise _credentials_exception()
+    try:
+        session_id = uuid.UUID(sid)
+    except ValueError:
+        raise _credentials_exception()
 
-    user = await get_user_by_username(db, username=username)
-    if user is None or user.token_version != token_version:
-        raise credentials_exception
+    row = (
+        await db.execute(
+            select(models.IdentitySession, models.User, models.UserIdentity.subject)
+            .join(models.User, models.User.id == models.IdentitySession.user_id)
+            .join(
+                models.UserIdentity,
+                models.UserIdentity.id == models.IdentitySession.identity_id,
+            )
+            .where(models.IdentitySession.id == session_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise _credentials_exception()
+    session, user, subject = row
+
+    now = datetime.now(UTC)
+    if not identity_sessions.is_live(session, now=now):
+        raise _credentials_exception()
+    if user.username != username:
+        raise _credentials_exception()
     if not is_user_active(user):
         # Same opaque 401 as a bad token so a lockout never leaks account
         # state; the row is already loaded, so this is a free check.
-        raise credentials_exception
-    return user
+        raise _credentials_exception()
+
+    if identity_sessions.is_due(session.checked_at, now=now):
+        await db.commit()
+    try:
+        await identity_sessions.ensure_confirmed(
+            session_id=session.id,
+            subject=subject,
+            checked_at=session.checked_at,
+            verified_at=session.verified_at,
+            provider=provider,
+        )
+    except identity_sessions.SessionEnded:
+        raise _credentials_exception() from None
+    return Principal(user=user, session_id=session.id)
 
 
-async def authenticate_and_get_user(
+async def authenticate_session(
     request: Request,
     db: AsyncSession = Depends(get_db),
     token: str = Depends(oauth2_scheme),
-) -> models.User:
-    """FastAPI dependency: extract Bearer token from header and validate.
+    provider: MeetingIdentityProvider = Depends(get_identity_provider),
+) -> Principal:
+    """FastAPI dependency: the Bearer token's user **and** session.
 
     Stamps the resolved identity as the rate-limit principal so the
     limiter keys authenticated requests on the user rather than the
     client IP (NAT/CGNAT-shared IPs otherwise share one bucket). See
     :func:`app.rate_limit.set_rate_limit_principal`.
     """
-    user = await _decode_and_get_user(db, token)
-    set_rate_limit_principal(request, "user", user.id)
-    return user
+    principal = await _authenticate(db, token, provider)
+    set_rate_limit_principal(request, "user", principal.user.id)
+    return principal
+
+
+async def authenticate_and_get_user(
+    principal: Principal = Depends(authenticate_session),
+) -> models.User:
+    """FastAPI dependency: the Bearer token's user. What nearly every
+    authenticated endpoint depends on."""
+    return principal.user
 
 
 async def authenticate_for_streaming(
     token: str = Depends(oauth2_scheme),
+    provider: MeetingIdentityProvider = Depends(get_identity_provider),
 ) -> models.User:
     """Auth for SSE / WebSocket / other long-lived response endpoints.
 
-    Opens its own short-lived ``AsyncSession`` for the JWT lookup and
+    Opens its own short-lived ``AsyncSession`` for the token lookup and
     closes it before returning, so FastAPI's request-scoped
     ``AsyncExitStack`` never holds a DB connection across the response
     lifetime. The standard :func:`authenticate_and_get_user` injects
@@ -250,19 +306,13 @@ async def authenticate_for_streaming(
     Mirrors sse-starlette's recommended pattern of creating database
     sessions inside the streaming context rather than as request-scoped
     dependencies.
+
+    The session is confirmed once, as the stream opens. A stream already
+    open outlives a revocation until it next reconnects — the same window
+    a token-only check always had.
     """
     async with AsyncSessionLocal() as db:
-        return await _decode_and_get_user(db, token)
-
-
-def revoke_user_tokens(user: models.User) -> None:
-    """
-    Invalidate every previously issued token for this user by bumping
-    `token_version`. Caller is responsible for committing the session.
-
-    Use after password change, "logout everywhere", or admin-forced logout.
-    """
-    user.token_version += 1
+        return (await _authenticate(db, token, provider)).user
 
 
 #
@@ -274,12 +324,12 @@ def revoke_user_tokens(user: models.User) -> None:
 #   ==============  ==================  ==============================
 #   Token           ``scope`` claim     Decoder
 #   ==============  ==================  ==============================
-#   user access     *(absent)*          :func:`_decode_and_get_user`
+#   user access     *(absent)*          :func:`_authenticate`
 #   share view      ``"share-view"``    :func:`decode_share_view_token`
 #   staff access    ``"staff"``         :func:`decode_staff_token`
 #   ==============  ==================  ==============================
 #
-# ``_decode_and_get_user`` rejects any token carrying a ``scope``, so a
+# ``_authenticate`` rejects any token carrying a ``scope``, so a
 # staff token can never authenticate a customer request.
 # :func:`decode_staff_token` requires ``scope == "staff"``, so neither a
 # customer token (no scope) nor a share-view token reaches the console.
@@ -377,8 +427,7 @@ async def authenticate_staff(db: AsyncSession, username: str, password: str) -> 
 
     Status is left to the caller so a ``DISABLED`` account yields the
     *same* opaque 401 as a wrong password — a former operator should not
-    be able to confirm their account still exists. Mirrors
-    :func:`authenticate_user`.
+    be able to confirm their account still exists.
     """
     staff = await get_staff_by_username(db, username)
     if not await _password_matches(password, staff.password_hash if staff else None):

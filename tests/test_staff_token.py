@@ -88,13 +88,14 @@ def test_staff_token_is_not_a_share_view_token() -> None:
 
 async def test_staff_token_is_rejected_where_a_customer_token_is_expected() -> None:
     # The customer decoder refuses anything carrying a scope — before it
-    # touches the database, which is why ``db=None`` proves the property:
+    # touches the database or the identity provider, which is why passing
+    # ``None`` for both proves the property:
     # a staff token must be dead on arrival at a customer endpoint, not
     # merely fail to match a user row.
     staff_token, _ = auth.create_staff_access_token(_staff())
 
     with pytest.raises(HTTPException) as exc_info:
-        await auth._decode_and_get_user(None, staff_token)
+        await auth._authenticate(None, staff_token, None)
 
     assert exc_info.value.status_code == 401
 

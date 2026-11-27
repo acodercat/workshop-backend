@@ -1,5 +1,8 @@
 """bcrypt's 72-byte bound, enforced in bytes at every new-password schema.
 
+Only operator passwords are hashed here any more — customer passwords
+belong to the identity provider.
+
 bcrypt 5 raises on longer input instead of truncating, so a password the
 schema let through would 500 at hashing time.
 """
@@ -10,17 +13,6 @@ from pydantic import ValidationError
 
 from app.auth import verify_password
 from app.schemas.admin.staff import StaffPasswordReset
-from app.schemas.user import PasswordChange
-
-# 25 CJK characters: under a 72-character cap, 75 bytes in UTF-8.
-_CJK_75_BYTES = "密" * 25
-
-
-def test_customer_password_is_bounded_in_bytes_not_characters() -> None:
-    with pytest.raises(ValidationError):
-        PasswordChange(current_password="x", new_password=_CJK_75_BYTES)
-
-    PasswordChange(current_password="x", new_password="密" * 24)  # 72 bytes
 
 
 def test_operator_password_is_bounded_in_bytes() -> None:

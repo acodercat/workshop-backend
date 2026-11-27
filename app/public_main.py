@@ -42,6 +42,8 @@ from app.api.public.router import public_router
 from app.asgi import create_app, probe_database
 from app.database import engine
 from app.rate_limit import limiter
+from app.services.identity.provider import MeetingIdentityProvider
+from app.services.meeting.clients import open_meeting_clients
 from app.services.user import UserEventHub
 from config import settings
 
@@ -219,9 +221,17 @@ async def lifespan(app: FastAPI):
     # lifespan is HTTP-only again: separating background work from request
     # handling lets each scale, restart, and fail independently.
 
-    logger.info("API started")
     try:
-        yield
+        # Sign-in is federated to Meeting (app/services/identity), and the
+        # meeting workspace acts as the user there (app/services/meeting).
+        # Both share one pooled client, closed with this block.
+        async with open_meeting_clients() as meeting_clients:
+            app.state.meeting_clients = meeting_clients
+            app.state.identity_provider = MeetingIdentityProvider(
+                meeting_clients.accounts, issuer=settings.meeting_service_url
+            )
+            logger.info("API started")
+            yield
     finally:
         await app.state.user_event_hub.stop()
         await app.state.redis.aclose()

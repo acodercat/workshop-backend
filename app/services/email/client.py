@@ -18,10 +18,8 @@ caller:
   in :mod:`config` — call sites stay clean.
 
 Upstream cap (Lark Suite SMTP): 200 sends / 100 s and 6000 sends /
-day per sender. The existing per-IP register-code rate limit
-(``rate_limit_register_code = 5/hour``) combined with the per-email
-60s cooldown keeps us comfortably under both, so no application-level
-throttle here.
+day per sender. What is sent here — operator-triggered notices — is far
+below both, so there is no application-level throttle.
 """
 
 import logging
@@ -145,12 +143,10 @@ async def send_html_email(*, to: str, subject: str, html_body: str) -> str:
             request_id=message_id,
         ) from exc
     # Deliberately everything else, not a tuple of transport types. What the
-    # caller does with a failure is the same whichever way the send broke —
-    # `EmailSendFailedError` (502) says "could not send, try again" and leaves
-    # the code unstored so the user can. Anything that escapes here instead
-    # reaches the generic 500 handler, and the user is told that an unexpected
-    # error occurred with nothing to do about it. A malformed `smtp_from_address`
-    # raising `ValueError` out of `aiosmtplib.send` is enough to reach that.
+    # caller does with a failure is the same whichever way the send broke:
+    # report it and try again. Anything that escapes here instead reaches the
+    # caller as an unexpected error with nothing to do about it. A malformed
+    # `smtp_from_address` raising `ValueError` out of `aiosmtplib.send` is enough to reach that.
     except Exception as exc:
         logger.exception("SMTP transport failure to %s", to)
         raise EmailSendError(

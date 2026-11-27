@@ -21,6 +21,8 @@ from app.api.public import (
     credits,
     feedback,
     mcp_server,
+    meeting,
+    meeting_library,
     project,
     schedule,
     session,
@@ -36,6 +38,8 @@ public_router.include_router(check_in.router)
 public_router.include_router(credits.router)
 public_router.include_router(feedback.router)
 public_router.include_router(mcp_server.router)
+public_router.include_router(meeting.router)
+public_router.include_router(meeting_library.router)
 public_router.include_router(project.router)
 public_router.include_router(schedule.router)
 public_router.include_router(session.router)
