@@ -219,7 +219,7 @@ def test_the_floor_runs_in_the_asgi_middleware() -> None:
     it, so a floor 429 carries the same envelope as every other error."""
     from slowapi.middleware import SlowAPIASGIMiddleware, SlowAPIMiddleware
 
-    installed = [m.cls for m in app.user_middleware]
+    installed = [middleware.cls for middleware in app.user_middleware]
 
     assert SlowAPIASGIMiddleware in installed
     assert SlowAPIMiddleware not in installed

@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import Index, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 
 from app.errors import FileNotOwnedError, FileNotUploadedError
@@ -9,7 +10,7 @@ from app.models.session_files import SessionFile
 from app.schemas.session import FileRef
 from app.services import file_storage
 from app.services.session import enqueue
-from app.services.session.enqueue import _bind_session_files
+from app.services.session.enqueue import bind_session_files
 from app.services.session.files import assert_files_owned_by
 
 
@@ -96,7 +97,7 @@ async def test_bind_session_files_inserts_each_new_key_once(stub_head_size) -> N
     session_id = uuid4()
     db = _Db()
 
-    newly_bound = await _bind_session_files(
+    newly_bound = await bind_session_files(
         db,
         session_id=session_id,
         user_id=7,
@@ -120,7 +121,7 @@ async def test_bind_persists_real_oss_size_not_client_declared(
     stub_head_size["size"] = 100
     db = _Db()
 
-    await _bind_session_files(
+    await bind_session_files(
         db,
         session_id=uuid4(),
         user_id=7,
@@ -135,7 +136,7 @@ async def test_bind_rejects_object_over_per_file_cap(stub_head_size) -> None:
     db = _Db()
 
     with pytest.raises(file_storage.FileTooLargeError):
-        await _bind_session_files(
+        await bind_session_files(
             db,
             session_id=uuid4(),
             user_id=7,
@@ -150,7 +151,7 @@ async def test_bind_rejects_never_uploaded_object(stub_head_size) -> None:
     db = _Db()
 
     with pytest.raises(FileNotUploadedError, match="was not uploaded"):
-        await _bind_session_files(
+        await bind_session_files(
             db,
             session_id=uuid4(),
             user_id=7,
@@ -165,7 +166,7 @@ async def test_bind_session_files_skips_key_already_bound_to_same_session(
 ) -> None:
     db = _Db(bound_here=["documents/a"])
 
-    newly_bound = await _bind_session_files(
+    newly_bound = await bind_session_files(
         db,
         session_id=uuid4(),
         user_id=7,
@@ -180,17 +181,15 @@ async def test_bind_session_files_skips_key_already_bound_to_same_session(
 async def test_bind_session_files_lets_an_owner_rebind_in_another_session(
     stub_head_size,
 ) -> None:
-    """The point of widening the constraint.
+    """An owner may reuse an upload in another of their sessions.
 
-    A scheduled task creates a fresh session every firing and re-attaches
-    the same upload; under the old column-level UNIQUE the second firing
-    failed with a 403 and no way forward. The key being bound elsewhere is
-    invisible to this session's lookup, so it inserts.
+    The key being bound elsewhere is invisible to this session's lookup, so
+    it inserts.
     """
     session_id = uuid4()
     db = _Db(bound_here=[])
 
-    newly_bound = await _bind_session_files(
+    newly_bound = await bind_session_files(
         db,
         session_id=session_id,
         user_id=7,
@@ -210,7 +209,7 @@ async def test_bind_session_files_rejects_a_key_owned_by_someone_else(
     db = _Db()
 
     with pytest.raises(FileNotOwnedError, match="another user"):
-        await _bind_session_files(
+        await bind_session_files(
             db,
             session_id=uuid4(),
             user_id=7,
@@ -234,13 +233,11 @@ class TestOwnership:
         return db.sql
 
     async def test_checks_every_table_that_can_hold_a_key(self):
-        # A schedule attachment reaches ``session_files`` only when the task
-        # first fires — possibly never — and a project file uploaded on the
-        # project's page may never reach it at all. Reading one table would
-        # leave either unheld, and a stranger with the key could bind it first.
+        # A project file uploaded on the project's page may never reach
+        # ``session_files`` at all. Reading that table alone would leave it
+        # unheld, and a stranger with the key could bind it first.
         sql = await self._compiled(7, ["k"])
         assert "FROM session_files" in sql
-        assert "FROM schedule_file" in sql
         assert "FROM project_file" in sql
         assert "UNION ALL" in sql
 
@@ -248,7 +245,7 @@ class TestOwnership:
         # The one thing ``IS DISTINCT FROM`` buys over ``!=``: a row whose
         # owner is NULL is *unknown* to ``!=`` and silently dropped.
         sql = await self._compiled(7, ["k"])
-        assert sql.count("user_id IS DISTINCT FROM 7") == 3
+        assert sql.count("user_id IS DISTINCT FROM 7") == 2
         assert "!= 7" not in sql
 
     async def test_a_deleted_project_file_still_holds_its_key(self):
@@ -258,7 +255,7 @@ class TestOwnership:
 
     async def test_only_the_requested_keys_are_consulted(self):
         sql = await self._compiled(7, ["a", "b"])
-        assert sql.count("file_key IN ('a', 'b')") == 3
+        assert sql.count("file_key IN ('a', 'b')") == 2
 
     async def test_any_foreign_row_makes_the_key_foreign(self):
         class _Foreign:
@@ -289,4 +286,28 @@ async def test_files_are_bound_before_the_user_row_is_locked(run_enqueue) -> Non
     # lock, that round trip would hold up every other write for the user.
     steps = await run_enqueue(AsyncMock())
 
-    assert steps.index("_bind_session_files") < steps.index("reserve_for_turn")
+    assert steps.index("bind_session_files") < steps.index("reserve_for_turn")
+
+
+class TestSchema:
+    def test_one_object_may_be_bound_to_several_sessions(self):
+        # An owner may reuse an upload in another of their sessions; the old
+        # column-level UNIQUE on ``file_key`` refused that with a 403.
+        column = SessionFile.__table__.c.file_key  # type: ignore[attr-defined]
+        assert not column.unique
+        uniques = {
+            tuple(column.name for column in constraint.columns)
+            for constraint in SessionFile.__table__.constraints  # type: ignore[attr-defined]
+            if isinstance(constraint, UniqueConstraint)
+        }
+        assert ("session_id", "file_key") in uniques
+
+    def test_the_owner_lookup_has_an_index(self):
+        # ``bind_session_files`` looks keys up with no session filter to
+        # find who holds them; the composite unique cannot serve that.
+        indexes = {
+            item.name
+            for item in SessionFile.__table__.indexes  # type: ignore[attr-defined]
+            if isinstance(item, Index)
+        }
+        assert "ix_session_files_file_key" in indexes

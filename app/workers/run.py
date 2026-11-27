@@ -11,10 +11,11 @@ multi-node deploys run this on every host and rely on Postgres
 advisory locks (``app.workers.settle_sweeper._LOCK_KEY``) to ensure
 exactly one host actually polls per tick.
 
-This process owns up to **five** concurrent background tasks. Two are
+This process owns up to **six** concurrent background tasks. Two are
 the push and pull halves of the same settle responsibility; the third
-fires scheduled tasks; the fourth (flag-gated) enforces mid-turn spend;
-the fifth hands finished meeting recordings to Meeting:
+fires scheduled tasks; the fourth sends queued messages on; the fifth
+(flag-gated) enforces mid-turn spend; the sixth hands finished meeting
+recordings to Meeting:
 
 - :mod:`app.workers.settle_sweeper` — periodic 60s poll, the
   correctness backstop. Catches missed pub/sub messages, expired
@@ -27,6 +28,10 @@ the fifth hands finished meeting recordings to Meeting:
   enqueues scheduled tasks whose time has come, through the same
   ``queue_user_message`` the message endpoint uses. Its own advisory lock
   as well.
+- :mod:`app.workers.message_queue_dispatcher` — periodic 2s poll that
+  sends a session's queued messages on as its turns complete, again
+  through ``queue_user_message``; ``settle:notify`` starts a tick early.
+  Its own advisory lock as well.
 - :mod:`app.workers.budget_enforcer` — only when
   ``budget_enforcer_enabled``: prices each running turn's
   heartbeat-reported interim usage and cancels turns outrunning their
@@ -56,6 +61,7 @@ from app.logging_config import setup_logging
 from app.workers import (
     budget_enforcer,
     meeting_archiver,
+    message_queue_dispatcher,
     schedule_dispatcher,
     settle_subscriber,
     settle_sweeper,
@@ -86,6 +92,7 @@ async def _run() -> None:
             tg.create_task(settle_sweeper.run_forever(redis))
             tg.create_task(settle_subscriber.run_forever(redis))
             tg.create_task(schedule_dispatcher.run_forever(redis))
+            tg.create_task(message_queue_dispatcher.run_forever(redis))
             tg.create_task(meeting_archiver.run_forever())
             # Flag-gated (on by default; set False to fall back to the
             # reserve gate alone). Log the resolved state either way so a
@@ -107,8 +114,8 @@ async def _run() -> None:
 def main() -> None:
     setup_logging(log_dir="logs", level="INFO")
     logger.info(
-        "background process starting (settle sweeper + subscriber + schedule dispatcher"
-        " + meeting archiver%s)",
+        "background process starting (settle sweeper + subscriber"
+        " + schedule dispatcher + message queue dispatcher + meeting archiver%s)",
         " + budget enforcer" if settings.budget_enforcer_enabled else "",
     )
     try:

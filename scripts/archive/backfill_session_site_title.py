@@ -36,10 +36,10 @@ def _preview_bucket() -> oss2.Bucket:
 
 
 def _extract_title(raw: bytes) -> str | None:
-    m = _TITLE_RE.search(raw.decode("utf-8", "replace"))
-    if not m:
+    match = _TITLE_RE.search(raw.decode("utf-8", "replace"))
+    if not match:
         return None
-    title = re.sub(r"\s+", " ", html.unescape(m.group(1)).strip())
+    title = re.sub(r"\s+", " ", html.unescape(match.group(1)).strip())
     return title[:255] or None
 
 

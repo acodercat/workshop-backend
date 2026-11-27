@@ -6,13 +6,11 @@ dispatcher seq-scans, a nonsense recurrence becomes storable). So each is
 pinned here by predicate, not just by name.
 """
 
-from sqlalchemy import CheckConstraint, Index, UniqueConstraint
+from sqlalchemy import CheckConstraint, Index
 from sqlalchemy.dialects import postgresql
 
 from app.models.schedule import Schedule, ScheduleRun, ScheduleSkipReason
-from app.models.schedule_file import ScheduleFile
 from app.models.schedule_mcp_server import ScheduleMCPServer
-from app.models.session_files import SessionFile
 
 
 def _indexes(model) -> dict[str, Index]:
@@ -45,7 +43,7 @@ class TestDispatcherScan:
         # walks paused and completed rows too — which on a long-lived
         # deployment is most of the table and none of it ever due.
         index = _indexes(Schedule)["ix_schedule_due"]
-        assert [c.name for c in index.columns] == ["next_run_at"]
+        assert [column.name for column in index.columns] == ["next_run_at"]
         assert _predicate(index) == "status = 'ACTIVE'"
 
 
@@ -56,7 +54,7 @@ class TestIdempotency:
         # crash-and-retry run the user's task a second time.
         index = _indexes(ScheduleRun)["uq_schedule_run_occurrence"]
         assert index.unique is True
-        assert [c.name for c in index.columns] == ["schedule_id", "scheduled_for"]
+        assert [column.name for column in index.columns] == ["schedule_id", "scheduled_for"]
 
     def test_unread_index_is_partial_on_unread(self):
         index = _indexes(ScheduleRun)["ix_schedule_run_unread"]
@@ -116,11 +114,22 @@ class TestConnectorBinding:
         # the reference check Postgres runs when an ``mcp_server`` row is
         # deleted. Without this index that check seq-scans.
         index = _indexes(ScheduleMCPServer)["ix_schedule_mcp_server_mcp_server_id"]
-        assert [c.name for c in index.columns] == ["mcp_server_id"]
+        assert [column.name for column in index.columns] == ["mcp_server_id"]
 
     def test_one_connector_cannot_be_bound_twice(self):
         pk = ScheduleMCPServer.__table__.primary_key  # type: ignore[attr-defined]
-        assert [c.name for c in pk.columns] == ["schedule_id", "mcp_server_id"]
+        assert [column.name for column in pk.columns] == ["schedule_id", "mcp_server_id"]
+
+
+class TestProject:
+    def test_a_users_hard_delete_unlinks_through_an_index(self):
+        # ``SET NULL`` for the one hard delete that reaches ``project``, a
+        # user's; partial, as most schedules belong to no project.
+        (fk,) = Schedule.__table__.c.project_id.foreign_keys
+        assert fk.ondelete == "SET NULL"
+        index = _indexes(Schedule)["ix_schedule_project_id"]
+        assert [column.name for column in index.columns] == ["project_id"]
+        assert _predicate(index) == "project_id IS NOT NULL"
 
 
 class TestSkillPicks:
@@ -131,41 +140,6 @@ class TestSkillPicks:
         column = Schedule.__table__.c.skills  # type: ignore[attr-defined]
         assert not column.nullable
         assert "'[]'::jsonb" in str(column.server_default.arg)
-
-
-class TestAttachments:
-    def test_one_object_may_be_bound_to_several_sessions(self):
-        # What the whole release turns on: a scheduled task creates a fresh
-        # session every firing and re-attaches the same upload. The old
-        # column-level UNIQUE on ``file_key`` made the second firing a 403.
-        column = SessionFile.__table__.c.file_key  # type: ignore[attr-defined]
-        assert not column.unique
-        uniques = {
-            tuple(c.name for c in constraint.columns)
-            for constraint in SessionFile.__table__.constraints  # type: ignore[attr-defined]
-            if isinstance(constraint, UniqueConstraint)
-        }
-        assert ("session_id", "file_key") in uniques
-
-    def test_the_owner_lookup_still_has_an_index(self):
-        # ``_bind_session_files`` looks keys up with no session filter to
-        # find who holds them; the composite unique cannot serve that.
-        assert "ix_session_files_file_key" in _indexes(SessionFile)
-
-    def test_attaching_the_same_file_twice_is_one_attachment(self):
-        uniques = {
-            tuple(c.name for c in constraint.columns)
-            for constraint in ScheduleFile.__table__.constraints  # type: ignore[attr-defined]
-            if isinstance(constraint, UniqueConstraint)
-        }
-        assert ("schedule_id", "file_key") in uniques
-
-    def test_a_deleted_schedule_takes_its_attachments(self):
-        fks = {
-            fk.column.table.name: fk.ondelete
-            for fk in ScheduleFile.__table__.foreign_keys  # type: ignore[attr-defined]
-        }
-        assert fks == {"schedule": "CASCADE", "user": "CASCADE"}
 
 
 class TestSkipReasonConsequences:
@@ -181,7 +155,6 @@ class TestSkipReasonConsequences:
         assert counted == {
             ScheduleSkipReason.INSUFFICIENT_CREDITS,
             ScheduleSkipReason.MISCONFIGURED,
-            ScheduleSkipReason.ATTACHMENT_UNAVAILABLE,
         }
 
     def test_only_lateness_retires_one_shot(self):

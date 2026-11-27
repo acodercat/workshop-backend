@@ -50,6 +50,9 @@ from app.errors import (
     GenerationInProgressError,
     MessageNotFoundError,
     NotAssistantMessageError,
+    QueuedMessageLimitError,
+    QueuedMessageNotFoundError,
+    SessionIdleError,
     SessionNotFoundError,
 )
 from app.models.mcp_server import MCPServer
@@ -57,7 +60,7 @@ from app.models.message import Message, MessageRole
 from app.models.message_feedback import MessageFeedback
 from app.models.project import Project
 from app.models.project_file import ProjectFile
-from app.models.schedule_file import ScheduleFile
+from app.models.queued_message import QueuedMessage
 from app.models.session import AgentType, Session, SessionStatus
 from app.models.session_files import SessionFile, SessionFileOrigin
 from app.models.session_share import SessionShare
@@ -75,11 +78,15 @@ from app.schemas.file import (
 )
 from app.schemas.message_feedback import FeedbackResponse, FeedbackUpsert
 from app.schemas.session import (
+    QUEUED_MESSAGES_MAX,
     CancelAcceptedResponse,
     MessageCreate,
     MessagePageResponse,
     MessageQueuedResponse,
     MessageResponse,
+    QueuedMessageCreate,
+    QueuedMessageOrder,
+    QueuedMessageResponse,
     SessionCreate,
     SessionDetailResponse,
     SessionResponse,
@@ -102,11 +109,20 @@ from app.services.session import (
     cancel_unclaimed_turn,
     connectors as session_connectors,
     generate_title,
+    pinning as session_pinning,
     queue_user_message,
     stream_events,
     upgrade_agent_type,
 )
 from app.services.session.files import assert_file_belongs_to_session
+from app.services.session.message_queue import (
+    dispatch_queued_message,
+    hold_queue,
+    list_queued_messages,
+    queue_is_moving,
+    steer_open_turn,
+    waiting,
+)
 from app.services.user import publish_session_status
 from config import settings
 
@@ -121,6 +137,10 @@ MAX_TURN_LIMIT = 50
 #: the handful a session opens on: by the time someone is scrolling back they
 #: are looking for something, and one exchange per request is a grind.
 DEFAULT_HISTORY_TURNS = 5
+
+#: ``PATCH`` fields that are not activity on the session: sent on their own,
+#: they leave its place among the recent ones alone.
+_NOT_ACTIVITY = frozenset({"pinned", "thinking_enabled"})
 
 router = APIRouter(tags=["sessions"])
 
@@ -143,7 +163,8 @@ async def _get_or_404(
     ``for_update`` takes a row-level lock held until the transaction
     ends — used by ``delete_session`` so its status check and tombstone
     serialize against ``queue_user_message``'s own ``FOR UPDATE`` lock,
-    by ``create_share`` so two rotations cannot both insert, and by
+    by ``cancel_session`` so the queue it holds is held before the turn
+    can end, by ``create_share`` so two rotations cannot both insert, and by
     ``update_session`` when it moves a session between projects, whose
     LITE → FULL upgrade runs under the lock enqueue takes.
     """
@@ -344,7 +365,8 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> PaginatedResponse[SessionResponse]:
-    """List the caller's non-deleted sessions, most recently updated first.
+    """List the caller's non-deleted sessions: pinned ones first, the most
+    recently pinned on top, then the rest, most recently updated first.
 
     ``search`` is an optional substring match on the session title,
     applied server-side (like ``GET /sessions/files``) so the client can
@@ -366,11 +388,15 @@ async def list_sessions(
     if project_id is not None:
         conditions.append(Session.project_id == project_id)
     filter_clause = sa.and_(*conditions)
-    base = select(Session).where(filter_clause).order_by(Session.updated_at.desc())
+    base = (
+        select(Session)
+        .where(filter_clause)
+        .order_by(Session.pinned_at.desc().nulls_last(), Session.updated_at.desc())
+    )
     total = (await db.execute(select(func.count(Session.id)).where(filter_clause))).scalar() or 0
     rows = (await db.execute(paginate(base, page, page_size))).scalars().all()
     return PaginatedResponse(
-        items=[SessionResponse.model_validate(s) for s in rows],
+        items=[SessionResponse.model_validate(session) for session in rows],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )
 
@@ -487,10 +513,9 @@ async def list_files(
         .join(Session, Session.id == SessionFile.session_id)
         .where(filter_clause)
         # One row per *file*, not per binding. A file can be bound to several
-        # sessions — a scheduled task re-attaches the same upload to every
-        # session it creates — and listing one object once a day is not a
-        # library. The most recent binding wins, so the entry is attributed
-        # to the run its owner is most likely looking for.
+        # of its owner's sessions, and listing one object once per session is
+        # not a library. The most recent binding wins, so the entry is
+        # attributed to the session its owner is most likely looking for.
         .distinct(SessionFile.file_key)
         .order_by(
             SessionFile.file_key,
@@ -662,10 +687,12 @@ async def get_session(
         agent_type=session.agent_type,
         project_id=session.project_id,
         connectors=await session_connectors.configured_ids(db, session_id),
+        thinking_enabled=session.thinking_enabled,
         created_at=session.created_at,
         updated_at=session.updated_at,
         messages=messages,
         has_more_messages=has_more,
+        queued_messages=await list_queued_messages(db, session_id),
     )
 
 
@@ -678,7 +705,9 @@ async def update_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> SessionResponse:
-    """Rename a session, or move it into a project or out of one.
+    """Rename a session, move it into a project or out of one, pin or unpin
+    it (:mod:`app.services.session.pinning`; 403 past the pin cap), or switch
+    the agent's thinking on or off.
 
     A move into a project locks the project before the session — the order
     every write that changes what a project holds takes, so a move cannot
@@ -703,6 +732,14 @@ async def update_session(
             upgrade_agent_type(session, AgentType.FULL)
             target.updated_at = func.now()
         session.project_id = body.project_id
+    if body.pinned is not None:
+        await session_pinning.set_pinned(db, session, body.pinned)
+    if body.thinking_enabled is not None:
+        session.thinking_enabled = body.thinking_enabled
+    if body.model_fields_set <= _NOT_ACTIVITY:
+        # Set to itself, or ``onupdate`` would stamp now() and lift the
+        # session to the top of the recent ones.
+        session.updated_at = Session.updated_at
     await db.commit()
     await db.refresh(session)
     return SessionResponse.model_validate(session)
@@ -843,8 +880,199 @@ async def create_message(
         files=body.files,
         skills=body.skills,
         agent_type=body.agent_type,
+        timezone=body.timezone,
+        answers=body.answers,
     )
     return MessageQueuedResponse()
+
+
+async def _queued_message_or_404(
+    db: AsyncSession, session_id: uuid.UUID, queued_message_id: int
+) -> QueuedMessage:
+    """The waiting message, in a session already resolved as the caller's.
+
+    Every queue endpoint takes the session's row lock first, which is the
+    lock a dispatch holds: a message read here cannot go out as a turn
+    before the caller commits. The worker's take holds no such lock, so the
+    running turn may still take it in between — a write that must not land
+    on a taken message states the condition itself, as the delete does.
+    """
+    queued = (
+        await db.execute(
+            select(QueuedMessage).where(
+                QueuedMessage.id == queued_message_id,
+                QueuedMessage.session_id == session_id,
+                waiting(),
+            )
+        )
+    ).scalar_one_or_none()
+    if queued is None:
+        raise QueuedMessageNotFoundError("Queued message not found.")
+    return queued
+
+
+@router.post(
+    "/sessions/{session_id}/queued-messages",
+    response_model=QueuedMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit(settings.rate_limit_message_create)
+async def create_queued_message(
+    request: Request,
+    session_id: uuid.UUID,
+    body: QueuedMessageCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Queue a message behind the session's running turn, or behind the
+    queued messages about to go out once it has completed.
+
+    See ``app/workers/message_queue_dispatcher.py`` for what carries a queue
+    on and what holds it. The state is read under the row lock the worker's
+    terminal write and the dispatcher also take, so a session with nothing
+    to wait on answers 409 ``session_idle`` — the message is then an
+    ordinary one for the client to send — rather than leaving it queued
+    behind nothing.
+    """
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queue = await list_queued_messages(db, session_id)
+    if session.status != SessionStatus.RUNNING and not queue_is_moving(session, queue):
+        raise SessionIdleError("Nothing in this session to wait for.")
+    if len(queue) >= QUEUED_MESSAGES_MAX:
+        raise QueuedMessageLimitError(QUEUED_MESSAGES_MAX)
+    queued = QueuedMessage(
+        session_id=session_id,
+        position=queue[-1].position + 1 if queue else 0,
+        content=body.content,
+        files=[file_ref.model_dump() for file_ref in body.files],
+        skills=body.skills,
+        timezone=body.timezone,
+    )
+    db.add(queued)
+    await db.flush()
+    # ``steer`` is derived, so the database answers it — before the commit,
+    # while the row is still this transaction's alone.
+    await db.refresh(queued, ["steer"])
+    await db.commit()
+    return queued
+
+
+@router.put(
+    "/sessions/{session_id}/queued-messages/order",
+    response_model=list[QueuedMessageResponse],
+)
+async def reorder_queued_messages(
+    session_id: uuid.UUID,
+    body: QueuedMessageOrder,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Put the session's queue in the order of ``body.ids``.
+
+    The client orders the queue it last saw, which may no longer be the
+    queue: a message can have gone out since. So the request is read as an
+    ordering rather than checked as a permutation — ids no longer waiting
+    are ignored, and a waiting message the client did not name keeps its
+    place after the ones it did. The answer is the queue as it now stands.
+    """
+    await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queue = await list_queued_messages(db, session_id)
+    rank = {queued_message_id: index for index, queued_message_id in enumerate(body.ids)}
+    # A stable sort: unnamed messages all rank last and keep their order.
+    queue.sort(key=lambda queued: rank.get(queued.id, len(rank)))
+    for position, queued in enumerate(queue):
+        queued.position = position
+    await db.commit()
+    # Read back: ``steer`` is derived, and a row's flush expires it.
+    return await list_queued_messages(db, session_id)
+
+
+@router.delete(
+    "/sessions/{session_id}/queued-messages/{queued_message_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_queued_message(
+    session_id: uuid.UUID,
+    queued_message_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Take a waiting message back. Nothing was reserved for it; files
+    bound when its owner steered with it stay the session's, as any file
+    sent to the session does.
+
+    One statement, waiting or not decided by the delete itself: a message
+    the running turn took a moment ago is the agent's, and a 404 here, never
+    deleted under it — the owner would be told it was taken back, and
+    editing it would send it twice.
+    """
+    await _get_or_404(db, session_id, current_user.id, for_update=True)
+    deleted = await db.execute(
+        delete(QueuedMessage)
+        .where(
+            QueuedMessage.id == queued_message_id,
+            QueuedMessage.session_id == session_id,
+            waiting(),
+        )
+        .returning(QueuedMessage.id)
+    )
+    if deleted.scalar_one_or_none() is None:
+        raise QueuedMessageNotFoundError("Queued message not found.")
+    await db.commit()
+
+
+@router.post(
+    "/sessions/{session_id}/queued-messages/{queued_message_id}/dispatch",
+    response_model=MessageQueuedResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@limiter.limit(settings.rate_limit_message_create)
+async def dispatch_queued_message_now(
+    request: Request,
+    session_id: uuid.UUID,
+    queued_message_id: int,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Send a waiting message now, whichever place it holds in the queue.
+
+    For a queue that is not moving on its own — its last turn was stopped
+    or failed, or the queue is held. Refused exactly as ``POST /messages``
+    would be, ``generation_in_progress`` included, and the message stays
+    queued.
+    """
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queued = await _queued_message_or_404(db, session_id, queued_message_id)
+    await dispatch_queued_message(db, redis, session, queued)
+    return MessageQueuedResponse()
+
+
+@router.post(
+    "/sessions/{session_id}/queued-messages/{queued_message_id}/steer",
+    response_model=QueuedMessageResponse,
+)
+@limiter.limit(settings.rate_limit_message_create)
+async def steer_with_queued_message(
+    request: Request,
+    session_id: uuid.UUID,
+    queued_message_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(authenticate_and_get_user),
+):
+    """Have a waiting message reach the session's open turn instead of
+    waiting for it to end: the worker takes it before the agent's next model
+    call, and it leaves the queue then. Its files and skills go with it. The
+    request is for that turn alone; one that ends first leaves the message
+    waiting as any other.
+
+    409 ``session_idle`` when no turn runs: there is nothing to steer, and
+    the queue sends it on as it is.
+    """
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
+    queued = await _queued_message_or_404(db, session_id, queued_message_id)
+    await steer_open_turn(db, session, queued)
+    return queued
 
 
 @router.post(
@@ -902,8 +1130,17 @@ async def cancel_session(
     later claimed and billed. :func:`cancel_unclaimed_turn` hard-cancels
     (and refunds) that case directly in the DB; only a claimed/``RUNNING``
     turn takes the pub/sub path for graceful mid-turn shutdown.
+
+    **The session's queue is held** (:func:`hold_queue`), before either
+    path: a stop is not followed by the next queued message going out on
+    its own, even when it lands as the answer finishes and the turn ends
+    ``COMPLETE`` after all. The queue moves again as any held one does.
+    The session's row is locked for it, so the turn's terminal write and
+    the queue's dispatcher come wholly before this stop or wholly after:
+    a turn that ended first reads as already stopped, and one that ends
+    after finds its queue held.
     """
-    session = await _get_or_404(db, session_id, current_user.id)
+    session = await _get_or_404(db, session_id, current_user.id, for_update=True)
     if session.status != SessionStatus.RUNNING:
         logger.info(
             "cancel: session %s is already %s — nothing to stop",
@@ -911,6 +1148,7 @@ async def cancel_session(
             session.status.value,
         )
         return CancelAcceptedResponse(already_stopped=True)
+    await hold_queue(db, session_id)
     if await cancel_unclaimed_turn(db, session_id=session_id):
         await db.commit()
         # Hard-cancelled in the DB with no worker in the picture, so no
@@ -923,6 +1161,7 @@ async def cancel_session(
             status=SessionStatus.CANCELLED,
         )
         return CancelAcceptedResponse(already_stopped=True)
+    await db.commit()
     await redis.publish(
         cancel_channel(str(session_id)),
         TerminationReason.USER_CANCELLED.value,
@@ -1324,15 +1563,12 @@ async def _enforce_session_file_quota(
     silently exhaust a user's upload headroom.
 
     Counted per *object*, not per binding. One upload can be bound to many
-    sessions — a scheduled task re-attaches the same file to every session
-    it creates — while occupying OSS exactly once, so charging it once a day
-    would be billing for storage nobody is using. Schedule attachments are
-    folded in from ``schedule_file`` so that one still counts before its
-    first firing has bound it anywhere, and every file the user added to a
-    project from ``project_file`` — uploaded on its page, or added from a
-    session, which it outlives. Those count while both the file and its
-    project are live: deleting either frees the quota, as deleting a
-    session does.
+    sessions while occupying OSS exactly once, so charging it per binding
+    would be billing for storage nobody is using. Every file the user added
+    to a project is folded in from ``project_file`` — uploaded on its page,
+    or added from a session, which it outlives. Those count while both the
+    file and its project are live: deleting either frees the quota, as
+    deleting a session does.
 
     ``size_bytes`` on every row is the size OSS reported when the file was
     bound or attached (``file_storage.confirmed_sizes``), never a client's
@@ -1350,9 +1586,6 @@ async def _enforce_session_file_quota(
             SessionFile.origin == SessionFileOrigin.UPLOAD,
         )
     )
-    attached = select(ScheduleFile.file_key, ScheduleFile.size_bytes).where(
-        ScheduleFile.user_id == user_id
-    )
     shared = (
         select(ProjectFile.file_key, ProjectFile.size_bytes)
         .join(Project, Project.id == ProjectFile.project_id)
@@ -1365,7 +1598,7 @@ async def _enforce_session_file_quota(
     # ``max`` rather than ``any``: the same object is the same number of
     # bytes wherever it is bound, so this picks that number deterministically
     # instead of leaving it to the planner.
-    objects = bound.union_all(attached, shared).subquery()
+    objects = bound.union_all(shared).subquery()
     per_object = (
         select(
             objects.c.file_key,

@@ -16,13 +16,14 @@ dispatcher had just completed, which its ``ACTIVE`` scan then never fires.
 
 from datetime import datetime
 
+from app.common.timezones import is_known_timezone
 from app.errors import (
     ScheduleCompletedError,
     ScheduleRunTimePastError,
     ScheduleTimezoneUnavailableError,
 )
 from app.models.schedule import Schedule, ScheduleStatus
-from app.schemas.schedule import RecurrenceSpec, is_known_timezone
+from app.schemas.schedule import RecurrenceSpec
 from app.services.schedule.recurrence import next_run_after
 
 # The columns a ``RecurrenceSpec`` is stored in, named alike on both sides.

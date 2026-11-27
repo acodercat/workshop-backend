@@ -57,7 +57,7 @@ def test_the_reasons_are_the_agreed_set():
 
 
 def test_the_reasons_fit_the_column():
-    too_long = sorted(r for r in AGREED_REASONS if len(r) > MAX_REASON_LENGTH)
+    too_long = sorted(reason for reason in AGREED_REASONS if len(reason) > MAX_REASON_LENGTH)
     assert not too_long, (
         f"{too_long} exceed the column's {MAX_REASON_LENGTH} characters and "
         f"would be truncated on write, so the reason read back is not the one "

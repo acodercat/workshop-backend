@@ -332,8 +332,9 @@ async def clear_orphan_tags(policy: UploadPolicy, file_keys: list[str]) -> None:
 
     Whether a failure may be ignored is the caller's call, not this
     function's: a message's attachments are bound and read within the turn,
-    so its caller logs and moves on, while a scheduled task's must survive
-    until it fires, so its caller refuses the save. Raising lets both say so.
+    so its caller logs and moves on, while a project file must survive until
+    some session reads it, so its caller refuses the add. Raising lets both
+    say so.
 
     Every key is attempted before anything is raised, so a retry has only
     what actually failed left to do — the call is idempotent. A no-op when

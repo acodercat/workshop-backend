@@ -62,7 +62,7 @@ class InviteCode(Base):
         SAEnum(
             InviteCodeOrigin,
             name="invite_code_origin",
-            values_callable=lambda cls: [m.value for m in cls],
+            values_callable=lambda cls: [member.value for member in cls],
         ),
         nullable=False,
         server_default=text("'REFERRAL'"),

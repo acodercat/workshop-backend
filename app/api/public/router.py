@@ -27,6 +27,7 @@ from app.api.public import (
     schedule,
     session,
     share,
+    sidebar_layout,
     skill,
     user,
 )
@@ -44,5 +45,6 @@ public_router.include_router(project.router)
 public_router.include_router(schedule.router)
 public_router.include_router(session.router)
 public_router.include_router(share.router)
+public_router.include_router(sidebar_layout.router)
 public_router.include_router(skill.router)
 public_router.include_router(user.router)

@@ -1,7 +1,7 @@
 """Unit tests for the event-driven settle subscriber.
 
-Per-message tests only — ``run_forever``'s outer subscribe/reconnect
-loop is straight Redis-client adapter code, not worth a unit test.
+Per-message tests only — the subscribe/reconnect loop is
+``app.workers.pubsub``'s (``tests/test_workers_pubsub.py``).
 The contract under test is: ``_handle_message`` is robust against
 the three bad-message flavors (bad payload / settle raises / DB
 raises) and routes valid UUIDs through ``settle_open_for_session``.
@@ -66,28 +66,12 @@ async def test_handle_message_settles_on_valid_uuid(monkeypatch) -> None:
     assert factory.last_session.committed is True
 
 
-async def test_handle_message_decodes_bytes_payload(monkeypatch) -> None:
-    """Tolerate ``bytes`` payload in case ``decode_responses=False`` is
-    ever flipped on the shared client."""
-    factory = _StubSessionFactory()
-    monkeypatch.setattr(settle_subscriber, "AsyncSessionLocal", factory)
-    settle = AsyncMock()
-    monkeypatch.setattr(settle_subscriber.credits, "settle_open_for_session", settle)
-
-    sid = "11111111-2222-3333-4444-555555555555"
-    await settle_subscriber._handle_message(sid.encode("utf-8"))
-
-    settle.assert_awaited_once()
-    assert str(settle.await_args.args[1]) == sid
-
-
 @pytest.mark.parametrize(
     "bad_payload",
     [
         "not-a-uuid",
         "",
         "00000000-0000",  # truncated
-        b"\xff\xfe",  # non-UTF8-ish bytes that still decode but aren't a UUID
     ],
 )
 async def test_handle_message_skips_invalid_payload(monkeypatch, bad_payload) -> None:

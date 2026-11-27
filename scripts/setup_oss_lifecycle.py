@@ -81,7 +81,7 @@ def main() -> None:
 
     bucket = get_bucket(SESSION_FILE_POLICY.bucket_name)
     # Keep every rule except a prior copy of ours, then append the fresh one.
-    kept = [r for r in _existing_rules(bucket) if r.id != _RULE_ID]
+    kept = [rule for rule in _existing_rules(bucket) if rule.id != _RULE_ID]
     rules = kept + [_orphan_rule(args.days)]
 
     print(

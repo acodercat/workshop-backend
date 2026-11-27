@@ -8,7 +8,7 @@ Submodule responsibilities:
   either source, removing one, and reading the current version of each.
 
 Both are imported by module path (``from app.services.project import files
-as project_files``), like :mod:`app.services.schedule.files` and
+as project_files``), like :mod:`app.services.schedule.connectors` and
 :mod:`app.services.connector.ownership`: their verbs read only beside the
 module's name.
 """

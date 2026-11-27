@@ -140,14 +140,15 @@ class Session(Base):
         SAEnum(
             Tier,
             name="session_tier",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
     # Whether the agent's thinking is on for this session (surfaced to users
     # as "deep think"). Stamped at creation from the composer toggle (default
-    # on); the worker reads it at claim time to toggle the model's thinking
-    # config. No Python-side ``default=`` — ``build_session`` sets it
+    # on), switched later by ``PATCH /sessions/{id}``; the worker reads it at
+    # claim time to toggle the model's thinking config, so a switch applies
+    # from the next turn. No Python-side ``default=`` — ``build_session`` sets it
     # explicitly (the migration backfilled existing rows to FALSE).
     thinking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # Which agent kind this session runs (FULL = sandbox agent, LITE =
@@ -161,7 +162,7 @@ class Session(Base):
         SAEnum(
             AgentType,
             name="agent_type",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -181,7 +182,7 @@ class Session(Base):
         SAEnum(
             SessionStatus,
             name="session_status",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -191,6 +192,10 @@ class Session(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    # When the owner pinned the session; NULL = not pinned. A time rather
+    # than a flag, so pinned sessions keep the order they were pinned in.
+    # Pinning keeps ``updated_at`` — see ``app/services/session/pinning.py``.
+    pinned_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     # Soft-delete tombstone. NULL = live; non-NULL = deleted (row kept
     # for billing/audit, invisible to the user). Only ever tested
     # ``IS NULL``. Like every timestamp column in this schema, tz-aware
@@ -225,7 +230,9 @@ class Session(Base):
         # by user_id, ORDER BY updated_at DESC). Postgres does not
         # auto-index foreign keys, so without this both the page query
         # and its count fall back to seq scans. Partial on ``deleted_at
-        # IS NULL`` — that list always hides soft-deleted rows.
+        # IS NULL`` — that list always hides soft-deleted rows. The list
+        # puts pinned sessions ahead of this order: a top-N sort over one
+        # user's live rows, which this index still finds.
         # Migrations ``b74c1e2f9a30`` (original) and the soft-delete rev
         # (partial swap) build it CONCURRENTLY in prod.
         Index(

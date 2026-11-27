@@ -487,8 +487,8 @@ class TestServerIcons:
                 self._srcs(
                     self._server_info(
                         *[
-                            {"src": f"https://cdn.example.com/{n}.png"}
-                            for n in range(_MAX_ICONS + 5)
+                            {"src": f"https://cdn.example.com/{icon_index}.png"}
+                            for icon_index in range(_MAX_ICONS + 5)
                         ]
                     )
                 )
@@ -525,7 +525,7 @@ class TestProbePagination:
             self.cursors_seen.append(cursor)
             names, next_cursor = self._pages[len(self.cursors_seen) - 1]
             return SimpleNamespace(
-                tools=[SimpleNamespace(name=n, description="") for n in names],
+                tools=[SimpleNamespace(name=name, description="") for name in names],
                 next_cursor=next_cursor,
             )
 

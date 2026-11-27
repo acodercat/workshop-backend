@@ -114,9 +114,6 @@ class ScheduleSkipReason(StrEnum):
     # The stored tier no longer resolves to a runnable model — a deployment
     # fault, but one the owner has to notice.
     MISCONFIGURED = "misconfigured"
-    # An attachment cannot be bound: its object is gone, it is over the cap,
-    # or its key is held by someone else.
-    ATTACHMENT_UNAVAILABLE = "attachment_unavailable"
 
     @property
     def counts_as_failure(self) -> bool:
@@ -129,7 +126,6 @@ class ScheduleSkipReason(StrEnum):
         return self in {
             ScheduleSkipReason.INSUFFICIENT_CREDITS,
             ScheduleSkipReason.MISCONFIGURED,
-            ScheduleSkipReason.ATTACHMENT_UNAVAILABLE,
         }
 
     @property
@@ -161,7 +157,7 @@ class Schedule(Base):
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     # Skill *names*, not ids, and not a snapshot — the same shape the
     # composer sends (``MessageCreate.skills``), re-resolved at every
-    # firing by ``_filter_invokable_skills``. Storing names is what makes
+    # firing by ``filter_invokable_skills``. Storing names is what makes
     # a skill the owner re-uploads take effect on the next run instead of
     # pinning the run to bytes chosen months ago.
     #
@@ -185,7 +181,7 @@ class Schedule(Base):
         SAEnum(
             ScheduleStatus,
             name="schedule_status",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -196,7 +192,7 @@ class Schedule(Base):
         SAEnum(
             ScheduleFrequency,
             name="schedule_frequency",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -233,13 +229,12 @@ class Schedule(Base):
         Integer, nullable=False, server_default=text("0")
     )
 
-    # --- Session construction. Every column here is required to build a
-    # --- Session; only ``tier`` is exposed by the v1 create form.
+    # --- Session construction: what each firing's session is built with.
     tier: Mapped[Tier] = mapped_column(
         SAEnum(
             Tier,
             name="session_tier",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
@@ -247,11 +242,24 @@ class Schedule(Base):
         SAEnum(
             AgentType,
             name="agent_type",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )
     thinking_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The project each firing's session is created in, so the run works
+    # under the project's instructions and files; NULL for none.
+    #
+    # **Only a live project counts.** Unlike ``session.project_id``, this may
+    # point at a soft-deleted project: deleting a project does not touch its
+    # schedules, because the dispatcher locks a schedule before the project
+    # its session goes into, and a delete that locked the project and then
+    # the schedule would be the opposite order. A deleted project is never
+    # restored, so naming one means naming none: the dispatcher creates the
+    # session outside any project, and the API reports ``null``.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("project.id", ondelete="SET NULL"), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
@@ -272,6 +280,14 @@ class Schedule(Base):
         # The management list: mine, newest first. Also the index Postgres
         # does not create for the FK, so deleting a user does not seq-scan.
         Index("ix_schedule_user_id_created_at", "user_id", text("created_at DESC")),
+        # The ``project_id`` FK's index, for the ``SET NULL`` a user's hard
+        # delete cascades through ``project``. Partial: most schedules belong
+        # to no project.
+        Index(
+            "ix_schedule_project_id",
+            "project_id",
+            postgresql_where=text("project_id IS NOT NULL"),
+        ),
         # Each frequency owns exactly one shape. Without this a WEEKLY row
         # with no weekday is storable, and the recurrence math would have
         # to invent an answer for it at dispatch time — in a background
@@ -337,7 +353,7 @@ class ScheduleRun(Base):
             native_enum=False,
             create_constraint=False,
             length=32,
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=True,
     )

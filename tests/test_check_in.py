@@ -16,8 +16,8 @@ from app.services.credits.check_in import apply_check_in_reward
 _TODAY = date(2026, 7, 1)
 
 
-def _row(d: date, streak: int) -> CheckIn:
-    return CheckIn(check_in_date=d, streak_day=streak)
+def _row(day: date, streak: int) -> CheckIn:
+    return CheckIn(check_in_date=day, streak_day=streak)
 
 
 @pytest.mark.parametrize(

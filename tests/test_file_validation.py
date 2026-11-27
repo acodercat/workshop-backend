@@ -266,4 +266,4 @@ def test_message_create_accepts_skills_list():
 
 def test_message_create_rejects_too_many_skills():
     with pytest.raises(ValidationError):
-        MessageCreate(content="hi", skills=[f"skill-{i}" for i in range(21)])
+        MessageCreate(content="hi", skills=[f"skill-{index}" for index in range(21)])

@@ -103,9 +103,9 @@ def _report(rows: list[_Counts], *, show_all: bool) -> None:
         by_model.setdefault(row[0], []).append(row)
 
     for model_id, tools in by_model.items():
-        calls = sum(t[2] for t in tools)
-        invalid = sum(t[3] for t in tools)
-        malformed = sum(t[4] for t in tools)
+        calls = sum(tool_row[2] for tool_row in tools)
+        invalid = sum(tool_row[3] for tool_row in tools)
+        malformed = sum(tool_row[4] for tool_row in tools)
         print(
             f"\n── {model_id}  (calls={calls:,}, invalid={invalid:,} = {_rate(invalid, calls)}, "
             f"malformed={malformed:,})"
@@ -132,14 +132,14 @@ async def main(args: argparse.Namespace) -> int:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--days", type=int, default=30, help="Look-back window (default 30).")
-    p.add_argument(
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--days", type=int, default=30, help="Look-back window (default 30).")
+    parser.add_argument(
         "--show-all",
         action="store_true",
         help="List every tool, not only those with errors.",
     )
-    return p.parse_args()
+    return parser.parse_args()
 
 
 if __name__ == "__main__":

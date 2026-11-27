@@ -63,7 +63,7 @@ def _list_pending(ids: list[int] | None) -> list[dict]:
             ).all()
     finally:
         engine.dispose()
-    return [{"id": r[0], "name": r[1], "email": r[2]} for r in rows]
+    return [{"id": row[0], "name": row[1], "email": row[2]} for row in rows]
 
 
 def _activate(ids: list[int] | None) -> list[dict]:
@@ -85,7 +85,7 @@ def _activate(ids: list[int] | None) -> list[dict]:
             ).all()
     finally:
         engine.dispose()
-    return [{"id": r[0], "name": r[1], "email": r[2]} for r in rows]
+    return [{"id": row[0], "name": row[1], "email": row[2]} for row in rows]
 
 
 async def _email_activated(activated: list[dict], locale: str) -> tuple[int, int, int]:
@@ -93,24 +93,24 @@ async def _email_activated(activated: list[dict], locale: str) -> tuple[int, int
 
     Returns (emailed_ok, skipped_no_email, failed)."""
     ok = skipped = failed = 0
-    for u in activated:
-        if not u["email"]:
+    for user in activated:
+        if not user["email"]:
             skipped += 1
-            print(f"  [skip]   id={u['id']} ({u['name']}): 无邮箱，已激活但不发信")
+            print(f"  [skip]   id={user['id']} ({user['name']}): 无邮箱，已激活但不发信")
             continue
-        subject, html_body = render_account_activated(name=u["name"], locale=locale)
+        subject, html_body = render_account_activated(name=user["name"], locale=locale)
         try:
             rid = await send_html_email(
-                to=u["email"],
+                to=user["email"],
                 subject=subject,
                 html_body=html_body,
             )
             ok += 1
-            print(f"  [sent]   id={u['id']} → {u['email']}  request_id={rid}")
+            print(f"  [sent]   id={user['id']} → {user['email']}  request_id={rid}")
         except EmailSendError as exc:
             failed += 1
             print(
-                f"  [FAILED] id={u['id']} → {u['email']}  {exc.message} "
+                f"  [FAILED] id={user['id']} → {user['email']}  {exc.message} "
                 f"(code={exc.code} request_id={exc.request_id})"
             )
     return ok, skipped, failed
@@ -152,10 +152,10 @@ def main() -> int:
             print("没有匹配的 PENDING 用户。")
             return 0
         print(f"将激活并发信 {len(pending)} 个（预览）:")
-        for u in pending:
+        for user in pending:
             print(
-                f"  id={u['id']}  name={u['name']!r}  "
-                f"email={u['email'] or '（无邮箱→只激活不发信）'}"
+                f"  id={user['id']}  name={user['name']!r}  "
+                f"email={user['email'] or '（无邮箱→只激活不发信）'}"
             )
         print("\nDry-run 完成，未做任何改动。确认无误后加 --send 执行。")
         return 0
@@ -166,7 +166,8 @@ def main() -> int:
         print("没有匹配的 PENDING 用户，未激活任何账号。")
         return 0
     print(
-        f"已激活 {len(activated)} 个: " + ", ".join(f"id={u['id']}({u['name']})" for u in activated)
+        f"已激活 {len(activated)} 个: "
+        + ", ".join(f"id={user['id']}({user['name']})" for user in activated)
     )
     print("\n发送激活通知:")
     ok, skipped, failed = asyncio.run(_email_activated(activated, args.locale))

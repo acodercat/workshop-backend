@@ -50,24 +50,26 @@ def _fetch_recipients(ids: list[int]) -> list[dict]:
             ).all()
     finally:
         engine.dispose()
-    return [{"id": r[0], "name": r[1], "email": r[2], "status": r[3]} for r in rows]
+    return [{"id": row[0], "name": row[1], "email": row[2], "status": row[3]} for row in rows]
 
 
 def _partition(recipients: list[dict], requested_ids: list[int]) -> tuple[list[dict], list[str]]:
     """Split into sendable recipients and skip-reasons."""
     sendable: list[dict] = []
     skipped: list[str] = []
-    found_ids = {r["id"] for r in recipients}
+    found_ids = {recipient["id"] for recipient in recipients}
     for missing in sorted(set(requested_ids) - found_ids):
         skipped.append(f"id={missing}: 用户不存在")
-    for r in recipients:
-        status = str(r["status"])
-        if not r["email"]:
-            skipped.append(f"id={r['id']} ({r['name']}): 无邮箱，跳过")
+    for recipient in recipients:
+        status = str(recipient["status"])
+        if not recipient["email"]:
+            skipped.append(f"id={recipient['id']} ({recipient['name']}): 无邮箱，跳过")
         elif status != "ACTIVE":
-            skipped.append(f"id={r['id']} ({r['name']}): status={status}（非 ACTIVE），跳过")
+            skipped.append(
+                f"id={recipient['id']} ({recipient['name']}): status={status}（非 ACTIVE），跳过"
+            )
         else:
-            sendable.append(r)
+            sendable.append(recipient)
     return sendable, skipped
 
 
@@ -75,22 +77,22 @@ async def _send_all(sendable: list[dict], locale: str, do_send: bool) -> int:
     """Render (and optionally send) one email per recipient. Returns the
     count of hard failures so the caller can set the exit code."""
     failures = 0
-    for r in sendable:
-        subject, html_body = render_account_activated(name=r["name"], locale=locale)
+    for recipient in sendable:
+        subject, html_body = render_account_activated(name=recipient["name"], locale=locale)
         if not do_send:
-            print(f"  [dry-run] → {r['email']}  |  {subject}  (html {len(html_body)} 字符)")
+            print(f"  [dry-run] → {recipient['email']}  |  {subject}  (html {len(html_body)} 字符)")
             continue
         try:
             request_id = await send_html_email(
-                to=r["email"],
+                to=recipient["email"],
                 subject=subject,
                 html_body=html_body,
             )
-            print(f"  [sent]    → {r['email']}  request_id={request_id}")
+            print(f"  [sent]    → {recipient['email']}  request_id={request_id}")
         except EmailSendError as exc:
             failures += 1
             print(
-                f"  [FAILED]  → {r['email']}  {exc.message} "
+                f"  [FAILED]  → {recipient['email']}  {exc.message} "
                 f"(code={exc.code} request_id={exc.request_id})"
             )
     return failures
@@ -125,8 +127,8 @@ def main() -> int:
     print(f"模式: {mode} | locale={args.locale} | 目标 ids={args.ids}\n")
     if skipped:
         print("跳过:")
-        for s in skipped:
-            print(f"  - {s}")
+        for reason in skipped:
+            print(f"  - {reason}")
         print()
     if not sendable:
         print("没有可发送的收件人。")

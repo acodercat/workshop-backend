@@ -7,14 +7,13 @@ what makes the version allocation and the per-project cap exact rather
 than race-acceptable: two adds to one project queue on it. Reads take no
 lock. Nothing here commits; the caller owns the transaction.
 
-Adding a file mirrors :mod:`app.services.schedule.files`. Ownership is
-checked with the predicates a message attachment uses; the stored size is
-what OSS reports, never the client's claim, because the upload quota sums
-it; and the object is taken off the orphan-reaping rule *before* the
-commit, failing the add if storage refuses — a project file may not be
-read for weeks, and one still tagged would be deleted under the project in
-about a day. That step runs last, after every refusal, because a refusal
-after it could not take the tag back.
+Ownership is checked with the predicates a message attachment uses; the
+stored size is what OSS reports, never the client's claim, because the
+upload quota sums it; and the object is taken off the orphan-reaping rule
+*before* the commit, failing the add if storage refuses — a project file
+may not be read for weeks, and one still tagged would be deleted under the
+project in about a day. That step runs last, after every refusal, because
+a refusal after it could not take the tag back.
 """
 
 import uuid

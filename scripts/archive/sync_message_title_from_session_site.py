@@ -80,8 +80,8 @@ _UPDATE = text(
 async def main() -> None:
     apply = "--apply" in sys.argv
     async with AsyncSessionLocal() as db:
-        n = (await db.execute(_COUNT)).scalar()
-        print(f"publish_site blocks missing a title with a session_site.title: {n}")
+        missing_count = (await db.execute(_COUNT)).scalar()
+        print(f"publish_site blocks missing a title with a session_site.title: {missing_count}")
         if not apply:
             print("DRY RUN — re-run with --apply to write.")
             return

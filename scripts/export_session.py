@@ -74,7 +74,8 @@ def main() -> None:
             (sid,),
         )
         messages = [
-            {"role": r, "blocks": b, "created_at": c.isoformat()} for r, b, c in cur.fetchall()
+            {"role": role, "blocks": blocks, "created_at": created_at.isoformat()}
+            for role, blocks, created_at in cur.fetchall()
         ]
 
         cur.execute(
@@ -110,7 +111,7 @@ def main() -> None:
 
     manifest = {"source_session_id": sid, "session": session, "messages": messages, "files": files}
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
-    total = sum(f["size_bytes"] for f in files)
+    total = sum(exported_file["size_bytes"] for exported_file in files)
     print(
         f"\nexported: {len(messages)} messages, {len(files)} files, "
         f"{total / 1024 / 1024:.1f} MB -> {out}"

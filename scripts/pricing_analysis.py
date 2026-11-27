@@ -65,8 +65,8 @@ from config import settings
 _MICRO_PER_USD = 1_000_000_000
 
 
-def _percentile(sorted_values: list[float], q: float) -> float:
-    """Linear-interpolated percentile (q in 0..1) over a pre-sorted list.
+def _percentile(sorted_values: list[float], quantile: float) -> float:
+    """Linear-interpolated percentile (quantile in 0..1) over a pre-sorted list.
 
     Avoids a numpy dependency; matches numpy's default ``linear`` method
     closely enough for a pricing read-out.
@@ -75,7 +75,7 @@ def _percentile(sorted_values: list[float], q: float) -> float:
         return 0.0
     if len(sorted_values) == 1:
         return sorted_values[0]
-    pos = q * (len(sorted_values) - 1)
+    pos = quantile * (len(sorted_values) - 1)
     lo = int(pos)
     hi = min(lo + 1, len(sorted_values) - 1)
     frac = pos - lo
@@ -147,7 +147,7 @@ async def _load_turns(db, since: datetime):
 def _summarize(agg: _ModelAgg) -> dict:
     margins = sorted(agg.margin_pct)
     durs = sorted(agg.duration_s)
-    toks = sorted(float(t) for t in agg.tokens_total)
+    toks = sorted(float(token_count) for token_count in agg.tokens_total)
     rev = sum(agg.revenue_usd)
     cogs = sum(agg.token_cogs_usd) + sum(agg.sandbox_cogs_usd)
     return {
@@ -168,27 +168,27 @@ def _summarize(agg: _ModelAgg) -> dict:
     }
 
 
-def _print_model_table(model_id: str, s: dict) -> None:
-    print(f"\n── {model_id}  (n={s['n']})")
+def _print_model_table(model_id: str, summary: dict) -> None:
+    print(f"\n── {model_id}  (n={summary['n']})")
     print(
-        f"   revenue ${s['revenue_usd']:.2f}   "
-        f"token-COGS ${s['token_cogs_usd']:.2f}   "
-        f"sandbox-COGS ${s['sandbox_cogs_usd']:.2f}"
+        f"   revenue ${summary['revenue_usd']:.2f}   "
+        f"token-COGS ${summary['token_cogs_usd']:.2f}   "
+        f"sandbox-COGS ${summary['sandbox_cogs_usd']:.2f}"
     )
-    print(f"   blended margin : {s['blended_margin'] * 100:6.1f}%")
+    print(f"   blended margin : {summary['blended_margin'] * 100:6.1f}%")
     print(
-        f"   margin pctl    : p50 {s['margin_p50'] * 100:5.1f}%   "
-        f"p90 {s['margin_p90'] * 100:5.1f}%   "
-        f"p99 {s['margin_p99'] * 100:5.1f}%   "
+        f"   margin pctl    : p50 {summary['margin_p50'] * 100:5.1f}%   "
+        f"p90 {summary['margin_p90'] * 100:5.1f}%   "
+        f"p99 {summary['margin_p99'] * 100:5.1f}%   "
         f"(p99 = worst turns)"
     )
     print(
-        f"   duration (s)   : p50 {s['dur_p50']:5.0f}   "
-        f"p90 {s['dur_p90']:6.0f}   p99 {s['dur_p99']:6.0f}"
+        f"   duration (s)   : p50 {summary['dur_p50']:5.0f}   "
+        f"p90 {summary['dur_p90']:6.0f}   p99 {summary['dur_p99']:6.0f}"
     )
-    print(f"   tokens/turn    : p50 {s['tok_p50']:,.0f}   p90 {s['tok_p90']:,.0f}")
-    flag = "  ⚠️ SELLING BELOW COST" if s["loss_share"] > 0.05 else ""
-    print(f"   loss-making    : {s['loss_share'] * 100:5.1f}% of turns{flag}")
+    print(f"   tokens/turn    : p50 {summary['tok_p50']:,.0f}   p90 {summary['tok_p90']:,.0f}")
+    flag = "  ⚠️ SELLING BELOW COST" if summary["loss_share"] > 0.05 else ""
+    print(f"   loss-making    : {summary['loss_share'] * 100:5.1f}% of turns{flag}")
 
 
 def _recommend(totals: dict, target_margin: float, sandbox_usd_per_hour: float) -> None:
@@ -310,13 +310,13 @@ async def main(args: argparse.Namespace) -> int:
 
     all_dur: list[float] = []
     tot = {"revenue_usd": 0.0, "token_cogs_usd": 0.0, "sandbox_cogs_usd": 0.0}
-    for model_id in sorted(by_model, key=lambda m: -by_model[m].n):
+    for model_id in sorted(by_model, key=lambda model: -by_model[model].n):
         agg = by_model[model_id]
-        s = _summarize(agg)
-        _print_model_table(model_id, s)
-        tot["revenue_usd"] += s["revenue_usd"]
-        tot["token_cogs_usd"] += s["token_cogs_usd"]
-        tot["sandbox_cogs_usd"] += s["sandbox_cogs_usd"]
+        summary = _summarize(agg)
+        _print_model_table(model_id, summary)
+        tot["revenue_usd"] += summary["revenue_usd"]
+        tot["token_cogs_usd"] += summary["token_cogs_usd"]
+        tot["sandbox_cogs_usd"] += summary["sandbox_cogs_usd"]
         all_dur.extend(agg.duration_s)
 
     rev = tot["revenue_usd"]
@@ -329,7 +329,8 @@ async def main(args: argparse.Namespace) -> int:
     )
     if unpriced:
         print(
-            "  skipped (no rate-card entry): " + ", ".join(f"{m}×{n}" for m, n in unpriced.items())
+            "  skipped (no rate-card entry): "
+            + ", ".join(f"{model}×{count}" for model, count in unpriced.items())
         )
 
     tot["dur_p90_global"] = _percentile(sorted(all_dur), 0.90)
@@ -338,28 +339,28 @@ async def main(args: argparse.Namespace) -> int:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--days", type=int, default=30, help="Look-back window (default 30).")
-    p.add_argument(
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--days", type=int, default=30, help="Look-back window (default 30).")
+    parser.add_argument(
         "--sandbox-usd-per-hour",
         type=float,
         default=0.0,
         help="Real infra cost of one sandbox-hour (USD). 0 = token-cost only.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--target-margin",
         type=float,
         default=0.65,
         help="Target blended gross margin (0..1) for the recommendation.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--beta",
         type=float,
         default=None,
         help="Preview a per-second price (credits/sec) instead of the "
         "configured one. e.g. --beta=0.1",
     )
-    return p.parse_args()
+    return parser.parse_args()
 
 
 if __name__ == "__main__":

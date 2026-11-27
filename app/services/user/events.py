@@ -95,7 +95,7 @@ async def stream_user_events(
             # Blocks until the hub routes an event here; sse-starlette's
             # own ping keeps the connection alive while idle.
             event = await queue.get()
-            fields = {k: v for k, v in event.items() if k != "type"}
+            fields = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event["type"], orjson.dumps(fields).decode())
     finally:
         hub.unsubscribe(user_id, queue)

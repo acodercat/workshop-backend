@@ -176,7 +176,7 @@ def normalize_bundle(data: bytes) -> bytes | None:
     with zf:
         names = zf.namelist()
         wrapper = None if _SKILL_FILENAME in names else _wrapper_dir(names)
-        if wrapper is None and not any(_is_macos_metadata(n) for n in names):
+        if wrapper is None and not any(_is_macos_metadata(entry_name) for entry_name in names):
             return None
         prefix = f"{wrapper}/" if wrapper else ""
 
@@ -265,7 +265,7 @@ def _reject_unsafe_entries(zf: zipfile.ZipFile) -> None:
             )
         # Normalize and check for parent escapes
         parts = name.split("/")
-        if any(p == ".." for p in parts):
+        if any(part == ".." for part in parts):
             raise InvalidSkillBundleError(
                 f"refused parent-traversal path: {name!r}",
             )
@@ -323,9 +323,9 @@ def _wrapper_dir(names: list[str]) -> str | None:
     macOS metadata does not count: Finder's "Compress" puts a
     ``__MACOSX/`` tree beside every folder it zips.
     """
-    content = [n for n in names if not _is_macos_metadata(n)]
-    top_levels = {n.split("/", 1)[0] for n in content if "/" in n} - {""}
-    root_files = {n for n in content if "/" not in n}
+    content = [entry_name for entry_name in names if not _is_macos_metadata(entry_name)]
+    top_levels = {entry_name.split("/", 1)[0] for entry_name in content if "/" in entry_name} - {""}
+    root_files = {entry_name for entry_name in content if "/" not in entry_name}
     if len(top_levels) != 1 or root_files:
         return None
     return next(iter(top_levels))

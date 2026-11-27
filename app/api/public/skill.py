@@ -29,7 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.api.uploads import multipart, read_capped, upload_request_body, uploaded_file
 from app.auth import authenticate_and_get_user
-from app.models.session_turn import SessionTurn, SessionTurnStatus
+from app.models.queued_message import QueuedMessage
+from app.models.session_turn import OPEN_TURN_STATUSES, SessionTurn
 from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.models.skill_category import SkillCategory
 from app.models.user import User
@@ -281,7 +282,8 @@ async def delete_skill(
     staging step. Order: DB first, then OSS.
 
     The object is kept while a queued or running turn pins it: a pick
-    snapshots ``bundle_key`` at enqueue, and the worker stages the bundle
+    snapshots ``bundle_key`` at enqueue, or when its message is steered
+    into a running turn, and the worker stages the bundle
     only when the model invokes the skill, so deleting it would fail a
     turn the user started before they deleted the skill.
     """
@@ -356,17 +358,18 @@ async def _get_owned_skill(
 
 
 async def _pinned_by_a_live_turn(db: AsyncSession, bundle_key: str) -> bool:
-    """Whether a ``PENDING`` / ``RUNNING`` turn snapshotted *bundle_key*."""
-    return bool(
-        await db.scalar(
-            select(
-                exists().where(
-                    SessionTurn.status.in_((SessionTurnStatus.PENDING, SessionTurnStatus.RUNNING)),
-                    SessionTurn.skills.contains([{"bundle_key": bundle_key}]),
-                )
-            )
-        )
+    """Whether a ``PENDING`` / ``RUNNING`` turn snapshotted *bundle_key*:
+    picked with its own message, or with one steered into it, whose
+    snapshot stays on the queue row until the turn ends."""
+    pin = [{"bundle_key": bundle_key}]
+    live = SessionTurn.status.in_(OPEN_TURN_STATUSES)
+    picked = exists().where(live, SessionTurn.skills.contains(pin))
+    steered = exists().where(
+        live,
+        SessionTurn.id == QueuedMessage.steer_turn_id,
+        QueuedMessage.skill_snapshots.contains(pin),
     )
+    return bool(await db.scalar(select(or_(picked, steered))))
 
 
 async def _get_visible_skill(

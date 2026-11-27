@@ -66,11 +66,13 @@ CANCEL_CHANNEL_PREFIX = "cancel"
 
 # Pub/Sub channel the worker publishes to after committing a terminal
 # ``session_turn`` write (COMPLETE / CANCELLED / FAILED). Payload is the session_id
-# string. Mirrored in ``agent-worker/agent_worker/wire/keys.py``. The
-# subscriber lives in :mod:`app.workers.settle_subscriber` and triggers
-# ``settle_open_for_session`` for sub-second settle latency. Pub/sub is
-# fire-and-forget on purpose — ``settle_sweeper``'s 60s poll backstops
-# any message lost to a disconnect.
+# string. Mirrored in ``agent-worker/agent_worker/wire/keys.py``. Named for
+# its first subscriber, :mod:`app.workers.settle_subscriber`, which settles
+# the session's reservation at once; :mod:`app.workers.message_queue_dispatcher`
+# follows it too, to send a queued message on without waiting out its tick.
+# Pub/sub is fire-and-forget on purpose — each subscriber is backstopped by
+# a poll (``settle_sweeper``'s, the dispatcher's own) for any message lost
+# to a disconnect.
 SETTLE_NOTIFY_CHANNEL = "settle:notify"
 
 # Per-``state`` pending OAuth-authorization state for MCP Connectors. Holds the

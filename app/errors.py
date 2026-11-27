@@ -627,6 +627,20 @@ class SessionNotFoundError(AppError):
     error_type = "session_not_found"
 
 
+class SessionPinLimitError(AppError):
+    """The caller already has the most pinned sessions allowed. Cleared by
+    unpinning one."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "session_pin_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} pinned sessions; unpin one to pin another.",
+            details={"limit": limit},
+        )
+
+
 class MessageNotFoundError(AppError):
     """No message with that id in the session — the session itself has
     already been resolved as the caller's."""
@@ -642,6 +656,38 @@ class NotAssistantMessageError(AppError):
 
     status_code = status.HTTP_400_BAD_REQUEST
     error_type = "not_assistant_message"
+
+
+class SessionIdleError(AppError):
+    """A message was sent to wait in a queue that is not waiting on anything:
+    no turn runs and no queued message is about to go out — the turn ended
+    between the client's last look and this request. 409: nothing is in the
+    way any more, so the message can simply be sent."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "session_idle"
+
+
+class QueuedMessageNotFoundError(AppError):
+    """No waiting message with that id in the session. The usual cause is
+    not a bad id: the message went out, and stopped being a queued one."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "queued_message_not_found"
+
+
+class QueuedMessageLimitError(AppError):
+    """The session's queue is full. Cleared as the queue drains, or by
+    deleting a waiting message."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "queued_message_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} messages may wait in one session.",
+            details={"limit": limit},
+        )
 
 
 class ShareNotFoundError(AppError):
@@ -875,7 +921,7 @@ class FileNotOwnedError(AppError):
     """A ``file_key`` the caller tried to store is held by another user.
 
     The guard that keeps a share viewer — who legitimately sees the keys of
-    a shared session's files — from binding one to a session or schedule of
+    a shared session's files — from binding one to a session or project of
     their own, and so from minting download URLs after the share ends."""
 
     status_code = status.HTTP_403_FORBIDDEN
@@ -912,9 +958,9 @@ class FileRetentionFailedError(AppError):
     """Object storage would not take an upload off the orphan-reaping rule.
 
     Raised only where keeping the file is a precondition of the save: a
-    scheduled task may not fire for days, and an attachment still tagged when
-    the ~1-day lifecycle rule runs is deleted underneath a task that reports
-    it saved. 502 — the storage service failed, and the same request can
+    project file may not be read for weeks, and one still tagged when the
+    ~1-day lifecycle rule runs is deleted underneath a project that reports
+    it added. 502 — the storage service failed, and the same request can
     simply be sent again."""
 
     status_code = status.HTTP_502_BAD_GATEWAY

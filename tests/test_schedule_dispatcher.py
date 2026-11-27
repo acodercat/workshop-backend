@@ -17,10 +17,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.errors import (
     ConcurrentTaskLimitError,
-    FileNotOwnedError,
-    FileNotUploadedError,
-    FileTooLargeError,
     InsufficientCreditsError,
+    ProjectNotFoundError,
     UnconfiguredTierError,
 )
 from app.models.schedule import (
@@ -158,7 +156,6 @@ def _patch(
     *,
     queue_raises: Exception | list[Exception | None] | None = None,
     connectors: tuple[int, ...] = (),
-    attachments: tuple = (),
 ) -> tuple:
     db = _FakeDb(schedule)
     calls: dict[str, list] = {"build": [], "queue": []}
@@ -188,13 +185,9 @@ def _patch(
     async def fake_configured_ids(_db, _schedule_id):
         return list(connectors)
 
-    async def fake_attached(_db, _schedule_id):
-        return list(attachments)
-
     monkeypatch.setattr(
         schedule_dispatcher.schedule_connectors, "configured_ids", fake_configured_ids
     )
-    monkeypatch.setattr(schedule_dispatcher.schedule_files, "attached", fake_attached)
     monkeypatch.setattr(schedule_dispatcher, "_lock", fake_lock)
     monkeypatch.setattr(schedule_dispatcher, "build_session", fake_build)
     monkeypatch.setattr(schedule_dispatcher, "queue_user_message", fake_queue)
@@ -243,50 +236,6 @@ class TestCarriedContext:
 
         assert calls["build"][0]["connector_ids"] == [3, 1]
 
-    async def test_passes_the_schedules_attachments_to_the_enqueue(self, monkeypatch):
-        schedule = _schedule()
-        _, calls = _patch(
-            monkeypatch,
-            schedule,
-            attachments=(
-                SimpleNamespace(
-                    file_key="session-files/abc/brief.pdf",
-                    filename="brief.pdf",
-                    mime_type="application/pdf",
-                    size_bytes=2048,
-                ),
-            ),
-        )
-
-        await schedule_dispatcher._process_one(7, redis=None)
-
-        # ``size_bytes`` comes off the stored row, which holds what OSS
-        # confirmed — not a number any client ever supplied.
-        (file_ref,) = calls["queue"][0]["files"]
-        assert file_ref.file_key == "session-files/abc/brief.pdf"
-        assert file_ref.size_bytes == 2048
-
-    async def test_the_same_object_is_rebound_on_every_firing(self, monkeypatch):
-        # What ``uq_session_files_session_id_file_key`` exists to allow: two
-        # firings, two sessions, one file.
-        schedule = _schedule()
-        attachment = SimpleNamespace(
-            file_key="session-files/abc/brief.pdf",
-            filename="brief.pdf",
-            mime_type=None,
-            size_bytes=1,
-        )
-        _, calls = _patch(monkeypatch, schedule, attachments=(attachment,))
-
-        await schedule_dispatcher._process_one(7, redis=None)
-        schedule.next_run_at = datetime.now(UTC) - timedelta(minutes=1)
-        await schedule_dispatcher._process_one(7, redis=None)
-
-        assert [f[0].file_key for f in (c["files"] for c in calls["queue"])] == [
-            "session-files/abc/brief.pdf",
-            "session-files/abc/brief.pdf",
-        ]
-
     async def test_carries_nothing_when_nothing_was_configured(self, monkeypatch):
         # The default, and the shape every schedule created before this
         # feature still has.
@@ -297,7 +246,54 @@ class TestCarriedContext:
 
         assert calls["queue"][0]["skills"] == []
         assert calls["build"][0]["connector_ids"] == []
+        assert calls["build"][0]["project_id"] is None
         assert calls["queue"][0]["files"] == []
+
+
+class TestProject:
+    """The project a firing's session is created in."""
+
+    @staticmethod
+    def _projects(monkeypatch, *, live: bool) -> list[dict]:
+        lookups: list[dict] = []
+
+        async def fake_require_owned_project(_db, **kwargs):
+            lookups.append(kwargs)
+            if not live:
+                raise ProjectNotFoundError("Project not found.")
+            return SimpleNamespace(id=kwargs["project_id"])
+
+        monkeypatch.setattr(
+            schedule_dispatcher.project_ownership,
+            "require_owned_project",
+            fake_require_owned_project,
+        )
+        return lookups
+
+    async def test_runs_in_the_schedules_project_under_its_lock(self, monkeypatch):
+        # Locked as every write that creates a session in a project is, so
+        # a delete cannot slip between the check and the session.
+        project_id = uuid4()
+        schedule = _schedule(project_id=project_id)
+        _, calls = _patch(monkeypatch, schedule)
+        lookups = self._projects(monkeypatch, live=True)
+
+        await schedule_dispatcher._process_one(7, redis=None)
+
+        assert lookups == [{"user_id": 42, "project_id": project_id, "for_update": True}]
+        assert calls["build"][0]["project_id"] == project_id
+
+    async def test_a_deleted_project_runs_in_none(self, monkeypatch):
+        # Deleting a project leaves its schedules naming it; the occurrence
+        # still runs, outside any project.
+        schedule = _schedule(project_id=uuid4())
+        _, calls = _patch(monkeypatch, schedule)
+        self._projects(monkeypatch, live=False)
+
+        await schedule_dispatcher._process_one(7, redis=None)
+
+        assert calls["build"][0]["project_id"] is None
+        assert len(calls["queue"]) == 1
 
 
 class TestHappyPath:
@@ -413,17 +409,8 @@ class TestRefusals:
         [
             (InsufficientCreditsError("no credits"), ScheduleSkipReason.INSUFFICIENT_CREDITS),
             (UnconfiguredTierError("bad tier"), ScheduleSkipReason.MISCONFIGURED),
-            (FileNotUploadedError("gone"), ScheduleSkipReason.ATTACHMENT_UNAVAILABLE),
-            (FileTooLargeError(9, 5), ScheduleSkipReason.ATTACHMENT_UNAVAILABLE),
-            (FileNotOwnedError("not yours"), ScheduleSkipReason.ATTACHMENT_UNAVAILABLE),
         ],
-        ids=[
-            "no-credits",
-            "misconfigured-tier",
-            "attachment-deleted",
-            "attachment-too-large",
-            "attachment-not-owned",
-        ],
+        ids=["no-credits", "misconfigured-tier"],
     )
     async def test_records_the_reason_and_moves_on(self, monkeypatch, exc, reason):
         schedule = _schedule()

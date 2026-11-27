@@ -128,6 +128,7 @@ class TestTheWireCarriesItOnTheSession:
             project_id=None,
             created_at=now,
             updated_at=now,
+            pinned_at=None,
         )
 
         assert "connectors" not in SessionResponse.model_fields
@@ -140,6 +141,7 @@ class TestTheWireCarriesItOnTheSession:
             agent_type=row.agent_type,
             project_id=row.project_id,
             connectors=[3, 7],
+            thinking_enabled=True,
             created_at=now,
             updated_at=now,
             messages=[],
@@ -167,7 +169,7 @@ class TestWhyItIsATableAndNotAnArray:
     def test_the_same_connector_cannot_be_configured_twice(self):
         # Deduplication happens in ``require_owned_connectors`` too; this is the
         # backstop that does not depend on remembering to call it.
-        assert [c.name for c in SessionMCPServer.__table__.primary_key] == [
+        assert [column.name for column in SessionMCPServer.__table__.primary_key] == [
             "session_id",
             "mcp_server_id",
         ]

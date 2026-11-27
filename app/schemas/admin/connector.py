@@ -104,7 +104,7 @@ def _must_be_instantiable(
     obeying the same rule from the same constant.
     """
     if value is not None and value not in INSTANTIABLE_AUTH_TYPES:
-        allowed = ", ".join(sorted(t.value for t in INSTANTIABLE_AUTH_TYPES))
+        allowed = ", ".join(sorted(auth_type.value for auth_type in INSTANTIABLE_AUTH_TYPES))
         raise ValueError(
             f"{value.value} needs a per-user credential the catalog cannot "
             f"hold; a catalog entry may be {allowed}"

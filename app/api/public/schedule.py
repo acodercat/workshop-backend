@@ -36,6 +36,7 @@ from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_user
 from app.common.pagination import paginate
 from app.errors import ScheduleActiveLimitError, ScheduleLimitError
+from app.models.project import Project
 from app.models.schedule import Schedule, ScheduleRun, ScheduleStatus
 from app.models.session import AgentType, Session
 from app.models.session_turn import SessionTurn, SessionTurnStatus, TerminationReason
@@ -46,7 +47,6 @@ from app.schemas.schedule import (
     UNREAD_ACKNOWLEDGE_MAX,
     MarkRunsReadRequest,
     ScheduleCreate,
-    ScheduleFileResponse,
     ScheduleListResponse,
     ScheduleResponse,
     ScheduleRunResponse,
@@ -54,11 +54,8 @@ from app.schemas.schedule import (
     UnreadCountResponse,
 )
 from app.services.connector import ownership as connector_ownership
-from app.services.schedule import (
-    connectors as schedule_connectors,
-    files as schedule_files,
-    lifecycle,
-)
+from app.services.project import ownership as project_ownership
+from app.services.schedule import connectors as schedule_connectors, lifecycle
 from app.services.session.creation import resolve_tier
 
 router = APIRouter(tags=["schedules"])
@@ -287,18 +284,27 @@ async def _schedule_responses(
     this session does not expire on commit, so without it the identity map
     would hand back the object as the request left it.
 
-    Four round trips however many rows: the schedules, their latest runs,
-    then each side table batched by id.
+    A schedule's project is reported only while it is live (see
+    ``Schedule.project_id``), joined here so a deleted one reads as none.
+
+    Four round trips however many rows: the schedules with their projects,
+    their latest runs, then each side table batched by id.
     """
     query = (
-        select(Schedule)
+        select(Schedule, Project.id.label("live_project_id"))
+        .outerjoin(
+            Project,
+            and_(Project.id == Schedule.project_id, Project.deleted_at.is_(None)),
+        )
         .where(Schedule.user_id == user_id)
         .order_by(Schedule.created_at.desc(), Schedule.id.desc())
         .execution_options(populate_existing=True)
     )
     if schedule_id is not None:
         query = query.where(Schedule.id == schedule_id)
-    schedules = list((await db.execute(query)).scalars())
+    rows = list(await db.execute(query))
+    schedules = [row.Schedule for row in rows]
+    live_project_ids = {row.Schedule.id: row.live_project_id for row in rows}
     ids = [schedule.id for schedule in schedules]
     if not ids:
         return []
@@ -313,15 +319,12 @@ async def _schedule_responses(
     )
     last_runs = {row.ScheduleRun.schedule_id: _run_response(row) for row in latest}
     connectors = await schedule_connectors.configured_ids_by_schedule(db, ids)
-    files = await schedule_files.attached_by_schedule(db, ids)
     return [
         ScheduleResponse.model_validate(schedule).model_copy(
             update={
                 "last_run": last_runs.get(schedule.id),
                 "connectors": connectors.get(schedule.id, []),
-                "files": [
-                    ScheduleFileResponse.model_validate(row) for row in files.get(schedule.id, [])
-                ],
+                "project_id": live_project_ids[schedule.id],
             }
         )
         for schedule in schedules
@@ -353,32 +356,38 @@ async def create_schedule(
         prompt=body.prompt,
         status=ScheduleStatus.ACTIVE,
         tier=body.tier,
-        # Not exposed by the create form: a scheduled task runs the
-        # platform default agent shape. Both are stored columns rather than
-        # constants at the dispatch site because a Session cannot be built
-        # without them, and surfacing them later must not need a migration.
+        thinking_enabled=body.thinking_enabled,
+        # Not exposed by the create form: a scheduled task runs the sandbox
+        # agent. A stored column rather than a constant at the dispatch site
+        # because a Session cannot be built without it, and surfacing it
+        # later must not need a migration.
         agent_type=AgentType.FULL,
-        thinking_enabled=True,
         # Names as given, order preserved: the worker's reminder lists them
         # the way the owner picked. Nothing is resolved here — a name is
         # checked against the live skill table at every firing, not once at
         # creation, so a schedule can name a skill uploaded later.
         skills=body.skills,
+        project_id=body.project_id,
     )
     lifecycle.assign_recurrence(schedule, body.recurrence)
     lifecycle.arm(schedule, datetime.now(UTC))
     connector_ids = await connector_ownership.require_owned_connectors(
         db, user_id=current_user.id, ids=body.connectors
     )
+    if body.project_id is not None:
+        # Unlocked: a schedule is not something a project holds, and one
+        # left naming a project deleted meanwhile simply runs in none.
+        await project_ownership.require_owned_project(
+            db, user_id=current_user.id, project_id=body.project_id
+        )
     await _assert_row_headroom(db, current_user.id)
     await _assert_activation_headroom(db, current_user.id)
     db.add(schedule)
-    # ``schedule.id`` is needed to bind the side tables, and all of it must
-    # land in one commit — a schedule that exists without the Connectors or
-    # attachments it was created with would fire wrong until noticed.
+    # ``schedule.id`` is needed to bind the Connectors, and both must land in
+    # one commit — a schedule that exists without the Connectors it was
+    # created with would fire wrong until noticed.
     await db.flush()
     await schedule_connectors.replace(db, schedule.id, connector_ids)
-    await schedule_files.replace(db, schedule.id, current_user.id, body.files)
     await db.commit()
     (response,) = await _schedule_responses(db, current_user.id, schedule_id=schedule.id)
     return response
@@ -426,18 +435,13 @@ async def update_schedule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authenticate_and_get_user),
 ) -> ScheduleResponse:
-    """Edit, pause, or resume a schedule.
+    """Edit, pause, or resume a schedule, or move it into a project or out
+    of one.
 
     ``None`` leaves a field alone; ``[]`` clears a list. What the edit does to
     the status and the clock is :func:`lifecycle.apply_owner_edit`'s to
     decide, on the row locked here for the rest of the transaction — which
     also serialises two concurrent edits of one schedule.
-
-    The lock is held across saving the attachments, which talks to object
-    storage. A dispatcher reaching this schedule meanwhile waits that long,
-    which is bounded by storage's own latency for at most
-    ``SCHEDULE_FILES_MAX`` concurrent calls — and an edit is rare where a
-    tick is not, so the order is the cheaper one to pay.
     """
     # Validated before the lock is taken, and before the caps are consulted,
     # for the reason ``create`` documents.
@@ -447,6 +451,12 @@ async def update_schedule(
     if body.connectors is not None:
         connector_ids = await connector_ownership.require_owned_connectors(
             db, user_id=current_user.id, ids=body.connectors
+        )
+    moving = "project_id" in body.model_fields_set
+    if moving and body.project_id is not None:
+        # Unlocked, for the reason ``create`` gives.
+        await project_ownership.require_owned_project(
+            db, user_id=current_user.id, project_id=body.project_id
         )
 
     schedule = await _get_or_404(db, schedule_id, current_user.id, for_update=True)
@@ -459,17 +469,16 @@ async def update_schedule(
         schedule.prompt = body.prompt
     if body.tier is not None:
         schedule.tier = body.tier
+    if body.thinking_enabled is not None:
+        schedule.thinking_enabled = body.thinking_enabled
     if body.skills is not None:
         schedule.skills = body.skills
     if connector_ids is not None:
         await schedule_connectors.replace(db, schedule.id, connector_ids)
-    if body.files is not None:
-        # Last, with every refusal above already behind it: it takes the
-        # attachments off the reaping rule in object storage, which a later
-        # refusal could not roll back.
-        await schedule_files.replace(db, schedule.id, current_user.id, body.files)
+    if moving:
+        schedule.project_id = body.project_id
     if body.model_fields_set:
-        # Explicit because an edit that only touched the side tables changes
+        # Explicit because an edit that only touched the Connectors changes
         # no column the ``onupdate`` would see.
         schedule.updated_at = func.now()
     await db.commit()
@@ -487,19 +496,11 @@ async def delete_schedule(
 ) -> None:
     """Delete a schedule and its run history.
 
-    A hard delete: ``schedule_run``, ``schedule_mcp_server`` and
-    ``schedule_file`` all cascade, which is the wanted answer — the history
-    and configuration of a schedule the owner removed is not something they
-    asked to keep. Sessions the schedule already produced are untouched:
-    nothing on ``session`` references ``schedule``, so they are ordinary
-    sessions from here on, and each keeps its own binding of the
-    attachments.
-
-    The OSS objects are not deleted, matching what a deleted *session* does
-    with its uploads. Nor is quota freed by this alone — it is counted per
-    object across both tables, and every session the task produced still
-    binds the same keys. Only an attachment that never fired comes off the
-    total.
+    A hard delete: ``schedule_run`` and ``schedule_mcp_server`` cascade,
+    which is the wanted answer — the history and configuration of a schedule
+    the owner removed is not something they asked to keep. Sessions the
+    schedule already produced are untouched: nothing on ``session``
+    references ``schedule``, so they are ordinary sessions from here on.
     """
     schedule = await _get_or_404(db, schedule_id, current_user.id)
     await db.delete(schedule)
