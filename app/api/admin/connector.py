@@ -24,12 +24,9 @@ from sqlalchemy import func, select
 from app.api.admin.dependencies import StaffContext
 from app.common.pagination import paginate
 from app.errors import (
-    CategoryNotFoundError,
     ConnectorCatalogEntryNotFoundError,
-    ConnectorCatalogUrlTakenError,
 )
-from app.models.connector_category import ConnectorCategory
-from app.models.mcp_server import MCPServer, MCPServerAuthType
+from app.models.mcp_server import MCPServer
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.user import User
 from app.schemas.admin.connector import (
@@ -40,13 +37,9 @@ from app.schemas.admin.connector import (
 )
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.services.admin import AuditAction, audit, field_changes
+from app.services.connector import catalog
 
 router = APIRouter(tags=["connectors"])
-
-#: Each canonical column beside the locale map that shadows it. Editing
-#: one without clearing the other is the bug this pairing exists to make
-#: hard to reintroduce — see ``update_catalog_entry``.
-_LOCALIZED_FIELDS = (("name", "name_i18n"), ("description", "description_i18n"))
 
 
 def _to_catalog_response(
@@ -93,34 +86,6 @@ def _to_connector_response(
     )
 
 
-async def _enforce_unique_url(ctx: StaffContext, url: str) -> None:
-    """Refuse a URL the catalog already offers.
-
-    Checked here rather than left to the unique constraint so the
-    operator gets a named 409 instead of an IntegrityError surfacing as
-    a 500. The constraint is still the thing that makes it true under a
-    race; this is the readable path.
-    """
-    if await ctx.db.scalar(
-        select(MCPServerCatalogEntry.id).where(MCPServerCatalogEntry.url == url)
-    ):
-        raise ConnectorCatalogUrlTakenError(f"The catalog already offers {url}.")
-
-
-async def _enforce_category_exists(ctx: StaffContext, category_id: int | None) -> None:
-    """Refuse a category the taxonomy does not hold.
-
-    Checked here for the reason :func:`_enforce_unique_url` is: the
-    foreign key makes it true, this makes it readable. It also keeps an
-    ``IntegrityError`` out of ``audit()``, where it would abort the
-    transaction and lose the audit row along with the write.
-
-    ``None`` is the uncategorised state, not a missing row, and passes.
-    """
-    if category_id is not None and await ctx.db.get(ConnectorCategory, category_id) is None:
-        raise CategoryNotFoundError(f"No connector category with id {category_id}.")
-
-
 @router.get(
     "/connector-catalog",
     response_model=list[ConnectorCatalogEntryResponse],
@@ -155,27 +120,12 @@ async def create_catalog_entry(
     Created unpublished by default so an operator can check the URL and
     icon render before users see it — publishing is the separate PATCH.
     """
-    await _enforce_unique_url(ctx, body.url)
-    await _enforce_category_exists(ctx, body.category_id)
-
     async with audit(
         ctx,
         action=AuditAction.CONNECTOR_CATALOG_CREATE,
         target_type="connector_catalog",
     ) as draft:
-        entry = MCPServerCatalogEntry(
-            name=body.name,
-            url=body.url,
-            auth_type=body.auth_type,
-            description=body.description,
-            icon_url=body.icon_url,
-            oauth_scope=body.oauth_scope,
-            published=body.published,
-            sort_order=body.sort_order,
-            category_id=body.category_id,
-        )
-        ctx.db.add(entry)
-        await ctx.db.flush()
+        entry = await catalog.create_entry(ctx.db, **body.model_dump())
         draft.target_id = entry.id
         draft.payload = {
             "name": entry.name,
@@ -196,17 +146,12 @@ async def update_catalog_entry(
 ) -> ConnectorCatalogEntryResponse:
     """Edit, publish/unpublish, or reorder a catalog entry.
 
-    Editing the URL can collide, which is new: while ``key`` carried the
-    unique constraint it was immutable, so no edit could conflict. Now
-    the identity is the URL and the URL is editable, so this checks the
-    same thing the create path does.
+    The rules an edit keeps — a free URL, a real category, nothing stale
+    left behind — are :func:`~app.services.connector.catalog.update_entry`'s.
     """
     entry = await ctx.db.get(MCPServerCatalogEntry, entry_id)
     if entry is None:
         raise ConnectorCatalogEntryNotFoundError(f"No catalog entry with id {entry_id}.")
-
-    if body.url is not None and body.url != entry.url:
-        await _enforce_unique_url(ctx, body.url)
 
     fields = body.model_dump(exclude_none=True)
     # Put back the one field whose explicit ``null`` is an instruction
@@ -214,8 +159,6 @@ async def update_catalog_entry(
     # ``ConnectorCatalogEntryUpdate.category_id``.
     if "category_id" in body.model_fields_set:
         fields["category_id"] = body.category_id
-
-    await _enforce_category_exists(ctx, fields.get("category_id"))
 
     changes = field_changes(entry, fields)
     if not changes:
@@ -227,51 +170,25 @@ async def update_catalog_entry(
         target_type="connector_catalog",
         target_id=entry.id,
     ) as draft:
-        # Captured before the write loop: the scope-clearing branch below
-        # records what the entry is losing, and by the time it runs
-        # ``setattr`` has already replaced ``entry.oauth_scope`` with
-        # whatever this request carried.
-        previous_scope = entry.oauth_scope
-
-        for field, value in fields.items():
-            setattr(entry, field, value)
-
-        # A scope is meaningless without OAuth, and the update schema
-        # cannot express "clear this" — ``None`` there means "leave
-        # alone" — so the invariant is kept here rather than asked of
-        # the caller. Left behind it would reappear the day someone
-        # switches the entry back to OAUTH, and be copied onto every
-        # Connector made from it in between.
-        if entry.auth_type is not MCPServerAuthType.OAUTH and entry.oauth_scope:
-            changes["oauth_scope"] = {"from": previous_scope, "to": None}
-            entry.oauth_scope = None
-
-        # Clearing a locale map is not optional — see the invalidation
-        # rule in ``app.services.localized_text``. Left behind here it
-        # would be invisible: the public catalog would keep serving the
-        # old text, ``build_connector`` would copy it onto every
-        # Connector created afterwards, and this endpoint returns the
-        # canonical column, so the operator would see the edit take
-        # effect.
-        #
-        # Cleared whole rather than per-locale because the console can
-        # neither show nor edit these maps: a translation of the
-        # superseded text would be a divergence an operator has no way
-        # to discover. The discarded map goes into the audit payload,
-        # since unlike a skill's (which its bundle re-supplies) this one
-        # is hand-curated and the trail is the only copy left.
-        discarded = {}
-        for field, locale_map in _LOCALIZED_FIELDS:
-            stale = getattr(entry, locale_map)
-            if field in changes and stale is not None:
-                discarded[f"cleared_{locale_map}"] = stale
-                setattr(entry, locale_map, None)
-
+        cleared = await catalog.update_entry(ctx.db, entry, fields)
+        # A scope the edit cleared is a change to a column the request may
+        # also have named, so it is recorded as one, from the value the
+        # entry held before.
+        if "oauth_scope" in cleared:
+            changes["oauth_scope"] = {"from": cleared.pop("oauth_scope"), "to": None}
         # ``entry_name`` rather than ``name``: unlike a skill's, this
         # name is editable, so under one key the label and the
         # before → after entry would overwrite each other and the key
         # would hold a string on some rows and a diff on others.
-        draft.payload = {"entry_name": entry.name, **changes, **discarded}
+        #
+        # A discarded locale map goes in whole, since unlike a skill's
+        # (which its bundle re-supplies) this one is hand-curated and the
+        # trail is the only copy left.
+        draft.payload = {
+            "entry_name": entry.name,
+            **changes,
+            **{f"cleared_{column}": value for column, value in cleared.items()},
+        }
 
     await ctx.db.refresh(entry)
     return _to_catalog_response(entry)

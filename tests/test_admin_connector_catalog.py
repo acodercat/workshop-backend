@@ -45,8 +45,8 @@ def test_the_identity_is_editable() -> None:
 def test_an_entry_can_arrive_already_filed() -> None:
     """The add form offers the tab, so an operator does not save an entry
     and then immediately edit it to put it on one. That the id names a
-    real category is checked in the endpoint (``_enforce_category_exists``),
-    not here — the schema cannot see the table."""
+    real category is checked by the catalog service
+    (``catalog.create_entry``), not here — the schema cannot see the table."""
     assert _create(category_id=7).category_id == 7
 
 
