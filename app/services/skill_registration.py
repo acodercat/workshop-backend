@@ -276,8 +276,8 @@ async def parse_payload(filename: str, data: bytes) -> tuple[bytes, ParsedSkill,
     Returns the (possibly repacked) bundle, its parsed metadata and the
     canonical extension. Nothing is stored and nothing is read from the
     database, so every refusal in here — wrong extension, oversize,
-    hostile archive, no ``SKILL.md`` — costs one thread and no cleanup,
-    which also makes it what a script's dry run calls.
+    hostile archive, no ``SKILL.md`` — leaves nothing to clean up, which
+    also makes it what a script's dry run calls.
 
     The parse is CPU-bound (zip header inspection, an in-memory repack
     for wrapper bundles, a UTF-8 decode) on a worst-case
