@@ -56,7 +56,21 @@ class TestCreateEntry:
 
         assert db.added == [entry]
         assert db.flushed
-        assert not hasattr(db, "commit")
+
+    @pytest.mark.parametrize(
+        ("auth_type", "stored"),
+        [(MCPServerAuthType.OAUTH, "read"), (MCPServerAuthType.NONE, None)],
+    )
+    async def test_a_scope_is_stored_only_on_an_oauth_entry(self, auth_type, stored) -> None:
+        entry = await catalog.create_entry(
+            _Db(),
+            name="Notes",
+            url="https://notes.example.com/mcp",
+            auth_type=auth_type,
+            oauth_scope="read",
+        )
+
+        assert entry.oauth_scope == stored
 
     async def test_a_url_the_catalog_offers_is_refused_before_anything_is_written(self) -> None:
         db = _Db(url_taken=True)
@@ -87,29 +101,48 @@ class TestUpdateEntry:
     async def test_rewording_a_column_clears_its_locale_map_and_returns_it(self) -> None:
         entry = _entry()
 
-        cleared = await catalog.update_entry(_Db(), entry, {"name": "Notebook"})
+        discarded = await catalog.update_entry(_Db(), entry, {"name": "Notebook"})
 
         assert entry.name == "Notebook"
         assert entry.name_i18n is None
-        assert cleared == {"name_i18n": {"zh": "笔记"}}
+        assert discarded == {"name_i18n": {"zh": "笔记"}}
         # The column the edit did not reword keeps its translations.
         assert entry.description_i18n == {"zh": "搜索笔记。"}
 
     async def test_a_column_sent_unchanged_keeps_its_locale_map(self) -> None:
         entry = _entry()
 
-        cleared = await catalog.update_entry(_Db(), entry, {"name": "Notes", "sort_order": 4})
+        discarded = await catalog.update_entry(_Db(), entry, {"name": "Notes", "sort_order": 4})
 
-        assert cleared == {}
+        assert discarded == {}
         assert entry.name_i18n == {"zh": "笔记"}
 
-    async def test_leaving_oauth_clears_the_scope_and_returns_what_it_was(self) -> None:
+    async def test_leaving_oauth_clears_the_scope(self) -> None:
         entry = _entry()
 
-        cleared = await catalog.update_entry(_Db(), entry, {"auth_type": MCPServerAuthType.NONE})
+        discarded = await catalog.update_entry(_Db(), entry, {"auth_type": MCPServerAuthType.NONE})
 
         assert entry.oauth_scope is None
-        assert cleared == {"oauth_scope": "read"}
+        # An ordinary column the edit sets, not something it discards.
+        assert discarded == {}
+
+    async def test_leaving_oauth_ends_the_preregistered_app_and_names_only_its_id(self) -> None:
+        entry = _entry(oauth_client_id="client-1", oauth_client_secret_encrypted="sealed")
+
+        discarded = await catalog.update_entry(_Db(), entry, {"auth_type": MCPServerAuthType.NONE})
+
+        assert entry.oauth_client_id is None
+        assert entry.oauth_client_secret_encrypted is None
+        assert discarded == {"oauth_client_id": "client-1"}
+
+    async def test_an_edit_that_stays_oauth_keeps_the_app(self) -> None:
+        entry = _entry(oauth_client_id="client-1", oauth_client_secret_encrypted="sealed")
+
+        discarded = await catalog.update_entry(_Db(), entry, {"sort_order": 2})
+
+        assert discarded == {}
+        assert entry.oauth_client_id == "client-1"
+        assert entry.oauth_client_secret_encrypted == "sealed"
 
     async def test_a_url_already_offered_is_refused_before_the_entry_changes(self) -> None:
         entry = _entry()

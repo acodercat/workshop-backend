@@ -153,6 +153,36 @@ def test_moving_off_oauth_clears_the_scope() -> None:
     assert _audit(db).payload["oauth_scope"] == {"from": "read write", "to": None}
 
 
+def test_moving_off_oauth_ends_the_preregistered_app_and_audits_its_id() -> None:
+    """The app is a client secret; kept on an entry that cannot use it, it
+    is a credential nobody is watching. The trail names the app that was
+    held by its client id, and carries nothing of the secret."""
+    entry = _entry(oauth_client_id="client-1", oauth_client_secret_encrypted="sealed")
+    db = _FakeDb(entry)
+
+    response = _patch(db, auth_type="NONE")
+
+    assert entry.oauth_client_id is None
+    assert entry.oauth_client_secret_encrypted is None
+    payload = _audit(db).payload
+    assert payload["cleared_oauth_client_id"] == "client-1"
+    assert "sealed" not in str(payload)
+    assert response.json()["has_preregistered_client"] is False
+
+
+def test_a_scope_sent_with_a_move_off_oauth_records_no_change() -> None:
+    """The edit sets a scope the move off OAUTH then clears; on an entry
+    that had none, the scope ends where it started, and the trail says
+    nothing about it."""
+    entry = _entry(oauth_scope=None)
+    db = _FakeDb(entry)
+
+    _patch(db, auth_type="NONE", oauth_scope="read")
+
+    assert entry.oauth_scope is None
+    assert "oauth_scope" not in _audit(db).payload
+
+
 def test_staying_on_oauth_keeps_the_scope() -> None:
     entry = _entry(oauth_scope="read write")
     db = _FakeDb(entry)

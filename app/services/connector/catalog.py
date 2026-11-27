@@ -5,9 +5,9 @@ Two sides of ``mcp_server_catalog``. The customer surface reads what is
 published and instantiates an entry. The console and the operator script
 manage the entries through :func:`create_entry` and :func:`update_entry`,
 which hold the rules an entry keeps whoever writes it — one entry per URL,
-a category that exists, no locale map or OAuth scope outliving the thing
-it described. Neither commits: the console's audit owns its transaction,
-and the script its own.
+a category that exists, no locale map outliving the text it translated,
+and nothing that only OAuth uses on an entry that is not OAUTH. Neither
+commits: the console's audit owns its transaction, and the script its own.
 
 Instantiating **copies** the template onto a new user-owned ``mcp_server`` row
 rather than referencing it live. That is what keeps a Connector working after
@@ -62,7 +62,9 @@ async def create_entry(
     """Add a catalog entry and flush it, so it has its id.
 
     Unpublished unless said otherwise, so an operator can check the URL and
-    icon render before users see it. Raises
+    icon render before users see it. A scope given for an entry that is not
+    OAUTH is not stored: see :func:`update_entry` for why none may sit
+    there. Raises
     :class:`ConnectorCatalogUrlTakenError` for a URL the catalog already
     offers and :class:`CategoryNotFoundError` for a category it does not
     hold.
@@ -77,7 +79,7 @@ async def create_entry(
         description=description,
         description_i18n=description_i18n,
         icon_url=icon_url,
-        oauth_scope=oauth_scope,
+        oauth_scope=oauth_scope if auth_type is MCPServerAuthType.OAUTH else None,
         published=published,
         sort_order=sort_order,
         category_id=category_id,
@@ -92,9 +94,12 @@ async def update_entry(
 ) -> dict[str, Any]:
     """Write *fields* onto *entry*, and clear what the edit leaves stale.
 
-    Returns the columns it cleared that the caller did not name, each with
-    the value it held — the only copy left of it, which is why the console
-    puts them in its audit payload.
+    Returns what it discarded that the edit cannot put back — a locale map,
+    the pre-registered app's client id — each with the value it held: the
+    only copy left of it, which is why the console puts them in its audit
+    payload. The secret goes with its client id and is never returned. A
+    cleared scope is not among them: it is a column the edit sets, and
+    reads as one afterwards.
 
     Editing the URL can collide: the URL is the entry's identity and it is
     editable, so this checks the same thing :func:`create_entry` does.
@@ -104,6 +109,12 @@ async def update_entry(
     invariant is kept here rather than asked of the caller. Left behind it
     would reappear the day someone switches the entry back to OAUTH, and be
     copied onto every Connector made from it in between.
+
+    **So is the platform's pre-registered OAuth app**, and it goes the same
+    way for a stronger reason: it is a client secret, and one kept on an
+    entry that cannot use it is a credential nobody is watching. An entry
+    switched back to OAUTH registers dynamically until an operator seeds
+    the app again (``scripts/manage_connector_catalog.py set-oauth-client``).
 
     **Clearing a locale map is not optional** — see the invalidation rule
     in :mod:`app.services.localized_text`. Left behind it would be
@@ -120,9 +131,6 @@ async def update_entry(
         await _assert_url_free(db, url)
     await _assert_category_exists(db, fields.get("category_id"))
 
-    # Read before the writes: what the entry loses is its value from before
-    # this edit, not one the edit itself carried.
-    previous_scope = entry.oauth_scope
     reworded = [
         locale_map
         for column, locale_map in _LOCALIZED_FIELDS
@@ -132,16 +140,19 @@ async def update_entry(
     for column, value in fields.items():
         setattr(entry, column, value)
 
-    cleared: dict[str, Any] = {}
-    if entry.auth_type is not MCPServerAuthType.OAUTH and entry.oauth_scope:
-        cleared["oauth_scope"] = previous_scope
+    discarded: dict[str, Any] = {}
+    if entry.auth_type is not MCPServerAuthType.OAUTH:
         entry.oauth_scope = None
+        if entry.oauth_client_id is not None:
+            discarded["oauth_client_id"] = entry.oauth_client_id
+            entry.oauth_client_id = None
+            entry.oauth_client_secret_encrypted = None
     for locale_map in reworded:
         stale = getattr(entry, locale_map)
         if stale is not None:
-            cleared[locale_map] = stale
+            discarded[locale_map] = stale
             setattr(entry, locale_map, None)
-    return cleared
+    return discarded
 
 
 async def list_published(db: AsyncSession) -> list[MCPServerCatalogEntry]:

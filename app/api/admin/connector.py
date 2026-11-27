@@ -160,8 +160,7 @@ async def update_catalog_entry(
     if "category_id" in body.model_fields_set:
         fields["category_id"] = body.category_id
 
-    changes = field_changes(entry, fields)
-    if not changes:
+    if not field_changes(entry, fields):
         return _to_catalog_response(entry)
 
     async with audit(
@@ -170,24 +169,30 @@ async def update_catalog_entry(
         target_type="connector_catalog",
         target_id=entry.id,
     ) as draft:
-        cleared = await catalog.update_entry(ctx.db, entry, fields)
-        # A scope the edit cleared is a change to a column the request may
-        # also have named, so it is recorded as one, from the value the
-        # entry held before.
-        if "oauth_scope" in cleared:
-            changes["oauth_scope"] = {"from": cleared.pop("oauth_scope"), "to": None}
+        # Recorded from what the edit did, not what it asked: the columns it
+        # named, and the scope ``update_entry`` clears when the entry leaves
+        # OAUTH, read before and after the write.
+        before = {
+            column: getattr(entry, column) for column in dict.fromkeys([*fields, "oauth_scope"])
+        }
+        discarded = await catalog.update_entry(ctx.db, entry, fields)
+        changes = {
+            column: {"from": value, "to": getattr(entry, column)}
+            for column, value in before.items()
+            if getattr(entry, column) != value
+        }
         # ``entry_name`` rather than ``name``: unlike a skill's, this
         # name is editable, so under one key the label and the
         # before → after entry would overwrite each other and the key
         # would hold a string on some rows and a diff on others.
         #
-        # A discarded locale map goes in whole, since unlike a skill's
-        # (which its bundle re-supplies) this one is hand-curated and the
-        # trail is the only copy left.
+        # What the edit discarded goes in whole: unlike a skill's locale map,
+        # which its bundle re-supplies, these are hand-curated and the trail
+        # is the only copy left.
         draft.payload = {
             "entry_name": entry.name,
             **changes,
-            **{f"cleared_{column}": value for column, value in cleared.items()},
+            **{f"cleared_{column}": value for column, value in discarded.items()},
         }
 
     await ctx.db.refresh(entry)

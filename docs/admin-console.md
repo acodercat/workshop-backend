@@ -479,7 +479,10 @@ masked, absent — so a later "just add the column" can't leak one.
 `has_preregistered_client` reports *whether* the platform holds an OAuth
 app, never any part of it. Seeding those apps stays in
 `scripts/manage_connector_catalog.py`, which is what lets the console
-handle no secrets at all. `tests/test_admin_connector_secrets.py` pins
+handle no secrets at all. The console can still end one: an edit that
+moves an entry off `OAUTH` clears its app along with its scope, and the
+audit row records the client id it held (`cleared_oauth_client_id`), never
+the secret. `tests/test_admin_connector_secrets.py` pins
 this against the ORM's real column list, so a *new* secret column fails
 the test until someone decides it's safe.
 
