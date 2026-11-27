@@ -9,8 +9,8 @@ Two entry points over one funnel:
   skill with no owner (``POST /skills`` on the console, and
   ``scripts/upload_skill.py``).
 
-Both validate the bytes, normalize wrapper zips, upload to OSS and write
-the row, compensating the OSS upload if the DB write fails. They differ
+Both run :func:`_parse_payload` over the bytes, upload what comes out to
+OSS and write the row, compensating the OSS upload if the DB write fails. They differ
 only in what the repo already says they differ in: ownership, the quota,
 where the object lands, and whether a same-named row is a conflict or
 the thing being replaced.
@@ -90,26 +90,7 @@ async def register_skill_bundle(
     explicit composer pick, which consults the listing's status but not
     the user's toggle.
     """
-    ext = _canonical_ext(filename)
-    is_zip = ext == ".zip"
-    if len(data) > SKILL_POLICY.max_bytes:
-        raise SkillBundleTooLargeError(
-            f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
-        )
-
-    # Validate structure (zip-bomb, path traversal, symlinks) **before**
-    # any path that decompresses entry bytes, then parse SKILL.md. The
-    # whole block is CPU-bound (zip header inspection, an in-memory repack
-    # for wrapper bundles, a UTF-8 decode) and runs on a worst-case
-    # ``SKILL_POLICY.max_bytes`` (50 MiB) input, so it goes through
-    # ``asyncio.to_thread`` — otherwise a single large bundle would stall
-    # the event loop (and with it every SSE stream / enqueue on this
-    # process) for the duration of the unpack.
-    data, parsed = await asyncio.to_thread(
-        _validate_and_parse,
-        data,
-        is_zip=is_zip,
-    )
+    data, parsed, ext = await _parse_payload(filename, data)
 
     await _enforce_user_quota(db, user_id)
 
@@ -189,13 +170,15 @@ async def register_platform_skill_bundle(
     **Flushes but does not commit** — the console's caller is inside
     ``audit()``, which owns the commit so the bundle and its audit row
     land in one transaction. A flush failure compensates the OSS upload
-    and re-raises; a failure in the caller's *commit* leaves the object
+    and re-raises, leaving the rollback to that caller like every other
+    failure; a failure in the caller's *commit* leaves the object
     for bucket lifecycle to collect, which is the accepted trade (the
     alternative is deleting an object a concurrent turn may be staging).
 
     The previous bundle object is **left in OSS** on a replace, for that
-    same staging reason. The caller records the replaced key in its
-    audit payload, which is what makes an unwanted version recoverable.
+    same staging reason. Its key is returned and logged here, and the
+    console records it in its audit payload, which is what makes an
+    unwanted version recoverable.
 
     **Shipping a bundle is a content change.** A replace leaves the
     listing's ``status`` and every user's preference where they were, so
@@ -210,8 +193,9 @@ async def register_platform_skill_bundle(
     uploading is not publishing, and the one thing an upload cannot undo
     is having been visible — and ``publish=True`` says to go live, on a
     new row or an existing one alike. Without that second half, a
-    deployment whose only publish path is this script (hkgai has no
-    console) could stage a listing and never get it live.
+    deployment with no console, whose only publish path is
+    ``scripts/upload_skill.py``, could stage a listing and never get it
+    live.
 
     ``category_id`` is tri-state: ``None`` leaves the row alone, so
     re-uploading a bundle keeps the tab an operator filed it under. It
@@ -223,17 +207,7 @@ async def register_platform_skill_bundle(
     if origin is SkillOrigin.CUSTOM:
         raise ValueError("CUSTOM skills are owned by a user; use register_skill_bundle")
 
-    ext = _canonical_ext(filename)
-    is_zip = ext == ".zip"
-    if len(data) > SKILL_POLICY.max_bytes:
-        raise SkillBundleTooLargeError(
-            f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
-        )
-    data, parsed = await asyncio.to_thread(
-        _validate_and_parse,
-        data,
-        is_zip=is_zip,
-    )
+    data, parsed, ext = await _parse_payload(filename, data)
 
     # Looked up before the upload so a failure here costs no OSS object.
     skill = await db.scalar(select(Skill).where(Skill.user_id.is_(None), Skill.name == parsed.name))
@@ -276,20 +250,44 @@ async def register_platform_skill_bundle(
     try:
         await db.flush()
     except Exception:
-        await db.rollback()
         await _best_effort_delete_oss(bundle_key)
         raise
 
     logger.info(
-        "platform skill %s: id=%s origin=%s name=%r size=%d status=%s",
+        "platform skill %s: id=%s origin=%s name=%r size=%d status=%s replaced_key=%s",
         "replaced" if replaced_key else "registered",
         skill.id,
         origin.value,
         skill.name,
         skill.bundle_size,
         skill.status.value,
+        replaced_key,
     )
     return skill, replaced_key
+
+
+async def _parse_payload(filename: str, data: bytes) -> tuple[bytes, ParsedSkill, str]:
+    """Everything every upload path does to the bytes before touching anything.
+
+    Returns the (possibly repacked) bundle, its parsed metadata and the
+    canonical extension. Nothing is stored and nothing is read from the
+    database, so every refusal in here — wrong extension, oversize,
+    hostile archive, no ``SKILL.md`` — costs one thread and no cleanup.
+
+    The parse is CPU-bound (zip header inspection, an in-memory repack
+    for wrapper bundles, a UTF-8 decode) on a worst-case
+    ``SKILL_POLICY.max_bytes`` input, so it goes through
+    :func:`asyncio.to_thread`: run inline, one large bundle would stall
+    the event loop, and with it every SSE stream and enqueue on this
+    process, for the duration of the unpack.
+    """
+    ext = _canonical_ext(filename)
+    if len(data) > SKILL_POLICY.max_bytes:
+        raise SkillBundleTooLargeError(
+            f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
+        )
+    data, parsed = await asyncio.to_thread(_validate_and_parse, data, is_zip=ext == ".zip")
+    return data, parsed, ext
 
 
 def _canonical_ext(filename: str) -> str:

@@ -8,6 +8,9 @@ import io
 import zipfile
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from app.models.skill import SkillOrigin
 from app.services import skill_registration
 
 
@@ -39,3 +42,35 @@ async def test_dot_skill_upload_parsed_as_zip_and_stored_as_zip(monkeypatch):
 
     assert skill.name == "renamed"  # parsed via the zip path, not as bare md
     assert captured["key"].endswith("/renamed.zip")  # canonicalized to .zip
+
+
+class _FlushFails:
+    """A session whose flush fails. It has no ``rollback``: the transaction
+    is the caller's, so the service reaching for one fails the test."""
+
+    def add(self, row: object) -> None:
+        pass
+
+    async def scalar(self, statement: object) -> None:
+        return None  # the platform name is free
+
+    async def flush(self) -> None:
+        raise RuntimeError("flush failed")
+
+
+async def test_a_platform_flush_failure_removes_the_upload_and_leaves_the_rollback(monkeypatch):
+    uploaded: list[str] = []
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        skill_registration.file_storage, "upload", lambda policy, key, data: uploaded.append(key)
+    )
+    monkeypatch.setattr(
+        skill_registration, "_best_effort_delete_oss", AsyncMock(side_effect=deleted.append)
+    )
+
+    with pytest.raises(RuntimeError, match="flush failed"):
+        await skill_registration.register_platform_skill_bundle(
+            _FlushFails(), origin=SkillOrigin.OFFICIAL, filename="pdf.zip", data=_skill_zip("pdf")
+        )
+
+    assert uploaded and deleted == uploaded
