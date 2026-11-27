@@ -380,7 +380,7 @@ transaction. That is the general rule for any service the console
 calls. The script stays as the path that still works when the console
 is down or an operator has only SSH; bulk re-packaging remains
 `scripts/replace_platform_skill_bundles.py`, which is a different job
-(dry-run first, curated metadata preserved).
+(dry-run first, curated metadata preserved) over the same service.
 
 ### Connectors (`app/api/admin/connector.py`)
 

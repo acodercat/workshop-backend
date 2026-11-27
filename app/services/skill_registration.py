@@ -6,14 +6,14 @@ Two entry points over one funnel:
 - :func:`register_skill_bundle` — a user's own ``CUSTOM`` skill
   (``POST /skills`` on the public surface).
 - :func:`register_platform_skill_bundle` — a ``SYSTEM``/``OFFICIAL``
-  skill with no owner (``POST /skills`` on the console, and
-  ``scripts/upload_skill.py``).
+  skill with no owner (``POST /skills`` on the console, and the operator
+  scripts that ship bundles).
 
-Both run :func:`_parse_payload` over the bytes, upload what comes out to
-OSS and write the row, compensating the OSS upload if the DB write fails. They differ
-only in what the repo already says they differ in: ownership, the quota,
-where the object lands, and whether a same-named row is a conflict or
-the thing being replaced.
+Both run :func:`parse_payload` over the bytes, upload what comes out to
+OSS and write the row, compensating the OSS upload if the DB write fails.
+They differ only in what the repo already says they differ in: ownership,
+the quota, where the object lands, and whether a same-named row is a
+conflict or the thing being replaced.
 
 Pure byte-level validation lives in :mod:`app.services.skill_bundle`;
 this module owns the DB + OSS side effects so endpoints stay thin
@@ -89,7 +89,7 @@ async def register_skill_bundle(
     explicit composer pick, which consults the listing's status but not
     the user's toggle.
     """
-    data, parsed, ext = await _parse_payload(filename, data)
+    data, parsed, ext = await parse_payload(filename, data)
 
     await _enforce_user_quota(db, user_id)
 
@@ -150,6 +150,7 @@ async def register_platform_skill_bundle(
     data: bytes,
     publish: bool = False,
     category_id: int | None = None,
+    keep_listing: bool = False,
 ) -> tuple[Skill, str | None]:
     """Register (or replace) a platform skill bundle.
 
@@ -201,12 +202,17 @@ async def register_platform_skill_bundle(
     has no per-origin default — a new skill is simply uncategorised
     until someone files it.
 
+    ``keep_listing`` ships new bytes under the listing the row already has:
+    ``display_name`` / ``display_name_i18n`` / ``description`` stay as an
+    operator curated them instead of being read from ``SKILL.md``, as every
+    console upload reads them.
+
     Raises the same typed kinds the user path does.
     """
     if origin is SkillOrigin.CUSTOM:
         raise ValueError("CUSTOM skills are owned by a user; use register_skill_bundle")
 
-    data, parsed, ext = await _parse_payload(filename, data)
+    data, parsed, ext = await parse_payload(filename, data)
 
     # Looked up before the upload so a failure here costs no OSS object.
     skill = await db.scalar(select(Skill).where(Skill.user_id.is_(None), Skill.name == parsed.name))
@@ -236,9 +242,10 @@ async def register_platform_skill_bundle(
         # skill its user can see" true rather than merely usual.
         await skill_enablement.clear_for_skill(db, skill.id)
     skill.origin = origin
-    skill.display_name = parsed.display_name
-    skill.display_name_i18n = parsed.display_name_i18n
-    skill.description = parsed.description
+    if not keep_listing:
+        skill.display_name = parsed.display_name
+        skill.display_name_i18n = parsed.display_name_i18n
+        skill.description = parsed.description
     skill.bundle_key = bundle_key
     skill.bundle_size = len(data)
     if category_id is not None:
@@ -263,13 +270,14 @@ async def register_platform_skill_bundle(
     return skill, replaced_key
 
 
-async def _parse_payload(filename: str, data: bytes) -> tuple[bytes, ParsedSkill, str]:
+async def parse_payload(filename: str, data: bytes) -> tuple[bytes, ParsedSkill, str]:
     """Everything every upload path does to the bytes before touching anything.
 
     Returns the (possibly repacked) bundle, its parsed metadata and the
     canonical extension. Nothing is stored and nothing is read from the
     database, so every refusal in here — wrong extension, oversize,
-    hostile archive, no ``SKILL.md`` — costs one thread and no cleanup.
+    hostile archive, no ``SKILL.md`` — costs one thread and no cleanup,
+    which also makes it what a script's dry run calls.
 
     The parse is CPU-bound (zip header inspection, an in-memory repack
     for wrapper bundles, a UTF-8 decode) on a worst-case

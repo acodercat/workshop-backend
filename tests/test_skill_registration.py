@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.models.skill import SkillOrigin
+from app.models.skill import Skill, SkillOrigin, SkillStatus
 from app.services import skill_registration
 
 
@@ -74,3 +74,41 @@ async def test_a_platform_flush_failure_removes_the_upload_and_leaves_the_rollba
         )
 
     assert uploaded and deleted == uploaded
+
+
+async def test_keep_listing_keeps_a_curated_listing_over_the_bundles(monkeypatch):
+    """New bytes under a listing an operator curated: the bundle supplies
+    the object, the named row supplies what users read."""
+    monkeypatch.setattr(skill_registration.file_storage, "upload", lambda policy, key, data: None)
+    existing = Skill(
+        user_id=None,
+        origin=SkillOrigin.OFFICIAL,
+        name="pdf",
+        display_name="PDF toolkit",
+        display_name_i18n={"zh": "PDF 工具"},
+        description="Curated by an operator.",
+        bundle_key="official/pdf/old/pdf.zip",
+        bundle_size=1,
+        status=SkillStatus.PUBLISHED,
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=existing)
+    db.flush = AsyncMock()
+
+    skill, replaced_key = await skill_registration.register_platform_skill_bundle(
+        db,
+        origin=SkillOrigin.OFFICIAL,
+        filename="pdf.zip",
+        data=_skill_zip("pdf"),
+        keep_listing=True,
+    )
+
+    assert skill is existing
+    assert replaced_key == "official/pdf/old/pdf.zip"
+    assert skill.bundle_key != replaced_key
+    assert (skill.display_name, skill.display_name_i18n, skill.description) == (
+        "PDF toolkit",
+        {"zh": "PDF 工具"},
+        "Curated by an operator.",
+    )
+    assert skill.status is SkillStatus.PUBLISHED
