@@ -4,7 +4,8 @@
   skills hidden from users entirely.
 - ``POST  /skills``            — upload a platform bundle (new or a new
   version of one that exists).
-- ``PATCH /skills/{id}``       — flip a skill's platform-wide default.
+- ``PATCH /skills/{id}``       — edit a skill's picker metadata or category,
+  or move it through its lifecycle (``status``).
 - ``GET   /skills/{id}/download-url`` — presigned GET for a **platform**
   bundle.
 

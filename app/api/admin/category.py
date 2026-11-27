@@ -169,9 +169,9 @@ async def _update(
     # ``_name_fields`` exists to prevent.
     fields = body.model_dump(exclude_none=True, exclude={"name", "name_i18n"})
     fields |= _name_fields(row.name, body)
-    # Raw values, not ``str()`` as the catalog's edit does: every column
-    # here is JSON-native, and ``str()`` on ``name_i18n`` would put a
-    # Python repr of the map into a JSONB payload someone has to grep.
+    # Raw values: every column here is JSON-native, and ``str()`` on
+    # ``name_i18n`` would put a Python repr of the map into a JSONB payload
+    # someone has to grep.
     changes = {
         field: {"from": getattr(row, field), "to": value}
         for field, value in fields.items()

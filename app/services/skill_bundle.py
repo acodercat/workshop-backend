@@ -7,7 +7,7 @@ the common "github download" wrapper) plus optional ``scripts/`` /
 
 This module is the **registration-time** validator: it answers
 "is this zip a legal skill bundle and what's its name + description?"
-so :mod:`app.api.public.skill` can decide to write the row.
+so :mod:`app.services.skill_registration` can decide to write the row.
 
 Refusals raise :mod:`app.errors` types directly, as every other service
 does — and a different type per thing the uploader would do next, so the

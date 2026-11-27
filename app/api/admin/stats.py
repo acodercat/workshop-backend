@@ -1,4 +1,4 @@
-"""Dashboard aggregates over the credit ledger.
+"""Dashboard aggregates: credits, check-ins, accounts, conversations, tokens.
 
 - ``GET /stats/credits``          — tiles, daily series, spend by model.
 - ``GET /stats/user-activity``     — the spend ranking, ``order`` picks which.

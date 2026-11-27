@@ -2,7 +2,7 @@
 read-only view of what users have configured.
 
 - ``GET   /connector-catalog``       — every entry, published or not.
-- ``POST  /connector-catalog``       — publish a new one.
+- ``POST  /connector-catalog``       — add one, unpublished by default.
 - ``PATCH /connector-catalog/{id}``  — edit / publish / reorder.
 - ``GET   /connectors``              — users' own Connectors, read-only.
 
