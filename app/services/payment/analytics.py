@@ -21,8 +21,7 @@ from datetime import date, datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.business_time import business_days, window_start
-from config import settings
+from app.common.business_time import business_days, business_tz, window_start
 
 _PAID_ROWS = "status = 'PAID'"
 
@@ -108,7 +107,7 @@ async def _daily_revenue(db: AsyncSession, *, since: datetime, days: int) -> lis
             WHERE {_PAID_ROWS} AND created_at >= :since
             GROUP BY day
             """),
-            {"since": since, "tz": settings.checkin_timezone},
+            {"since": since, "tz": business_tz().key},
         )
     ).all()
 
