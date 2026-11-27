@@ -19,7 +19,7 @@ buckets that must NOT be synced from metaseq:
    STANDARD=glm-5.2, ADVANCED=deepseek-v4-pro** (metaseq uses FAST=glm-5.2, etc.). Pricing in
    `credit_rates` must have an entry for every whitelisted model (incl. `glm-5.1`).
 3. **Brand + deploy** — "HKGAI Agent" / 香港生成式人工智能研发中心 wherever they appear;
-   `scripts/deploy.sh` (hkgai uvicorn worker count), `scripts/seed_users.py` (hkgai dev seed).
+   `scripts/deploy.sh` (hkgai uvicorn worker count).
    OSS buckets / domains are `.env`-driven (Huawei OBS `agent-workshop-*` / `.hkgai.net`), so
    `config.py`'s metaseq-flavored defaults are harmless — env overrides at runtime.
 
@@ -122,8 +122,13 @@ committed the console's routers and `import app.admin_main` started to
 work: `payment` is gone from its imports and its `include_router`. The
 admin-import probe in the table is what catches it coming back.
 
-### `scripts/seed_users.py`, `scripts/deploy.sh`
+### `scripts/deploy.sh`
 Keep hkgai's (`--ours`).
+
+### `scripts/seed_users.py`
+Deleted on the branch that signs in through Meeting (`office`): it inserted password accounts, and an
+account is now created only by a first sign-in through Meeting
+(`app/services/identity/provisioning.py`). If a merge brings it back, delete it again.
 
 ### `CLAUDE.md`
 Take metaseq's flow description, but swap the email transport back to SMTP / Lark Suite
@@ -408,7 +413,8 @@ git branch -d sync/metaseq-master-<date>
 1. `config.py` (email + model/tier + new fields — every merge that touches config)
 2. `app/services/email/*`, `pyproject.toml`, `uv.lock` (SMTP vs Aliyun)
 3. `app/services/{redis,user/events,user/hub,skill_bundle}.py`, `app/main.py` (parallel infra)
-4. `scripts/seed_users.py`, `scripts/deploy.sh`
+4. `scripts/deploy.sh`; `scripts/seed_users.py` — deleted here, so an edit to it arrives as a
+   modify/delete conflict; resolve `git rm`
 5. `CLAUDE.md`
 6. Anything under `app/services/payment/` or `app/services/commission/` on metaseq — arrives as a
    modify/delete conflict; resolve `git rm`

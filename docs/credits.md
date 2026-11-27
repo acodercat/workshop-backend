@@ -865,5 +865,4 @@ deferred — see [`credits-future.md`](credits-future.md):
 | Rate card config | `config.py::Settings.credit_*` keys |
 | Migrations | `alembic/versions/9e3a8b714f02_*` (V1 schema), `b1c7e29f4d8a_*` (cosmetic drift fix), `c2f4a8d1e9b3_*` (V2 token columns), `d8f3b2e6a1c9_*` (V3 organization) |
 | Admin top-up script | `scripts/topup_credits.py` |
-| User seed script (creates personal orgs too) | `scripts/seed_users.py` |
 | E2E test fixture | `tests/conftest.py::test_user` |

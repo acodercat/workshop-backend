@@ -184,6 +184,23 @@ async def test_meeting_not_answering_is_not_a_sign_out(response) -> None:
             await provider.verify(MeetingSession("p", "d"), timeout=1)
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"user_info": {"user_id": "42", "email": "a@example.com"}},
+        {"account_id": "42", "email": "a@example.com"},
+        {"user_info": {"account_id": ""}},
+    ],
+)
+async def test_only_meetings_account_id_names_the_account(data) -> None:
+    # The account id is the subject a local account is filed under. Another
+    # id-shaped field, or the same one somewhere else in the payload, must
+    # not be taken for it: that would sign the user in as a new account.
+    async with _provider(lambda r: _ok(data)) as provider:
+        with pytest.raises(IdentityProviderUnavailableError):
+            await provider.verify(MeetingSession("p", "d"), timeout=1)
+
+
 async def test_a_transport_failure_is_unavailable() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down")

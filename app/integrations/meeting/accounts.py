@@ -50,17 +50,18 @@ def _first_text(source: dict[str, Any], *keys: str) -> str | None:
 def _account(data: Any) -> MeetingAccount:
     """Read an account out of a ``get_user_info`` payload.
 
-    The payload has been seen both flat and nested under ``user_info``, in
-    snake and camel case, with the display name under several keys — so
-    each field is looked up under every spelling on record instead of the
-    one that happened to be current when this was written. The account id
-    is the only field without which there is no answer at all.
+    The account is ``data.user_info`` and its id is ``account_id`` — one
+    field, read under one name. It is the subject every local account is
+    filed under, so a payload without it is no answer at all: falling back
+    to some other id-shaped field would sign the user in as a new account.
+
+    The display name only describes the account, and Meeting has carried it
+    under several keys, so that one is looked up under each of them.
     """
-    if not isinstance(data, dict):
-        raise MeetingUnavailable("user info is not an object")
-    nested = data.get("user_info") or data.get("userInfo")
-    user = nested if isinstance(nested, dict) else data
-    account_id = _first_text(user, "account_id", "accountId", "user_id", "userId")
+    user = data.get("user_info") if isinstance(data, dict) else None
+    if not isinstance(user, dict):
+        raise MeetingUnavailable("the answer carries no user info")
+    account_id = _first_text(user, "account_id")
     if account_id is None:
         raise MeetingUnavailable("user info names no account")
     email = user.get("email")
