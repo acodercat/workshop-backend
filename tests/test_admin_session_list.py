@@ -16,7 +16,7 @@ from typing import NamedTuple
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.admin import session as admin_session
+from app.api.admin import session as admin_session, session_rows
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_staff
 from app.exception_handlers import install_error_handlers
@@ -97,7 +97,7 @@ def _items(db: _FakeDb, monkeypatch, spend: dict) -> list:
     async def fake_spend(_db, _session_ids):
         return spend
 
-    monkeypatch.setattr(admin_session.analytics, "session_spend", fake_spend)
+    monkeypatch.setattr(session_rows.analytics, "session_spend", fake_spend)
     return _client(db).get("/sessions").json()["items"]
 
 
