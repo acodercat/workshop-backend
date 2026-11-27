@@ -25,7 +25,7 @@ import logging
 import os
 import uuid
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,8 +36,7 @@ from app.errors import (
     SkillQuotaExceededError,
 )
 from app.models.skill import Skill, SkillOrigin, SkillStatus
-from app.models.user_skill_preference import UserSkillPreference
-from app.services import file_storage
+from app.services import file_storage, skill_enablement
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_bundle import (
     ParsedSkill,
@@ -235,9 +234,7 @@ async def register_platform_skill_bundle(
         # them — a SYSTEM skill reaches the model on ``status`` alone).
         # Dropping them is what keeps "a preference row exists only for a
         # skill its user can see" true rather than merely usual.
-        await db.execute(
-            delete(UserSkillPreference).where(UserSkillPreference.skill_id == skill.id)
-        )
+        await skill_enablement.clear_for_skill(db, skill.id)
     skill.origin = origin
     skill.display_name = parsed.display_name
     skill.display_name_i18n = parsed.display_name_i18n
