@@ -18,10 +18,9 @@ catalog. ``message`` is an English developer-facing fallback —
 terse, declarative, no "please ..." imperatives — shown only when
 the client has no localized override.
 
-Subclasses span every domain — auth, credits, payments, commission,
-skills, check-in, sessions. The module lives at ``app/errors.py`` (not
-under any one domain package) precisely so any of them can add typed
-errors here without a circular dependency.
+Subclasses span every domain, one section of this file each. The module
+lives at ``app/errors.py`` (not under any one domain package) precisely so
+any of them can add typed errors here without a circular dependency.
 
 How many kinds is the right number: one per distinct thing the user
 would *do next*, not one per place a check fails. Two conditions that
@@ -32,7 +31,8 @@ vague enough to cover both, which is copy that helps with neither.
 
 To add a new error kind:
 
-1. Add a subclass below with ``status_code`` + ``error_type``.
+1. Add a subclass to its domain's section with ``status_code`` +
+   ``error_type``.
 2. ``raise NewKindError("english fallback")`` from wherever the
    condition is detected. If the localized sentence needs a number to
    be actionable, pass ``details`` and let the class build both from
@@ -45,6 +45,8 @@ To add a new error kind:
 from typing import Any, ClassVar
 
 from fastapi import status
+
+# ── Base ────────────────────────────────────────────────────────────────────
 
 
 class AppError(Exception):
@@ -72,6 +74,9 @@ class AppError(Exception):
         super().__init__(message)
         self.message = message
         self.details = details
+
+
+# ── Sign-in and account ─────────────────────────────────────────────────────
 
 
 class UserAuthenticationError(AppError):
@@ -214,6 +219,65 @@ class SamePasswordError(AppError):
     error_type = "same_password"
 
 
+# ── Console staff ───────────────────────────────────────────────────────────
+
+
+class StaffAuthenticationError(AppError):
+    """The admin console could not identify the caller — absent, malformed,
+    expired, wrongly-scoped or revoked token, or a deactivated account. All
+    of those collapse into this one error on purpose: distinguishing them
+    hands an attacker a probe against the highest-privilege surface in the
+    system. The console reads it as "sign in again"."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "staff_unauthenticated"
+
+
+class StaffCredentialsError(AppError):
+    """Admin-console sign-in failed. A wrong password and a ``DISABLED``
+    account raise the *same* error: a former operator probing the console
+    should not be able to confirm their account still exists."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "staff_invalid_credentials"
+
+
+class StaffNotFoundError(AppError):
+    """No staff account with that id."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "staff_not_found"
+
+
+class StaffUsernameTakenError(AppError):
+    """A staff account with that username already exists. Usernames are the
+    console's login key, so this is a conflict rather than a validation
+    error — the caller picks another, it isn't a malformed request."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "staff_username_taken"
+
+
+class LastActiveStaffError(AppError):
+    """The change would leave the console with no ``ACTIVE`` staff account
+    — a full lockout, recoverable only by someone with database
+    credentials running ``scripts/manage_staff.py``. Add or re-enable
+    another account first."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "staff_last_active"
+
+
+class UserNotFoundError(AppError):
+    """No user account with that id (admin-console lookup)."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "user_not_found"
+
+
+# ── Credits ─────────────────────────────────────────────────────────────────
+
+
 class InsufficientCreditsError(AppError):
     """User's credit balance is below the reservation estimate for
     the requested turn. Surface 402 (the textbook code for "this
@@ -234,6 +298,387 @@ class ModelUnavailableError(AppError):
 
     status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     error_type = "model_unavailable"
+
+
+class AdjustmentAlreadyAppliedError(AppError):
+    """A credit adjustment with this idempotency key was already applied.
+    409 so the console shows "already applied" instead of silently
+    double-granting on a retried form submission."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "adjustment_already_applied"
+
+
+# ── Payments ────────────────────────────────────────────────────────────────
+
+
+class PaymentDisabledError(AppError):
+    """The payment/recharge feature is off (``payment_enabled`` is False
+    or Huifu credentials are unconfigured). 403 so the frontend hides the
+    top-up surface rather than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "payment_disabled"
+
+
+class PaymentAmountRangeError(AppError):
+    """Requested top-up amount is outside ``[payment_min_cny,
+    payment_max_cny]``. A client-side validation guard duplicated in the
+    service layer so it holds regardless of caller."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "payment_amount_range"
+
+
+class OrderNotFoundError(AppError):
+    """No payment order with that id is owned by the caller (or it never
+    existed). Folds the not-owned case into not-found so an order id can't
+    be probed across users."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "order_not_found"
+
+
+class PaymentProviderError(AppError):
+    """The upstream payment provider returned an error / unparseable
+    response when creating or querying an order. 502 so it reads as an
+    upstream failure the client can retry, not a client error."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "payment_provider_error"
+
+
+# ── Commission ──────────────────────────────────────────────────────────────
+
+
+class CommissionDisabledError(AppError):
+    """The referral-commission wallet is off (``commission_enabled`` is
+    False). 403 so the frontend hides the withdraw/convert surface rather
+    than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "commission_disabled"
+
+
+class CommissionAmountRangeError(AppError):
+    """Requested withdrawal / conversion amount is below the configured
+    minimum (or too small to buy a whole credit). A client-side guard
+    duplicated in the service layer so it holds regardless of caller."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "commission_amount_range"
+
+
+class InsufficientCommissionError(AppError):
+    """The withdrawable commission balance can't cover the requested
+    withdrawal / conversion (frozen funds in the settlement hold don't
+    count). 400 — the client should refresh the balance and retry with a
+    smaller amount."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "insufficient_commission"
+
+
+class WithdrawalNotFoundError(AppError):
+    """No withdrawal request with that id is owned by the caller (or it
+    never existed). Folds the not-owned case into not-found so an id can't
+    be probed across users."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "withdrawal_not_found"
+
+
+# ── Check-in ────────────────────────────────────────────────────────────────
+
+
+class CheckInDisabledError(AppError):
+    """Daily check-in is off (``checkin_reward_credits`` is 0). 403 so the
+    frontend hides the check-in surface rather than retrying."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "check_in_disabled"
+
+
+class AlreadyCheckedInError(AppError):
+    """The user already claimed today's check-in. 409 (conflict) — the
+    client refreshes the status and shows the already-claimed state. The
+    double-guard (``check_in`` UNIQUE + ``CHECKIN`` ledger idempotency
+    key) makes this race-safe."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "already_checked_in"
+
+
+# ── Sessions ────────────────────────────────────────────────────────────────
+
+
+class SessionNotFoundError(AppError):
+    """No session with that id that the caller may see.
+
+    On the customer surface that covers soft-deleted sessions and other
+    users' ids too — one answer, so ownership is not leaked. The admin
+    console still finds soft-deleted sessions, so there it fires only for
+    ids that never existed."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "session_not_found"
+
+
+class SessionPinLimitError(AppError):
+    """The caller already has the most pinned sessions allowed. Cleared by
+    unpinning one."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "session_pin_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} pinned sessions; unpin one to pin another.",
+            details={"limit": limit},
+        )
+
+
+class AgentTypeDowngradeError(AppError):
+    """A message send carried a FULL → LITE ``agent_type``. Only the
+    LITE → FULL upgrade exists (a downgrade would strand the session's
+    sandbox and files); the UI never offers it, so this is a client
+    programming error — 400."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "agent_type_downgrade"
+
+
+class UnconfiguredTierError(AppError):
+    """A capability tier resolves to no model this deployment can run —
+    absent from ``settings.session_tier_models``, or naming a model outside
+    ``settings.supported_session_model_ids``. A configuration gap rather
+    than a caller mistake, but one only a request for that tier finds."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "tier_unconfigured"
+
+
+class GenerationInProgressError(AppError):
+    """The session's last turn is still running — refused for a new message
+    and for a delete alike. 409: wait for it, or stop it."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "generation_in_progress"
+
+
+class ConcurrentTaskLimitError(AppError):
+    """The user already has ``settings.max_concurrent_running_tasks`` tasks
+    running. Its own kind rather than a status-derived 429, because the
+    remedy is to let a running task finish or stop it, not to slow down —
+    and the slowapi 429 already owns ``rate_limited``."""
+
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    error_type = "concurrent_task_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} tasks may run at once.",
+            details={"limit": limit},
+        )
+
+
+class SessionIdleError(AppError):
+    """A message was sent to wait in a queue that is not waiting on anything:
+    no turn runs and no queued message is about to go out — the turn ended
+    between the client's last look and this request. 409: nothing is in the
+    way any more, so the message can simply be sent."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "session_idle"
+
+
+class MessageNotFoundError(AppError):
+    """No message with that id in the session — the session itself has
+    already been resolved as the caller's."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "message_not_found"
+
+
+class NotAssistantMessageError(AppError):
+    """Feedback was sent for a message the agent did not write. The UI
+    offers ratings on assistant messages only, so this is a client
+    programming error — 400."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "not_assistant_message"
+
+
+class FeedbackNotFoundError(AppError):
+    """No feedback submission with that id (admin-console lookup)."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "feedback_not_found"
+
+
+class QueuedMessageNotFoundError(AppError):
+    """No waiting message with that id in the session. The usual cause is
+    not a bad id: the message went out, and stopped being a queued one."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "queued_message_not_found"
+
+
+class QueuedMessageLimitError(AppError):
+    """The session's queue is full. Cleared as the queue drains, or by
+    deleting a waiting message."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "queued_message_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} messages may wait in one session.",
+            details={"limit": limit},
+        )
+
+
+class ShareNotFoundError(AppError):
+    """No live share behind that token: never created, revoked, or its
+    session is gone. One type for all of them, because the visitor's next
+    step is the same — ask the owner for a new link."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "share_not_found"
+
+
+# ── Files ───────────────────────────────────────────────────────────────────
+
+
+class FileSizeQuotaExceededError(AppError):
+    """The upload would push the user past their per-user total-size quota
+    (``max_session_files_bytes_per_user``). The individual file is fine on
+    its own; it just doesn't fit the account's remaining storage headroom.
+    The per-file size cap is enforced separately at the schema layer.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_size_quota_exceeded"
+
+
+class FileCountQuotaExceededError(AppError):
+    """The user has hit the per-user file-count backstop
+    (``max_session_files_per_user``)."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_count_quota_exceeded"
+
+
+class FileTooLargeError(AppError):
+    """An object over the policy's per-file cap, whether declared at mint
+    time or measured at bind time. Carries both numbers: the sentence the
+    client renders has to say how far over."""
+
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    error_type = "file_too_large"
+
+    def __init__(self, size_bytes: int, max_bytes: int) -> None:
+        self.size_bytes = size_bytes
+        self.max_bytes = max_bytes
+        super().__init__(
+            f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap",
+            details={"size_bytes": size_bytes, "max_bytes": max_bytes},
+        )
+
+
+class FileNotUploadedError(AppError):
+    """A ``file_key`` with no object behind it — the presigned upload never
+    completed. Raised where the real size is looked up, which is the one
+    moment the object provably exists or does not."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    error_type = "file_not_uploaded"
+
+
+class FileNotInSessionError(AppError):
+    """A ``file_key`` was requested against a session it is not bound to.
+
+    Raised by the download and preview paths. 403 rather than 404: the
+    caller knows the key exists, and a different answer for "no such file"
+    would let the endpoint probe which keys do."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_not_in_session"
+
+
+class FileNotOwnedError(AppError):
+    """A ``file_key`` the caller tried to store is held by another user.
+
+    The guard that keeps a share viewer — who legitimately sees the keys of
+    a shared session's files — from binding one to a session or project of
+    their own, and so from minting download URLs after the share ends."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "file_not_owned"
+
+
+class FileRetentionFailedError(AppError):
+    """Object storage would not take an upload off the orphan-reaping rule.
+
+    Raised only where keeping the file is a precondition of the save: a
+    project file may not be read for weeks, and one still tagged when the
+    ~1-day lifecycle rule runs is deleted underneath a project that reports
+    it added. 502 — the storage service failed, and the same request can
+    simply be sent again."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    error_type = "file_retention_failed"
+
+
+# ── Projects ────────────────────────────────────────────────────────────────
+
+
+class ProjectNotFoundError(AppError):
+    """No live project with that id that the caller owns. One answer for a
+    deleted project, someone else's and one that never existed, so ids are
+    not leaked."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "project_not_found"
+
+
+class ProjectLimitError(AppError):
+    """The caller is at the per-account cap on live projects. Cleared by
+    deleting one."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "project_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} projects per account; delete some to make room.",
+            details={"limit": limit},
+        )
+
+
+class ProjectFileNotFoundError(AppError):
+    """No live file with that id in the project — the project itself has
+    already been resolved as the caller's."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "project_file_not_found"
+
+
+class ProjectFileLimitError(AppError):
+    """The project already holds the most files it may. Counted by name: a
+    new version of a file the project has is never refused."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "project_file_limit"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} files per project; delete some to make room.",
+            details={"limit": limit},
+        )
+
+
+# ── Skills ──────────────────────────────────────────────────────────────────
 
 
 class SkillFileTypeError(AppError):
@@ -333,6 +778,62 @@ class SkillQuotaExceededError(AppError):
 
     status_code = status.HTTP_403_FORBIDDEN
     error_type = "skill_quota_exceeded"
+
+
+class SkillNotFoundError(AppError):
+    """No skill with that id (admin-console lookup — unlike the
+    customer surface, the console sees every origin, so this fires only
+    for ids that never existed)."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "skill_not_found"
+
+
+class PrivateSkillBundleError(AppError):
+    """The console asked for a bundle that is not the platform's.
+
+    403 rather than 404: the row is on the operator's screen, so
+    pretending it does not exist would read as a bug. What is refused is
+    the *bytes* — a ``CUSTOM`` bundle is a user's private file, the same
+    class of thing as a conversation, and the console reads neither.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "private_skill_bundle"
+
+
+class PrivateSkillLifecycleError(AppError):
+    """The console tried to publish or retire a user's own skill.
+
+    The same boundary :class:`PrivateSkillBundleError` draws, one step
+    further in: not only are a ``CUSTOM`` bundle's bytes the user's, so
+    is whether it exists for them. Retiring one would leave it where its
+    owner cannot see, edit, delete or stop paying quota for it, and no
+    surface would explain where it went. 403 for the same reason: the
+    row is on the operator's screen.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    error_type = "private_skill_lifecycle"
+
+
+# ── Categories ──────────────────────────────────────────────────────────────
+
+
+class CategoryNotFoundError(AppError):
+    """No category with that id (admin-console lookup, both taxonomies).
+
+    One error for ``skill_category`` and ``connector_category`` alike: they
+    are separate tables, so passing one's id where the other is expected
+    already lands here, and the operator's next move — pick a real id out of
+    ``GET /{skill,connector}-categories`` — is the same either way. The
+    message names the taxonomy; the type does not need to."""
+
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "category_not_found"
+
+
+# ── Connectors ──────────────────────────────────────────────────────────────
 
 
 class InvalidConnectorUrlError(AppError):
@@ -495,23 +996,6 @@ class OAuthNotConfiguredError(AppError):
     error_type = "oauth_not_configured"
 
 
-class ConnectorNotFoundError(AppError):
-    """No Connector with that id that the caller owns. One answer for both,
-    so the existence of other users' Connectors is not leaked."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "connector_not_found"
-
-
-class ConnectorCatalogEntryNotFoundError(AppError):
-    """No such entry in the official Connector directory — the id is unknown or
-    the entry has been unpublished. 404 rather than 403 for an unpublished one:
-    an unlisted entry should read as absent, not as "exists but withheld"."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "connector_catalog_entry_not_found"
-
-
 class ConnectorOAuthError(AppError):
     """An OAuth step failed — metadata discovery, dynamic client registration,
     or the authorization-code exchange. 502: reads as an upstream/provider
@@ -521,352 +1005,34 @@ class ConnectorOAuthError(AppError):
     error_type = "connector_oauth_failed"
 
 
-class FileSizeQuotaExceededError(AppError):
-    """The upload would push the user past their per-user total-size quota
-    (``max_session_files_bytes_per_user``). The individual file is fine on
-    its own; it just doesn't fit the account's remaining storage headroom.
-    The per-file size cap is enforced separately at the schema layer.
-    """
+class ConnectorNotFoundError(AppError):
+    """No Connector with that id that the caller owns. One answer for both,
+    so the existence of other users' Connectors is not leaked."""
 
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "file_size_quota_exceeded"
+    status_code = status.HTTP_404_NOT_FOUND
+    error_type = "connector_not_found"
 
 
-class FileCountQuotaExceededError(AppError):
-    """The user has hit the per-user file-count backstop
-    (``max_session_files_per_user``)."""
+class ConnectorNotOwnedError(AppError):
+    """A Connector selection named an id the caller does not own.
 
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "file_count_quota_exceeded"
-
-
-class PaymentDisabledError(AppError):
-    """The payment/recharge feature is off (``payment_enabled`` is False
-    or Huifu credentials are unconfigured). 403 so the frontend hides the
-    top-up surface rather than retrying."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "payment_disabled"
-
-
-class PaymentAmountRangeError(AppError):
-    """Requested top-up amount is outside ``[payment_min_cny,
-    payment_max_cny]``. A client-side validation guard duplicated in the
-    service layer so it holds regardless of caller."""
+    Refused rather than dropped: an unknown id is a client bug, and storing
+    it would leave a foreign id bound to this user's session or schedule.
+    400 rather than the 404 a single-Connector path gives, because the id is
+    one of several in a body the client composed and naming the refusal is
+    the useful answer."""
 
     status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "payment_amount_range"
+    error_type = "connector_not_owned"
 
 
-class OrderNotFoundError(AppError):
-    """No payment order with that id is owned by the caller (or it never
-    existed). Folds the not-owned case into not-found so an order id can't
-    be probed across users."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "order_not_found"
-
-
-class PaymentProviderError(AppError):
-    """The upstream payment provider returned an error / unparseable
-    response when creating or querying an order. 502 so it reads as an
-    upstream failure the client can retry, not a client error."""
-
-    status_code = status.HTTP_502_BAD_GATEWAY
-    error_type = "payment_provider_error"
-
-
-class CommissionDisabledError(AppError):
-    """The referral-commission wallet is off (``commission_enabled`` is
-    False). 403 so the frontend hides the withdraw/convert surface rather
-    than retrying."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "commission_disabled"
-
-
-class CommissionAmountRangeError(AppError):
-    """Requested withdrawal / conversion amount is below the configured
-    minimum (or too small to buy a whole credit). A client-side guard
-    duplicated in the service layer so it holds regardless of caller."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "commission_amount_range"
-
-
-class InsufficientCommissionError(AppError):
-    """The withdrawable commission balance can't cover the requested
-    withdrawal / conversion (frozen funds in the settlement hold don't
-    count). 400 — the client should refresh the balance and retry with a
-    smaller amount."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "insufficient_commission"
-
-
-class WithdrawalNotFoundError(AppError):
-    """No withdrawal request with that id is owned by the caller (or it
-    never existed). Folds the not-owned case into not-found so an id can't
-    be probed across users."""
+class ConnectorCatalogEntryNotFoundError(AppError):
+    """No such entry in the official Connector directory — the id is unknown or
+    the entry has been unpublished. 404 rather than 403 for an unpublished one:
+    an unlisted entry should read as absent, not as "exists but withheld"."""
 
     status_code = status.HTTP_404_NOT_FOUND
-    error_type = "withdrawal_not_found"
-
-
-class CheckInDisabledError(AppError):
-    """Daily check-in is off (``checkin_reward_credits`` is 0). 403 so the
-    frontend hides the check-in surface rather than retrying."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "check_in_disabled"
-
-
-class AlreadyCheckedInError(AppError):
-    """The user already claimed today's check-in. 409 (conflict) — the
-    client refreshes the status and shows the already-claimed state. The
-    double-guard (``check_in`` UNIQUE + ``CHECKIN`` ledger idempotency
-    key) makes this race-safe."""
-
-    status_code = status.HTTP_409_CONFLICT
-    error_type = "already_checked_in"
-
-
-class AgentTypeDowngradeError(AppError):
-    """A message send carried a FULL → LITE ``agent_type``. Only the
-    LITE → FULL upgrade exists (a downgrade would strand the session's
-    sandbox and files); the UI never offers it, so this is a client
-    programming error — 400."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "agent_type_downgrade"
-
-
-class GenerationInProgressError(AppError):
-    """The session's last turn is still running — refused for a new message
-    and for a delete alike. 409: wait for it, or stop it."""
-
-    status_code = status.HTTP_409_CONFLICT
-    error_type = "generation_in_progress"
-
-
-class ConcurrentTaskLimitError(AppError):
-    """The user already has ``settings.max_concurrent_running_tasks`` tasks
-    running. Its own kind rather than a status-derived 429, because the
-    remedy is to let a running task finish or stop it, not to slow down —
-    and the slowapi 429 already owns ``rate_limited``."""
-
-    status_code = status.HTTP_429_TOO_MANY_REQUESTS
-    error_type = "concurrent_task_limit"
-
-    def __init__(self, limit: int) -> None:
-        super().__init__(
-            f"At most {limit} tasks may run at once.",
-            details={"limit": limit},
-        )
-
-
-class UnconfiguredTierError(AppError):
-    """A capability tier resolves to no model this deployment can run —
-    absent from ``settings.session_tier_models``, or naming a model outside
-    ``settings.supported_session_model_ids``. A configuration gap rather
-    than a caller mistake, but one only a request for that tier finds."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "tier_unconfigured"
-
-
-class StaffAuthenticationError(AppError):
-    """The admin console could not identify the caller — absent, malformed,
-    expired, wrongly-scoped or revoked token, or a deactivated account. All
-    of those collapse into this one error on purpose: distinguishing them
-    hands an attacker a probe against the highest-privilege surface in the
-    system. The console reads it as "sign in again"."""
-
-    status_code = status.HTTP_401_UNAUTHORIZED
-    error_type = "staff_unauthenticated"
-
-
-class StaffCredentialsError(AppError):
-    """Admin-console sign-in failed. A wrong password and a ``DISABLED``
-    account raise the *same* error: a former operator probing the console
-    should not be able to confirm their account still exists."""
-
-    status_code = status.HTTP_401_UNAUTHORIZED
-    error_type = "staff_invalid_credentials"
-
-
-class StaffNotFoundError(AppError):
-    """No staff account with that id."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "staff_not_found"
-
-
-class StaffUsernameTakenError(AppError):
-    """A staff account with that username already exists. Usernames are the
-    console's login key, so this is a conflict rather than a validation
-    error — the caller picks another, it isn't a malformed request."""
-
-    status_code = status.HTTP_409_CONFLICT
-    error_type = "staff_username_taken"
-
-
-class LastActiveStaffError(AppError):
-    """The change would leave the console with no ``ACTIVE`` staff account
-    — a full lockout, recoverable only by someone with database
-    credentials running ``scripts/manage_staff.py``. Add or re-enable
-    another account first."""
-
-    status_code = status.HTTP_409_CONFLICT
-    error_type = "staff_last_active"
-
-
-class UserNotFoundError(AppError):
-    """No user account with that id (admin-console lookup)."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "user_not_found"
-
-
-class SessionNotFoundError(AppError):
-    """No session with that id that the caller may see.
-
-    On the customer surface that covers soft-deleted sessions and other
-    users' ids too — one answer, so ownership is not leaked. The admin
-    console still finds soft-deleted sessions, so there it fires only for
-    ids that never existed."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "session_not_found"
-
-
-class SessionPinLimitError(AppError):
-    """The caller already has the most pinned sessions allowed. Cleared by
-    unpinning one."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "session_pin_limit"
-
-    def __init__(self, limit: int) -> None:
-        super().__init__(
-            f"At most {limit} pinned sessions; unpin one to pin another.",
-            details={"limit": limit},
-        )
-
-
-class MessageNotFoundError(AppError):
-    """No message with that id in the session — the session itself has
-    already been resolved as the caller's."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "message_not_found"
-
-
-class NotAssistantMessageError(AppError):
-    """Feedback was sent for a message the agent did not write. The UI
-    offers ratings on assistant messages only, so this is a client
-    programming error — 400."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "not_assistant_message"
-
-
-class SessionIdleError(AppError):
-    """A message was sent to wait in a queue that is not waiting on anything:
-    no turn runs and no queued message is about to go out — the turn ended
-    between the client's last look and this request. 409: nothing is in the
-    way any more, so the message can simply be sent."""
-
-    status_code = status.HTTP_409_CONFLICT
-    error_type = "session_idle"
-
-
-class QueuedMessageNotFoundError(AppError):
-    """No waiting message with that id in the session. The usual cause is
-    not a bad id: the message went out, and stopped being a queued one."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "queued_message_not_found"
-
-
-class QueuedMessageLimitError(AppError):
-    """The session's queue is full. Cleared as the queue drains, or by
-    deleting a waiting message."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "queued_message_limit"
-
-    def __init__(self, limit: int) -> None:
-        super().__init__(
-            f"At most {limit} messages may wait in one session.",
-            details={"limit": limit},
-        )
-
-
-class ShareNotFoundError(AppError):
-    """No live share behind that token: never created, revoked, or its
-    session is gone. One type for all of them, because the visitor's next
-    step is the same — ask the owner for a new link."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "share_not_found"
-
-
-class FeedbackNotFoundError(AppError):
-    """No feedback submission with that id (admin-console lookup)."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "feedback_not_found"
-
-
-class SkillNotFoundError(AppError):
-    """No skill with that id (admin-console lookup — unlike the
-    customer surface, the console sees every origin, so this fires only
-    for ids that never existed)."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "skill_not_found"
-
-
-class PrivateSkillBundleError(AppError):
-    """The console asked for a bundle that is not the platform's.
-
-    403 rather than 404: the row is on the operator's screen, so
-    pretending it does not exist would read as a bug. What is refused is
-    the *bytes* — a ``CUSTOM`` bundle is a user's private file, the same
-    class of thing as a conversation, and the console reads neither.
-    """
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "private_skill_bundle"
-
-
-class PrivateSkillLifecycleError(AppError):
-    """The console tried to publish or retire a user's own skill.
-
-    The same boundary :class:`PrivateSkillBundleError` draws, one step
-    further in: not only are a ``CUSTOM`` bundle's bytes the user's, so
-    is whether it exists for them. Retiring one would leave it where its
-    owner cannot see, edit, delete or stop paying quota for it, and no
-    surface would explain where it went. 403 for the same reason: the
-    row is on the operator's screen.
-    """
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "private_skill_lifecycle"
-
-
-class CategoryNotFoundError(AppError):
-    """No category with that id (admin-console lookup, both taxonomies).
-
-    One error for ``skill_category`` and ``connector_category`` alike: they
-    are separate tables, so passing one's id where the other is expected
-    already lands here, and the operator's next move — pick a real id out of
-    ``GET /{skill,connector}-categories`` — is the same either way. The
-    message names the taxonomy; the type does not need to."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "category_not_found"
+    error_type = "connector_catalog_entry_not_found"
 
 
 class ConnectorCatalogUrlTakenError(AppError):
@@ -879,13 +1045,7 @@ class ConnectorCatalogUrlTakenError(AppError):
     error_type = "connector_catalog_url_taken"
 
 
-class AdjustmentAlreadyAppliedError(AppError):
-    """A credit adjustment with this idempotency key was already applied.
-    409 so the console shows "already applied" instead of silently
-    double-granting on a retried form submission."""
-
-    status_code = status.HTTP_409_CONFLICT
-    error_type = "adjustment_already_applied"
+# ── Schedules ───────────────────────────────────────────────────────────────
 
 
 class ScheduleActiveLimitError(AppError):
@@ -972,122 +1132,3 @@ class ScheduleCompletedError(AppError):
 
     def __init__(self) -> None:
         super().__init__("This schedule has already completed; edit its schedule to run it again.")
-
-
-class ProjectNotFoundError(AppError):
-    """No live project with that id that the caller owns. One answer for a
-    deleted project, someone else's and one that never existed, so ids are
-    not leaked."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "project_not_found"
-
-
-class ProjectLimitError(AppError):
-    """The caller is at the per-account cap on live projects. Cleared by
-    deleting one."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "project_limit"
-
-    def __init__(self, limit: int) -> None:
-        super().__init__(
-            f"At most {limit} projects per account; delete some to make room.",
-            details={"limit": limit},
-        )
-
-
-class ProjectFileNotFoundError(AppError):
-    """No live file with that id in the project — the project itself has
-    already been resolved as the caller's."""
-
-    status_code = status.HTTP_404_NOT_FOUND
-    error_type = "project_file_not_found"
-
-
-class ProjectFileLimitError(AppError):
-    """The project already holds the most files it may. Counted by name: a
-    new version of a file the project has is never refused."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "project_file_limit"
-
-    def __init__(self, limit: int) -> None:
-        super().__init__(
-            f"At most {limit} files per project; delete some to make room.",
-            details={"limit": limit},
-        )
-
-
-class FileNotInSessionError(AppError):
-    """A ``file_key`` was requested against a session it is not bound to.
-
-    Raised by the download and preview paths. 403 rather than 404: the
-    caller knows the key exists, and a different answer for "no such file"
-    would let the endpoint probe which keys do."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "file_not_in_session"
-
-
-class FileNotOwnedError(AppError):
-    """A ``file_key`` the caller tried to store is held by another user.
-
-    The guard that keeps a share viewer — who legitimately sees the keys of
-    a shared session's files — from binding one to a session or project of
-    their own, and so from minting download URLs after the share ends."""
-
-    status_code = status.HTTP_403_FORBIDDEN
-    error_type = "file_not_owned"
-
-
-class FileNotUploadedError(AppError):
-    """A ``file_key`` with no object behind it — the presigned upload never
-    completed. Raised where the real size is looked up, which is the one
-    moment the object provably exists or does not."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "file_not_uploaded"
-
-
-class FileTooLargeError(AppError):
-    """An object over the policy's per-file cap, whether declared at mint
-    time or measured at bind time. Carries both numbers: the sentence the
-    client renders has to say how far over."""
-
-    status_code = status.HTTP_413_CONTENT_TOO_LARGE
-    error_type = "file_too_large"
-
-    def __init__(self, size_bytes: int, max_bytes: int) -> None:
-        self.size_bytes = size_bytes
-        self.max_bytes = max_bytes
-        super().__init__(
-            f"File too large: {size_bytes} bytes exceeds the {max_bytes}-byte cap",
-            details={"size_bytes": size_bytes, "max_bytes": max_bytes},
-        )
-
-
-class FileRetentionFailedError(AppError):
-    """Object storage would not take an upload off the orphan-reaping rule.
-
-    Raised only where keeping the file is a precondition of the save: a
-    project file may not be read for weeks, and one still tagged when the
-    ~1-day lifecycle rule runs is deleted underneath a project that reports
-    it added. 502 — the storage service failed, and the same request can
-    simply be sent again."""
-
-    status_code = status.HTTP_502_BAD_GATEWAY
-    error_type = "file_retention_failed"
-
-
-class ConnectorNotOwnedError(AppError):
-    """A Connector selection named an id the caller does not own.
-
-    Refused rather than dropped: an unknown id is a client bug, and storing
-    it would leave a foreign id bound to this user's session or schedule.
-    400 rather than the 404 a single-Connector path gives, because the id is
-    one of several in a body the client composed and naming the refusal is
-    the useful answer."""
-
-    status_code = status.HTTP_400_BAD_REQUEST
-    error_type = "connector_not_owned"
