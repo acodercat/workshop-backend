@@ -9,7 +9,6 @@ bucket names.
 """
 
 import asyncio
-import logging
 import os
 import threading
 import uuid
@@ -22,8 +21,6 @@ from app.common.filenames import validate_input_filename
 from app.errors import FileNotUploadedError, FileRetentionFailedError, FileTooLargeError
 from app.schemas.file import UploadUrlResponse
 from config import settings
-
-logger = logging.getLogger(__name__)
 
 
 class FileObjectNotFoundError(ValueError):
