@@ -180,7 +180,7 @@ def test_a_replace_leaves_a_staged_listing_staged() -> None:
 
 
 def test_the_same_name_replaces_and_logs_the_displaced_bundle(caplog) -> None:
-    caplog.set_level("INFO", logger="app.api.admin.skill")
+    caplog.set_level("INFO", logger="app.services.skill_registration")
     existing = _existing_skill()
     db = _FakeDb(existing=existing)
 

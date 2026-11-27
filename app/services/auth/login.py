@@ -7,7 +7,6 @@ unregistered email here raises ``not_registered`` rather than
 auto-creating. The endpoint is a thin adapter over :func:`login_by_code`.
 """
 
-import logging
 from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
@@ -19,8 +18,6 @@ from app.errors import AccountInactiveError, NotRegisteredError
 from app.models.user import User
 from app.schemas.auth import LoggedInResponse
 from app.services.auth.verification import verify_verification_code
-
-logger = logging.getLogger(__name__)
 
 
 async def login_by_code(

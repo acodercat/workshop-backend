@@ -12,15 +12,12 @@ time; it reads settings from ``config.settings`` (``llm_base_url``,
 single short completion.
 """
 
-import logging
 import re
 
 from openai import AsyncOpenAI, OpenAIError
 
 from app.common.text import printable
 from config import settings
-
-logger = logging.getLogger(__name__)
 
 # A defensive cap so a runaway tool call with a giant prompt doesn't
 # blow out the generator. 4k chars is plenty for any reasonable first

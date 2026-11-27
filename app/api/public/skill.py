@@ -22,8 +22,7 @@ from fastapi import (
     Request,
     status,
 )
-from sqlalchemy import exists, func, or_, select, update as sql_update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import exists, or_, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
@@ -38,7 +37,7 @@ from app.models.user_skill_preference import UserSkillPreference
 from app.rate_limit import limiter
 from app.schemas.file import DownloadUrlResponse
 from app.schemas.skill import SkillCategoryResponse, SkillResponse, SkillUpdate
-from app.services import file_storage, localized_text
+from app.services import file_storage, localized_text, skill_enablement
 from app.services.file_storage import SKILL_POLICY
 from app.services.localized_text import DEFAULT_LOCALE, normalize_locale
 from app.services.skill_download import skill_download_url
@@ -258,13 +257,13 @@ async def update_skill(
         await db.execute(sql_update(Skill).where(Skill.id == skill.id).values(**updates))
 
     if body.enabled is not None:
-        await _upsert_preference(db, current_user.id, skill.id, body.enabled)
+        await skill_enablement.set_enabled(db, current_user.id, skill.id, body.enabled)
 
     await db.commit()
     await db.refresh(skill)
     return _to_response(
         skill,
-        enabled=await _preference_enabled(db, current_user.id, skill.id),
+        enabled=await skill_enablement.is_enabled(db, current_user.id, skill.id),
     )
 
 
@@ -398,41 +397,3 @@ async def _get_visible_skill(
             detail="skill not found",
         )
     return skill
-
-
-async def _preference_enabled(db: AsyncSession, user_id: int, skill_id: int) -> bool:
-    """This user's answer for one skill; ``False`` where they never gave one."""
-    return bool(
-        await db.scalar(
-            select(UserSkillPreference.enabled).where(
-                UserSkillPreference.user_id == user_id,
-                UserSkillPreference.skill_id == skill_id,
-            )
-        )
-    )
-
-
-async def _upsert_preference(
-    db: AsyncSession,
-    user_id: int,
-    skill_id: int,
-    enabled: bool,
-) -> None:
-    """Idempotent ``INSERT ... ON CONFLICT`` for the override row.
-
-    ``updated_at`` is bumped explicitly in the conflict branch — the
-    ``onupdate=func.now()`` mapping on the model only fires on ORM
-    UPDATE statements, not on Postgres ``ON CONFLICT DO UPDATE``.
-    """
-    stmt = (
-        pg_insert(UserSkillPreference)
-        .values(user_id=user_id, skill_id=skill_id, enabled=enabled)
-        .on_conflict_do_update(
-            index_elements=[
-                UserSkillPreference.user_id,
-                UserSkillPreference.skill_id,
-            ],
-            set_={"enabled": enabled, "updated_at": func.now()},
-        )
-    )
-    await db.execute(stmt)

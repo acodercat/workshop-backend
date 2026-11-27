@@ -20,9 +20,9 @@ summing every turn-related kind would smear one turn across two days
 whenever it straddles midnight. Counting negative SETTLE rows also makes
 "turns" exact — one settled turn, one row.
 
-**Business days.** Daily buckets are cut in ``settings.checkin_timezone``
-(Asia/Shanghai), not UTC, so "today" means what an operator means by it —
-the same rule the daily check-in already uses.
+**Business days.** Daily buckets are cut in the business timezone
+(:mod:`app.common.business_time`), not UTC, so "today" means what an
+operator means by it — the same rule the daily check-in already uses.
 """
 
 from collections.abc import Sequence
@@ -34,8 +34,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.business_time import business_days, window_start
-from config import settings
+from app.common.business_time import business_days, business_tz, window_start
 
 # The single predicate every spend figure is built on — see the module
 # docstring. Kept as one string so the four queries below cannot drift
@@ -266,7 +265,7 @@ async def _daily_spend(db: AsyncSession, *, since: datetime, days: int) -> list[
             WHERE {_SPEND_ROWS} AND created_at >= :since
             GROUP BY day
             """),
-            {"since": since, "tz": settings.checkin_timezone},
+            {"since": since, "tz": business_tz().key},
         )
     ).all()
 

@@ -9,7 +9,6 @@ bucket names.
 """
 
 import asyncio
-import logging
 import os
 import threading
 import uuid
@@ -22,8 +21,6 @@ from app.common.filenames import validate_input_filename
 from app.errors import FileNotUploadedError, FileRetentionFailedError, FileTooLargeError
 from app.schemas.file import UploadUrlResponse
 from config import settings
-
-logger = logging.getLogger(__name__)
 
 
 class FileObjectNotFoundError(ValueError):
@@ -95,7 +92,7 @@ class UploadPolicy:
     # extension → content-type. For session files this is a *lookup table*,
     # not a gate: an extension missing from it uploads as
     # ``application/octet-stream``. ``SKILL_POLICY`` still treats it as an
-    # allow-list — see ``skill_registration.validate_skill_filename``.
+    # allow-list — see ``skill_registration._canonical_ext``.
     allowed_types: dict[str, str]
 
 

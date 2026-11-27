@@ -17,6 +17,7 @@ from fastapi import APIRouter, Query, status
 from sqlalchemy import func, select
 
 from app.api.admin.dependencies import StaffContext
+from app.api.admin.session_rows import session_responses
 from app.common.pagination import paginate
 from app.errors import AdjustmentAlreadyAppliedError, UserNotFoundError
 from app.models.session import Session
@@ -31,9 +32,8 @@ from app.schemas.admin.user import (
 )
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.credits import CreditsTransactionEntry
-from app.services import credits, session as session_service
+from app.services import credits
 from app.services.admin import AdminContext
-from app.services.credits import analytics
 from app.services.credits.rates import credits_from_micro, micro_from_credits
 
 router = APIRouter(tags=["users"])
@@ -252,30 +252,7 @@ async def list_user_sessions(
         )
     ).all()
 
-    # Two grouped queries for the whole page, not two per row, each
-    # asked of the module that owns the table it reads: usage of the
-    # session domain, money of the ledger's — see ``session_spend`` for
-    # why only a negative SETTLE counts as spend.
-    session_ids = [row.id for row in rows]
-    turns = await session_service.per_session_usage(ctx.db, session_ids)
-    spend_micro = await analytics.session_spend(ctx.db, session_ids)
-
     return PaginatedResponse(
-        items=[
-            SessionResponse(
-                id=row.id,
-                title=row.title,
-                status=row.status,
-                agent_type=row.agent_type,
-                model_id=row.model_id,
-                turn_count=turns.get(row.id, session_service.NO_TURN_USAGE).turn_count,
-                total_tokens=turns.get(row.id, session_service.NO_TURN_USAGE).total_tokens,
-                spent_credits=credits_from_micro(spend_micro.get(row.id, 0)),
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-                deleted_at=row.deleted_at,
-            )
-            for row in rows
-        ],
+        items=await session_responses(ctx.db, rows),
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

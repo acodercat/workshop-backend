@@ -150,6 +150,20 @@ def test_moving_off_oauth_clears_a_scope_sent_in_the_same_request() -> None:
     assert entry.oauth_scope is None
 
 
+def test_moving_off_oauth_ends_the_preregistered_app() -> None:
+    """The app is a client secret; kept on an entry that cannot use it, it
+    is a credential nobody is watching."""
+    entry = _entry(oauth_client_id="client-1", oauth_client_secret_encrypted="sealed")
+    db = _FakeDb(entry)
+
+    response = _patch(db, auth_type="NONE")
+
+    assert entry.oauth_client_id is None
+    assert entry.oauth_client_secret_encrypted is None
+    assert db.commits == 1
+    assert response.json()["has_preregistered_client"] is False
+
+
 def test_staying_on_oauth_keeps_the_scope() -> None:
     entry = _entry(oauth_scope="read write")
     db = _FakeDb(entry)

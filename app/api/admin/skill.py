@@ -4,7 +4,8 @@
   skills hidden from users entirely.
 - ``POST  /skills``            — upload a platform bundle (new or a new
   version of one that exists).
-- ``PATCH /skills/{id}``       — flip a skill's platform-wide default.
+- ``PATCH /skills/{id}``       — edit a skill's picker metadata or category,
+  or move it through its lifecycle (``status``).
 - ``GET   /skills/{id}/download-url`` — presigned GET for a **platform**
   bundle.
 
@@ -24,7 +25,6 @@ object. The script stays as the recovery path for a console that is
 down or an operator who has only SSH.
 """
 
-import logging
 from typing import cast, get_args
 
 import sqlalchemy as sa
@@ -53,7 +53,6 @@ from app.services.skill_download import skill_download_url
 from app.services.skill_registration import register_platform_skill_bundle
 
 router = APIRouter(tags=["skills"])
-logger = logging.getLogger(__name__)
 
 #: Origins whose bundle the console may pull the bytes of. An allowlist,
 #: not ``!= CUSTOM``: this is a privacy boundary, and an origin added
@@ -177,15 +176,10 @@ async def upload_skill(ctx: StaffContext, request: Request) -> SkillResponse:
         data = await read_capped(file, SKILL_POLICY.max_bytes)
         filename = file.filename or "skill.zip"
 
-    skill, replaced_key = await register_platform_skill_bundle(
+    skill, _ = await register_platform_skill_bundle(
         ctx.db, origin=SkillOrigin(origin), filename=filename, data=data
     )
     await ctx.db.commit()
-    if replaced_key is not None:
-        # The version this one displaced: the row no longer points at it,
-        # but the object is still in the bucket. This deployment keeps no
-        # operator trail, so the log line is the only way back to it.
-        logger.info("skill %s: bundle %s replaced %s", skill.name, skill.bundle_key, replaced_key)
 
     # A platform upload has no owner, so neither name column applies.
     await ctx.db.refresh(skill)

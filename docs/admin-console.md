@@ -377,7 +377,7 @@ bundle unwritten. That is the general rule for any service the console
 calls. The script stays as the path that still works when the console
 is down or an operator has only SSH; bulk re-packaging remains
 `scripts/replace_platform_skill_bundles.py`, which is a different job
-(dry-run first, curated metadata preserved).
+(dry-run first, curated metadata preserved) over the same service.
 
 ### Connectors (`app/api/admin/connector.py`)
 
@@ -475,7 +475,10 @@ masked, absent — so a later "just add the column" can't leak one.
 `has_preregistered_client` reports *whether* the platform holds an OAuth
 app, never any part of it. Seeding those apps stays in
 `scripts/manage_connector_catalog.py`, which is what lets the console
-handle no secrets at all. `tests/test_admin_connector_secrets.py` pins
+handle no secrets at all. The console can still end one: an edit that
+moves an entry off `OAUTH` clears its app along with its scope; this
+deployment keeps no operator trail, so the app is gone until an operator
+seeds it again. `tests/test_admin_connector_secrets.py` pins
 this against the ORM's real column list, so a *new* secret column fails
 the test until someone decides it's safe.
 
