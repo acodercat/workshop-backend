@@ -132,6 +132,9 @@ class ScheduleCreate(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=8000)
     recurrence: RecurrenceSpec
     tier: Tier = Tier.STANDARD
+    # Whether each firing's session thinks ("deep think"), on by default as
+    # in a new session.
+    thinking_enabled: bool = True
     # Skill *names*, the same shape the composer sends. Since the worker's
     # listing narrowed to live SYSTEM skills plus the turn's own picks,
     # this is the only way an OFFICIAL or CUSTOM skill reaches a scheduled
@@ -162,6 +165,7 @@ class ScheduleUpdate(BaseModel):
     prompt: str | None = Field(default=None, min_length=1, max_length=8000)
     recurrence: RecurrenceSpec | None = None
     tier: Tier | None = None
+    thinking_enabled: bool | None = None
     # Whole-set replacements, not deltas: the form submits what it wants,
     # and ``None`` means "leave alone" while ``[]`` means "clear". A patch
     # that sent one id at a time would need the two to be distinguishable
@@ -237,6 +241,7 @@ class ScheduleResponse(BaseModel):
     # Assembled by the endpoint, like ``connectors``.
     last_run: ScheduleRunResponse | None = None
     tier: Tier
+    thinking_enabled: bool
     # What each firing will carry. ``skills`` reads straight off the row;
     # ``connectors`` is assembled from ``schedule_mcp_server``.
     skills: list[str]

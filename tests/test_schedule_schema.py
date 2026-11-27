@@ -197,3 +197,15 @@ class TestCarriedContext:
         # its project, and only leaving the field out leaves it alone.
         assert "project_id" not in ScheduleUpdate().model_fields_set
         assert "project_id" in ScheduleUpdate(project_id=None).model_fields_set
+
+
+class TestThinking:
+    def test_a_new_schedule_thinks_unless_told_otherwise(self):
+        # The default a new session has, so a client that never sends the
+        # field keeps the behaviour schedules had before it was a choice.
+        body = ScheduleCreate(prompt="x", recurrence=_spec(ScheduleFrequency.DAILY))
+        assert body.thinking_enabled is True
+
+    def test_update_tells_leave_alone_apart_from_switching_off(self):
+        assert ScheduleUpdate().thinking_enabled is None
+        assert ScheduleUpdate(thinking_enabled=False).thinking_enabled is False
