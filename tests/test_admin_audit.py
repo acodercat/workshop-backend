@@ -11,11 +11,13 @@ a database.
 asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.models.admin_audit_log import AdminAuditLog
 from app.models.staff import Staff, StaffStatus
-from app.services.admin import AdminContext, AuditAction, audit
+from app.services.admin import AdminContext, AuditAction, audit, field_changes
 
 
 class _FakeDb:
@@ -189,3 +191,16 @@ def test_the_trail_carries_no_operator_justification() -> None:
     writer.
     """
     assert "reason" not in AdminAuditLog.__table__.columns
+
+
+def test_field_changes_records_only_the_fields_that_move():
+    row = SimpleNamespace(name="Docs", sort_order=3, name_i18n={"zh": "文档"})
+
+    changes = field_changes(row, {"name": "Guides", "sort_order": 3, "name_i18n": None})
+
+    # Raw values, not ``str()``: a locale map stays a map in the payload.
+    assert changes == {
+        "name": {"from": "Docs", "to": "Guides"},
+        "name_i18n": {"from": {"zh": "文档"}, "to": None},
+    }
+    assert field_changes(row, {"sort_order": 3}) == {}

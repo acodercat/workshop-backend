@@ -50,7 +50,7 @@ from app.schemas.admin.skill import PlatformSkillOrigin, SkillResponse, SkillUpd
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
 from app.schemas.file import DownloadUrlResponse
 from app.services import user as user_service
-from app.services.admin import AuditAction, audit
+from app.services.admin import AuditAction, audit, field_changes
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_download import skill_download_url
 from app.services.skill_registration import register_platform_skill_bundle
@@ -256,11 +256,7 @@ async def update_skill(ctx: StaffContext, skill_id: int, body: SkillUpdate) -> S
     if category_id is not None and await ctx.db.get(SkillCategory, category_id) is None:
         raise CategoryNotFoundError(f"No skill category with id {category_id}.")
 
-    changes = {
-        field: {"from": getattr(skill, field), "to": value}
-        for field, value in fields.items()
-        if getattr(skill, field) != value
-    }
+    changes = field_changes(skill, fields)
     if not changes:
         return _to_skill_response(skill, owner_username, owner_name)
 

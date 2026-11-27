@@ -27,7 +27,7 @@ gets its generated id for ``draft.target_id``.
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -109,6 +109,24 @@ async def audit(
         draft.target_type,
         draft.target_id,
     )
+
+
+def field_changes(row: object, fields: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """The before → after entry of each of *fields* that would move *row*,
+    keyed by column — the shape an edit's audit payload records.
+
+    Read before the edit is applied. A field already at its value is left
+    out: a "changed X from X to X" entry is noise in a trail whose value is
+    that every row means something, and an empty result means the request
+    changes nothing and needs no audit row at all.
+
+    Values are stored raw, so every column passed must be JSON-native.
+    """
+    return {
+        name: {"from": getattr(row, name), "to": value}
+        for name, value in fields.items()
+        if getattr(row, name) != value
+    }
 
 
 def _redact(payload: dict[str, Any]) -> dict[str, Any]:

@@ -30,7 +30,7 @@ accounts live here only because no other module owns them.
 """
 
 from app.services.admin.actions import AuditAction
-from app.services.admin.audit import AuditDraft, audit
+from app.services.admin.audit import AuditDraft, audit, field_changes
 from app.services.admin.context import AdminContext
 
 __all__ = [
@@ -38,4 +38,5 @@ __all__ = [
     "AuditAction",
     "AuditDraft",
     "audit",
+    "field_changes",
 ]

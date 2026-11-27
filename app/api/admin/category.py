@@ -39,7 +39,7 @@ from app.schemas.admin.category import (
     CategoryUpdate,
 )
 from app.services import localized_text
-from app.services.admin import AuditAction, audit
+from app.services.admin import AuditAction, audit, field_changes
 
 router = APIRouter(tags=["categories"])
 
@@ -169,14 +169,7 @@ async def _update(
     # ``_name_fields`` exists to prevent.
     fields = body.model_dump(exclude_none=True, exclude={"name", "name_i18n"})
     fields |= _name_fields(row.name, body)
-    # Raw values: every column here is JSON-native, and ``str()`` on
-    # ``name_i18n`` would put a Python repr of the map into a JSONB payload
-    # someone has to grep.
-    changes = {
-        field: {"from": getattr(row, field), "to": value}
-        for field, value in fields.items()
-        if getattr(row, field) != value
-    }
+    changes = field_changes(row, fields)
     if not changes:
         return CategoryResponse.model_validate(row)
 

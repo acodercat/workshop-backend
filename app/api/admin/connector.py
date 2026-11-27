@@ -39,7 +39,7 @@ from app.schemas.admin.connector import (
     ConnectorResponse,
 )
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.services.admin import AuditAction, audit
+from app.services.admin import AuditAction, audit, field_changes
 
 router = APIRouter(tags=["connectors"])
 
@@ -217,11 +217,7 @@ async def update_catalog_entry(
 
     await _enforce_category_exists(ctx, fields.get("category_id"))
 
-    changes = {
-        field: {"from": getattr(entry, field), "to": value}
-        for field, value in fields.items()
-        if getattr(entry, field) != value
-    }
+    changes = field_changes(entry, fields)
     if not changes:
         return _to_catalog_response(entry)
 
