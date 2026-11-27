@@ -12,10 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException
 
 from app import auth
-from app.errors import IdentityProviderUnavailableError
+from app.errors import IdentityProviderUnavailableError, UserAuthenticationError
 from app.integrations.meeting.transport import MeetingSession
 from app.models.user import UserStatus
 from app.services.identity import credentials, sessions
@@ -255,7 +254,7 @@ async def test_a_live_session_authenticates(monkeypatch) -> None:
 async def test_a_dead_session_is_an_opaque_401(monkeypatch, row) -> None:
     monkeypatch.setattr(sessions, "ensure_confirmed", AsyncMock())
 
-    with pytest.raises(HTTPException) as caught:
+    with pytest.raises(UserAuthenticationError) as caught:
         await auth._authenticate(_db(row), _token(), MagicMock())
 
     assert caught.value.status_code == 401
@@ -271,7 +270,7 @@ async def test_a_dead_session_is_an_opaque_401(monkeypatch, row) -> None:
     ],
 )
 async def test_a_token_naming_no_session_is_refused_before_the_database(token) -> None:
-    with pytest.raises(HTTPException) as caught:
+    with pytest.raises(UserAuthenticationError) as caught:
         await auth._authenticate(None, token, None)
 
     assert caught.value.status_code == 401
@@ -280,14 +279,14 @@ async def test_a_token_naming_no_session_is_refused_before_the_database(token) -
 async def test_a_token_for_another_username_is_refused(monkeypatch) -> None:
     monkeypatch.setattr(sessions, "ensure_confirmed", AsyncMock())
 
-    with pytest.raises(HTTPException):
+    with pytest.raises(UserAuthenticationError):
         await auth._authenticate(_db(_session_row()), _token(sub="axon_2"), MagicMock())
 
 
 async def test_a_session_the_provider_ended_is_a_401(monkeypatch) -> None:
     monkeypatch.setattr(sessions, "ensure_confirmed", AsyncMock(side_effect=sessions.SessionEnded))
 
-    with pytest.raises(HTTPException) as caught:
+    with pytest.raises(UserAuthenticationError) as caught:
         await auth._authenticate(_db(_session_row()), _token(), MagicMock())
 
     assert caught.value.status_code == 401

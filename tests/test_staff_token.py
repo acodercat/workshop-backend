@@ -15,10 +15,9 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
-from fastapi import HTTPException
 
 from app import auth
-from app.errors import StaffAuthenticationError
+from app.errors import StaffAuthenticationError, UserAuthenticationError
 from app.models.staff import Staff, StaffStatus
 from config import settings
 
@@ -94,10 +93,8 @@ async def test_staff_token_is_rejected_where_a_customer_token_is_expected() -> N
     # merely fail to match a user row.
     staff_token, _ = auth.create_staff_access_token(_staff())
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(UserAuthenticationError):
         await auth._authenticate(None, staff_token, None)
-
-    assert exc_info.value.status_code == 401
 
 
 # --- failure modes all collapse to None --------------------------------

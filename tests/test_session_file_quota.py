@@ -1,4 +1,4 @@
-"""Which objects the per-user upload quota counts (``_enforce_session_file_quota``).
+"""Which objects the per-user upload quota counts (``assert_upload_quota``).
 
 Asserted on the compiled statement: what the quota charges for is entirely
 in its predicates, and a stub of the query would pass whatever they said.
@@ -6,7 +6,7 @@ in its predicates, and a stub of the query would pass whatever they said.
 
 from sqlalchemy.dialects import postgresql
 
-from app.api.public.session import _enforce_session_file_quota
+from app.services.session.files import assert_upload_quota
 
 
 class _Result:
@@ -26,7 +26,7 @@ class _CapturingDb:
 
 async def _compiled() -> str:
     db = _CapturingDb()
-    await _enforce_session_file_quota(db, 7, 0)
+    await assert_upload_quota(db, user_id=7, incoming_size_bytes=0)
     return db.sql
 
 

@@ -2,7 +2,7 @@
 read-only view of what users have configured.
 
 - ``GET   /connector-catalog``       — every entry, published or not.
-- ``POST  /connector-catalog``       — publish a new one.
+- ``POST  /connector-catalog``       — add one, unpublished by default.
 - ``PATCH /connector-catalog/{id}``  — edit / publish / reorder.
 - ``GET   /connectors``              — users' own Connectors, read-only.
 
@@ -24,12 +24,9 @@ from sqlalchemy import func, select
 from app.api.admin.dependencies import StaffContext
 from app.common.pagination import paginate
 from app.errors import (
-    CategoryNotFoundError,
     ConnectorCatalogEntryNotFoundError,
-    ConnectorCatalogUrlTakenError,
 )
-from app.models.connector_category import ConnectorCategory
-from app.models.mcp_server import MCPServer, MCPServerAuthType
+from app.models.mcp_server import MCPServer
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.models.user import User
 from app.schemas.admin.connector import (
@@ -39,13 +36,9 @@ from app.schemas.admin.connector import (
     ConnectorResponse,
 )
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
+from app.services.connector import catalog
 
 router = APIRouter(tags=["connectors"])
-
-#: Each canonical column beside the locale map that shadows it. Editing
-#: one without clearing the other is the bug this pairing exists to make
-#: hard to reintroduce — see ``update_catalog_entry``.
-_LOCALIZED_FIELDS = (("name", "name_i18n"), ("description", "description_i18n"))
 
 
 def _to_catalog_response(
@@ -92,32 +85,6 @@ def _to_connector_response(
     )
 
 
-async def _enforce_unique_url(ctx: StaffContext, url: str) -> None:
-    """Refuse a URL the catalog already offers.
-
-    Checked here rather than left to the unique constraint so the
-    operator gets a named 409 instead of an IntegrityError surfacing as
-    a 500. The constraint is still the thing that makes it true under a
-    race; this is the readable path.
-    """
-    if await ctx.db.scalar(
-        select(MCPServerCatalogEntry.id).where(MCPServerCatalogEntry.url == url)
-    ):
-        raise ConnectorCatalogUrlTakenError(f"The catalog already offers {url}.")
-
-
-async def _enforce_category_exists(ctx: StaffContext, category_id: int | None) -> None:
-    """Refuse a category the taxonomy does not hold.
-
-    Checked here for the reason :func:`_enforce_unique_url` is: the
-    foreign key makes it true, this makes it readable.
-
-    ``None`` is the uncategorised state, not a missing row, and passes.
-    """
-    if category_id is not None and await ctx.db.get(ConnectorCategory, category_id) is None:
-        raise CategoryNotFoundError(f"No connector category with id {category_id}.")
-
-
 @router.get(
     "/connector-catalog",
     response_model=list[ConnectorCatalogEntryResponse],
@@ -152,21 +119,7 @@ async def create_catalog_entry(
     Created unpublished by default so an operator can check the URL and
     icon render before users see it — publishing is the separate PATCH.
     """
-    await _enforce_unique_url(ctx, body.url)
-    await _enforce_category_exists(ctx, body.category_id)
-
-    entry = MCPServerCatalogEntry(
-        name=body.name,
-        url=body.url,
-        auth_type=body.auth_type,
-        description=body.description,
-        icon_url=body.icon_url,
-        oauth_scope=body.oauth_scope,
-        published=body.published,
-        sort_order=body.sort_order,
-        category_id=body.category_id,
-    )
-    ctx.db.add(entry)
+    entry = await catalog.create_entry(ctx.db, **body.model_dump())
     await ctx.db.commit()
 
     await ctx.db.refresh(entry)
@@ -182,17 +135,12 @@ async def update_catalog_entry(
 ) -> ConnectorCatalogEntryResponse:
     """Edit, publish/unpublish, or reorder a catalog entry.
 
-    Editing the URL can collide, which is new: while ``key`` carried the
-    unique constraint it was immutable, so no edit could conflict. Now
-    the identity is the URL and the URL is editable, so this checks the
-    same thing the create path does.
+    The rules an edit keeps — a free URL, a real category, nothing stale
+    left behind — are :func:`~app.services.connector.catalog.update_entry`'s.
     """
     entry = await ctx.db.get(MCPServerCatalogEntry, entry_id)
     if entry is None:
         raise ConnectorCatalogEntryNotFoundError(f"No catalog entry with id {entry_id}.")
-
-    if body.url is not None and body.url != entry.url:
-        await _enforce_unique_url(ctx, body.url)
 
     fields = body.model_dump(exclude_none=True)
     # Put back the one field whose explicit ``null`` is an instruction
@@ -201,42 +149,10 @@ async def update_catalog_entry(
     if "category_id" in body.model_fields_set:
         fields["category_id"] = body.category_id
 
-    await _enforce_category_exists(ctx, fields.get("category_id"))
-
-    changed = {field for field, value in fields.items() if getattr(entry, field) != value}
-    if not changed:
+    if all(getattr(entry, field) == value for field, value in fields.items()):
         return _to_catalog_response(entry)
 
-    for field in changed:
-        setattr(entry, field, fields[field])
-
-    # A scope is meaningless without OAuth, and the update schema
-    # cannot express "clear this" — ``None`` there means "leave
-    # alone" — so the invariant is kept here rather than asked of
-    # the caller. Left behind it would reappear the day someone
-    # switches the entry back to OAUTH, and be copied onto every
-    # Connector made from it in between.
-    if entry.auth_type is not MCPServerAuthType.OAUTH and entry.oauth_scope:
-        entry.oauth_scope = None
-
-    # Clearing a locale map is not optional — see the invalidation
-    # rule in ``app.services.localized_text``. Left behind here it
-    # would be invisible: the public catalog would keep serving the
-    # old text, ``build_connector`` would copy it onto every
-    # Connector created afterwards, and this endpoint returns the
-    # canonical column, so the operator would see the edit take
-    # effect.
-    #
-    # Cleared whole rather than per-locale because the console can
-    # neither show nor edit these maps: a translation of the
-    # superseded text would be a divergence an operator has no way
-    # to discover. This deployment keeps no operator trail, so the
-    # discarded map — hand-curated, unlike a skill's, which its bundle
-    # re-supplies — is gone for good once cleared.
-    for field, locale_map in _LOCALIZED_FIELDS:
-        if field in changed:
-            setattr(entry, locale_map, None)
-
+    await catalog.update_entry(ctx.db, entry, fields)
     await ctx.db.commit()
 
     await ctx.db.refresh(entry)

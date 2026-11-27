@@ -53,10 +53,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
+from app.errors import AppError
 from app.models.connector_category import ConnectorCategory
 from app.models.mcp_server import MCPServerAuthType
 from app.models.mcp_server_catalog import MCPServerCatalogEntry
 from app.services import localized_text
+from app.services.connector import catalog
 from app.services.connector.catalog import INSTANTIABLE_AUTH_TYPES
 from app.services.connector.url_identity import normalize_connector_url
 from app.services.crypto import encrypt_secret
@@ -84,35 +86,30 @@ class _LocaleMap(argparse.Action):
 
 
 async def _add(db: AsyncSession, args: argparse.Namespace) -> int:
-    existing = await _find(db, args.url)
-    if existing is not None:
-        print(
-            f"the catalog already offers {args.url} (id={existing.id})",
-            file=sys.stderr,
-        )
-        return 1
-
     category_id = None
     if args.category is not None:
         category_id = await _resolve_category_id(db, args.category)
         if category_id is None:
             return 1
 
-    entry = MCPServerCatalogEntry(
-        name=args.name,
-        name_i18n=localized_text.clean_map(args.name_i18n),
-        description_i18n=localized_text.clean_map(args.description_i18n),
-        url=args.url,
-        auth_type=MCPServerAuthType(args.auth_type),
-        oauth_scope=args.oauth_scope,
-        description=args.description,
-        icon_url=args.icon_url,
-        sort_order=args.sort_order,
-        category_id=category_id,
-    )
-    db.add(entry)
+    try:
+        entry = await catalog.create_entry(
+            db,
+            name=args.name,
+            name_i18n=localized_text.clean_map(args.name_i18n),
+            description_i18n=localized_text.clean_map(args.description_i18n),
+            url=args.url,
+            auth_type=MCPServerAuthType(args.auth_type),
+            oauth_scope=args.oauth_scope,
+            description=args.description,
+            icon_url=args.icon_url,
+            sort_order=args.sort_order,
+            category_id=category_id,
+        )
+    except AppError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     await db.commit()
-    await db.refresh(entry)
     print(f"added {entry.name!r} (id={entry.id})")
     return 0
 

@@ -77,9 +77,9 @@ def _phrase_to_type(code: int) -> str:
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     # RFC 7235 requires ``WWW-Authenticate`` on every 401. Bearer is the
     # only scheme any surface here speaks, so the challenge is emitted
-    # centrally rather than remembered per error class — a 401 ``AppError``
-    # (``StaffAuthenticationError``, ``StaffCredentialsError``) gets the
-    # same header the ``HTTPException``-raising auth paths already send.
+    # centrally rather than remembered per error class: every 401
+    # ``AppError`` — the customer's ``UserAuthenticationError`` and the
+    # console's two alike — carries the same challenge.
     headers = (
         {"WWW-Authenticate": "Bearer"} if exc.status_code == status.HTTP_401_UNAUTHORIZED else None
     )

@@ -6,14 +6,14 @@ Two entry points over one funnel:
 - :func:`register_skill_bundle` — a user's own ``CUSTOM`` skill
   (``POST /skills`` on the public surface).
 - :func:`register_platform_skill_bundle` — a ``SYSTEM``/``OFFICIAL``
-  skill with no owner (``POST /skills`` on the console, and
-  ``scripts/upload_skill.py``).
+  skill with no owner (``POST /skills`` on the console, and the operator
+  scripts that ship bundles).
 
-Both validate the bytes, normalize wrapper zips, upload to OSS and write
-the row, compensating the OSS upload if the DB write fails. They differ
-only in what the repo already says they differ in: ownership, the quota,
-where the object lands, and whether a same-named row is a conflict or
-the thing being replaced.
+Both run :func:`parse_payload` over the bytes, upload what comes out to
+OSS and write the row, compensating the OSS upload if the DB write fails.
+They differ only in what the repo already says they differ in: ownership,
+the quota, where the object lands, and whether a same-named row is a
+conflict or the thing being replaced.
 
 Pure byte-level validation lives in :mod:`app.services.skill_bundle`;
 this module owns the DB + OSS side effects so endpoints stay thin
@@ -25,7 +25,7 @@ import logging
 import os
 import uuid
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,8 +36,7 @@ from app.errors import (
     SkillQuotaExceededError,
 )
 from app.models.skill import Skill, SkillOrigin, SkillStatus
-from app.models.user_skill_preference import UserSkillPreference
-from app.services import file_storage
+from app.services import file_storage, skill_enablement
 from app.services.file_storage import SKILL_POLICY
 from app.services.skill_bundle import (
     ParsedSkill,
@@ -90,26 +89,7 @@ async def register_skill_bundle(
     explicit composer pick, which consults the listing's status but not
     the user's toggle.
     """
-    ext = _canonical_ext(filename)
-    is_zip = ext == ".zip"
-    if len(data) > SKILL_POLICY.max_bytes:
-        raise SkillBundleTooLargeError(
-            f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
-        )
-
-    # Validate structure (zip-bomb, path traversal, symlinks) **before**
-    # any path that decompresses entry bytes, then parse SKILL.md. The
-    # whole block is CPU-bound (zip header inspection, an in-memory repack
-    # for wrapper bundles, a UTF-8 decode) and runs on a worst-case
-    # ``SKILL_POLICY.max_bytes`` (50 MiB) input, so it goes through
-    # ``asyncio.to_thread`` — otherwise a single large bundle would stall
-    # the event loop (and with it every SSE stream / enqueue on this
-    # process) for the duration of the unpack.
-    data, parsed = await asyncio.to_thread(
-        _validate_and_parse,
-        data,
-        is_zip=is_zip,
-    )
+    data, parsed, ext = await parse_payload(filename, data)
 
     await _enforce_user_quota(db, user_id)
 
@@ -170,12 +150,13 @@ async def register_platform_skill_bundle(
     data: bytes,
     publish: bool = False,
     category_id: int | None = None,
+    keep_listing: bool = False,
 ) -> tuple[Skill, str | None]:
     """Register (or replace) a platform skill bundle.
 
     Returns the skill and **the bundle key it displaced** — ``None`` when
     the skill is new. That key is the only remaining pointer to the
-    previous version, so the caller is expected to record it.
+    previous version, which is why it is also logged here.
 
     A platform skill has **no owner** (``user_id IS NULL``) and so no
     quota — it is the operator's catalogue, not an account's storage.
@@ -187,16 +168,16 @@ async def register_platform_skill_bundle(
     and the id the worker has seen both survive the update.
 
     **Flushes but does not commit** — the caller owns the commit. A flush
-    failure compensates the OSS upload and re-raises; a failure in the
-    caller's *commit* leaves the object for bucket lifecycle to collect,
-    which is the accepted trade (the alternative is deleting an object a
-    concurrent turn may be staging).
+    failure compensates the OSS upload and re-raises, leaving the rollback
+    to that caller like every other failure; a failure in the caller's
+    *commit* leaves the object for bucket lifecycle to collect, which is the
+    accepted trade (the alternative is deleting an object a concurrent turn
+    may be staging).
 
     The previous bundle object is **left in OSS** on a replace, for that
-    same staging reason. Its key is *returned* rather than recorded
-    anywhere — this deployment keeps no operator trail (revision
-    ``c8f2a5e1d94b``), so the caller surfacing it is the only way back to
-    that version.
+    same staging reason. Its key is returned and logged here — this
+    deployment keeps no operator trail (revision ``c8f2a5e1d94b``), so the
+    log line is the only way back to that version.
 
     **Shipping a bundle is a content change.** A replace leaves the
     listing's ``status`` and every user's preference where they were, so
@@ -211,30 +192,26 @@ async def register_platform_skill_bundle(
     uploading is not publishing, and the one thing an upload cannot undo
     is having been visible — and ``publish=True`` says to go live, on a
     new row or an existing one alike. Without that second half, a
-    deployment whose only publish path is this script (hkgai has no
-    console) could stage a listing and never get it live.
+    deployment with no console, whose only publish path is
+    ``scripts/upload_skill.py``, could stage a listing and never get it
+    live.
 
     ``category_id`` is tri-state: ``None`` leaves the row alone, so
     re-uploading a bundle keeps the tab an operator filed it under. It
     has no per-origin default — a new skill is simply uncategorised
     until someone files it.
 
+    ``keep_listing`` ships new bytes under the listing the row already has:
+    ``display_name`` / ``display_name_i18n`` / ``description`` stay as an
+    operator curated them instead of being read from ``SKILL.md``, as every
+    console upload reads them.
+
     Raises the same typed kinds the user path does.
     """
     if origin is SkillOrigin.CUSTOM:
         raise ValueError("CUSTOM skills are owned by a user; use register_skill_bundle")
 
-    ext = _canonical_ext(filename)
-    is_zip = ext == ".zip"
-    if len(data) > SKILL_POLICY.max_bytes:
-        raise SkillBundleTooLargeError(
-            f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
-        )
-    data, parsed = await asyncio.to_thread(
-        _validate_and_parse,
-        data,
-        is_zip=is_zip,
-    )
+    data, parsed, ext = await parse_payload(filename, data)
 
     # Looked up before the upload so a failure here costs no OSS object.
     skill = await db.scalar(select(Skill).where(Skill.user_id.is_(None), Skill.name == parsed.name))
@@ -262,13 +239,12 @@ async def register_platform_skill_bundle(
         # them — a SYSTEM skill reaches the model on ``status`` alone).
         # Dropping them is what keeps "a preference row exists only for a
         # skill its user can see" true rather than merely usual.
-        await db.execute(
-            delete(UserSkillPreference).where(UserSkillPreference.skill_id == skill.id)
-        )
+        await skill_enablement.clear_for_skill(db, skill.id)
     skill.origin = origin
-    skill.display_name = parsed.display_name
-    skill.display_name_i18n = parsed.display_name_i18n
-    skill.description = parsed.description
+    if not keep_listing:
+        skill.display_name = parsed.display_name
+        skill.display_name_i18n = parsed.display_name_i18n
+        skill.description = parsed.description
     skill.bundle_key = bundle_key
     skill.bundle_size = len(data)
     if category_id is not None:
@@ -277,20 +253,45 @@ async def register_platform_skill_bundle(
     try:
         await db.flush()
     except Exception:
-        await db.rollback()
         await _best_effort_delete_oss(bundle_key)
         raise
 
     logger.info(
-        "platform skill %s: id=%s origin=%s name=%r size=%d status=%s",
+        "platform skill %s: id=%s origin=%s name=%r size=%d status=%s replaced_key=%s",
         "replaced" if replaced_key else "registered",
         skill.id,
         origin.value,
         skill.name,
         skill.bundle_size,
         skill.status.value,
+        replaced_key,
     )
     return skill, replaced_key
+
+
+async def parse_payload(filename: str, data: bytes) -> tuple[bytes, ParsedSkill, str]:
+    """Everything every upload path does to the bytes before touching anything.
+
+    Returns the (possibly repacked) bundle, its parsed metadata and the
+    canonical extension. Nothing is stored and nothing is read from the
+    database, so every refusal in here — wrong extension, oversize,
+    hostile archive, no ``SKILL.md`` — leaves nothing to clean up, which
+    also makes it what a script's dry run calls.
+
+    The parse is CPU-bound (zip header inspection, an in-memory repack
+    for wrapper bundles, a UTF-8 decode) on a worst-case
+    ``SKILL_POLICY.max_bytes`` input, so it goes through
+    :func:`asyncio.to_thread`: run inline, one large bundle would stall
+    the event loop, and with it every SSE stream and enqueue on this
+    process, for the duration of the unpack.
+    """
+    ext = _canonical_ext(filename)
+    if len(data) > SKILL_POLICY.max_bytes:
+        raise SkillBundleTooLargeError(
+            f"file is {len(data)} bytes; limit is {SKILL_POLICY.max_bytes}"
+        )
+    data, parsed = await asyncio.to_thread(_validate_and_parse, data, is_zip=ext == ".zip")
+    return data, parsed, ext
 
 
 def _canonical_ext(filename: str) -> str:

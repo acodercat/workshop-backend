@@ -10,7 +10,7 @@ this batch instead of double-crediting. Each user gets its own
 session/transaction so one bad row can't abort the rest.
 
 Usage:
-    uv run python -m scripts.topup_all_users --credits=200000--tag=20260516 --reason="bulk grant 200k"
+    uv run python -m scripts.topup_all_users --credits=200000 --tag=20260516 --reason="bulk grant 200k"
 """
 
 import argparse
@@ -80,7 +80,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reason",
         required=True,
-        help="Audited on every ledger row.",
+        help="Recorded on every ledger row this batch writes.",
     )
     args = parser.parse_args()
     if args.credits <= 0:

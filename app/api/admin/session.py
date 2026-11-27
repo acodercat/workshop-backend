@@ -22,6 +22,7 @@ from fastapi import APIRouter, Query
 from sqlalchemy import func, select
 
 from app.api.admin.dependencies import StaffContext
+from app.api.admin.session_rows import session_responses
 from app.api.admin.window import OptionalWindowDays
 from app.common.business_time import window_start
 from app.common.pagination import paginate
@@ -29,9 +30,6 @@ from app.models.session import Session
 from app.models.user import User
 from app.schemas.admin.session import SessionWithOwnerResponse
 from app.schemas.collection_response import PaginatedResponse, PaginationMeta
-from app.services import session as session_service
-from app.services.credits import analytics
-from app.services.credits.rates import credits_from_micro
 
 router = APIRouter(tags=["sessions"])
 
@@ -92,31 +90,16 @@ async def list_sessions(
         )
     ).all()
 
-    session_ids = [session.id for session, _, _ in rows]
-    turns = await session_service.per_session_usage(ctx.db, session_ids)
-    spend_micro = await analytics.session_spend(ctx.db, session_ids)
-
-    # A session that has run nothing is absent from both aggregates by
-    # design, so both are read through a default rather than indexed.
+    responses = await session_responses(ctx.db, [session for session, _, _ in rows])
     return PaginatedResponse(
         items=[
             SessionWithOwnerResponse(
-                id=session.id,
-                title=session.title,
-                status=session.status,
-                agent_type=session.agent_type,
-                model_id=session.model_id,
-                turn_count=turns.get(session.id, session_service.NO_TURN_USAGE).turn_count,
-                total_tokens=turns.get(session.id, session_service.NO_TURN_USAGE).total_tokens,
-                spent_credits=credits_from_micro(spend_micro.get(session.id, 0)),
-                created_at=session.created_at,
-                updated_at=session.updated_at,
-                deleted_at=session.deleted_at,
+                **response.model_dump(),
                 user_id=session.user_id,
                 owner_username=owner_username,
                 owner_name=owner_name,
             )
-            for session, owner_username, owner_name in rows
+            for response, (session, owner_username, owner_name) in zip(responses, rows, strict=True)
         ],
         meta=PaginationMeta(total=total, page_size=page_size, page=page),
     )

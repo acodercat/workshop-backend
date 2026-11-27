@@ -334,7 +334,7 @@ class Settings(BaseSettings):
             "cap — so this must sit comfortably above ``max_message_files`` to "
             "leave headroom for a user attaching a full batch (and re-adding / "
             "retrying) within one window. OSS storage abuse is gated by the "
-            "per-user size/count quota (``_enforce_session_file_quota``), not "
+            "per-user size/count quota (``assert_upload_quota``), not "
             "by this request-rate limit."
         ),
     )

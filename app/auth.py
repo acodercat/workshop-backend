@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
@@ -18,7 +18,7 @@ from app import models
 from app.api.dependencies import get_db, get_identity_provider
 from app.common.password import BCRYPT_MAX_BYTES
 from app.database import AsyncSessionLocal
-from app.errors import StaffAuthenticationError
+from app.errors import StaffAuthenticationError, UserAuthenticationError
 from app.rate_limit import set_rate_limit_principal
 from app.services.identity import sessions as identity_sessions
 from app.services.identity.provider import MeetingIdentityProvider
@@ -167,14 +167,6 @@ class Principal:
     session_id: uuid.UUID
 
 
-def _credentials_exception() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-
 async def _authenticate(
     db: AsyncSession, token: str, provider: MeetingIdentityProvider
 ) -> Principal:
@@ -202,26 +194,27 @@ async def _authenticate(
     Every failure of 1–4 is the same opaque 401, so nothing here tells a
     forged token from a revoked session or a disabled account.
     """
+    unauthenticated = UserAuthenticationError("Could not validate credentials")
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except InvalidTokenError as exc:
         logger.info("Rejected token: %s: %s", type(exc).__name__, exc)
-        raise _credentials_exception()
+        raise unauthenticated
 
     if "scope" in payload:
         # A scoped token (share-view, staff) reaching the user-auth path is
         # a caller mistake at best, an attempted privilege escalation at
         # worst. Refuse without distinguishing the two.
-        raise _credentials_exception()
+        raise unauthenticated
 
     username = payload.get("sub")
     sid = payload.get("sid")
     if not isinstance(username, str) or not isinstance(sid, str):
-        raise _credentials_exception()
+        raise unauthenticated
     try:
         session_id = uuid.UUID(sid)
     except ValueError:
-        raise _credentials_exception()
+        raise unauthenticated
 
     row = (
         await db.execute(
@@ -235,18 +228,18 @@ async def _authenticate(
         )
     ).one_or_none()
     if row is None:
-        raise _credentials_exception()
+        raise unauthenticated
     session, user, subject = row
 
     now = datetime.now(UTC)
     if not identity_sessions.is_live(session, now=now):
-        raise _credentials_exception()
+        raise unauthenticated
     if user.username != username:
-        raise _credentials_exception()
+        raise unauthenticated
     if not is_user_active(user):
         # Same opaque 401 as a bad token so a lockout never leaks account
         # state; the row is already loaded, so this is a free check.
-        raise _credentials_exception()
+        raise unauthenticated
 
     if identity_sessions.is_due(session.checked_at, now=now):
         await db.commit()
@@ -259,7 +252,7 @@ async def _authenticate(
             provider=provider,
         )
     except identity_sessions.SessionEnded:
-        raise _credentials_exception() from None
+        raise unauthenticated from None
     return Principal(user=user, session_id=session.id)
 
 

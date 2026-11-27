@@ -16,7 +16,6 @@ invariant to protect, so they stay inline in the endpoint — the same
 convention the customer-facing endpoints follow.
 """
 
-import logging
 from collections.abc import Sequence
 
 from sqlalchemy import select
@@ -25,8 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_password_hash, revoke_staff_tokens
 from app.errors import LastActiveStaffError, StaffUsernameTakenError
 from app.models.staff import Staff, StaffStatus
-
-logger = logging.getLogger(__name__)
 
 MIN_PASSWORD_CHARS = 12
 """Minimum length for an operator password.

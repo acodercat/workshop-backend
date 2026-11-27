@@ -17,7 +17,7 @@ from typing import NamedTuple
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.admin import user as admin_user
+from app.api.admin import session_rows, user as admin_user
 from app.api.dependencies import get_db
 from app.auth import authenticate_and_get_staff
 from app.exception_handlers import install_error_handlers
@@ -115,7 +115,7 @@ def test_usage_lands_on_each_row(monkeypatch) -> None:
         assert list(session_ids) == [_BUSY, _FRESH]
         return {_BUSY: 3_000_000_000}
 
-    monkeypatch.setattr(admin_user.analytics, "session_spend", fake_spend)
+    monkeypatch.setattr(session_rows.analytics, "session_spend", fake_spend)
 
     body = _client(db).get("/users/42/sessions").json()
 
@@ -134,7 +134,7 @@ def test_the_row_names_the_model_that_ran_not_the_tier_picked(monkeypatch) -> No
     async def fake_spend(_db, _session_ids):
         return {}
 
-    monkeypatch.setattr(admin_user.analytics, "session_spend", fake_spend)
+    monkeypatch.setattr(session_rows.analytics, "session_spend", fake_spend)
 
     (row, _) = _client(_FakeDb([])).get("/users/42/sessions").json()["items"]
 
@@ -149,7 +149,7 @@ def test_the_row_carries_no_conversation(monkeypatch) -> None:
     async def fake_spend(_db, _session_ids):
         return {}
 
-    monkeypatch.setattr(admin_user.analytics, "session_spend", fake_spend)
+    monkeypatch.setattr(session_rows.analytics, "session_spend", fake_spend)
 
     (row, _) = _client(_FakeDb([])).get("/users/42/sessions").json()["items"]
 

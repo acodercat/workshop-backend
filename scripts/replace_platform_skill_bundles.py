@@ -1,21 +1,20 @@
 """Repoint platform skills to freshly-packaged bundles from a local skills dir.
 
-For each named skill, zip its directory (``SKILL.md`` at the zip root), run it
-through the SAME structural-validation + normalization path the upload endpoint
-uses (``validate_zip_structure`` -> ``normalize_bundle`` -> ``parse_bundle``),
-so the stored bytes are exactly what a real upload would store. Then upload to
-the skill OSS bucket and repoint the platform ``skill`` row's ``bundle_key`` /
-``bundle_size`` / ``updated_at`` — curated metadata (name / display_name /
-display_name_i18n / description / origin / enabled) is left untouched — and
-finally delete the previous OSS object.
+For each named skill, zip its directory (``SKILL.md`` at the zip root) and
+ship it through the registration service
+(:func:`app.services.skill_registration.register_platform_skill_bundle`), so
+the stored bytes, the key and the row are exactly what a console upload
+writes. The listing an operator curated is kept: ``display_name`` /
+``display_name_i18n`` / ``description`` come from the existing row, not the
+bundle, and ``origin`` / ``status`` / ``category_id`` stay where they are.
 
-``bundle_size`` is updated alongside ``bundle_key`` because it is a physical
-property of the bundle file (leaving it stale would misreport the new bundle),
-not curated metadata.
+The previous bundle object is left in OSS, as the service leaves it — a turn
+may be staging it — and its key is printed, so an unwanted version can be
+pointed back to.
 
 Only touches PLATFORM skills (``user_id IS NULL``) whose name matches a
-``<name>/`` subdir under ``--src``. Dry-run by default; pass ``--apply`` to
-write. Prints old -> new keys for rollback.
+``<name>/`` subdir under ``--src``. Dry-run by default — it validates each
+bundle and writes nothing; pass ``--apply`` to write.
 
     cd backend
     uv run python -m scripts.replace_platform_skill_bundles --src ../agent-skills/anthropic-skills/skills
@@ -23,23 +22,17 @@ write. Prints old -> new keys for rollback.
 """
 
 import argparse
+import asyncio
 import io
-import re
-import uuid
 import zipfile
 from pathlib import Path
 
-import psycopg
+from sqlalchemy import select
 
-from app.services import file_storage
-from app.services.file_storage import SKILL_POLICY
-from app.services.skill_bundle import (
-    InvalidSkillBundleError,
-    normalize_bundle,
-    parse_bundle,
-    validate_zip_structure,
-)
-from config import settings
+from app.database import AsyncSessionLocal
+from app.errors import AppError
+from app.models.skill import Skill
+from app.services.skill_registration import parse_payload, register_platform_skill_bundle
 
 # Platform skills to repoint. Each must exist both as a ``<name>/`` subdir
 # under ``--src`` and as a ``user_id IS NULL`` row in the ``skill`` table.
@@ -65,14 +58,57 @@ def _zip_skill_dir(skill_dir: Path) -> bytes:
     return buf.getvalue()
 
 
-def _validate(raw: bytes) -> tuple[bytes, str]:
-    """Mirror the upload endpoint's ``_validate_and_parse`` for a zip:
-    structure check, then normalize, then parse. Returns the stored bytes
-    and the SKILL.md name."""
-    validate_zip_structure(raw)
-    normalized = normalize_bundle(raw)
-    data = normalized if normalized is not None else raw
-    return data, parse_bundle(data).name
+async def repoint(src: Path, *, apply: bool) -> int:
+    """Repoint each of :data:`SKILLS` found under *src*; returns how many
+    were (or, on a dry run, would be) repointed. A bundle the service
+    refuses (an ``AppError``) is reported and skipped, so one bad bundle does
+    not stop the rest; any other failure ends the run, the skills before it
+    already committed."""
+    done = 0
+    async with AsyncSessionLocal() as db:
+        for name in SKILLS:
+            skill_dir = src / name
+            if not (skill_dir / "SKILL.md").is_file():
+                print(f"  ✗ {name}: no SKILL.md under {skill_dir}")
+                continue
+
+            filename = f"{name}.zip"
+            raw = _zip_skill_dir(skill_dir)
+            try:
+                data, parsed, _ = await parse_payload(filename, raw)
+            except AppError as exc:
+                print(f"  ✗ {name}: invalid bundle — {exc}")
+                continue
+            # The service files a bundle under the name in its SKILL.md, so
+            # a mismatch would replace (or create) some other skill.
+            if parsed.name != name:
+                print(f"  ✗ {name}: SKILL.md name is {parsed.name!r}, expected {name!r} — skipped")
+                continue
+
+            skill = await db.scalar(
+                select(Skill).where(Skill.user_id.is_(None), Skill.name == name)
+            )
+            if skill is None:
+                print(f"  ✗ {name}: no platform skill row (user_id IS NULL)")
+                continue
+
+            print(f"  {name}: {len(data)} bytes, name ok")
+            print(f"     old: {skill.bundle_key}")
+
+            if apply:
+                try:
+                    skill, _ = await register_platform_skill_bundle(
+                        db, origin=skill.origin, filename=filename, data=raw, keep_listing=True
+                    )
+                except AppError as exc:
+                    await db.rollback()
+                    print(f"  ✗ {name}: rejected — {exc}")
+                    continue
+                await db.commit()
+                print(f"     new: {skill.bundle_key}")
+                print("     ✅ uploaded + repointed (old bundle kept)")
+            done += 1
+    return done
 
 
 def main() -> int:
@@ -90,61 +126,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # psycopg wants the sync ``postgresql://`` URL; strip the SQLAlchemy
-    # ``+asyncpg``/``+psycopg`` driver suffix the app config carries.
-    db_uri = re.sub(r"postgresql\+\w+", "postgresql", settings.db_uri)
-
-    done = 0
-    with psycopg.connect(db_uri) as conn:
-        for name in SKILLS:
-            skill_dir = args.src / name
-            if not (skill_dir / "SKILL.md").is_file():
-                print(f"  ✗ {name}: no SKILL.md under {skill_dir}")
-                continue
-
-            raw = _zip_skill_dir(skill_dir)
-            try:
-                data, parsed_name = _validate(raw)
-            except InvalidSkillBundleError as exc:
-                print(f"  ✗ {name}: invalid bundle — {exc}")
-                continue
-            if parsed_name != name:
-                print(f"  ✗ {name}: SKILL.md name is {parsed_name!r}, expected {name!r} — skipped")
-                continue
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT origin, bundle_key FROM skill WHERE name = %s AND user_id IS NULL",
-                    (name,),
-                )
-                row = cur.fetchone()
-            if row is None:
-                print(f"  ✗ {name}: no platform skill row (user_id IS NULL)")
-                continue
-            origin, old_key = row
-            new_key = f"{origin.lower()}/{name}/{uuid.uuid4()}/{name}.zip"
-
-            print(f"  {name}: {len(data)} bytes, name ok")
-            print(f"     old: {old_key}")
-            print(f"     new: {new_key}")
-
-            if args.apply:
-                # Order: upload new -> repoint (commit) -> delete old. A crash
-                # before commit leaves the row on the old (still-present) key;
-                # the delete runs only after the repoint is durable.
-                file_storage.upload(SKILL_POLICY, new_key, data)
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE skill "
-                        "SET bundle_key = %s, bundle_size = %s, updated_at = now() "
-                        "WHERE name = %s AND user_id IS NULL",
-                        (new_key, len(data), name),
-                    )
-                conn.commit()
-                file_storage.delete(SKILL_POLICY, old_key)  # best-effort cleanup
-                print("     ✅ uploaded + repointed + old bundle deleted")
-            done += 1
-
+    done = asyncio.run(repoint(args.src, apply=args.apply))
     if args.apply:
         print(f"\n✅ repointed {done} skill(s)")
     else:

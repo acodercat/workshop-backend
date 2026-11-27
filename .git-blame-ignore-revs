@@ -17,3 +17,6 @@
 
 # local names written in full
 26ab8ccc4d6feab0bc6d8d79665b5567ee4a8eb3
+
+# app/errors.py regrouped by domain, classes unchanged
+ef94f8630e4f3a38004e7aa89e8971d4a029ad33
