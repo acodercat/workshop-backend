@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
@@ -17,7 +17,7 @@ from app import models
 from app.api.dependencies import get_db
 from app.common.password import BCRYPT_MAX_BYTES
 from app.database import AsyncSessionLocal
-from app.errors import StaffAuthenticationError
+from app.errors import StaffAuthenticationError, UserAuthenticationError
 from app.rate_limit import set_rate_limit_principal
 from config import settings
 
@@ -182,22 +182,18 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
     that have no user identity bound to them and must never be accepted
     on a user-auth path.
     """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    unauthenticated = UserAuthenticationError("Could not validate credentials")
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except InvalidTokenError as exc:
         logger.info("Rejected token: %s: %s", type(exc).__name__, exc)
-        raise credentials_exception
+        raise unauthenticated
 
     if "scope" in payload:
         # A scoped token (share-view) reaching the user-auth path is a
         # caller mistake at best, an attempted privilege escalation at
         # worst. Refuse without distinguishing the two.
-        raise credentials_exception
+        raise unauthenticated
 
     # ``sub`` was previously the user's phone number; we backfilled
     # pre-existing values into ``username`` 1:1, so old tokens keep
@@ -205,15 +201,15 @@ async def _decode_and_get_user(db: AsyncSession, token: str) -> models.User:
     username: str | None = payload.get("sub")
     token_version: int = payload.get("token_version", 0)
     if username is None:
-        raise credentials_exception
+        raise unauthenticated
 
     user = await get_user_by_username(db, username=username)
     if user is None or user.token_version != token_version:
-        raise credentials_exception
+        raise unauthenticated
     if not is_user_active(user):
         # Same opaque 401 as a bad token so a lockout never leaks account
         # state; the row is already loaded, so this is a free check.
-        raise credentials_exception
+        raise unauthenticated
     return user
 
 

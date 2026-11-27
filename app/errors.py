@@ -74,6 +74,21 @@ class AppError(Exception):
         self.details = details
 
 
+class UserAuthenticationError(AppError):
+    """The API could not identify the caller — a malformed, expired,
+    wrongly-scoped or revoked token, or an account that is not active. One
+    error for all of them: telling them apart would let a caller probe
+    which accounts exist and which are locked. A client reads it as "sign
+    in again".
+
+    Its ``type`` is the generic ``unauthorized`` a bare 401 carries, the
+    value clients already switch on.
+    """
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    error_type = "unauthorized"
+
+
 class EmailTakenError(AppError):
     status_code = status.HTTP_409_CONFLICT
     error_type = "email_taken"
