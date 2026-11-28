@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
     LibraryChangedError,
+    ProjectNotFoundError,
     VocabularyCategoryNotFoundError,
     VocabularyInvalidError,
 )
@@ -45,13 +46,14 @@ _KIND_NAMES = {value: key for key, value in _KINDS.items()}
 
 
 async def _project_id(db: AsyncSession, user_id: int, scope: str) -> uuid.UUID | None:
-    """The project a scope names, after checking the caller owns it."""
+    """The project a scope names, after checking the caller owns it. A scope
+    that is not a project id is a project that does not exist."""
     if scope == PERSONAL:
         return None
     try:
         project_id = uuid.UUID(scope)
     except ValueError:
-        raise VocabularyInvalidError("Unknown vocabulary.") from None
+        raise ProjectNotFoundError("Project not found.") from None
     await require_owned_project(db, user_id=user_id, project_id=project_id)
     return project_id
 
@@ -69,7 +71,7 @@ async def _locked(
     """The vocabulary row, created if missing, locked for the write."""
     await db.execute(
         insert(MeetingVocabulary)
-        .values(id=uuid.uuid4(), user_id=user_id, project_id=project_id)
+        .values(user_id=user_id, project_id=project_id)
         .on_conflict_do_nothing()
     )
     return (await db.execute(_vocabulary_query(user_id, project_id).with_for_update())).scalar_one()
@@ -111,7 +113,7 @@ async def _view(db: AsyncSession, scope: str, row: MeetingVocabulary | None) -> 
         scope=scope,
         version=row.version,
         terms=[_term(term) for term in await _terms(db, row.id)],
-        categories=[VocabularyCategory.model_validate(c) for c in row.categories],
+        categories=[VocabularyCategory.model_validate(category) for category in row.categories],
     )
 
 
@@ -153,9 +155,9 @@ async def save_terms(
     and refused if they do not.
     """
     row = await _begin(db, user_id, scope, expected_version)
-    unique = merge_terms(terms, categories={c["id"] for c in row.categories})
+    unique = merge_terms(terms, categories={category["id"] for category in row.categories})
 
-    existing = {(_KIND_NAMES[t.kind], t.text): t for t in await _terms(db, row.id)}
+    existing = {(_KIND_NAMES[term.kind], term.text): term for term in await _terms(db, row.id)}
     await db.execute(
         delete(MeetingVocabularyTerm).where(MeetingVocabularyTerm.vocabulary_id == row.id)
     )
@@ -206,7 +208,10 @@ def merge_terms(
 
 def _clashes(row: MeetingVocabulary, name: str, *, except_id: str | None = None) -> bool:
     folded = name.casefold()
-    return any(c["name"].casefold() == folded and c["id"] != except_id for c in row.categories)
+    return any(
+        category["name"].casefold() == folded and category["id"] != except_id
+        for category in row.categories
+    )
 
 
 async def create_category(
@@ -231,11 +236,14 @@ async def rename_category(
     name: str,
 ) -> Vocabulary:
     row = await _begin(db, user_id, scope, expected_version)
-    if not any(c["id"] == category_id for c in row.categories):
+    if not any(category["id"] == category_id for category in row.categories):
         raise VocabularyCategoryNotFoundError("No such category.")
     if _clashes(row, name, except_id=category_id):
         raise VocabularyInvalidError("A category with that name exists.")
-    row.categories = [{**c, "name": name} if c["id"] == category_id else c for c in row.categories]
+    row.categories = [
+        {**category, "name": name} if category["id"] == category_id else category
+        for category in row.categories
+    ]
     return await _finish(db, scope, row)
 
 
@@ -250,9 +258,9 @@ async def delete_category(
 ) -> Vocabulary:
     """Remove a category. Its terms go with it, or stay uncategorized."""
     row = await _begin(db, user_id, scope, expected_version)
-    if not any(c["id"] == category_id for c in row.categories):
+    if not any(category["id"] == category_id for category in row.categories):
         raise VocabularyCategoryNotFoundError("No such category.")
-    row.categories = [c for c in row.categories if c["id"] != category_id]
+    row.categories = [category for category in row.categories if category["id"] != category_id]
     in_category = (
         MeetingVocabularyTerm.vocabulary_id == row.id,
         MeetingVocabularyTerm.category == category_id,
@@ -266,10 +274,6 @@ async def delete_category(
             .values(category=None, version=MeetingVocabularyTerm.version + 1)
         )
     return await _finish(db, scope, row)
-
-
-#
-# The list of vocabularies
 
 
 async def _list_version(db: AsyncSession, user_id: int) -> int:
@@ -343,9 +347,9 @@ async def update_list_entry(
     hidden: bool | None,
 ) -> VocabularyList:
     """Rename a vocabulary in the list, or hide / show it."""
+    project_id = await _project_id(db, user_id, scope)
     if await _lock_list_version(db, user_id) != expected_list_version:
         raise LibraryChangedError("The vocabulary list changed since it was read.")
-    project_id = await _project_id(db, user_id, scope)
     if name is not None:
         folded = name.casefold()
         if any(

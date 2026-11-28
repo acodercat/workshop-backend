@@ -3,9 +3,9 @@
 - ``GET /invite-codes?origin=&q=`` — every code, operator and referral.
 - ``GET /invite-redemptions``      — who joined on whose code.
 
-Registration now happens at the Meeting service with Meeting's own
-invitation codes, so nothing here is redeemed or issued any more. What
-remains is the record of who joined on which code before that.
+Registration is at the Meeting service, with Meeting's own invitation
+codes, so nothing here is redeemed or issued. These tables are the
+read-only record of who joined on which local code.
 """
 
 import sqlalchemy as sa
@@ -95,7 +95,7 @@ async def list_invite_redemptions(
     Two joins onto ``user`` — invitee and referrer — so the row reads as
     the relationship it records rather than a pair of ids.
     ``?referrer_user_id=`` is one person's referral tree, one level
-    deep, which is the only depth commission is paid on.
+    deep, which is the only depth a referral reward is paid on.
     """
     invitee = aliased(User)
     referrer = aliased(User)

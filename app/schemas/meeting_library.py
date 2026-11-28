@@ -13,8 +13,11 @@ from pydantic import (
     model_validator,
 )
 
-#
-# Templates
+# Template limits, shared with the document importer
+# (:mod:`app.services.meeting.template_import`).
+MAX_SECTIONS = 20
+MAX_TABLE_FIELDS = 30
+MAX_GUIDANCE_LENGTH = 1000
 
 _Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
 
@@ -30,11 +33,17 @@ class TemplateOptions(BaseModel):
     instructions: Annotated[str, StringConstraints(max_length=2000)] | None = None
     output_format: Annotated[str, StringConstraints(max_length=40)] | None = None
     table_fields: (
-        Annotated[list[Annotated[str, StringConstraints(max_length=80)]], Field(max_length=30)]
+        Annotated[
+            list[Annotated[str, StringConstraints(max_length=80)]],
+            Field(max_length=MAX_TABLE_FIELDS),
+        ]
         | None
     ) = None
     section_guidance: (
-        Annotated[list[Annotated[str, StringConstraints(max_length=1000)]], Field(max_length=20)]
+        Annotated[
+            list[Annotated[str, StringConstraints(max_length=MAX_GUIDANCE_LENGTH)]],
+            Field(max_length=MAX_SECTIONS),
+        ]
         | None
     ) = None
 
@@ -42,7 +51,7 @@ class TemplateOptions(BaseModel):
 class TemplateDraft(BaseModel):
     title: _Name
     description: Annotated[str, StringConstraints(max_length=500)] = ""
-    sections: Annotated[list[_Name], Field(min_length=1, max_length=20)]
+    sections: Annotated[list[_Name], Field(min_length=1, max_length=MAX_SECTIONS)]
     options: TemplateOptions = TemplateOptions()
 
     @model_validator(mode="after")
@@ -84,10 +93,6 @@ class TemplatePreview(BaseModel):
     # Always true: only structure is taken from the document, never its
     # example content, which would otherwise be written into minutes.
     sample_content_excluded: Literal[True] = True
-
-
-#
-# Vocabularies
 
 
 _Spelling = Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)]

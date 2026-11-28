@@ -60,7 +60,6 @@ def _user(status: UserStatus = UserStatus.ACTIVE) -> User:
         id=42,
         username="axon_42",
         name="Bob",
-        password_hash="x",
         email="bob@example.com",
         status=status,
         credit_balance=50_000_000,  # 5 credits

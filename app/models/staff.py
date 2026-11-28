@@ -16,8 +16,7 @@ Deliberately a **separate table** from ``user`` rather than an
 There is **no role column**: every active operator has full console
 access — a deliberate v1 simplification for a small, fully-trusted
 operator team (see ``docs/admin-console.md``). If tiers are ever needed,
-a role column is one additive migration away; the audit trail records
-who did what either way.
+a role column is one additive migration away.
 
 Authentication is the ``scope="staff"`` JWT class in :mod:`app.auth` — a
 third token class alongside user tokens and share-view tokens, mutually
@@ -56,7 +55,7 @@ class Staff(Base):
     # constraint's backing index already serves the login lookup.
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Human name shown in the console header and on audit-log rows.
+    # Human name shown in the console header.
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[StaffStatus] = mapped_column(
         SAEnum(

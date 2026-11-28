@@ -125,10 +125,6 @@ async def detail(db: AsyncSession, user_id: int, recording_id: str) -> Recording
     )
 
 
-#
-# Live
-
-
 async def start_live(ctx: MeetingContext, db: AsyncSession, body: LiveStart) -> LiveSession:
     """Open Meeting's live stream and the recording that will capture it.
 
@@ -275,10 +271,6 @@ async def retry(
     await db.commit()
 
 
-#
-# Upload
-
-
 def media_extension(filename: str) -> str:
     return os.path.splitext(filename)[1].lower()
 
@@ -317,7 +309,6 @@ async def register_upload(
         await db.execute(
             insert(MeetingRecording)
             .values(
-                id=uuid.uuid4(),
                 user_id=user_id,
                 identity_session_id=session_id,
                 kind=RecordingKind.UPLOAD,

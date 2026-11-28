@@ -25,8 +25,8 @@ class StaffCreate(BaseModel):
         min_length=3,
         max_length=64,
         # Login identifier, hand-provisioned, and it appears in log lines.
-        # Kept to an unambiguous set so it can't be
-        # confused with a display name or carry look-alike characters.
+        # Kept to an unambiguous set so it can't be confused with a display
+        # name or carry look-alike characters.
         pattern=r"^[a-z0-9][a-z0-9_.-]*$",
     )
     name: str = Field(min_length=1, max_length=64)
@@ -69,9 +69,8 @@ class StaffPasswordReset(BaseModel):
 class StaffPasswordChange(BaseModel):
     """An operator changing their own password.
 
-    Sudo-gated on ``current_password``, mirroring the customer-facing
-    email change flow: possession of a live token is not on its
-    own enough to rotate the credential behind it.
+    Sudo-gated on ``current_password``: possession of a live token is
+    not on its own enough to rotate the credential behind it.
     """
 
     current_password: str = Field(min_length=1, max_length=128)

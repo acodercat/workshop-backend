@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     # name to the user and nothing else notices. ``config.py`` is where the two
     # already diverge on purpose, and the **default** carries it — not the
     # ``.env`` — so this deployment is correct without anyone remembering to set
-    # it. Master's default reads ``PPIG Connector``; a merge conflicts here, and
+    # it. Master's default reads ``Axon Connector``; a merge conflicts here, and
     # that is the point.
     mcp_client_name: str = Field(
         default="HKGAI Connector",
@@ -478,17 +478,16 @@ class Settings(BaseSettings):
         description="Tag presigned session-file uploads for lifecycle reaping; clear the tag on bind.",
     )
 
-    # SMTP — used to send the registration / email-change verification
-    # codes. Lark Suite Mail by default (smtp.larksuite.com). Defaults
+    # SMTP — used to send operator notices (account activation, credit
+    # top-up). Lark Suite Mail by default (smtp.larksuite.com). Defaults
     # are empty strings (instead of required) so dev environments
     # without SMTP access can still boot — calls that need SMTP will
     # fail loudly at send time with a clearer error than a Pydantic
     # validation panic at import.
     #
     # Upstream cap (Lark Suite): 200 sends / 100 s and 6000 sends /
-    # day per sender. The existing per-IP register-code rate limit
-    # plus 60s per-email cooldown stay well under both — no extra
-    # app-level throttling needed.
+    # day per sender. Operator-triggered notices stay far below both —
+    # no app-level throttling needed.
     smtp_host: str = Field(default="smtp.larksuite.com", description="SMTP server hostname")
     smtp_port: int = Field(
         default=465,
@@ -808,18 +807,16 @@ class Settings(BaseSettings):
         ge=0,
         description="Stop turns once the user's projected post-settle balance falls to this many credits. 0 = stop at exactly zero, tolerating one detection window of overshoot (Manus-style).",
     )
-    # Auto-grant on registration, in whole credits at the current peg
-    # (1 credit ≈ $0.01 of cost basis). A generous "try the product"
-    # allowance; note
-    # this is large enough that signup-farming abuse is a real
-    # consideration (gate behind email verification + rate limits).
-    # Set to 0 to disable (every new user starts at 0 balance, admin must
-    # top up). The grant uses a deterministic idempotency key
-    # ``welcome-{user_id}`` so a registration retry after partial
-    # failure can't double-grant.
+    # Auto-grant at an account's first sign-in, in whole credits at the
+    # current peg (1 credit ≈ $0.01 of cost basis). A generous "try the
+    # product" allowance; every account behind it is one the identity
+    # provider registered. Set to 0 to disable (every new user starts at
+    # 0 balance, admin must top up). The grant uses a deterministic
+    # idempotency key ``welcome-{user_id}`` so two racing first sign-ins
+    # for one account grant once.
     credit_welcome_grant_credits: int = Field(
         default=1000,
-        description="Whole credits granted to every new user at registration. Set to 0 to disable.",
+        description="Whole credits granted to every new user at first sign-in. Set to 0 to disable.",
     )
     # Daily check-in: a user claims a fixed credit reward once per business
     # day. Set the reward to 0 to disable the feature (403 on claim). The
@@ -833,13 +830,10 @@ class Settings(BaseSettings):
         default="Asia/Shanghai",
         description="Business timezone whose calendar day defines one check-in per day.",
     )
-    # Customer-facing RMB sale price of ONE credit, used only to convert a
-    # top-up payment (¥) into credits — the domestic-market recharge knob.
-    # Deliberately distinct from the internal cost peg (1 credit ≈ $0.01 ≈
-    # ¥0.072 of LLM COGS): selling at ¥0.10 against a ¥0.072 cost basis
-    # bakes ~28% margin into the recharge step itself, on top of the
-    # per-turn token markup. Consumed by ``rates.credits_from_cny`` (admin
-    # ``topup_credits --cny`` today, self-serve Alipay/WeChat later). Does
+    # RMB price of ONE credit, used only to convert an operator top-up
+    # stated in ¥ (``scripts/topup_credits.py --cny``, through
+    # ``rates.credits_from_cny``) into credits. Distinct from the internal
+    # cost peg (1 credit ≈ $0.01 ≈ ¥0.072 of LLM COGS). Does
     # NOT touch billing / settle / balance — those stay on the µ-credit
     # ledger and the USD cost peg; this is pure sell-side pricing.
     credit_price_cny: float = Field(

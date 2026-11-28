@@ -117,7 +117,7 @@ async def _default_id(db: AsyncSession, user_id: int, rows: list[MeetingTemplate
             )
         )
     ).scalar_one_or_none()
-    existing = {str(row.id) for row in rows} | {t["id"] for t in builtin_templates()}
+    existing = {str(row.id) for row in rows} | {template["id"] for template in builtin_templates()}
     return chosen if chosen is not None and chosen in existing else FALLBACK_DEFAULT
 
 
@@ -157,7 +157,7 @@ def _columns(draft: TemplateDraft) -> dict[str, Any]:
     }
 
 
-async def _result(db: AsyncSession, user_id: int, row: MeetingTemplate) -> SummaryTemplate:
+async def _commit_and_view(db: AsyncSession, user_id: int, row: MeetingTemplate) -> SummaryTemplate:
     await db.commit()
     return _personal(row, await _default_id(db, user_id, [row]))
 
@@ -166,7 +166,7 @@ async def create(db: AsyncSession, user_id: int, draft: TemplateDraft) -> Summar
     row = MeetingTemplate(user_id=user_id, version=1, **_columns(draft))
     db.add(row)
     await db.flush()
-    return await _result(db, user_id, row)
+    return await _commit_and_view(db, user_id, row)
 
 
 async def update_template(
@@ -179,7 +179,7 @@ async def update_template(
         setattr(row, key, value)
     row.version += 1
     row.updated_at = datetime.now(UTC)
-    return await _result(db, user_id, row)
+    return await _commit_and_view(db, user_id, row)
 
 
 async def copy(db: AsyncSession, user_id: int, template_id: str) -> SummaryTemplate:
@@ -216,7 +216,9 @@ async def remove(db: AsyncSession, user_id: int, template_id: str) -> None:
 
 
 async def set_default(db: AsyncSession, user_id: int, template_id: str) -> SummaryTemplate:
-    builtin = next((t for t in builtin_templates() if t["id"] == template_id), None)
+    builtin = next(
+        (template for template in builtin_templates() if template["id"] == template_id), None
+    )
     if builtin is not None:
         await _save_default(db, user_id, template_id)
         return _public(builtin, template_id)

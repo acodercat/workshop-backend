@@ -10,6 +10,7 @@ a short lock per meeting to keep two of our own requests from interleaving
 is what the read-back is for).
 """
 
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -32,6 +33,7 @@ from app.schemas.meeting import (
 )
 from app.services.meeting.context import MeetingContext, meeting_errors
 from app.services.redis import LockHeld, short_lock
+from config import settings
 
 _FILTERS: dict[MeetingView, ListFilter] = {
     "meetings": "all",
@@ -39,9 +41,9 @@ _FILTERS: dict[MeetingView, ListFilter] = {
     "recycleBin": "trash",
 }
 # Long enough to cover a read, a write and a read-back at Meeting's
-# ordinary timeout; short enough that a crashed request does not lock the
-# record out for long.
-_EDIT_LOCK_SECONDS = 150
+# ordinary timeout, with a margin; short enough that a crashed request does
+# not lock the record out for long.
+_EDIT_LOCK_SECONDS = math.ceil(3 * settings.meeting_request_timeout_seconds) + 15
 
 
 def _variants(overviews: Overviews) -> MinutesVariants:
@@ -90,8 +92,8 @@ async def list_meetings(ctx: MeetingContext, *, view: MeetingView, page: int) ->
     the last page, so a deletion that shortens the list does not strand
     the client on an empty one."""
     async with meeting_errors(ctx):
-        listed = await ctx.meetings.list(ctx.actor, which=_FILTERS[view], page_index=page - 1)
-    last = max(1, -(-listed.total // PAGE_SIZE))
+        listed = await ctx.meetings.list_page(ctx.actor, which=_FILTERS[view], page_index=page - 1)
+    last = max(1, math.ceil(listed.total / PAGE_SIZE))
     if page > last and listed.total > 0:
         return await list_meetings(ctx, view=view, page=last)
     return MeetingPage(

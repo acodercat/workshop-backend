@@ -11,8 +11,8 @@ classes. This module packages the result as an
 
 There are **no roles**: every active operator may use every endpoint (a
 v1 decision recorded in ``docs/admin-console.md`` — the operator team is
-small and fully trusted, and named). If
-tiers are ever needed, this module is where a role gate would return.
+small, named and fully trusted). If tiers are ever needed, this module is
+where a role gate would return.
 """
 
 from typing import Annotated

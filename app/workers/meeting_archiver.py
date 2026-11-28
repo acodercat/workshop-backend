@@ -38,11 +38,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import ColumnElement, delete, select, update
 
 from app.database import AsyncSessionLocal
 from app.integrations.meeting.storage import put_object
 from app.integrations.meeting.transport import (
+    MeetingActor,
     MeetingDenied,
     MeetingError,
     MeetingRateLimited,
@@ -57,7 +58,7 @@ from app.models.meeting_recording import (
     RecordingStatus,
 )
 from app.services import file_storage
-from app.services.identity.sessions import end_session
+from app.services.identity.sessions import end_refused_session
 from app.services.meeting.clients import MeetingClients, open_meeting_clients
 from app.services.meeting.delegation import DelegationUnavailable, meeting_actor
 from app.services.meeting.recordings import BYTES_PER_SAMPLE, SAMPLE_RATE, media_extension
@@ -162,7 +163,7 @@ async def _file(clients: MeetingClients, claim: _Claim) -> str:
         ticket = await clients.meetings.upload_ticket(delegation.actor)
         key = await put_object(ticket, content, extension=extension)
     except MeetingError as exc:
-        raise await _meeting_failure(exc, row) from exc
+        raise await _meeting_failure(exc, row, delegation.actor) from exc
 
     await _mark_requested(claim)
     try:
@@ -178,7 +179,7 @@ async def _file(clients: MeetingClients, claim: _Claim) -> str:
     except (MeetingDenied, MeetingRefused, MeetingRateLimited) as exc:
         # A definite answer: Meeting did not file it. Safe to try again.
         await _unmark_requested(claim)
-        raise await _meeting_failure(exc, row) from exc
+        raise await _meeting_failure(exc, row, delegation.actor) from exc
     except MeetingError as exc:
         # No usable answer. It may have been filed; leave ``REQUESTED`` standing.
         raise _Failed(RecordingError.ARCHIVE_UNKNOWN) from exc
@@ -236,12 +237,18 @@ def wav(windows: list[bytes]) -> bytes:
     return b"".join([header, *windows])
 
 
-async def _meeting_failure(exc: MeetingError, row: MeetingRecording) -> _Failed:
+async def _meeting_failure(
+    exc: MeetingError, row: MeetingRecording, actor: MeetingActor
+) -> _Failed:
     if isinstance(exc, MeetingDenied):
         # Meeting has ended the session behind this sign-in; end it here
-        # too, as a request would.
-        if row.identity_session_id is not None:
-            await end_session(row.identity_session_id)
+        # too, as a request would — unless a concurrent call rotated the
+        # cookie after this one read it, and only the superseded value was
+        # refused.
+        if row.identity_session_id is not None and not await end_refused_session(
+            row.identity_session_id, refused=actor.session
+        ):
+            return _Failed(RecordingError.SERVICE_UNAVAILABLE)
         return _Failed(RecordingError.SESSION_EXPIRED)
     if isinstance(exc, MeetingRateLimited):
         return _Failed(RecordingError.RATE_LIMITED)
@@ -251,7 +258,7 @@ async def _meeting_failure(exc: MeetingError, row: MeetingRecording) -> _Failed:
     return _Failed(RecordingError.SERVICE_UNAVAILABLE)
 
 
-def _owned_by(claim: _Claim):
+def _claimed_by(claim: _Claim) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
     return (
         MeetingRecording.id == claim.recording_id,
         MeetingRecording.lease_token == claim.token,
@@ -266,7 +273,7 @@ async def _mark_requested(claim: _Claim) -> None:
             await db.execute(
                 update(MeetingRecording)
                 .where(
-                    *_owned_by(claim),
+                    *_claimed_by(claim),
                     MeetingRecording.archive_state == ArchiveState.NOT_REQUESTED,
                 )
                 .values(archive_state=ArchiveState.REQUESTED)
@@ -282,7 +289,7 @@ async def _unmark_requested(claim: _Claim) -> None:
     async with AsyncSessionLocal() as db:
         await db.execute(
             update(MeetingRecording)
-            .where(*_owned_by(claim))
+            .where(*_claimed_by(claim))
             .values(archive_state=ArchiveState.NOT_REQUESTED)
         )
         await db.commit()
@@ -294,66 +301,69 @@ async def _settle(
     error: RecordingError | None = None,
     archived_meeting_id: str | None = None,
 ) -> None:
-    """Record the outcome and release the claim — if it is still ours."""
-    now = datetime.now(UTC)
-    values: dict[str, object] = {"lease_until": None, "lease_token": None, "updated_at": now}
-    if archived_meeting_id is not None:
-        values |= {
-            "status": RecordingStatus.ARCHIVED,
-            "archive_state": ArchiveState.DONE,
-            "archived_meeting_id": archived_meeting_id,
-            "error": None,
-        }
-    else:
-        values |= {"status": RecordingStatus.FAILED, "error": error}
-    async with AsyncSessionLocal() as db:
-        settled = (
-            await db.execute(
-                update(MeetingRecording)
-                .where(*_owned_by(claim))
-                .values(**values)
-                .returning(MeetingRecording.id)
-            )
-        ).scalar_one_or_none()
-        await db.commit()
-    if settled is None:
-        logger.warning("lost the claim on recording %s before settling", claim.recording_id)
-        return
-    if archived_meeting_id is not None or (error is not None and error.final):
-        # Meeting has the audio, or never will: this copy has served its purpose.
-        await _release_audio(claim.recording_id)
+    """Record the outcome and release the claim — if it is still ours.
 
+    A failure after Meeting was asked to file the meeting (``REQUESTED`` is
+    still standing) is recorded as ``meeting_archive_unknown`` whatever
+    caused it: Meeting may have filed it, so trying again could file it
+    twice.
 
-async def _release_audio(recording_id: uuid.UUID) -> None:
-    """Drop the recording's local audio: its live windows, or its upload."""
+    A recording settled for good — archived, or failed with a final error —
+    has its live windows and its ``media_key`` dropped in the same
+    transaction as the outcome; its uploaded object is deleted after the
+    commit.
+    """
     async with AsyncSessionLocal() as db:
-        media_key = (
+        owned = (
             await db.execute(
-                select(MeetingRecording.media_key)
-                .where(MeetingRecording.id == recording_id)
+                select(MeetingRecording.archive_state, MeetingRecording.media_key)
+                .where(*_claimed_by(claim))
                 .with_for_update()
             )
-        ).scalar_one_or_none()
+        ).one_or_none()
+        if owned is None:
+            logger.warning("lost the claim on recording %s before settling", claim.recording_id)
+            return
+        values: dict[str, object] = {
+            "lease_until": None,
+            "lease_token": None,
+            "updated_at": datetime.now(UTC),
+        }
+        if archived_meeting_id is not None:
+            values |= {
+                "status": RecordingStatus.ARCHIVED,
+                "archive_state": ArchiveState.DONE,
+                "archived_meeting_id": archived_meeting_id,
+                "error": None,
+            }
+        else:
+            if owned.archive_state == ArchiveState.REQUESTED:
+                error = RecordingError.ARCHIVE_UNKNOWN
+            values |= {"status": RecordingStatus.FAILED, "error": error}
+        settled_for_good = archived_meeting_id is not None or (error is not None and error.final)
+        if settled_for_good:
+            # Meeting has the audio, or never will: this copy has served its purpose.
+            values["media_key"] = None
+            await db.execute(
+                delete(MeetingRecordingWindow).where(
+                    MeetingRecordingWindow.recording_id == claim.recording_id
+                )
+            )
         await db.execute(
             update(MeetingRecording)
-            .where(MeetingRecording.id == recording_id)
-            .values(media_key=None)
-        )
-        await db.execute(
-            delete(MeetingRecordingWindow).where(
-                MeetingRecordingWindow.recording_id == recording_id
-            )
+            .where(MeetingRecording.id == claim.recording_id)
+            .values(**values)
         )
         await db.commit()
-    if media_key:
+    if settled_for_good and owned.media_key:
         try:
             await asyncio.to_thread(
-                file_storage.delete, file_storage.MEETING_MEDIA_POLICY, media_key
+                file_storage.delete, file_storage.MEETING_MEDIA_POLICY, owned.media_key
             )
         except Exception:
             # The row no longer points at it; the bucket keeps an orphan,
             # which costs storage, not correctness.
-            logger.warning("could not delete released upload %s", media_key)
+            logger.warning("could not delete released upload %s", owned.media_key)
 
 
 async def _sweep() -> None:

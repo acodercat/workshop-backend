@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors import MeetingChangedError, MeetingSettingsInvalidError
+from app.errors import MeetingSettingsChangedError, MeetingSettingsInvalidError
 from app.models.meeting_settings import MeetingSettings, MinutesSource
 from config import settings
 
@@ -35,7 +35,8 @@ async def read(db: AsyncSession) -> CurrentSettings:
 async def change(
     db: AsyncSession, *, source: MinutesSource, model: str, revision: int
 ) -> CurrentSettings:
-    """Save new settings if nobody has since ``revision``. Commits."""
+    """Save new settings if nobody has since ``revision``. Flushes; the
+    caller commits."""
     if model not in available_models():
         raise MeetingSettingsInvalidError("That model is not available.")
     changed = (
@@ -47,6 +48,6 @@ async def change(
         )
     ).scalar_one_or_none()
     if changed is None:
-        raise MeetingChangedError("The settings changed since they were read.")
-    await db.commit()
+        raise MeetingSettingsChangedError("The settings changed since they were read.")
+    await db.flush()
     return CurrentSettings(source=source, model=model, revision=changed)

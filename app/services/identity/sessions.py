@@ -28,7 +28,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import ColumnElement, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
@@ -98,6 +98,11 @@ def is_live(session: IdentitySession, *, now: datetime) -> bool:
     return session.revoked_at is None and session.expires_at > now
 
 
+def _live() -> tuple[ColumnElement[bool], ...]:
+    """:func:`is_live` as SQL, for the statements that act on a session."""
+    return (IdentitySession.revoked_at.is_(None), IdentitySession.expires_at > func.now())
+
+
 async def ensure_confirmed(
     *,
     session_id: uuid.UUID,
@@ -162,8 +167,12 @@ async def _reverify(
             credential, timeout=settings.identity_reverify_timeout_seconds
         )
     except CredentialRejected:
-        await end_session(session_id)
-        raise SessionEnded from None
+        if await end_refused_session(session_id, refused=credential):
+            raise SessionEnded from None
+        # A concurrent call rotated the credential while this one asked
+        # with the old value: the refusal was of a superseded credential,
+        # and the stored one is next asked an interval from now.
+        return None
     except IdentityProviderUnavailableError:
         # The claim already moved ``checked_at``, so the next attempt is an
         # interval away — an outage costs one timeout per session per
@@ -194,24 +203,30 @@ async def _claim(session_id: uuid.UUID, *, due_before: datetime) -> str | None:
 
     One statement, so it is atomic across requests *and* processes: of any
     number racing, exactly one sees ``checked_at`` still old, moves it, and
-    gets a row back. ``None`` means another request has it, or the session
-    was revoked meanwhile.
+    gets a row back. ``None`` means another request has it.
+
+    Raises :class:`SessionEnded` when the claimed row has been revoked
+    since the caller read it, so a request that read the row just before a
+    sign-out is refused rather than let through on its last confirmation.
     """
     async with AsyncSessionLocal() as db:
-        sealed = (
+        row = (
             await db.execute(
                 update(IdentitySession)
                 .where(
                     IdentitySession.id == session_id,
-                    IdentitySession.revoked_at.is_(None),
                     IdentitySession.checked_at <= due_before,
                 )
                 .values(checked_at=datetime.now(UTC))
-                .returning(IdentitySession.credential)
+                .returning(IdentitySession.credential, IdentitySession.revoked_at)
             )
-        ).scalar_one_or_none()
+        ).one_or_none()
         await db.commit()
-        return sealed
+    if row is None:
+        return None
+    if row.revoked_at is not None:
+        raise SessionEnded
+    return row.credential
 
 
 async def _confirm(
@@ -253,13 +268,14 @@ class SessionCredential:
 
 async def load_credential(session_id: uuid.UUID) -> SessionCredential | None:
     """The credential behind a live session, or ``None`` if the session is
-    gone or its credential cannot be read. Reads in a session of its own."""
+    revoked, expired or gone, or its credential cannot be read. Reads in a
+    session of its own."""
     async with AsyncSessionLocal() as db:
         row = (
             await db.execute(
                 select(IdentitySession.credential, UserIdentity.subject)
                 .join(UserIdentity, UserIdentity.id == IdentitySession.identity_id)
-                .where(IdentitySession.id == session_id, IdentitySession.revoked_at.is_(None))
+                .where(IdentitySession.id == session_id, *_live())
             )
         ).one_or_none()
     if row is None:
@@ -276,8 +292,8 @@ async def replace_credential(
 ) -> str | None:
     """Store a rotated credential, compare-and-swap on the sealed value the
     caller read. Returns the new sealed value, or ``None`` if the row had
-    already moved on (another request rotated it first, or it was revoked)
-    — in which case the stored one is newer and must be kept."""
+    already moved on (another request rotated it first, or it was revoked
+    or expired) — in which case the stored one is newer and must be kept."""
     sealed = seal(credential)
     async with AsyncSessionLocal() as db:
         stored = (
@@ -285,7 +301,7 @@ async def replace_credential(
                 update(IdentitySession)
                 .where(
                     IdentitySession.id == session_id,
-                    IdentitySession.revoked_at.is_(None),
+                    *_live(),
                     IdentitySession.credential == expected,
                 )
                 .values(credential=sealed)
@@ -297,11 +313,43 @@ async def replace_credential(
 
 
 async def end_session(session_id: uuid.UUID) -> None:
-    """Revoke a session in a transaction of its own — for callers that
-    learn mid-request that the provider has ended it."""
+    """Revoke a session in a transaction of its own, whatever credential it
+    holds — for a session nothing can ever confirm again."""
     async with AsyncSessionLocal() as db:
         await revoke_session(db, session_id)
         await db.commit()
+
+
+async def end_refused_session(session_id: uuid.UUID, *, refused: MeetingSession) -> bool:
+    """Revoke a session because the provider refused ``refused``, the
+    credential a call presented for it. Returns whether the session is over.
+
+    Compare-and-swap on that credential: Meeting rotates the session cookie,
+    so a call made with a value another call has since replaced can be
+    refused while the stored one is live. When the stored credential is no
+    longer ``refused`` the session stands and this returns ``False``. The
+    row is locked while compared, so a rotation cannot land in between.
+    """
+    async with AsyncSessionLocal() as db:
+        sealed = (
+            await db.execute(
+                select(IdentitySession.credential)
+                .where(IdentitySession.id == session_id, IdentitySession.revoked_at.is_(None))
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if sealed is None:
+            return True
+        try:
+            superseded = unseal(sealed) != refused
+        except CredentialUnreadable:
+            # Nothing could act with the stored one either.
+            superseded = False
+        if superseded:
+            return False
+        await revoke_session(db, session_id)
+        await db.commit()
+    return True
 
 
 async def revoke_session(db: AsyncSession, session_id: uuid.UUID) -> str | None:

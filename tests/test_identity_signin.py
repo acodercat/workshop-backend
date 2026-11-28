@@ -93,7 +93,7 @@ async def test_sign_out_revokes_locally_before_asking_the_provider(monkeypatch) 
         order.append("revoke-row")
         return sealed
 
-    provider = MagicMock(revoke=AsyncMock(side_effect=lambda c: order.append("provider")))
+    provider = MagicMock(revoke=AsyncMock(side_effect=lambda _credential: order.append("provider")))
     monkeypatch.setattr(signin, "revoke_session", revoke_row)
 
     await signin.sign_out(db, provider, session_id=uuid.uuid4())

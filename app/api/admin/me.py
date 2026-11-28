@@ -33,9 +33,8 @@ async def read_me(ctx: StaffContext) -> StaffProfileResponse:
 async def change_my_password(ctx: StaffContext, body: StaffPasswordChange) -> Response:
     """Rotate the caller's own password.
 
-    Sudo-gated on ``current_password``, mirroring the customer-facing
-    email change flow: holding a live token is not on its own
-    enough to rotate the credential behind it.
+    Sudo-gated on ``current_password``: holding a live token is not on
+    its own enough to rotate the credential behind it.
 
     **This signs the caller out**, here and everywhere else — the token
     version bumps, so the token that authorized this request is dead by

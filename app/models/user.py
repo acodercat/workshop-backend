@@ -47,11 +47,6 @@ class User(Base):
     # the user can change their display name freely; ``username`` is
     # the stable login identifier.
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Always ``NULL`` for an account created by sign-in: identity is federated
-    # (see :class:`~app.models.user_identity.UserIdentity`) and the provider
-    # holds the credential. Rows that predate federation keep the hash they
-    # had; nothing verifies it any more.
-    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Not a credential — sign-in names an account by its
     # :class:`~app.models.user_identity.UserIdentity`, which is where the
     # ``UNIQUE`` lives. Kept so the API has something to return.

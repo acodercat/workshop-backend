@@ -1,5 +1,4 @@
-"""The meeting library — summary templates and vocabularies — and the
-deployment's meeting AI settings.
+"""The meeting library: summary templates and vocabularies.
 
 Under their own prefixes rather than ``/meetings/...``: those paths are
 meeting ids, and ``/meetings/templates`` would be read as one.
@@ -13,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.api.uploads import read_capped_body
 from app.auth import authenticate_and_get_user
-from app.errors import TemplateImportTooLargeError
 from app.models.user import User
 from app.schemas.meeting_library import (
     CategoryName,
@@ -29,13 +27,9 @@ from app.schemas.meeting_library import (
     VocabularySave,
 )
 from app.services.meeting import templates, vocabulary
-from app.services.meeting.template_import import MAX_UPLOAD_BYTES, import_template
+from app.services.meeting.template_import import MAX_UPLOAD_BYTES, import_template, too_large
 
 router = APIRouter()
-
-
-#
-# Templates
 
 
 @router.get("/meeting-library/templates")
@@ -73,13 +67,7 @@ async def preview_template_import(
     """Read a template out of an uploaded document (the raw bytes are the
     body). Nothing is saved: the user reviews the preview and creates the
     template from it."""
-    data = await read_capped_body(
-        request,
-        MAX_UPLOAD_BYTES,
-        too_large=TemplateImportTooLargeError(
-            f"The document is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-        ),
-    )
+    data = await read_capped_body(request, MAX_UPLOAD_BYTES, too_large=too_large())
     # Unzipping and parsing a document is CPU work; keep it off the loop.
     return await asyncio.to_thread(import_template, filename, data)
 
@@ -112,8 +100,7 @@ async def delete_template(
     await templates.remove(db, user.id, template_id)
 
 
-#
-# Vocabularies. ``scope`` is ``personal`` or a project id.
+# Vocabularies: ``scope`` is ``personal`` or a project id.
 
 
 @router.get("/meeting-library/vocabularies")

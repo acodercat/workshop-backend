@@ -1,8 +1,8 @@
 """The console's session list reports usage, and cannot open a session.
 
-Both halves are the same decision. ``GET /sessions/{id}`` was removed
-rather than audited — a conversation is the most private thing the
-platform holds and no console question needs one — so the row itself has
+Both halves are the same decision. There is no ``GET /sessions/{id}`` —
+a conversation is the most private thing the platform holds and no
+console question needs one — so the row itself has
 to answer "was this session expensive, and why". These pin that the three
 usage figures reach the response, and that the content endpoint stays
 gone.

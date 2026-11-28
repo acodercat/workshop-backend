@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints
 
+from app.integrations.meeting.records import MeetingStatus
 from app.models.meeting_recording import (
     CaptionTarget,
     RecordingError,
@@ -25,7 +26,6 @@ from app.schemas.meeting_library import TemplateDraft
 HOSTED_PREFIX = "meeting-"
 
 MeetingView = Literal["meetings", "favorites", "recycleBin"]
-MeetingStatus = Literal["processing", "complete", "failed"]
 # The three languages minutes are kept in: Traditional, Simplified, English.
 MinutesLanguage = Literal["tc", "sc", "en"]
 
@@ -166,9 +166,6 @@ class QuestionRequest(BaseModel):
     messages: Annotated[list[ChatMessage], Field(min_length=1, max_length=60)]
     language: MinutesLanguage
 
-
-#
-# Recordings
 
 _Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)]
 _Notes = Annotated[str, StringConstraints(strip_whitespace=True, max_length=50_000)]

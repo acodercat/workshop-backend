@@ -109,7 +109,9 @@ class CaptionTarget(StrEnum):
 
 
 def _enum(enum_cls: type[StrEnum], name: str) -> SAEnum:
-    return SAEnum(enum_cls, name=name, values_callable=lambda cls: [m.value for m in cls])
+    return SAEnum(
+        enum_cls, name=name, values_callable=lambda members: [member.value for member in members]
+    )
 
 
 class MeetingRecording(Base):

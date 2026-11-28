@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from app.integrations.meeting.records import coalesce, row_of
 from app.integrations.meeting.transport import (
     DENIED_CODES,
     OK_CODES,
@@ -59,10 +60,6 @@ class OutputEmpty(OutputError):
     """The stream completed with no text in it."""
 
 
-def _row(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
 def _code(value: Any) -> str | None:
     return None if value is None else str(value)
 
@@ -74,7 +71,7 @@ def _assert_authorized(value: Any) -> None:
         return
     if _code(value.get("code")) in DENIED_CODES:
         raise MeetingDenied
-    if value.get("data") is not None and value.get("data") is not value:
+    if value.get("data") is not None:
         _assert_authorized(value["data"])
     if isinstance(value.get("error"), dict):
         _assert_authorized(value["error"])
@@ -89,13 +86,13 @@ class _Assembler:
         if not isinstance(value, dict):
             return
         _assert_authorized(value)
-        for layer in (value, _row(value.get("data")) or value):
+        for layer in (value, row_of(value.get("data")) or value):
             code = _code(layer.get("code"))
             if layer.get("error") or (code is not None and code not in OK_CODES):
                 raise OutputFailed("unavailable")
-        payload = _row(value.get("data")) or value
+        payload = row_of(value.get("data")) or value
         choices = payload.get("choices")
-        choice = _row(choices[0]) if isinstance(choices, list) and choices else {}
+        choice = row_of(choices[0]) if isinstance(choices, list) and choices else {}
         for reason in (
             choice.get("finish_reason"),
             payload.get("finish_reason"),
@@ -105,12 +102,12 @@ class _Assembler:
                 raise OutputFailed("truncated")
             if reason is not None and reason != "stop":
                 raise OutputIncomplete
-        delta = _row(choice.get("delta"))
-        message_event = _row(delta.get("message_event"))
-        chunk = _first_present(
+        delta = row_of(choice.get("delta"))
+        message_event = row_of(delta.get("message_event"))
+        chunk = coalesce(
             payload.get("answer"),
             delta.get("content"),
-            _row(choice.get("message")).get("content"),
+            row_of(choice.get("message")).get("content"),
             message_event.get("answer") if message_event.get("event") == "overview" else None,
             payload.get("text"),
             payload.get("content"),
@@ -132,7 +129,7 @@ class _Assembler:
             except ValueError:
                 value = None
             _assert_authorized(value)
-            reason = _row(value).get("reason")
+            reason = row_of(value).get("reason")
             raise OutputFailed(
                 reason if isinstance(reason, str) and reason in _REASONS else "unavailable"
             )
@@ -149,11 +146,6 @@ class _Assembler:
             raise OutputFailed("format") from exc
         if event in _TEXT_EVENTS:
             self.consume(value, final=final)
-
-
-def _first_present(*values: Any) -> Any:
-    """JavaScript's ``??`` chain: the first value that is not ``None``."""
-    return next((value for value in values if value is not None), None)
 
 
 async def read_output(response: httpx.Response) -> str:

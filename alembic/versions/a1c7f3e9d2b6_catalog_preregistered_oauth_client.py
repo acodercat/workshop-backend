@@ -55,7 +55,7 @@ def _columns_present() -> bool:
     the first to run drops them and the second finds nothing.
     """
     columns = {
-        c["name"] for c in inspect(op.get_bind()).get_columns("mcp_server_catalog")
+        column["name"] for column in inspect(op.get_bind()).get_columns("mcp_server_catalog")
     }
     return "oauth_client_id" in columns
 

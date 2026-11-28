@@ -28,6 +28,10 @@ adding a second:
   `withdrawal_request.ledger_id` in passing). The fix at that moment is a local
   revision on this branch, not an edit to master's file.
 
+**hkgai note:** how this branch's chain relates to master's now — revisions
+not taken, re-pointed or edited in place — is kept in ``HKGAI_MERGE.md``
+("⚠️ Alembic migration chain"); read that rather than the first point above.
+
 Revision ID: b7e2d9a4c1f5
 Revises: d3b7f5a1c682
 Create Date: 2026-08-03

@@ -15,10 +15,8 @@ fix the skill, adjust the prompt.
 **The excerpt is the only customer conversation content the console can
 show, and it is deliberately the smallest possible slice**: the one reply
 being judged, quoted as evidence. There is no way to open the session it
-came from — that endpoint was removed rather than audited — so this is
-where the privacy line sits, and it is worth keeping it here. Not
-audited: the queue is a list the operator scans in bulk, and auditing
-every scroll would bury the signal that matters.
+came from — the console has no such endpoint — so this is where the
+privacy line sits, and it is worth keeping it here.
 """
 
 from fastapi import APIRouter, Query

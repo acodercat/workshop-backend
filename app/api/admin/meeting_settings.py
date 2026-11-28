@@ -35,8 +35,8 @@ async def get_meeting_settings(ctx: StaffContext) -> MeetingSettingsView:
 async def change_meeting_settings(
     ctx: StaffContext, body: MeetingSettingsChange
 ) -> MeetingSettingsView:
-    return _view(
-        await meeting_settings.change(
-            ctx.db, source=body.source, model=body.model, revision=body.revision
-        )
+    current = await meeting_settings.change(
+        ctx.db, source=body.source, model=body.model, revision=body.revision
     )
+    await ctx.db.commit()
+    return _view(current)

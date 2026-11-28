@@ -55,15 +55,16 @@ after first deploy.
    row *and* owns the commit, so a mutation persists only together with
    its record. This deployment drops all of it (`c8f2a5e1d94b`): the
    console is an internal tool reached by a handful of named accounts,
-   and the controls that matter sit outside the application. The cost is
-   worth naming — each endpoint now commits for itself, so a mutation
-   that forgets to commit silently does not stick, where forgetting used
-   to be impossible. `tests/test_admin_mutations_commit.py` is what
-   replaced the structural guarantee.
+   and the controls that matter sit outside the application. Each
+   endpoint commits for itself, so a mutation that forgets to commit
+   silently does not stick. Tests assert each commit:
+   `tests/test_admin_mutations_commit.py` for staff and `me`, a
+   `db.commits` check in every other endpoint's own test file.
 6. **The console never re-implements a domain service.** Credit
    adjustments and skill publishing call the funnels that already hold
-   the invariants (`credits._internal`, `skill_registration`, …). `services/admin/` exists only for what
-   nothing else owns (staff accounts).
+   the invariants (`credits._internal`, `skill_registration`, …).
+   `services/admin/` exists only for what nothing else owns (staff
+   accounts).
 7. **`api/public` + `api/admin` sibling layout** — already applied
    repo-wide; a third surface would be a third sibling.
 8. **Native PG enum** for `staff_status` (repo convention). Note the
@@ -138,10 +139,9 @@ the ledger would have to live somewhere, and no module owns all three.
 
 **Neither list can open a session, and there is no endpoint that would
 let it.** A conversation is the most private thing the platform holds,
-and no question this surface exists to answer needs one — so rather than
-auditing the read, the read was removed. `GET /sessions/{id}` and the
-`session.view` action are both gone; the console has no audited read
-because it has no way to read one customer's content at all. The one
+and no question this surface exists to answer needs one — so there is no
+`GET /sessions/{id}`, and the console has no way to read one customer's
+content at all. The one
 thing it *can* pull bytes of is a platform skill bundle
 (`GET /skills/{id}/download-url`), which is the platform's own artifact
 and refuses `CUSTOM` for exactly this reason — the rule is about whose
@@ -216,9 +216,9 @@ compare-and-swap on `revision`, so two operators editing at once get a
 
 ### Invites (`app/api/admin/invite.py` — `/invite-codes`, `/invite-redemptions`)
 
-Read-only history. Registration moved to the Meeting service, which has
-invitation codes of its own, so no code here is issued or redeemed any
-more; what remains is the record of who came in through whom before that.
+Read-only. Registration is at the Meeting service, which has invitation
+codes of its own, so no code here is issued or redeemed; these tables
+record who came in through whom on a local code.
 
 | Route | What |
 |---|---|
@@ -556,19 +556,12 @@ now that check-in and credit reporting both need it. "What is
 today" has one definition platform-wide, tested in
 `tests/test_business_time.py`.
 
-### The vocabulary these produced
+### Still out
 
-Upstream each writable resource contributes one member to an
-`AuditAction` enum, and the read-only surfaces (ratings, dashboard,
-connector list) contribute none — an action exists because something
-writes, not because a page exists. This deployment keeps no operator
-trail, so the enum is gone with the rest (`c8f2a5e1d94b`); what the list
-is still good for is reading off which surfaces mutate and which only
-display.
-
-Still deliberately out, with scripts covering them: org management, and the two script jobs that
-are genuinely not console work: sealing a connector's OAuth client
-secret, and bulk re-packaging platform bundles from a checkout.
+Deliberately out, with scripts covering them: org management, and the
+two script jobs that are genuinely not console work: sealing a
+connector's OAuth client secret, and bulk re-packaging platform bundles
+from a checkout.
 
 ## Frontend and the questions settled with it
 
@@ -660,10 +653,7 @@ double-entry verified in SQL), the soft-deleted session still readable,
 feedback triage, the ratings queue with its excerpt and filter, a
 minted invite code coming back `SYSTEM`-origin and ownerless, the
 catalog's create/publish pair with **no secret-shaped field on the
-wire**. The upstream smoke also asserted one audit row per mutating
-action; there is no trail here to assert against, so what stands in its
-place is `tests/test_admin_mutations_commit.py` — the mutation persisted
-at all.
+wire**.
 
 Two real bugs it caught that unit tests could not: reading the
 server-computed ``updated_at`` back after a flush raised

@@ -17,14 +17,12 @@ caller:
 - Provider config (host / port / SSL-vs-STARTTLS / login) is centralised
   in :mod:`config` — call sites stay clean.
 
-Upstream cap (Lark Suite SMTP): 200 sends / 100 s and 6000 sends /
-day per sender. What is sent here — operator-triggered notices — is far
-below both, so there is no application-level throttle.
+No application-level throttle here; see the Lark cap note on the
+``smtp_*`` settings in :mod:`config`.
 """
 
 import logging
 import ssl
-import uuid
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 
@@ -47,7 +45,7 @@ class EmailSendError(Exception):
         self,
         message: str,
         *,
-        code: int | str | None = None,
+        code: int | None = None,
         request_id: str | None = None,
     ) -> None:
         super().__init__(message)
@@ -99,35 +97,22 @@ async def send_html_email(*, to: str, subject: str, html_body: str) -> str:
 
     # ``make_msgid`` needs a domain; derive it from the From address
     # so the Message-Id matches the sending domain and doesn't trip
-    # reputation checks. Fall back to a random uuid if the address is
-    # malformed (the SMTP send will surface the real error).
-    domain = settings.smtp_from_address.split("@", 1)[-1] or uuid.uuid4().hex
-    message_id = make_msgid(domain=domain)
+    # reputation checks.
+    message_id = make_msgid(domain=settings.smtp_from_address.split("@", 1)[-1])
     msg = _build_message(to=to, subject=subject, html_body=html_body, message_id=message_id)
 
     try:
-        if settings.smtp_use_ssl:
-            await aiosmtplib.send(
-                msg,
-                hostname=settings.smtp_host,
-                port=settings.smtp_port,
-                username=settings.smtp_username,
-                password=settings.smtp_password,
-                use_tls=True,
-                tls_context=ssl.create_default_context(),
-                timeout=settings.smtp_timeout_seconds,
-            )
-        else:
-            await aiosmtplib.send(
-                msg,
-                hostname=settings.smtp_host,
-                port=settings.smtp_port,
-                username=settings.smtp_username,
-                password=settings.smtp_password,
-                start_tls=True,
-                tls_context=ssl.create_default_context(),
-                timeout=settings.smtp_timeout_seconds,
-            )
+        await aiosmtplib.send(
+            msg,
+            hostname=settings.smtp_host,
+            port=settings.smtp_port,
+            username=settings.smtp_username,
+            password=settings.smtp_password,
+            use_tls=settings.smtp_use_ssl,
+            start_tls=not settings.smtp_use_ssl,
+            tls_context=ssl.create_default_context(),
+            timeout=settings.smtp_timeout_seconds,
+        )
     except aiosmtplib.SMTPException as exc:
         code = getattr(exc, "code", None)
         logger.warning(

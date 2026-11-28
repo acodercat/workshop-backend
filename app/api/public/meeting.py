@@ -84,10 +84,6 @@ def remote_meeting_id(meeting_id: str = Path(min_length=1, max_length=520)) -> s
     return meeting_id.removeprefix(HOSTED_PREFIX)
 
 
-#
-# Hosted meetings
-
-
 @router.get("/meetings")
 async def list_meetings(
     view: MeetingView = "meetings",
@@ -227,10 +223,6 @@ async def answer_question(
         ctx, db, remote_id, messages=body.messages, language=body.language
     )
     return GeneratedText(content=content)
-
-
-#
-# Recordings: made here, archived to Meeting by the background process.
 
 
 @router.post("/meeting-recordings/live", status_code=status.HTTP_201_CREATED)

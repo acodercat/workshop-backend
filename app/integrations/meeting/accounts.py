@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
+from app.integrations.meeting.records import first_text
 from app.integrations.meeting.transport import (
     OK_CODES,
     MeetingActor,
@@ -38,15 +39,6 @@ class MeetingAccount:
     display_name: str
 
 
-def _first_text(source: dict[str, Any], *keys: str) -> str | None:
-    """The first of ``keys`` holding a non-empty value, as text."""
-    for key in keys:
-        value = source.get(key)
-        if value not in (None, ""):
-            return str(value)
-    return None
-
-
 def _account(data: Any) -> MeetingAccount:
     """Read an account out of a ``get_user_info`` payload.
 
@@ -61,13 +53,13 @@ def _account(data: Any) -> MeetingAccount:
     user = data.get("user_info") if isinstance(data, dict) else None
     if not isinstance(user, dict):
         raise MeetingUnavailable("the answer carries no user info")
-    account_id = _first_text(user, "account_id")
-    if account_id is None:
+    account_id = first_text(user, "account_id")
+    if not account_id:
         raise MeetingUnavailable("user info names no account")
     email = user.get("email")
     email = email if isinstance(email, str) and email else None
     display_name = (
-        _first_text(user, "nickname", "nick_name", "screen_name", "name", "username")
+        first_text(user, "nickname", "nick_name", "screen_name", "name", "username")
         or email
         or account_id
     )

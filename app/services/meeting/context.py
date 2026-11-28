@@ -37,7 +37,7 @@ from app.integrations.meeting.transport import (
     MeetingRefused,
     MeetingUnavailable,
 )
-from app.services.identity.sessions import end_session
+from app.services.identity.sessions import end_refused_session
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +61,17 @@ async def meeting_errors(ctx: MeetingContext) -> AsyncIterator[None]:
     A denial is the one with a side effect: Meeting has ended the session
     behind this sign-in, so it is ended here too — otherwise the user would
     stay signed in to a workspace that can no longer show their meetings,
-    until the next scheduled re-confirmation noticed.
+    until the next scheduled re-confirmation noticed. Unless a concurrent
+    request rotated the session cookie after this one read it: then the
+    refusal was of the superseded value, the session stands, and the
+    request fails as retryable.
     """
     try:
         yield
     except MeetingDenied as exc:
-        await end_session(ctx.session_id)
-        raise MeetingSessionExpiredError("Meeting ended this session.") from exc
+        if await end_refused_session(ctx.session_id, refused=ctx.actor.session):
+            raise MeetingSessionExpiredError("Meeting ended this session.") from exc
+        raise MeetingServiceUnavailableError("Meeting refused a superseded session.") from exc
     except MeetingRateLimited as exc:
         raise MeetingRateLimitedError("Meeting is throttling requests.") from exc
     except MeetingRefused as exc:

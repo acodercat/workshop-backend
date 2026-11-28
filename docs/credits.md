@@ -147,22 +147,22 @@ safe: the second attempt fails the constraint, gets caught, and
 state machine instead: each transitions are guarded by the `state =
 'OPEN'` predicate, so a duplicated trigger is a no-op.
 
-### Best-effort welcome grant outside the register tx
+### Best-effort welcome grant outside the provisioning tx
 
-Welcome grant on registration is **not** inside the user-creation
-transaction. Two reasons:
+The welcome grant at an account's first sign-in is **not** inside the
+user-creation transaction. Two reasons:
 
 1. `apply_topup` calls `db.rollback()` itself on a duplicate-key
    `IntegrityError` (documented contract). If composed into the
-   register tx, that rollback would wipe the freshly created
+   provisioning tx, that rollback would wipe the freshly created
    user/org/member rows too.
-2. Any transient failure during the grant shouldn't invalidate a
-   registration the user already proved with email verification —
-   they'd just have to re-verify a new code, which is awful UX.
+2. Any transient failure during the grant shouldn't refuse a sign-in
+   the identity provider has already approved — the user gets in with
+   a zero balance and an operator tops them up.
 
 Trade-off: there's a microsecond window where the user exists with 0
-balance. Acceptable; the client doesn't have a session yet because
-the registration response hasn't returned.
+balance. Acceptable; the client doesn't have a token yet because
+the sign-in response hasn't returned.
 
 ---
 
@@ -198,7 +198,7 @@ CREATE INDEX ix_credit_ledger_user_created
 | `SETTLE` | settle path (lazy sweep / sweeper) | both | two rows: reverse-reserve + actual debit |
 | `REFUND` | settle path on missing usage / session delete / expired | + | full refund |
 | `ADJUST` | `adjust_credits` script / admin console | either | manual correction |
-| `REFERRAL` | registration through a referral code | + | the referrer's reward |
+| `REFERRAL` | nothing on this deployment — rows are from local registration through a referral code | + | the referrer's reward |
 | `CHECKIN` | daily check-in | + | the day's reward |
 
 `SETTLE` is unusual — every settle writes **two** rows in one tx:
@@ -624,10 +624,12 @@ Two entry points:
 Each visits at most a handful of OPEN reservations per call
 (partial index keeps the lookup cheap).
 
-### Background process (settle sweeper + subscriber)
+### Background process (settle sweeper + subscriber + dispatchers)
 
-One process, two always-on concurrent async tasks (`app/workers/run.py`
-with an `asyncio.TaskGroup`; the budget enforcer is a flag-gated third). Standalone entrypoint:
+One process, four always-on concurrent async tasks — settle sweeper,
+settle subscriber, schedule dispatcher, message queue dispatcher — plus
+the flag-gated budget enforcer (`app/workers/run.py`, one
+`asyncio.TaskGroup`). The two settle tasks are described here. Standalone entrypoint:
 `uv run python -m app.workers.run`. Lifecycle commands:
 `bash scripts/deploy.sh background {start|stop|restart|status|logs}`.
 

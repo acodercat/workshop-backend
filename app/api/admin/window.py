@@ -2,9 +2,8 @@
 
 A closed set rather than a free integer: every option should be one an
 operator actually reasons in, and it keeps each query's cost
-predictable. Shared by the credits dashboard, the payments page, the
-message-ratings page and the session list so they describe the same
-spans of time —
+predictable. Shared by the credits dashboard, the message-ratings page
+and the session list so they describe the same spans of time —
 duplicating the policy is how one page silently starts offering a window
 the other doesn't. The list takes :data:`OptionalWindowDays`, which adds
 "all time" without forking the set.

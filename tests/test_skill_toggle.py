@@ -99,9 +99,7 @@ def _client(db: _FakeDb) -> TestClient:
     install_error_handlers(app)
     app.include_router(public_skill.router)
     app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[authenticate_and_get_user] = lambda: User(
-        id=_USER_ID, username="u", password_hash="x"
-    )
+    app.dependency_overrides[authenticate_and_get_user] = lambda: User(id=_USER_ID, username="u")
     return TestClient(app)
 
 

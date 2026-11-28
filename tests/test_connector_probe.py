@@ -17,7 +17,12 @@ from app.errors import (
 )
 from app.models.mcp_server import MCPServerAuthType
 from app.services.mcp import probe as probe_mod
-from app.services.mcp.probe import _describe, _unreachable, build_auth_headers, probe
+from app.services.mcp.probe import (
+    _describe,
+    _unreachable,
+    build_auth_headers,
+    probe,
+)
 
 
 def _mcp_error(code: int, message: str) -> BaseException:
@@ -322,8 +327,7 @@ class TestTheFailureSaysWhatFailed:
         # checks see it, and it arrived as the generic "cannot connect" while
         # the fix was one word in the URL.
         error = _unreachable(
-            _mcp_error(INVALID_REQUEST, "Unexpected content type: text/html"),
-            handshook=False,
+            _mcp_error(INVALID_REQUEST, "Unexpected content type: text/html"), handshook=False
         )
         assert isinstance(error, ConnectorNotMcpEndpointError)
         assert "/mcp" in str(error)
@@ -337,8 +341,7 @@ class TestTheFailureSaysWhatFailed:
 
     def test_a_server_error_stays_a_server_error(self):
         error = _unreachable(
-            _mcp_error(INTERNAL_ERROR, "Server returned an error response"),
-            handshook=False,
+            _mcp_error(INTERNAL_ERROR, "Server returned an error response"), handshook=False
         )
         assert isinstance(error, ConnectorHttpStatusError)
 
@@ -372,10 +375,7 @@ class TestTheFailureSaysWhatFailed:
         # this string, so without the log line the only description of what
         # actually happened is discarded at the browser.
         with caplog.at_level("WARNING"):
-            _unreachable(
-                ExceptionGroup("g", [RuntimeError("connection refused")]),
-                handshook=False,
-            )
+            _unreachable(ExceptionGroup("g", [RuntimeError("connection refused")]), handshook=False)
         assert "connection refused" in caplog.text
         assert "connector_unreachable" in caplog.text
 

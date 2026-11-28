@@ -139,6 +139,15 @@ class PasswordPolicyError(AppError):
     error_type = "password_policy"
 
 
+class NamePolicyError(AppError):
+    """A display name the identity provider would not accept — too long,
+    in bytes. Checked here first for the same reason as
+    :class:`PasswordPolicyError`; ``details`` carries the bound."""
+
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    error_type = "name_policy"
+
+
 class IdentityProviderUnavailableError(AppError):
     """The identity provider could not be reached, or answered with
     something that is not an answer. Nothing is wrong with the request —
@@ -1139,6 +1148,14 @@ class MeetingModelUnavailableError(AppError):
 class MeetingSettingsInvalidError(AppError):
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     error_type = "meeting_settings_invalid"
+
+
+class MeetingSettingsChangedError(AppError):
+    """Another operator saved the meeting settings since they were read.
+    Reload, then change them again."""
+
+    status_code = status.HTTP_409_CONFLICT
+    error_type = "meeting_settings_changed"
 
 
 class MeetingTemplateNotFoundError(AppError):

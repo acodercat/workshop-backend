@@ -3,8 +3,8 @@
 :mod:`app.integrations.meeting` reports what Meeting said; this module says
 what it means for sign-in — mostly a translation table from Meeting's
 refusal codes onto the application's typed errors, plus Meeting's bounds on
-a new password, checked here first because Meeting's own answer to a bad
-one is a bare code nobody can act on.
+a new password and a display name, checked here first because Meeting's own
+answer to a bad one is a bare code nobody can act on.
 
 The credential a sign-in yields is Meeting's session
 (:class:`~app.integrations.meeting.transport.MeetingSession`). It is
@@ -25,6 +25,7 @@ from app.errors import (
     IdentityProviderRejectedError,
     IdentityProviderUnavailableError,
     InvalidCredentialsError,
+    NamePolicyError,
     PasswordPolicyError,
 )
 from app.integrations.meeting.accounts import MeetingAccount, MeetingAccounts, PasswordTooLong
@@ -232,8 +233,9 @@ class MeetingIdentityProvider:
         one enter through the same door."""
         _check_new_password(password)
         if len(name.encode()) > MAX_NAME_BYTES:
-            raise IdentityProviderRejectedError(
-                f"Name must be at most {MAX_NAME_BYTES} bytes.", details={"code": "name_too_long"}
+            raise NamePolicyError(
+                f"Name must be at most {MAX_NAME_BYTES} bytes.",
+                details={"max_bytes": MAX_NAME_BYTES},
             )
         try:
             await self._accounts.register(

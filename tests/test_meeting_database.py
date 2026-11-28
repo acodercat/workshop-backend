@@ -62,7 +62,7 @@ async def test_racing_first_sign_ins_create_one_account() -> None:
     assert len({result.user.id for result in results}) == 1
 
 
-async def _session_id(signed_in: signin.SignedIn) -> uuid.UUID:
+def _session_id(signed_in: signin.SignedIn) -> uuid.UUID:
     claims = jwt.decode(
         signed_in.access_token, settings.secret_key, algorithms=[settings.algorithm]
     )
@@ -70,7 +70,7 @@ async def _session_id(signed_in: signin.SignedIn) -> uuid.UUID:
 
 
 async def test_a_rotated_credential_is_written_back_once() -> None:
-    session_id = await _session_id(await _sign_in(_provider(f"rotate-{uuid.uuid4()}")))
+    session_id = _session_id(await _sign_in(_provider(f"rotate-{uuid.uuid4()}")))
     first = await meeting_actor(session_id)
     second = await meeting_actor(session_id)
     assert first.actor.on_rotate and second.actor.on_rotate
@@ -100,11 +100,27 @@ async def _queued_recording(user_id: int) -> uuid.UUID:
 
 
 async def _claim_mine(recording_id: uuid.UUID) -> meeting_archiver._Claim:
-    # Other tests' rows may be queued too; claim until ours comes up.
-    while (claim := await meeting_archiver._claim()) is not None:
-        if claim.recording_id == recording_id:
-            return claim
-    raise AssertionError("the recording was never claimed")
+    # Other rows may be queued too; claim until ours comes up, then hand
+    # back every claim taken on the way so those rows stay claimable.
+    skipped: list[meeting_archiver._Claim] = []
+    try:
+        while (claim := await meeting_archiver._claim()) is not None:
+            if claim.recording_id == recording_id:
+                return claim
+            skipped.append(claim)
+        raise AssertionError("the recording was never claimed")
+    finally:
+        async with AsyncSessionLocal() as db:
+            for other in skipped:
+                await db.execute(
+                    update(MeetingRecording)
+                    .where(
+                        MeetingRecording.id == other.recording_id,
+                        MeetingRecording.lease_token == other.token,
+                    )
+                    .values(lease_until=None, lease_token=None)
+                )
+            await db.commit()
 
 
 async def test_an_archiver_whose_lease_lapsed_cannot_file_or_settle() -> None:

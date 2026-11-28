@@ -21,6 +21,7 @@ from app.errors import (
     IdentityProviderRejectedError,
     IdentityProviderUnavailableError,
     InvalidCredentialsError,
+    NamePolicyError,
     PasswordPolicyError,
 )
 from app.integrations.meeting.accounts import MeetingAccounts
@@ -148,7 +149,7 @@ async def test_sign_in_refusals_map_to_what_the_user_should_do(code, error) -> N
 
 
 async def test_a_password_too_long_to_encrypt_is_just_wrong() -> None:
-    async with _provider(lambda r: pytest.fail("must not call Meeting")) as provider:
+    async with _provider(lambda _request: pytest.fail("must not call Meeting")) as provider:
         with pytest.raises(InvalidCredentialsError):
             await provider.authenticate("a@example.com", "x" * 1000)
 
@@ -162,7 +163,7 @@ async def test_a_password_too_long_to_encrypt_is_just_wrong() -> None:
     ],
 )
 async def test_meeting_saying_signed_out_rejects_the_credential(response) -> None:
-    async with _provider(lambda r: response) as provider:
+    async with _provider(lambda _request: response) as provider:
         with pytest.raises(CredentialRejected):
             await provider.verify(MeetingSession("p", "d"), timeout=1)
 
@@ -179,7 +180,7 @@ async def test_meeting_saying_signed_out_rejects_the_credential(response) -> Non
 async def test_meeting_not_answering_is_not_a_sign_out(response) -> None:
     # Only Meeting *saying* a session is over may end ours; anything else
     # is an outage, and must not log everyone out.
-    async with _provider(lambda r: response) as provider:
+    async with _provider(lambda _request: response) as provider:
         with pytest.raises(IdentityProviderUnavailableError):
             await provider.verify(MeetingSession("p", "d"), timeout=1)
 
@@ -196,7 +197,7 @@ async def test_only_meetings_account_id_names_the_account(data) -> None:
     # The account id is the subject a local account is filed under. Another
     # id-shaped field, or the same one somewhere else in the payload, must
     # not be taken for it: that would sign the user in as a new account.
-    async with _provider(lambda r: _ok(data)) as provider:
+    async with _provider(lambda _request: _ok(data)) as provider:
         with pytest.raises(IdentityProviderUnavailableError):
             await provider.verify(MeetingSession("p", "d"), timeout=1)
 
@@ -224,18 +225,32 @@ async def test_account_request_refusals_carry_meetings_code() -> None:
 
 
 async def test_account_requests_are_throttled_as_such() -> None:
-    async with _provider(lambda r: httpx.Response(429)) as provider:
+    async with _provider(lambda _request: httpx.Response(429)) as provider:
         with pytest.raises(IdentityProviderRateLimitedError):
             await provider.reset_password(email="a@example.com", password="pw123456", code="123456")
 
 
 @pytest.mark.parametrize("password", ["short", "x" * 16, "密密密密密密"])  # 18 bytes
 async def test_new_passwords_meet_meetings_rules_before_it_is_asked(password) -> None:
-    async with _provider(lambda r: pytest.fail("must not call Meeting")) as provider:
+    async with _provider(lambda _request: pytest.fail("must not call Meeting")) as provider:
         with pytest.raises(PasswordPolicyError):
             await provider.register(
                 email="a@example.com", password=password, code="123456", name="A", invite_code=None
             )
+
+
+async def test_a_name_over_meetings_bound_is_refused_before_it_is_asked() -> None:
+    async with _provider(lambda _request: pytest.fail("must not call Meeting")) as provider:
+        with pytest.raises(NamePolicyError) as caught:
+            await provider.register(
+                email="a@example.com",
+                password="pw123456",
+                code="123456",
+                name="密" * 14,  # 42 bytes
+                invite_code=None,
+            )
+
+    assert caught.value.details == {"max_bytes": 40}
 
 
 async def test_registration_forwards_an_invitation_code() -> None:

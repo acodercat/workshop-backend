@@ -64,7 +64,7 @@ class MeetingMeetings:
         self._overview_timeout = overview_timeout
         self._translate_overview_timeout = translate_overview_timeout
 
-    async def list(
+    async def list_page(
         self, actor: MeetingActor, *, which: ListFilter, page_index: int
     ) -> MeetingListPage:
         """One page of meetings. ``page_index`` is zero-based — Meeting calls
@@ -244,7 +244,7 @@ class MeetingMeetings:
             actor,
             body={
                 "key": "translate_selected",
-                "parameters": [{"key": k, "value": v} for k, v in parameters.items()],
+                "parameters": [{"key": key, "value": value} for key, value in parameters.items()],
                 "stream": True,
             },
             timeout=timeout,

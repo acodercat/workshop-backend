@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
-from app.integrations.meeting.transport import MeetingError
+from app.integrations.meeting.transport import OK_CODES, MeetingError
 
 Row = dict[str, Any]
 
@@ -91,7 +91,7 @@ def first_text(row: Row, *keys: str) -> str:
     return ""
 
 
-def first_raw_text(row: Row, *keys: str) -> str:
+def _first_raw_text(row: Row, *keys: str) -> str:
     """As :func:`first_text`, but the value is returned untrimmed — the
     meeting list keeps titles and summaries exactly as Meeting sent them."""
     for key in keys:
@@ -101,7 +101,7 @@ def first_raw_text(row: Row, *keys: str) -> str:
     return ""
 
 
-def array_value(value: Any) -> list[Any]:
+def _array_value(value: Any) -> list[Any]:
     """A list, or a JSON string of one; anything else reads as empty."""
     if isinstance(value, list):
         return value
@@ -126,7 +126,7 @@ def _detail_payload(value: Any) -> Row:
 
 
 @dataclass(frozen=True)
-class RecordParts:
+class _RecordParts:
     payload: Row
     rows: list[Any]
     recognition: Row
@@ -134,10 +134,10 @@ class RecordParts:
     container: Any
 
 
-def record_parts(value: Any) -> RecordParts:
+def _record_parts(value: Any) -> _RecordParts:
     """Split a detail answer into its meeting info and its one recognition."""
     payload = _detail_payload(value)
-    records = array_value(payload.get("records"))
+    records = _array_value(payload.get("records"))
     records_are_recognition = any(
         any(key in row_of(item) for key in _RECOGNITION_MARKERS) for item in records
     )
@@ -146,10 +146,10 @@ def record_parts(value: Any) -> RecordParts:
         payload.get("items"),
         payload.get("records") if records_are_recognition else None,
     )
-    rows = array_value(container)
+    rows = _array_value(container)
     recognition = row_of(rows[0]) if rows else payload
     info = row_of(coalesce(payload.get("meetingInfo"), payload.get("meeting_info")))
-    return RecordParts(payload, rows, recognition, info, container)
+    return _RecordParts(payload, rows, recognition, info, container)
 
 
 def coalesce(*values: Any) -> Any:
@@ -157,7 +157,7 @@ def coalesce(*values: Any) -> Any:
     return next((value for value in values if value is not None), None)
 
 
-def transcript_value(row: Row) -> Any:
+def _transcript_value(row: Row) -> Any:
     """The transcript field of a recognition, preferring a non-empty one."""
     candidates = [row.get(key) for key in _TRANSCRIPT_KEYS]
     for value in candidates:
@@ -256,7 +256,26 @@ def parse_transcript(value: Any, *, strict: bool = False, depth: int = 0) -> lis
     ]
 
 
-def validate_detail(value: Any, expected_id: str) -> RecordParts:
+_SUMMARY_KEYS = (
+    "overviewTc",
+    "overview_tc",
+    "summaryTc",
+    "summary_tc",
+    "overviewSc",
+    "overview_sc",
+    "summarySc",
+    "summary_sc",
+    "overviewEn",
+    "overview_en",
+    "summaryEn",
+    "summary_en",
+    "overview",
+    "summary",
+    "content",
+)
+
+
+def validate_detail(value: Any, expected_id: str) -> _RecordParts:
     """Check a detail answer is one readable record for ``expected_id``.
 
     Refuses rather than repairs: an envelope reporting failure, more than
@@ -270,7 +289,7 @@ def validate_detail(value: Any, expected_id: str) -> RecordParts:
     for _ in range(5):
         code = envelope.get("code")
         if (
-            (code is not None and str(code) not in ("0", "200"))
+            (code is not None and str(code) not in OK_CODES)
             or envelope.get("success") is False
             or envelope.get("ok") is False
         ):
@@ -280,12 +299,12 @@ def validate_detail(value: Any, expected_id: str) -> RecordParts:
             break
         envelope = nested
 
-    parts = record_parts(value)
+    parts = _record_parts(value)
     container = parts.container
     if (
         container is not None
         and not isinstance(container, list)
-        and not (isinstance(container, str) and array_value(container))
+        and not (isinstance(container, str) and _array_value(container))
     ):
         raise RecordInvalid("detail-container")
     if len(parts.rows) > 1:
@@ -305,31 +324,12 @@ def validate_detail(value: Any, expected_id: str) -> RecordParts:
     if (
         not ids
         and not first_text(merged, "meetingName", "meeting_name", "title", "name")
-        and transcript_value(merged) is None
+        and _transcript_value(merged) is None
         and not first_text(merged, *_SUMMARY_KEYS)
     ):
         raise RecordInvalid("detail-unrecognized")
-    parse_transcript(transcript_value(parts.recognition), strict=True)
+    parse_transcript(_transcript_value(parts.recognition), strict=True)
     return parts
-
-
-_SUMMARY_KEYS = (
-    "overviewTc",
-    "overview_tc",
-    "summaryTc",
-    "summary_tc",
-    "overviewSc",
-    "overview_sc",
-    "summarySc",
-    "summary_sc",
-    "overviewEn",
-    "overview_en",
-    "summaryEn",
-    "summary_en",
-    "overview",
-    "summary",
-    "content",
-)
 
 
 class TranscriptEditUnsafe(MeetingError):
@@ -365,8 +365,10 @@ def edit_transcript(value: Any, *, index: int, content: str, speaker_name: str) 
             return [visit(item, depth + 1) for item in source]
         row = row_of(source)
         is_text = isinstance(source, str) and bool(source.strip())
-        key = next((k for k in _CONTENT_KEYS if first_text(row, k)), None)
-        if is_text or key or first_text(row, *_TRANSLATION_KEYS):
+        content_key = next(
+            (candidate for candidate in _CONTENT_KEYS if first_text(row, candidate)), None
+        )
+        if is_text or content_key or first_text(row, *_TRANSLATION_KEYS):
             current = position
             position += 1
             if current != index:
@@ -374,12 +376,15 @@ def edit_transcript(value: Any, *, index: int, content: str, speaker_name: str) 
             changed = True
             if is_text:
                 return {"content": content, "speaker_name": speaker_name}
-            patched = {**row, key or "content": content}
+            patched = {**row, content_key or "content": content}
             speaker = row_of(row.get("speaker"))
             if speaker:
                 patched["speaker"] = {**speaker, "name": speaker_name}
             else:
-                speaker_key = next((k for k in _SPEAKER_KEYS if first_text(row, k)), "speaker_name")
+                speaker_key = next(
+                    (candidate for candidate in _SPEAKER_KEYS if first_text(row, candidate)),
+                    "speaker_name",
+                )
                 patched[speaker_key] = speaker_name
             # A translation of the old text must not be shown as a
             # translation of the correction.
@@ -415,12 +420,12 @@ def to_wire(value: Any) -> Any:
         return [to_wire(item) for item in value]
     if isinstance(value, dict):
         return {
-            _UPPER.sub(lambda m: "_" + m.group(0).lower(), k): to_wire(v) for k, v in value.items()
+            _UPPER.sub(lambda match: "_" + match.group(0).lower(), key): to_wire(nested)
+            for key, nested in value.items()
         }
     return value
 
 
-#
 # Typed records: what the rest of the application reads.
 
 MeetingStatus = Literal["processing", "complete", "failed"]
@@ -492,7 +497,7 @@ def _enabled(value: Any) -> bool:
 
 
 def _time(row: Row) -> datetime | None:
-    seconds = first_raw_text(row, "meeting_time_sec", "meetingTimeSec")
+    seconds = _first_raw_text(row, "meeting_time_sec", "meetingTimeSec")
     if seconds:
         try:
             return datetime.fromtimestamp(float(seconds), UTC)
@@ -506,10 +511,10 @@ def _time(row: Row) -> datetime | None:
 
 
 def _listing_fields(row: Row, *, in_favorites: bool, in_trash: bool) -> dict[str, Any]:
-    meeting_id = first_raw_text(row, "meeting_id", "meetingId", "id", "source_id", "sourceId")
+    meeting_id = _first_raw_text(row, "meeting_id", "meetingId", "id", "source_id", "sourceId")
     if not meeting_id:
         raise RecordInvalid("list-item-id")
-    description = first_raw_text(
+    description = _first_raw_text(
         row,
         "overview_tc",
         "overviewTc",
@@ -522,7 +527,7 @@ def _listing_fields(row: Row, *, in_favorites: bool, in_trash: bool) -> dict[str
         "summaryEn",
         "summary",
     )
-    recognition = first_raw_text(row, "recognition_status", "recognitionStatus")
+    recognition = _first_raw_text(row, "recognition_status", "recognitionStatus")
     status: MeetingStatus
     if recognition == "1" or (not recognition and description):
         status = "complete"
@@ -532,13 +537,13 @@ def _listing_fields(row: Row, *, in_favorites: bool, in_trash: bool) -> dict[str
         status = "processing"
     return {
         "meeting_id": meeting_id,
-        "title": first_raw_text(row, "meeting_name", "meetingName", "title"),
+        "title": _first_raw_text(row, "meeting_name", "meetingName", "title"),
         "time": _time(row),
         "summary": description,
         "summaries": Overviews(
-            tc=first_raw_text(row, "summary_tc", "summaryTc"),
-            sc=first_raw_text(row, "summary_sc", "summarySc"),
-            en=first_raw_text(row, "summary_en", "summaryEn"),
+            tc=_first_raw_text(row, "summary_tc", "summaryTc"),
+            sc=_first_raw_text(row, "summary_sc", "summarySc"),
+            en=_first_raw_text(row, "summary_en", "summaryEn"),
         ),
         "status": status,
         # When Meeting omits a flag, the list the meeting came from implies it.
@@ -556,18 +561,18 @@ def _listing_fields(row: Row, *, in_favorites: bool, in_trash: bool) -> dict[str
 def read_list(
     data: Any, *, page_index: int, page_size: int, in_favorites: bool, in_trash: bool
 ) -> MeetingListPage:
-    data = row_of(data)
+    payload = row_of(data)
     records = coalesce(
-        data.get("meeting_infos"),
-        data.get("meetingInfos"),
-        data.get("meeting_summary_infos"),
-        data.get("meetingSummaryInfos"),
-        data.get("list"),
-        data.get("items"),
-        data.get("records"),
+        payload.get("meeting_infos"),
+        payload.get("meetingInfos"),
+        payload.get("meeting_summary_infos"),
+        payload.get("meetingSummaryInfos"),
+        payload.get("list"),
+        payload.get("items"),
+        payload.get("records"),
         [],
     )
-    total = data.get("total", 0)
+    total = payload.get("total", 0)
     # Meeting has sent the count both as a number and as a numeric string.
     if isinstance(total, str) and total.isdigit():
         total = int(total)
@@ -595,9 +600,9 @@ def read_record(data: Any, meeting_id: str) -> MeetingRecord:
     parts = validate_detail(data, meeting_id)
     recognition = parts.recognition
     info = parts.info
-    raw = transcript_value(recognition)
+    raw = _transcript_value(recognition)
     overviews = Overviews(
-        tc=first_raw_text(
+        tc=_first_raw_text(
             recognition,
             "overviewTc",
             "overview_tc",
@@ -607,11 +612,11 @@ def read_record(data: Any, meeting_id: str) -> MeetingRecord:
             "summary",
             "content",
         ),
-        sc=first_raw_text(recognition, "overviewSc", "overview_sc", "summarySc", "summary_sc"),
-        en=first_raw_text(recognition, "overviewEn", "overview_en", "summaryEn", "summary_en"),
+        sc=_first_raw_text(recognition, "overviewSc", "overview_sc", "summarySc", "summary_sc"),
+        en=_first_raw_text(recognition, "overviewEn", "overview_en", "summaryEn", "summary_en"),
     )
-    recognition_id = first_raw_text(recognition, "recognition_id", "recognitionId")
-    title = first_raw_text(info, "meeting_name", "meetingName")
+    recognition_id = _first_raw_text(recognition, "recognition_id", "recognitionId")
+    title = _first_raw_text(info, "meeting_name", "meetingName")
     time_sec = coalesce(info.get("meeting_time_sec"), info.get("meetingTimeSec"))
     fingerprint = json.dumps(
         [
@@ -622,7 +627,7 @@ def read_record(data: Any, meeting_id: str) -> MeetingRecord:
             recognition.get("overview"),
             title,
             info.get("remark"),
-            first_raw_text(info, "meeting_time_sec", "meetingTimeSec"),
+            _first_raw_text(info, "meeting_time_sec", "meetingTimeSec"),
             recognition_id,
         ],
         ensure_ascii=False,
@@ -650,12 +655,14 @@ def read_record(data: Any, meeting_id: str) -> MeetingRecord:
 def read_audio_url(data: Any) -> str:
     """The recording's signed link, or ``""`` if there is none. Only an
     https link counts: the browser plays from it directly."""
-    data = row_of(data)
+    payload = row_of(data)
     file = row_of(
         next(
             iter(
-                array_value(
-                    coalesce(data.get("signedFile"), data.get("signed_file"), data.get("files"))
+                _array_value(
+                    coalesce(
+                        payload.get("signedFile"), payload.get("signed_file"), payload.get("files")
+                    )
                 )
             ),
             None,

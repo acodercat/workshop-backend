@@ -3,31 +3,14 @@
 Each helper here returns ``(subject, html_body)`` ready to pass to
 :func:`app.services.email.client.send_html_email`. HTML is held in
 source (rather than fetched from an SMTP provider's template store)
-so the registration flow works identically across providers.
+so the operator notices — account activation, credit top-up — read the
+same whichever provider sends them.
 """
 
 import html
 from typing import Literal, cast
 
 Locale = Literal["zh-CN", "en-US"]
-
-
-def _render(
-    subject_map: dict[str, str],
-    body_map: dict[str, str],
-    *,
-    code: str,
-    locale: str,
-) -> tuple[str, str]:
-    """Format a (subject, body) pair from per-locale templates,
-    falling back to ``zh-CN`` for unknown locales."""
-    # ``cast`` because membership in the map is what makes it a ``Locale``,
-    # and an ``in`` test over a dict does not narrow a ``str``.
-    resolved: Locale = cast("Locale", locale) if locale in subject_map else "zh-CN"
-    return (
-        subject_map[resolved].format(code=code),
-        body_map[resolved].format(code=code),
-    )
 
 
 _ACCOUNT_ACTIVATED_SUBJECT = {
@@ -73,6 +56,8 @@ def render_account_activated(*, name: str, locale: str) -> tuple[str, str]:
     interpolation so a name containing ``<``/``&`` can't break or inject
     into the markup. Falls back to ``zh-CN`` for unknown locales.
     """
+    # ``cast`` because membership in the map is what makes it a ``Locale``,
+    # and an ``in`` test over a dict does not narrow a ``str``.
     resolved: Locale = cast("Locale", locale) if locale in _ACCOUNT_ACTIVATED_SUBJECT else "zh-CN"
     safe_name = html.escape(name)
     return (
@@ -82,10 +67,9 @@ def render_account_activated(*, name: str, locale: str) -> tuple[str, str]:
 
 
 # Credits top-up notification. Like the account-activated notice this is a
-# one-way notice (no ``{code}``) — an admin added credits to the account,
+# one-way notice — an admin added credits to the account,
 # so the copy carries the amount added and the resulting balance. Same
-# visual shell/branding; SingleSendMail-only, no Aliyun BatchSendMail
-# counterpart.
+# visual shell/branding.
 _CREDITS_TOPPED_UP_SUBJECT = {
     "zh-CN": "【HKGAI Agent】已为您的账号充值 {credits} credits",
     "en-US": "[HKGAI Agent] {credits} credits added to your account",

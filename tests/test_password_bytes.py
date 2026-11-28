@@ -1,6 +1,6 @@
 """bcrypt's 72-byte bound, enforced in bytes at every new-password schema.
 
-Only operator passwords are hashed here any more — customer passwords
+Operator and share-link passwords are hashed here; customer passwords
 belong to the identity provider.
 
 bcrypt 5 raises on longer input instead of truncating, so a password the

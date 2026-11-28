@@ -11,8 +11,9 @@ otherwise be written into minutes as if it had been said:
   is read for its headings.
 - ``.txt`` — lines that look like headings.
 
-A port of the importer this deployment used before; its heuristics are
-kept as they were because users' documents were tuned against them.
+The heuristics are deliberately specific — each one matches a layout
+that users' documents actually take — so a change to one changes how
+existing documents import.
 
 Documents are untrusted. DOCX is a zip of XML: the zip is bounded in entry
 count and declared size before anything is decompressed, and the XML is
@@ -36,7 +37,13 @@ from app.errors import (
     TemplateImportUnreadableError,
     TemplateImportUnsupportedError,
 )
-from app.schemas.meeting_library import TemplateDraft, TemplatePreview
+from app.schemas.meeting_library import (
+    MAX_GUIDANCE_LENGTH,
+    MAX_SECTIONS,
+    MAX_TABLE_FIELDS,
+    TemplateDraft,
+    TemplatePreview,
+)
 from app.services.meeting.templates import builtin_draft
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
@@ -45,9 +52,6 @@ _MAX_UNZIPPED_BYTES = 10 * 1024 * 1024
 _MAX_TEXT = 100_000
 _MAX_DEPTH = 128
 _MAX_ELEMENTS = 250_000
-_MAX_SECTIONS = 20
-_MAX_FIELDS = 30
-_MAX_GUIDANCE = 1000
 _DATE = re.compile(r"\d{4}[年/-]\d{1,2}[月/-]")
 _FENCE = re.compile(r"^\s*(```|~~~)")
 
@@ -60,13 +64,18 @@ _ERB_DOCUMENT_SHA256 = "af044e3f9ea2b31edf7db7ea77d52f5c408bb1bbc21e9bdbfcee378c
 _ERB_TEMPLATE_ID = "public-erb-committee"
 
 
+def too_large() -> TemplateImportTooLargeError:
+    """The refusal of a document over :data:`MAX_UPLOAD_BYTES`."""
+    return TemplateImportTooLargeError(
+        f"The document is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+    )
+
+
 def import_template(filename: str, data: bytes) -> TemplatePreview:
     if not re.search(r"\.(docx|md|txt)$", filename, re.IGNORECASE) or len(filename) > 255:
         raise TemplateImportUnsupportedError("Only DOCX, MD and TXT documents can be imported.")
     if len(data) > MAX_UPLOAD_BYTES:
-        raise TemplateImportTooLargeError(
-            f"The document is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-        )
+        raise too_large()
     stem = re.sub(r"\.[^.]+$", "", filename)[:120]
     if filename.lower().endswith(".docx"):
         return _from_docx(stem, data)
@@ -81,15 +90,12 @@ def import_template(filename: str, data: bytes) -> TemplatePreview:
     return _from_text(stem, text)
 
 
-#
-# Plain text and Markdown headings
-
-
 def _from_text(title: str, text: str) -> TemplatePreview:
     if not title.strip() or not text.strip() or len(text) > _MAX_TEXT:
         raise TemplateImportUnreadableError("The document is empty or too long.")
     sections: list[str] = []
-    uncertain: list[str] = []
+    # Insertion-ordered and deduplicated: one warning per kind of guess.
+    uncertain: dict[str, None] = {}
     fenced = False
     for line in re.split(r"\r?\n", text):
         if _FENCE.match(line):
@@ -106,20 +112,20 @@ def _from_text(title: str, text: str) -> TemplatePreview:
         else:
             heading = ""
         if _DATE.search(heading):
-            uncertain.append("含具體日期的標題已排除，請核對章節。")
+            uncertain["含具體日期的標題已排除，請核對章節。"] = None
             continue
         if heading and len(heading) <= 120 and heading not in sections:
             sections.append(heading)
     if not sections:
-        uncertain.append("未識別出明確章節，請手動確認結構。")
+        uncertain["未識別出明確章節，請手動確認結構。"] = None
     return _preview(
         {
             "title": title,
             "description": "",
-            "sections": sections[:_MAX_SECTIONS] or ["會議概要"],
+            "sections": sections[:MAX_SECTIONS] or ["會議概要"],
             "options": {"tone": "客觀簡潔", "missing": "未明確"},
         },
-        uncertain,
+        list(uncertain),
     )
 
 
@@ -189,9 +195,9 @@ def _parse_markdown_sections(
     if (
         not title.strip()
         or not sections
-        or any(not s.strip() for s in sections)
-        or len(sections) > _MAX_SECTIONS
-        or any(len(g) > _MAX_GUIDANCE for g in section_guidance)
+        or any(not section.strip() for section in sections)
+        or len(sections) > MAX_SECTIONS
+        or any(len(guidance_text) > MAX_GUIDANCE_LENGTH for guidance_text in section_guidance)
     ):
         return None
     try:
@@ -212,10 +218,6 @@ def _preview(draft: dict[str, Any], uncertain: list[str]) -> TemplatePreview:
         return TemplatePreview(draft=TemplateDraft.model_validate(draft), uncertain=uncertain)
     except ValidationError:
         raise TemplateImportUnreadableError("No usable template structure was found.") from None
-
-
-#
-# DOCX
 
 
 def _from_docx(title: str, data: bytes) -> TemplatePreview:
@@ -361,7 +363,7 @@ def _read_word_xml(xml: bytes) -> _Node:
 
 
 def _child(node: _Node, tag: str) -> _Node | None:
-    return next((n for n in node.children if n.tag == tag), None)
+    return next((child for child in node.children if child.tag == tag), None)
 
 
 def _content(node: _Node) -> str:
@@ -369,7 +371,7 @@ def _content(node: _Node) -> str:
         return node.text
     if node.tag in ("tab", "br"):
         return " "
-    return (" " if node.tag == "tc" else "").join(_content(n) for n in node.children)
+    return (" " if node.tag == "tc" else "").join(_content(child) for child in node.children)
 
 
 def _enabled(node: _Node | None) -> bool:
@@ -459,9 +461,9 @@ def _word_template(title: str, xml: bytes, styles_xml: bytes | None) -> Template
 
     def section(name: str) -> None:
         nonlocal active
-        if name not in chapters and len(chapters) >= _MAX_SECTIONS:
+        if name not in chapters and len(chapters) >= MAX_SECTIONS:
             active = None
-            uncertain["僅保留首 20 個章節，請核對範圍。"] = None
+            uncertain[f"僅保留首 {MAX_SECTIONS} 個章節，請核對範圍。"] = None
             return
         active = chapters.setdefault(name, {})
 
@@ -471,14 +473,14 @@ def _word_template(title: str, xml: bytes, styles_xml: bytes | None) -> Template
 
     def visit(node: _Node, in_cell: bool = False) -> None:
         if node.tag == "tbl":
-            rows = [n for n in node.children if n.tag == "tr"]
+            rows = [child for child in node.children if child.tag == "tr"]
             if not rows:
                 return
             header = rows[0]
             labels = [
-                re.sub(r"([㐀-鿿])\s+(?=[㐀-鿿])", r"\1", _content(c).strip())
-                for c in header.children
-                if c.tag == "tc"
+                re.sub(r"([㐀-鿿])\s+(?=[㐀-鿿])", r"\1", _content(cell).strip())
+                for cell in header.children
+                if cell.tag == "tc"
             ]
             named = [label for label in labels if label]
             header_row = (
@@ -496,18 +498,18 @@ def _word_template(title: str, xml: bytes, styles_xml: bytes | None) -> Template
                 columns = [label for label in labels if label]
                 for column in columns:
                     fields[column] = None
-                if active is None and all(_COLUMN_NAME.match(c) for c in columns):
+                if active is None and all(_COLUMN_NAME.match(column) for column in columns):
                     section(
                         "跟進事項"
                         if any(
-                            re.search(r"跟[進进]|owner|負責人|负责人", c, re.IGNORECASE)
-                            for c in columns
+                            re.search(r"跟[進进]|owner|負責人|负责人", column, re.IGNORECASE)
+                            for column in columns
                         )
                         else "會議事項"
                     )
                 hint("以「" + "」、「".join(columns) + "」分欄整理。")
             for row in rows[1 if header_row else 0 :]:
-                cells = [n for n in row.children if n.tag == "tc"]
+                cells = [child for child in row.children if child.tag == "tc"]
                 key = re.sub(r"[：:]$", "", _content(cells[0] if cells else row).strip())
                 if not header_row and len(cells) == 2 and _FIELD.match(key + "："):
                     if active is None:
@@ -543,13 +545,13 @@ def _word_template(title: str, xml: bytes, styles_xml: bytes | None) -> Template
         named_heading = markdown.group(1) if markdown else None
         ordinal = bool(_ORDINAL.match(text))
         short = len(text) <= 60 and not re.search(r"[。！？!?；;]", text)
-        runs = [n for n in node.children if n.tag == "r" and _content(n).strip()]
+        runs = [child for child in node.children if child.tag == "r" and _content(child).strip()]
         bold = (
             not in_cell
             and short
             and not re.search(r"[：:]", text)
             and bool(runs)
-            and all(_enabled(_child(r, "b")) for r in runs)
+            and all(_enabled(_child(run, "b")) for run in runs)
         )
         if bold and not _BASIC_HEADING.match(text):
             uncertain["部分章節從短粗體段落推斷，請核對標題。"] = None
@@ -573,18 +575,18 @@ def _word_template(title: str, xml: bytes, styles_xml: bytes | None) -> Template
     for name in sections:
         hints = list(chapters[name])
         value = "\n".join(hints) if hints else _guidance_for(name)
-        if len(value) > _MAX_GUIDANCE:
-            uncertain["部分章節提示超過 1000 字，已截短，請核對。"] = None
-        guidance.append(value[:_MAX_GUIDANCE])
-    if len(fields) > _MAX_FIELDS:
-        uncertain["僅保留首 30 個表格欄位。"] = None
+        if len(value) > MAX_GUIDANCE_LENGTH:
+            uncertain[f"部分章節提示超過 {MAX_GUIDANCE_LENGTH} 字，已截短，請核對。"] = None
+        guidance.append(value[:MAX_GUIDANCE_LENGTH])
+    if len(fields) > MAX_TABLE_FIELDS:
+        uncertain[f"僅保留首 {MAX_TABLE_FIELDS} 個表格欄位。"] = None
     options: dict[str, Any] = {
         "tone": "客觀簡潔",
         "missing": "未明確",
         "section_guidance": guidance,
     }
     if fields:
-        options["table_fields"] = list(fields)[:_MAX_FIELDS]
+        options["table_fields"] = list(fields)[:MAX_TABLE_FIELDS]
     return _preview(
         {"title": title, "description": "", "sections": sections, "options": options},
         list(uncertain),

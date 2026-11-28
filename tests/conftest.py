@@ -204,6 +204,7 @@ def _open_session(user: dict) -> str:
     Rows go with the user (``ON DELETE CASCADE``).
     """
     from app.auth import create_access_token
+    from app.integrations.meeting.transport import MeetingSession
     from app.services.identity.credentials import seal
 
     session_id = uuid.uuid4()
@@ -218,7 +219,12 @@ def _open_session(user: dict) -> str:
             cur.execute(
                 "INSERT INTO identity_session (id, user_id, identity_id, credential, expires_at) "
                 "VALUES (%s, %s, %s, %s, now() + interval '1 hour')",
-                (session_id, user["id"], identity_id, seal({})),
+                (
+                    session_id,
+                    user["id"],
+                    identity_id,
+                    seal(MeetingSession(passport="", device_id="")),
+                ),
             )
         conn.commit()
     return create_access_token({"sub": user["username"], "sid": str(session_id)})

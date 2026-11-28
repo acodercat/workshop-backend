@@ -4,10 +4,10 @@ Two rows held the same address in different case (``AAAZUO666@163.com`` on
 id 88, created before email normalization landed; ``aaazuo666@163.com`` on
 id 112). Postgres' ``UNIQUE(email)`` is case-sensitive, so the second
 registration was allowed and id 88 became unreachable: every lookup
-lowercases its input, and id 88 has no phone as a fallback channel.
+lowercases its input, and id 88 has no other sign-in channel.
 
 This is option B of the repair — move id 88's whole credit balance onto the
-live account, then free the address on 88 and revoke its tokens. Sessions
+live account, then clear the address on 88 and revoke its sessions. Sessions
 and files stay on 88 (invisible to the user, harmless).
 
 Run once from ``backend/``::
@@ -86,8 +86,9 @@ async def main() -> None:
         else:
             print("balance already zero — no ledger movement")
 
-        # Free the address for the surviving row, and sign the dead one out
-        # by revoking its sessions (app/services/identity/sessions.py).
+        # Clear the dead row's address, so nothing contacts it and the
+        # collision check below no longer counts it, and sign it out by
+        # revoking its sessions (app/services/identity/sessions.py).
         loser.email = None
         await db.execute(
             update(models.IdentitySession)

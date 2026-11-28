@@ -12,6 +12,7 @@ not — they are returned for the user to review and save.
 
 import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import Any, TypeVar
@@ -32,6 +33,7 @@ from app.services.meeting.context import MeetingContext, meeting_errors
 from app.services.meeting.model import complete
 from app.services.meeting.templates import default_draft, writing_prompt
 from app.services.redis import LockHeld, lock_held, short_lock
+from config import settings as app_settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +44,14 @@ _LOCALES: dict[MinutesLanguage, TranslationTarget] = {
     "sc": "zh-CN",
     "en": "en-US",
 }
-# Long enough for Meeting to write minutes (``meeting_overview_timeout_seconds``)
-# with room to read the result back.
-_GENERATION_LOCK_SECONDS = 240
+# Long enough for Meeting to write minutes and for the result to be read
+# back, each at its configured timeout, with a margin.
+_GENERATION_LOCK_SECONDS = (
+    math.ceil(
+        app_settings.meeting_overview_timeout_seconds + app_settings.meeting_request_timeout_seconds
+    )
+    + 15
+)
 _GENERATION_POLL_SECONDS = 2.0
 # Meeting failing at the task — as opposed to a signed-out session or a
 # throttle, which would fail the fallback's next request just the same.
@@ -204,7 +211,7 @@ async def translate(
     translate ``content``, as the settings say.
     """
     record = await hosted.read(ctx, remote_id)
-    stored: str = asdict(record.overviews)[language]
+    stored: str = getattr(record.overviews, language)
     if stored:
         return stored
     if not content.strip():

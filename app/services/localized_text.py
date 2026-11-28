@@ -19,7 +19,7 @@ write path that changes a canonical column must therefore clear its map in the
 same breath. It is a rule rather than a helper because the sites that apply it
 differ in mechanism: ``api/public/skill.py`` builds a dict for one UPDATE,
 ``api/admin/skill.py`` assigns on the ORM row, ``api/admin/connector.py``
-does that and records the discarded map in its audit payload, and
+goes through ``catalog.update_entry``, and
 ``api/admin/category.py::_name_fields`` is the one that can *keep* a map —
 the category console can show and edit the translations, so a rename that
 supplies new ones replaces rather than discards. What they share is the

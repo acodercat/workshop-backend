@@ -215,8 +215,8 @@ async def lifespan(app: FastAPI):
     app.state.user_event_hub = UserEventHub(app.state.redis)
     await app.state.user_event_hub.start()
 
-    # Background process (settle sweeper + subscriber)
-    # runs as a **sibling**, not inside this event loop — see
+    # Background process (settle sweeper + subscriber, schedule and message
+    # queue dispatchers, budget enforcer) runs as a **sibling**, not inside this event loop — see
     # ``app/workers/run.py`` and ``scripts/deploy.sh background``. Web's
     # lifespan is HTTP-only again: separating background work from request
     # handling lets each scale, restart, and fail independently.
@@ -254,7 +254,7 @@ async def _probe_redis(app: FastAPI) -> str | None:
 
 
 app = create_app(
-    title="MetaSeq Agent API",
+    title="HKGAI Agent API",
     root_path="/api/v1",
     cors_origins=settings.cors_origins,
     lifespan=lifespan,

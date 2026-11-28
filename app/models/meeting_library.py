@@ -144,7 +144,7 @@ class MeetingVocabularyTerm(Base):
         SAEnum(
             TermKind,
             name="meeting_term_kind",
-            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),
         nullable=False,
     )

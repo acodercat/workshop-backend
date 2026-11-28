@@ -36,24 +36,24 @@ class UploadTicket:
 
 
 def read_ticket(data: Any) -> UploadTicket:
-    ticket = row_of(data)
-    endpoint = first_text(ticket, "endpoint")
+    ticket_row = row_of(data)
+    endpoint = first_text(ticket_row, "endpoint")
     server = urlsplit(endpoint if "://" in endpoint else "https://" + endpoint)
-    read = UploadTicket(
+    ticket = UploadTicket(
         server=f"https://{server.netloc}",
-        bucket=first_text(ticket, "bucket"),
-        key_prefix=first_text(ticket, "keyPrefix", "key_prefix"),
-        access_key=first_text(ticket, "accessKey", "access_key"),
-        secret_key=first_text(ticket, "secretKey", "secret_key"),
-        security_token=first_text(ticket, "securityToken", "security_token"),
+        bucket=first_text(ticket_row, "bucket"),
+        key_prefix=first_text(ticket_row, "keyPrefix", "key_prefix"),
+        access_key=first_text(ticket_row, "accessKey", "access_key"),
+        secret_key=first_text(ticket_row, "secretKey", "secret_key"),
+        security_token=first_text(ticket_row, "securityToken", "security_token"),
     )
     if (
         server.scheme != "https"
         or not server.netloc
-        or not (read.access_key and read.secret_key and read.security_token and read.bucket)
+        or not (ticket.access_key and ticket.secret_key and ticket.security_token and ticket.bucket)
     ):
         raise MeetingUnavailable("Meeting handed out an unusable upload ticket")
-    return read
+    return ticket
 
 
 def _put(ticket: UploadTicket, key: str, content: bytes) -> None:
@@ -84,6 +84,7 @@ async def put_object(ticket: UploadTicket, content: bytes, *, extension: str) ->
 
     The SDK is synchronous, so the upload runs in a worker thread.
     """
-    key = f"{ticket.key_prefix}{hashlib.md5(content).hexdigest()}{extension}"  # noqa: S324 — a content address, not a security hash
+    # MD5 as a content address, not a security hash.
+    key = f"{ticket.key_prefix}{hashlib.md5(content).hexdigest()}{extension}"
     await asyncio.to_thread(_put, ticket, key, content)
     return key

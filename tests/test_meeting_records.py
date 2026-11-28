@@ -29,7 +29,7 @@ def test_a_json_string_list_is_a_transcript() -> None:
 
     segments = parse_transcript(raw, strict=True)
 
-    assert [(s.speaker, s.text, s.start_ms) for s in segments] == [
+    assert [(segment.speaker, segment.text, segment.start_ms) for segment in segments] == [
         ("Ann", "hello", 1500),
         ("Bo", "world", 62_000),
     ]
@@ -38,7 +38,7 @@ def test_a_json_string_list_is_a_transcript() -> None:
 def test_nested_children_are_flattened_in_order() -> None:
     raw = {"paragraphs": [{"sentences": [{"text": "a"}, {"text": "b"}]}, {"text": "c"}]}
 
-    assert [s.text for s in parse_transcript(raw, strict=True)] == ["a", "b", "c"]
+    assert [segment.text for segment in parse_transcript(raw, strict=True)] == ["a", "b", "c"]
 
 
 def test_an_anonymous_speaker_is_named_by_index() -> None:

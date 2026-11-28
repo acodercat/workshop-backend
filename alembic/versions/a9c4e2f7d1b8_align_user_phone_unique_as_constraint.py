@@ -43,7 +43,7 @@ def _has_phone() -> bool:
     to live in the revision itself. Master keeps the column and takes both
     branches unchanged.
     """
-    columns = {c["name"] for c in inspect(op.get_bind()).get_columns("user")}
+    columns = {column["name"] for column in inspect(op.get_bind()).get_columns("user")}
     return "phone" in columns
 
 

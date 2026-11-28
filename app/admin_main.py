@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI):
 
 
 app = create_app(
-    title="MetaSeq Admin API",
+    title="HKGAI Agent Admin API",
     root_path="/admin/api/v1",
     cors_origins=settings.admin_cors_origins,
     lifespan=lifespan,

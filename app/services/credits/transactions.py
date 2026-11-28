@@ -52,7 +52,7 @@ class TransactionKind(StrEnum):
       netted to zero and is filtered out (see the module docstring).
     - **Direct** (pass-through from ``credit_ledger``):
       ``WELCOME_GRANT`` (auto-grant at registration),
-      ``TOPUP`` (admin-initiated or future payment-driven),
+      ``TOPUP`` (admin-initiated),
       ``ADJUST`` (manual correction),
       ``REFERRAL`` (reward for a successful referral),
       ``CHECKIN`` (daily check-in reward).

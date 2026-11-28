@@ -1,9 +1,9 @@
 """Session re-confirmation, token authentication, and credential sealing.
 
 The database writes in :mod:`app.services.identity.sessions` go through
-three small functions (claim, confirm, revoke); these tests replace them
-with an in-memory row so the decisions around them can be exercised
-offline.
+small functions (claim, confirm, revoke); most tests replace them with an
+in-memory row so the decisions around them can be exercised offline, and
+the rest run those functions against a scripted database.
 """
 
 import uuid
@@ -53,6 +53,7 @@ class _Row:
         monkeypatch.setattr(sessions, "_claim", self._claim)
         monkeypatch.setattr(sessions, "_confirm", self._confirm)
         monkeypatch.setattr(sessions, "end_session", self._revoke)
+        monkeypatch.setattr(sessions, "end_refused_session", self._revoke_refused)
 
     async def _claim(self, session_id, *, due_before):
         self.claims += 1
@@ -65,6 +66,16 @@ class _Row:
 
     async def _revoke(self, session_id):
         self.revoked = True
+
+    async def _revoke_refused(self, session_id, *, refused):
+        if credentials.unseal(self.sealed) != refused:
+            return False
+        self.revoked = True
+        return True
+
+    def rotate(self) -> None:
+        """Another call replaces the stored credential."""
+        self.sealed = credentials.seal(MeetingSession("rotated", "d"))
 
 
 def _ages(*, checked: float, verified: float) -> dict:
@@ -124,6 +135,25 @@ async def test_a_session_the_provider_rejects_is_revoked(monkeypatch) -> None:
         )
 
     assert row.revoked
+
+
+async def test_a_refusal_of_a_credential_rotated_meanwhile_keeps_the_session(
+    monkeypatch,
+) -> None:
+    row = _Row(monkeypatch)
+
+    async def refuse_after_a_rotation(credential, *, timeout):
+        row.rotate()
+        raise CredentialRejected
+
+    provider = MagicMock(verify=AsyncMock(side_effect=refuse_after_a_rotation))
+
+    await sessions.ensure_confirmed(
+        **_ages(checked=_INTERVAL + 1, verified=_INTERVAL + 1), provider=provider
+    )
+
+    assert not row.revoked
+    assert row.confirmed is None
 
 
 async def test_a_credential_answering_for_someone_else_is_revoked(monkeypatch) -> None:
@@ -189,6 +219,86 @@ async def test_a_lost_claim_proceeds_on_the_last_confirmation(monkeypatch) -> No
     assert row.claims == 1
 
 
+#
+# The statements themselves, against a database that records what it is
+# asked and answers from a script.
+
+
+class _Database:
+    def __init__(self, *results) -> None:
+        self.results = list(results)
+        self.statements: list = []
+        self.committed = False
+
+    def __call__(self) -> "_Database":
+        return self
+
+    async def __aenter__(self) -> "_Database":
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        return None
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        return self.results.pop(0)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+def _result(*, one=None, scalar=None) -> MagicMock:
+    result = MagicMock()
+    result.one_or_none.return_value = one
+    result.scalar_one_or_none.return_value = scalar
+    return result
+
+
+async def test_a_session_revoked_before_its_claim_has_ended(monkeypatch) -> None:
+    claimed = SimpleNamespace(credential="sealed", revoked_at=datetime.now(UTC))
+    monkeypatch.setattr(sessions, "AsyncSessionLocal", _Database(_result(one=claimed)))
+
+    with pytest.raises(sessions.SessionEnded):
+        await sessions._claim(uuid.uuid4(), due_before=datetime.now(UTC))
+
+
+async def test_a_refused_credential_no_longer_stored_is_not_revoked(monkeypatch) -> None:
+    stored = credentials.seal(MeetingSession("rotated", "d"))
+    database = _Database(_result(scalar=stored))
+    monkeypatch.setattr(sessions, "AsyncSessionLocal", database)
+
+    ended = await sessions.end_refused_session(uuid.uuid4(), refused=MeetingSession("p", "d"))
+
+    assert not ended
+    assert len(database.statements) == 1  # the locked read, and no revoke
+    assert not database.committed
+
+
+async def test_a_refused_credential_still_stored_is_revoked(monkeypatch) -> None:
+    refused = MeetingSession("p", "d")
+    database = _Database(_result(scalar=credentials.seal(refused)), _result(scalar="sealed"))
+    monkeypatch.setattr(sessions, "AsyncSessionLocal", database)
+
+    assert await sessions.end_refused_session(uuid.uuid4(), refused=refused)
+    assert database.committed
+
+
+async def test_an_expired_session_lends_no_credential(monkeypatch) -> None:
+    database = _Database(_result(one=None), _result(scalar=None))
+    monkeypatch.setattr(sessions, "AsyncSessionLocal", database)
+
+    assert await sessions.load_credential(uuid.uuid4()) is None
+    assert (
+        await sessions.replace_credential(
+            uuid.uuid4(), expected="sealed", credential=MeetingSession("p", "d")
+        )
+        is None
+    )
+
+    for statement in database.statements:
+        assert "identity_session.expires_at > now()" in str(statement.compile())
+
+
 def test_a_sealed_credential_round_trips_and_is_not_plaintext() -> None:
     sealed = credentials.seal(MeetingSession("secret-passport", "d"))
 
@@ -208,7 +318,9 @@ def test_a_damaged_credential_is_unreadable(sealed) -> None:
 
 def _token(**claims) -> str:
     payload = {"sub": "axon_1", "sid": str(uuid.uuid4()), **claims}
-    return auth.create_access_token({k: v for k, v in payload.items() if v is not None})
+    return auth.create_access_token(
+        {key: value for key, value in payload.items() if value is not None}
+    )
 
 
 def _db(row) -> AsyncMock:

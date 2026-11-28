@@ -9,7 +9,7 @@ from app.errors import MeetingGenerationFailedError, MeetingNoTranscriptError
 from app.models.meeting_settings import MinutesSource
 from app.services.meeting import minutes
 from app.services.meeting.settings import CurrentSettings
-from tests.test_meeting_hosted import FakeMeeting, _context
+from tests.meeting_fakes import FakeMeeting, meeting_context_for
 
 
 class _TranslatingMeeting(FakeMeeting):
@@ -41,7 +41,7 @@ def _source(monkeypatch, source: MinutesSource) -> AsyncMock:
 
 async def test_stored_minutes_in_the_language_win(monkeypatch) -> None:
     model = _source(monkeypatch, MinutesSource.AUTO)
-    async with _context(FakeMeeting()) as ctx:
+    async with meeting_context_for(FakeMeeting()) as ctx:
         text = await minutes.translate(
             ctx, AsyncMock(), "m1", language="tc", source_language=None, content="ignored"
         )
@@ -52,7 +52,7 @@ async def test_stored_minutes_in_the_language_win(monkeypatch) -> None:
 
 async def test_between_chinese_scripts_is_a_conversion(monkeypatch) -> None:
     model = _source(monkeypatch, MinutesSource.AUTO)
-    async with _context(FakeMeeting()) as ctx:
+    async with meeting_context_for(FakeMeeting()) as ctx:
         text = await minutes.translate(
             ctx, AsyncMock(), "m1", language="sc", source_language="tc", content="會議紀錄"
         )
@@ -63,7 +63,7 @@ async def test_between_chinese_scripts_is_a_conversion(monkeypatch) -> None:
 
 async def test_auto_falls_back_to_the_model_when_meeting_cannot(monkeypatch) -> None:
     model = _source(monkeypatch, MinutesSource.AUTO)
-    async with _context(_TranslatingMeeting(_BROKEN)) as ctx:
+    async with meeting_context_for(_TranslatingMeeting(_BROKEN)) as ctx:
         text = await minutes.translate(
             ctx, AsyncMock(), "m1", language="en", source_language="tc", content="會議"
         )
@@ -74,7 +74,7 @@ async def test_auto_falls_back_to_the_model_when_meeting_cannot(monkeypatch) -> 
 
 async def test_meeting_only_does_not_fall_back(monkeypatch) -> None:
     model = _source(monkeypatch, MinutesSource.MEETING)
-    async with _context(_TranslatingMeeting(_BROKEN)) as ctx:
+    async with meeting_context_for(_TranslatingMeeting(_BROKEN)) as ctx:
         with pytest.raises(MeetingGenerationFailedError):
             await minutes.translate(
                 ctx, AsyncMock(), "m1", language="en", source_language="tc", content="會議"
@@ -86,7 +86,7 @@ async def test_meeting_only_does_not_fall_back(monkeypatch) -> None:
 async def test_system_only_never_asks_meeting(monkeypatch) -> None:
     _source(monkeypatch, MinutesSource.SYSTEM)
     meeting = _TranslatingMeeting(httpx.Response(500))
-    async with _context(meeting) as ctx:
+    async with meeting_context_for(meeting) as ctx:
         text = await minutes.translate(
             ctx, AsyncMock(), "m1", language="en", source_language="tc", content="會議"
         )
@@ -96,7 +96,7 @@ async def test_system_only_never_asks_meeting(monkeypatch) -> None:
 
 
 async def test_minutes_already_stored_are_not_regenerated() -> None:
-    async with _context(FakeMeeting()) as ctx:
+    async with meeting_context_for(FakeMeeting()) as ctx:
         result = await minutes.minutes(ctx, AsyncMock(), "m1", language="sc")
 
     # No Simplified copy is stored; the Traditional one is returned with a
@@ -108,7 +108,7 @@ async def test_minutes_already_stored_are_not_regenerated() -> None:
 async def test_no_transcript_means_nothing_to_draft_from(monkeypatch) -> None:
     fake = FakeMeeting()
     fake.record["list"][0]["recognition_message"] = []
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         with pytest.raises(MeetingNoTranscriptError):
             await minutes.draft(ctx, AsyncMock(), "m1", template=None)
 
@@ -117,7 +117,7 @@ async def test_system_source_writes_minutes_with_the_model(monkeypatch) -> None:
     model = _source(monkeypatch, MinutesSource.SYSTEM)
     fake = _TranslatingMeeting(httpx.Response(500))
     fake.record["list"][0]["overview_tc"] = ""
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         result = await minutes.minutes(ctx, AsyncMock(), "m1", language="tc")
 
     assert result.content == "from the model"
@@ -130,7 +130,7 @@ async def test_a_concurrent_writer_is_waited_for_not_duplicated(monkeypatch) -> 
     _source(monkeypatch, MinutesSource.MEETING)
     fake = FakeMeeting()
     fake.record["list"][0]["overview_tc"] = ""
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         detail = await minutes.hosted.meeting_detail(ctx, "m1")
         key = f"meeting_minutes:{ctx.user_id}:m1:{detail.remote.revision}"
         ctx.redis.values[key] = "another request"  # type: ignore[attr-defined]

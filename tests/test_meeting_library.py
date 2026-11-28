@@ -36,19 +36,23 @@ def _docx(body: str, *, extra: dict[str, bytes] | None = None) -> bytes:
     return buffer.getvalue()
 
 
-def _p(text: str, *, style: str = "", bold: bool = False) -> str:
+def _paragraph(text: str, *, style: str = "", bold: bool = False) -> str:
     props = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
     run_props = "<w:rPr><w:b/></w:rPr>" if bold else ""
     return f"<w:p>{props}<w:r>{run_props}<w:t>{text}</w:t></w:r></w:p>"
 
 
+def _table_row(*cells: str) -> str:
+    return "<w:tr>" + "".join(f"<w:tc>{_paragraph(cell)}</w:tc>" for cell in cells) + "</w:tr>"
+
+
 def test_word_headings_become_sections_and_example_text_does_not() -> None:
     body = (
-        _p("董事會會議", style="Title")
-        + _p("出席者", style="Heading1")
-        + _p("陳大文、李小明")  # example content, not structure
-        + _p("寫作提示：列出姓名及職銜")
-        + _p("討論事項", style="Heading1")
+        _paragraph("董事會會議", style="Title")
+        + _paragraph("出席者", style="Heading1")
+        + _paragraph("陳大文、李小明")  # example content, not structure
+        + _paragraph("寫作提示：列出姓名及職銜")
+        + _paragraph("討論事項", style="Heading1")
     )
 
     preview = import_template("board.docx", _docx(body))
@@ -61,8 +65,7 @@ def test_word_headings_become_sections_and_example_text_does_not() -> None:
 
 
 def test_a_table_header_row_becomes_fields() -> None:
-    row = lambda *cells: "<w:tr>" + "".join(f"<w:tc>{_p(c)}</w:tc>" for c in cells) + "</w:tr>"  # noqa: E731
-    body = f"<w:tbl>{row('事項', '負責人', '期限')}{row('a', 'b', 'c')}</w:tbl>"
+    body = f"<w:tbl>{_table_row('事項', '負責人', '期限')}{_table_row('a', 'b', 'c')}</w:tbl>"
 
     preview = import_template("tasks.docx", _docx(body))
 
@@ -84,14 +87,14 @@ def test_a_dtd_is_refused_rather_than_expanded() -> None:
 
 
 def test_a_zip_declaring_too_much_is_refused_before_unpacking() -> None:
-    entries = {f"word/f{i}.xml": b"" for i in range(301)}
+    entries = {f"word/f{index}.xml": b"" for index in range(301)}
 
     with pytest.raises(TemplateImportTooLargeError):
-        import_template("x.docx", _docx(_p("a"), extra=entries))
+        import_template("x.docx", _docx(_paragraph("a"), extra=entries))
 
 
 def test_the_committee_form_is_recognized_by_its_document_part(monkeypatch) -> None:
-    document = _docx(_p("anything"))
+    document = _docx(_paragraph("anything"))
     with zipfile.ZipFile(io.BytesIO(document)) as archive:
         import hashlib
 

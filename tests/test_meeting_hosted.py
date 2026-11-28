@@ -5,9 +5,7 @@ so an edit is exercised the way it runs: read, compare revisions, write,
 read back.
 """
 
-import json
 import uuid
-from contextlib import asynccontextmanager
 
 import httpx
 import pytest
@@ -26,127 +24,23 @@ from app.integrations.meeting.transport import (
     open_meeting_http,
 )
 from app.services.meeting import context as meeting_context, hosted
-from app.services.meeting.context import MeetingContext
-
-
-class FakeLock:
-    """The part of redis-py's ``Lock`` that ``short_lock`` uses."""
-
-    def __init__(self, values: dict[str, str], key: str) -> None:
-        self._values = values
-        self._key = key
-        self._token = str(uuid.uuid4())
-
-    async def acquire(self) -> bool:
-        if self._key in self._values:
-            return False
-        self._values[self._key] = self._token
-        return True
-
-    async def release(self) -> None:
-        if self._values.get(self._key) == self._token:
-            del self._values[self._key]
-
-    async def locked(self) -> bool:
-        return self._key in self._values
-
-
-class FakeRedis:
-    def __init__(self) -> None:
-        # Held locks, by key.
-        self.values: dict[str, str] = {}
-
-    def lock(self, key, timeout=None, blocking=True):
-        return FakeLock(self.values, key)
-
-
-class FakeMeeting:
-    """One meeting, ``m1``, plus whatever list pages a test sets."""
-
-    def __init__(self) -> None:
-        self.record = {
-            "meeting_info": {"meeting_id": "m1", "meeting_name": "Board", "remark": "r"},
-            "list": [
-                {
-                    "recognition_id": "r1",
-                    "overview_tc": "舊紀要",
-                    "recognition_message": [{"content": "hi", "speaker": {"name": "A"}}],
-                }
-            ],
-        }
-        self.list_pages: dict[int, dict] = {}
-        self.writes: list[tuple[str, dict]] = []
-        self.deleted: list[str] = []
-        # When set, PUTs are accepted but not applied — a write Meeting
-        # acknowledges and then does not show.
-        self.drop_writes = False
-        self.deny = False
-
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        if self.deny:
-            return httpx.Response(200, json={"code": 401})
-        path = request.url.path
-        body = json.loads(request.content) if request.content else {}
-        if path == "/meeting/api/v1/info" and request.method == "GET":
-            return httpx.Response(200, json={"code": 0, "data": self.record})
-        if path == "/meeting/api/v1/info" and request.method == "PUT":
-            self.writes.append((path, body))
-            if not self.drop_writes:
-                self.record["list"][0]["overview_tc"] = body["overview_tc"]
-                self.record["list"][0]["recognition_message"] = body["recognition_message"]
-            return httpx.Response(200, json={"code": 0})
-        if path == "/meeting/api/v1/meeting" and request.method == "PUT":
-            self.writes.append((path, body))
-            if not self.drop_writes:
-                self.record["meeting_info"]["meeting_name"] = body["meeting_name"]
-            return httpx.Response(200, json={"code": 0})
-        if path == "/meeting/api/v1/meeting" and request.method == "DELETE":
-            self.deleted.append(body["meeting_id"])
-            return httpx.Response(200, json={"code": 0})
-        if path == "/meeting/api/v1/list":
-            return httpx.Response(
-                200, json={"code": 0, "data": self.list_pages.get(body["offset"], {"total": 0})}
-            )
-        return httpx.Response(404)
-
-
-@asynccontextmanager
-async def _context(fake: FakeMeeting):
-    async with open_meeting_http(
-        "https://meeting.test", transport=httpx.MockTransport(fake)
-    ) as http:
-        transport = MeetingTransport(
-            http, app_id="2", cookie_name="passport", accept_language="zh-HK", timeout=5
-        )
-        yield MeetingContext(
-            meetings=MeetingMeetings(
-                transport,
-                origin="https://meeting.test",
-                overview_timeout=5,
-                translate_overview_timeout=5,
-            ),
-            actor=MeetingActor(MeetingSession("p", "d")),
-            account_id="42",
-            session_id=uuid.uuid4(),
-            user_id=1,
-            redis=FakeRedis(),  # type: ignore[arg-type]
-        )
+from tests.meeting_fakes import FakeMeeting, meeting_context_for
 
 
 async def test_detail_reads_transcript_and_minutes() -> None:
-    async with _context(FakeMeeting()) as ctx:
+    async with meeting_context_for(FakeMeeting()) as ctx:
         detail = await hosted.meeting_detail(ctx, "m1")
 
     assert detail.id == "meeting-m1"
     assert detail.title == "Board"
     assert detail.summary == "舊紀要"
-    assert [(t.speaker, t.text) for t in detail.transcript] == [("A", "hi")]
+    assert [(line.speaker, line.text) for line in detail.transcript] == [("A", "hi")]
     assert detail.remote is not None and detail.remote.editable
 
 
 async def test_minutes_saved_at_the_read_revision_land() -> None:
     fake = FakeMeeting()
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         before = await hosted.meeting_detail(ctx, "m1")
         assert before.remote is not None
         await hosted.save_minutes(ctx, "m1", content="新紀要", revision=before.remote.revision)
@@ -160,7 +54,7 @@ async def test_minutes_saved_at_the_read_revision_land() -> None:
 
 async def test_an_edit_against_a_stale_revision_is_refused() -> None:
     fake = FakeMeeting()
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         with pytest.raises(MeetingChangedError):
             await hosted.save_minutes(ctx, "m1", content="x", revision="stale")
 
@@ -169,7 +63,7 @@ async def test_an_edit_against_a_stale_revision_is_refused() -> None:
 
 async def test_a_concurrent_edit_of_the_same_meeting_is_refused() -> None:
     fake = FakeMeeting()
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         revision = (await hosted.meeting_detail(ctx, "m1")).remote.revision
         ctx.redis.values[f"meeting_edit:{ctx.user_id}:m1"] = "someone-else"  # type: ignore[attr-defined]
         with pytest.raises(MeetingChangedError):
@@ -181,7 +75,7 @@ async def test_a_concurrent_edit_of_the_same_meeting_is_refused() -> None:
 async def test_a_write_meeting_does_not_show_is_unconfirmed() -> None:
     fake = FakeMeeting()
     fake.drop_writes = True
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         revision = (await hosted.meeting_detail(ctx, "m1")).remote.revision
         with pytest.raises(MeetingSaveUnconfirmedError):
             await hosted.rename(ctx, "m1", title="New", revision=revision)
@@ -191,26 +85,27 @@ async def test_a_write_meeting_does_not_show_is_unconfirmed() -> None:
 
 async def test_a_transcript_edit_lands_on_its_line() -> None:
     fake = FakeMeeting()
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         revision = (await hosted.meeting_detail(ctx, "m1")).remote.revision
         await hosted.save_transcript_line(
             ctx, "m1", index=0, content="hello", speaker_name="Ann", revision=revision
         )
         detail = await hosted.meeting_detail(ctx, "m1")
 
-    assert [(t.speaker, t.text) for t in detail.transcript] == [("Ann", "hello")]
+    assert [(line.speaker, line.text) for line in detail.transcript] == [("Ann", "hello")]
 
 
 async def test_meeting_denying_the_session_ends_it_here(monkeypatch) -> None:
     ended: list[uuid.UUID] = []
 
-    async def end_session(session_id):
+    async def end_refused_session(session_id, *, refused):
         ended.append(session_id)
+        return True
 
-    monkeypatch.setattr(meeting_context, "end_session", end_session)
+    monkeypatch.setattr(meeting_context, "end_refused_session", end_refused_session)
     fake = FakeMeeting()
     fake.deny = True
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         with pytest.raises(MeetingSessionExpiredError):
             await hosted.meeting_detail(ctx, "m1")
 
@@ -223,7 +118,7 @@ async def test_a_page_past_the_end_answers_with_the_last_page() -> None:
         0: {"total": 1, "meeting_infos": [{"meeting_id": "a", "recognition_status": "1"}]},
         4: {"total": 1, "meeting_infos": []},
     }
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         page = await hosted.list_meetings(ctx, view="meetings", page=5)
 
     assert page.page == 1
@@ -233,7 +128,7 @@ async def test_a_page_past_the_end_answers_with_the_last_page() -> None:
 async def test_flags_default_to_the_list_they_came_from() -> None:
     fake = FakeMeeting()
     fake.list_pages = {0: {"total": 1, "meeting_infos": [{"meeting_id": "a"}]}}
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         page = await hosted.list_meetings(ctx, view="recycleBin", page=1)
 
     assert page.items[0].trashed and not page.items[0].favorite
@@ -242,7 +137,7 @@ async def test_flags_default_to_the_list_they_came_from() -> None:
 async def test_an_unreadable_list_is_not_shown_as_empty() -> None:
     fake = FakeMeeting()
     fake.list_pages = {0: {"total": 3, "meeting_infos": []}}
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         with pytest.raises(MeetingRecordUnreadableError):
             await hosted.list_meetings(ctx, view="meetings", page=1)
 
@@ -250,7 +145,7 @@ async def test_an_unreadable_list_is_not_shown_as_empty() -> None:
 async def test_recycle_bin_deletion_needs_every_id_still_in_the_bin() -> None:
     fake = FakeMeeting()
     fake.list_pages = {0: {"total": 1, "meeting_infos": [{"meeting_id": "a", "trash": 1}]}}
-    async with _context(fake) as ctx:
+    async with meeting_context_for(fake) as ctx:
         with pytest.raises(MeetingChangedError):
             await hosted.delete_from_recycle_bin(ctx, ids=["meeting-a", "meeting-b"], page=1)
         assert fake.deleted == []
