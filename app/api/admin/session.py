@@ -5,8 +5,8 @@
 
 **There is exactly one route here, and no ``GET /sessions/{id}``.** A
 conversation is the most private thing the platform holds, and no
-question this surface exists to answer needs one — so rather than
-auditing the read, the read does not exist. What the row carries instead
+question this surface exists to answer needs one — so the read does not
+exist. What the row carries instead
 is usage: ``turn_count`` / ``total_tokens`` / ``spent_credits`` answer
 "was this session expensive, and why" without anyone reading a word the
 user wrote.
@@ -64,9 +64,9 @@ async def list_sessions(
     # a list that cannot fill it. No join — nothing filtered here lives
     # on the owner.
     total = await ctx.db.scalar(select(func.count()).select_from(Session).where(*filters))
-    # The owner is joined rather than resolved per row: the list is read as "whose
-    # session is this", and a page of rows must not become a page of
-    # lookups. Both name columns come off the one join — the console
+    # The owner is joined rather than resolved per row: the list is read
+    # as "whose session is this", and a page of rows must not become a
+    # page of lookups. Both name columns come off the one join — the console
     # shows a username with the display name under it, and fetching the
     # second separately would be the per-row lookup this avoids. Inner is
     # safe: ``session.user_id`` is NOT NULL with a cascading FK, so every

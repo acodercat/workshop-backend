@@ -180,9 +180,7 @@ def render_sudo_verification(*, code: str, locale: str) -> tuple[str, str]:
 # Account-approved notification. Unlike the verification templates above this
 # carries no ``{code}`` — it's a one-way notice that an admin flipped a
 # PENDING account to ACTIVE, so the user can now sign in. Same visual
-# shell/branding as the verification emails. Note: there is no Aliyun
-# BatchSendMail-side counterpart for this one — it's sent only via
-# SingleSendMail (``send_html_email``), which takes the HTML inline.
+# shell/branding as the verification emails.
 _ACCOUNT_ACTIVATED_SUBJECT = {
     "zh-CN": "【HKGAI Agent】您的账号已激活",
     "en-US": "[HKGAI Agent] Your account is now active",
@@ -237,8 +235,7 @@ def render_account_activated(*, name: str, locale: str) -> tuple[str, str]:
 # Credits top-up notification. Like the account-activated notice this is a
 # one-way notice (no ``{code}``) — an admin added credits to the account,
 # so the copy carries the amount added and the resulting balance. Same
-# visual shell/branding; SingleSendMail-only, no Aliyun BatchSendMail
-# counterpart.
+# visual shell/branding.
 _CREDITS_TOPPED_UP_SUBJECT = {
     "zh-CN": "【HKGAI Agent】已为您的账号充值 {credits} credits",
     "en-US": "[HKGAI Agent] {credits} credits added to your account",

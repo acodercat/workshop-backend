@@ -11,8 +11,7 @@
 Under ``/stats``, not ``/metrics``: the ASGI factory already serves
 Prometheus at ``/metrics`` on both apps.
 
-**Not audited**, like every read here: the console has no audited read
-because it has no way to read one customer's content at all. These are
+The console has no way to read one customer's content at all; these are
 counts, never a conversation.
 
 **No aggregation lives in this module.** Each figure is computed by

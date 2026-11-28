@@ -50,7 +50,7 @@ back to ``f4c8a2b91d63`` on a later sync.
 Bringing the intervening trunk chain over instead would *look* tidier —
 it is linear and rooted exactly at this branch's head — but
 ``b6d2f8a04c17`` in the middle of it drops ``admin_audit_log.reason``,
-a column this branch still declares and reads.
+a column this branch declared and read at the time.
 
 Revision ID: a3f9c1d7e2b4
 Revises: a1f4c7e02b31

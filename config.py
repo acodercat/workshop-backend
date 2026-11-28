@@ -104,7 +104,7 @@ class Settings(BaseSettings):
     # name to the user and nothing else notices. ``config.py`` is where the two
     # already diverge on purpose, and the **default** carries it — not the
     # ``.env`` — so this deployment is correct without anyone remembering to set
-    # it. Master's default reads ``PPIG Connector``; a merge conflicts here, and
+    # it. Master's default reads ``Axon Connector``; a merge conflicts here, and
     # that is the point.
     mcp_client_name: str = Field(
         default="HKGAI Connector",
@@ -712,13 +712,10 @@ class Settings(BaseSettings):
         default="Asia/Shanghai",
         description="Business timezone whose calendar day defines one check-in per day.",
     )
-    # Customer-facing RMB sale price of ONE credit, used only to convert a
-    # top-up payment (¥) into credits — the domestic-market recharge knob.
-    # Deliberately distinct from the internal cost peg (1 credit ≈ $0.01 ≈
-    # ¥0.072 of LLM COGS): selling at ¥0.10 against a ¥0.072 cost basis
-    # bakes ~28% margin into the recharge step itself, on top of the
-    # per-turn token markup. Consumed by ``rates.credits_from_cny`` (admin
-    # ``topup_credits --cny`` today, self-serve Alipay/WeChat later). Does
+    # RMB price of ONE credit, used only to convert an operator top-up
+    # stated in ¥ (``scripts/topup_credits.py --cny``, through
+    # ``rates.credits_from_cny``) into credits. Distinct from the internal
+    # cost peg (1 credit ≈ $0.01 ≈ ¥0.072 of LLM COGS). Does
     # NOT touch billing / settle / balance — those stay on the µ-credit
     # ledger and the USD cost peg; this is pure sell-side pricing.
     credit_price_cny: float = Field(

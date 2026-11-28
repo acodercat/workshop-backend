@@ -4,7 +4,7 @@ Two rows held the same address in different case (``AAAZUO666@163.com`` on
 id 88, created before email normalization landed; ``aaazuo666@163.com`` on
 id 112). Postgres' ``UNIQUE(email)`` is case-sensitive, so the second
 registration was allowed and id 88 became unreachable: every lookup
-lowercases its input, and id 88 has no phone as a fallback channel.
+lowercases its input, and id 88 has no other sign-in channel.
 
 This is option B of the repair — move id 88's whole credit balance onto the
 live account, then free the address on 88 and revoke its tokens. Sessions

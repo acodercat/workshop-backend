@@ -1,7 +1,7 @@
 [project]
 name = "metaseq-backend"
 version = "0.1.0"
-description = "MetaSeq Agent backend — REST API, auth, SSE streaming, Redis bridge to the agent worker"
+description = "HKGAI Agent backend — REST API, auth, SSE streaming, Redis bridge to the agent worker"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

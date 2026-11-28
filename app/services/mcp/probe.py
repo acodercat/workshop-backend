@@ -67,7 +67,6 @@ _MAX_ICON_SRC_LEN = 4096
 # to store and re-serialize on every request.
 _MAX_ICONS = 8
 
-
 # The SDK's wording when a response body will not parse as JSON-RPC. Matched to
 # *add* a sentence, never to decide anything: if a future SDK renames it, the
 # hint disappears and the message stays correct.
@@ -238,9 +237,8 @@ async def _probe(
     await guard_public_url(url)
     headers = build_auth_headers(auth_type, credential)
 
-    # Set once the session is open, which is what separates "this URL is not
-    # an MCP endpoint" from "this MCP server went wrong later" — see
-    # ``_unreachable``.
+    # Set once the session is open, which is what separates "this URL is not an
+    # MCP endpoint" from "this MCP server went wrong later" — see ``_unreachable``.
     handshook = False
 
     # The refused statuses, recorded as they go past.

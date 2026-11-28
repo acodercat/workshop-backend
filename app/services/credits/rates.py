@@ -228,14 +228,12 @@ def micro_from_credits(amount_credits: int) -> int:
     return amount_credits * _MICRO_PER_CREDIT
 
 
-def credits_from_cny(amount_cny: float | str) -> int:
-    """Whole credits a customer receives for an RMB top-up payment.
+def credits_from_cny(amount_cny: Decimal | float | str) -> int:
+    """Whole credits an RMB amount converts to, for an operator top-up
+    stated in ¥ (``scripts/topup_credits.py --cny``).
 
-    Uses the **customer-facing sale price** ``settings.credit_price_cny``
-    (¥0.1/credit by default) — NOT the internal USD cost peg. This is the
-    domestic recharge conversion; the gap between sale price and cost
-    basis is intentional margin and lives only in this sell-side path
-    (billing/settle never sees CNY).
+    Uses ``settings.credit_price_cny`` (¥0.1/credit by default) — NOT the
+    internal USD cost peg; billing/settle never sees CNY.
 
     Decimal arithmetic (not float division) because ``¥100 / 0.1`` in
     binary float is ``999.9999…`` and would silently shortchange the

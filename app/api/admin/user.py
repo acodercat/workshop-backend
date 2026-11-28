@@ -80,8 +80,8 @@ async def list_users(
     """Return one page of the user directory, newest first.
 
     One ``q`` searched across the two identifiers a support ticket
-    arrives with — this deployment signs in by email only. Plain ILIKE — at the current user count a trigram
-    index would be jewellery.
+    arrives with (username and email). Plain ILIKE — at the current user
+    count a trigram index would be jewellery.
     """
     filters = []
     if q is not None:

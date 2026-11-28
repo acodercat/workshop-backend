@@ -84,10 +84,9 @@ async def register_user(
 
     # Only ``email`` is user-supplied here; the generated ``axon_${id}`` is
     # unique by construction (id is from a sequence).
-    taken_error = EmailTakenError("Email already registered")
     existing = await db.execute(select(User.id).where(User.email == identifier))
     if existing.first() is not None:
-        raise taken_error
+        raise EmailTakenError("Email already registered")
 
     # bcrypt up-front (~250ms, CPU-bound) so no invite-code row lock is
     # held across it.
@@ -143,7 +142,7 @@ async def register_user(
     except IntegrityError as exc:
         await db.rollback()
         logger.info("register race: email=%s", identifier)
-        raise taken_error from exc
+        raise EmailTakenError("Email already registered") from exc
 
     # Org + member inserts can't trip a uniqueness constraint (org has
     # no UNIQUE on (name, owner) and the member's

@@ -410,7 +410,7 @@ async def authenticate_and_get_staff(
 
     Endpoints consume this through ``StaffContext``
     (:mod:`app.api.admin.dependencies`), which packages the operator with
-    the request metadata the audit trail records.
+    the DB session.
     """
     unauthenticated = StaffAuthenticationError("Could not validate credentials")
 

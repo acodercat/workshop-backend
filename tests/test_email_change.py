@@ -67,3 +67,16 @@ async def test_the_code_goes_to_the_new_address(monkeypatch) -> None:
     await _request(_db(taken=False), "b@example.com")
 
     assert send.await_args.kwargs == {"user_id": 7, "email": "b@example.com", "locale": "zh-CN"}
+
+
+async def test_a_change_swaps_the_column_and_signs_everyone_out(monkeypatch) -> None:
+    monkeypatch.setattr(email_change, "verify_email_change_code", AsyncMock())
+    user = _user()
+    user.token_version = 3
+
+    await email_change.change_email(
+        AsyncMock(), AsyncMock(), user=user, new_email="b@example.com", code="123456"
+    )
+
+    assert user.email == "b@example.com"
+    assert user.token_version == 4

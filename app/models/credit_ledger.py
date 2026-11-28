@@ -55,8 +55,8 @@ from app.database import Base
 class CreditLedgerKind(StrEnum):
     """Why a ledger row exists.
 
-    - ``TOPUP``    — external credit-in (admin script today, payment
-      provider in V3). Always positive ``amount``. Carries an
+    - ``TOPUP``    — external credit-in (welcome grant, admin script).
+      Always positive ``amount``. Carries an
       ``idempotency_key``.
     - ``RESERVE``  — funds locked at the start of a turn. Always
       negative; paired with later ``SETTLE`` / ``REFUND`` row(s) by
@@ -132,8 +132,8 @@ class CreditLedger(Base):
     )
     # NULL on system-emitted rows (RESERVE / SETTLE / REFUND) where the
     # reservation state machine prevents duplicates anyway. Required
-    # on TOPUP / ADJUST so admin scripts / future payment webhooks can
-    # retry safely.
+    # on TOPUP / ADJUST so the welcome grant and admin scripts can retry
+    # safely.
     idempotency_key: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,

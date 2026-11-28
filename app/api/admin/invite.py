@@ -6,7 +6,7 @@
 
 Registration is invite-gated, so this is the growth funnel: issuing is
 the only way to let someone in, and the redemption list is the referral
-trail behind every commission.
+trail behind every referral reward.
 
 Issuing replaces day-to-day use of ``scripts/create_invite_code.py`` and
 goes through :func:`app.services.auth.invite.create_invite_code` — the
@@ -126,7 +126,7 @@ async def list_invite_redemptions(
     Two joins onto ``user`` — invitee and referrer — so the row reads as
     the relationship it records rather than a pair of ids.
     ``?referrer_user_id=`` is one person's referral tree, one level
-    deep, which is the only depth commission is paid on.
+    deep, which is the only depth a referral reward is paid on.
     """
     invitee = aliased(User)
     referrer = aliased(User)

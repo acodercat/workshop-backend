@@ -15,7 +15,8 @@ buckets that must NOT be synced from metaseq:
    and the dep is `aiosmtplib` (not `alibabacloud-dm*`). Templates carry the HKGAI brand
    ("HKGAI Agent", 香港生成式人工智能研发中心).
 2. **Model / tier config** (`config.py`) — `supported_session_model_ids` includes `glm-5.1`
-   and `fable` (metaseq omits both); `session_tier_models` maps **FAST=deepseek-v4-flash,
+   and `fable` (metaseq omits both) and leaves out metaseq's `kimi-k2-code` (not in this
+   deployment's worker registry); `session_tier_models` maps **FAST=deepseek-v4-flash,
    STANDARD=glm-5.2, ADVANCED=deepseek-v4-pro** (metaseq uses FAST=glm-5.2, etc.). Pricing in
    `credit_rates` must have an entry for every whitelisted model (incl. `glm-5.1`).
 3. **Brand + deploy** — "HKGAI Agent" / 香港生成式人工智能研发中心 wherever they appear;
@@ -23,7 +24,16 @@ buckets that must NOT be synced from metaseq:
    OSS buckets / domains are `.env`-driven (Huawei OBS `agent-workshop-*` / `.hkgai.net`), so
    `config.py`'s metaseq-flavored defaults are harmless — env overrides at runtime.
 
-4. **No payment / commission / withdrawal.** HKGAI does not sell credits, so metaseq's
+4. **A BEARER catalog entry takes the user's token at add time** (`5c923d4`). Metaseq's
+   catalog offers NONE and OAUTH only. Here `INSTANTIABLE_AUTH_TYPES` includes BEARER,
+   `CREDENTIAL_AUTH_TYPES = {BEARER}`, `build_connector(..., encrypted_credential=)` requires
+   the token for such an entry and refuses one for any other
+   (`ConnectorCatalogCredentialError`), and `POST /connectors` with `catalog_id` accepts
+   `credential`. Files: `app/services/connector/catalog.py`, `app/api/public/mcp_server.py`,
+   `app/schemas/mcp_server.py`, `app/errors.py`, `scripts/manage_connector_catalog.py` and
+   their tests. On conflict keep this fork's side of those hunks.
+
+5. **No payment / commission / withdrawal.** HKGAI does not sell credits, so metaseq's
    汇付 (Huifu) recharge, the referral-commission wallet, and withdrawals are **excluded
    application-side**. See "Excluding payment" below — this one is not a conflict you resolve,
    it is a deletion you must remember to make.
@@ -58,15 +68,18 @@ deliberately not taken (`e47c14a`, metaseq's brand).
 
 | Check | Command | Expected |
 |---|---|---|
-| No Aliyun DirectMail in app | `grep -rniE "alibabacloud_dm\|DmClient\|aliyun_dm" app/` | empty (`alibabacloud_dysmsapi` is the **SMS** SDK and is legitimate — do not grep bare `alibabacloud`) |
+| No Aliyun DirectMail in app | `grep -rniE "alibabacloud_dm\|DmClient\|aliyun_dm" app/` | empty |
 | Email client = SMTP | `grep -c aiosmtplib app/services/email/client.py` | ≥1 |
 | Email dep in lockfile | `grep -c 'name = "alibabacloud-dm' uv.lock` and `grep -c 'name = "aiosmtplib"' uv.lock` | 0 DirectMail, ≥1 aiosmtplib |
 | Email brand | `grep "HKGAI Agent\|香港生成式人工智能研发中心" app/services/email/templates.py` | present |
+| No metaseq brand | `grep -rn "MetaSeq\|水杉\|Metasequoia" app/ pyproject.toml` | empty |
+| Model whitelist excludes kimi-k2-code | `grep -A16 "supported_session_model_ids" config.py \| grep -c '"kimi-k2-code"'` | 0 |
+| BEARER catalog entries | `grep -n "CREDENTIAL_AUTH_TYPES = " app/services/connector/catalog.py` and `grep -c ConnectorCatalogCredentialError app/errors.py` | one line, ≥1 |
 | Model whitelist | `grep -E "glm-5.1\|fable" config.py` | both present |
 | Tier mapping | `grep -A4 session_tier_models config.py` | `"FAST": "deepseek-v4-flash"` |
 | No phone / SMS channel | `grep -rniE "phone\|sms\|dysms" app/ config.py` | Only the comment in `models/user.py` saying the field is gone. The channel was removed in `5fcf505` and the column in `b7e2d9a4c1f5`; a `phone:` field reappearing on the model is a merge bringing back a column this database does not have |
 | SMS dep gone | `grep -c 'dysmsapi' pyproject.toml uv.lock` | 0 in both |
-| OAuth client name | `grep -A1 "mcp_client_name" config.py` and `grep -c _CLIENT_NAME app/services/mcp/oauth.py` | `default="HKGAI Connector"` in `config.py`, and **0** in `oauth.py`. This is the name an authorization server prints on its consent screen, so a wrong value is visible only to the user and to nothing else. It moved out of `oauth.py` precisely so the conflict lands in `config.py`, where the two branches diverge by design — metaseq's default reads `PPIG Connector`, and taking metaseq's side here is the mistake this row exists to catch. A `_CLIENT_NAME` constant reappearing in `oauth.py` means a merge undid the move |
+| OAuth client name | `grep -A1 "mcp_client_name" config.py` and `grep -c _CLIENT_NAME app/services/mcp/oauth.py` | `default="HKGAI Connector"` in `config.py`, and **0** in `oauth.py`. This is the name an authorization server prints on its consent screen, so a wrong value is visible only to the user and to nothing else. It moved out of `oauth.py` precisely so the conflict lands in `config.py`, where the two branches diverge by design — metaseq's default reads `Axon Connector`, and taking metaseq's side here is the mistake this row exists to catch. A `_CLIENT_NAME` constant reappearing in `oauth.py` means a merge undid the move |
 | Migration head | `uv run alembic heads` | **One head, after you resolve it.** This branch owns revisions of its own, so a sync that brought new metaseq revisions can leave two siblings: `uv run alembic merge heads -m "sync"`, once, then one head again. Two heads at deploy time is the failure this row exists to catch — but it is not the only chain failure a sync causes, and `merge heads` does not answer the other one. Read "⚠️ Alembic migration chain" before touching `alembic/versions/` |
 | Removed schema stays removed | `ls alembic/versions/b7e2d9a4c1f5_*.py` | exactly one file. It drops `payment_order` / `commission_ledger` / `withdrawal_request`, their four enum types, `user.commission_balance_fen` and `user.phone` — a merge that loses the file loses all of it. **A metaseq revision that alters any of them will fail this fork's `upgrade`** — about one in ten historically. A later revision cannot undo an earlier one's failure, so the guard goes **in the revision itself, in this fork** — see `e2b7d4f9a1c6` **and** `a1c7f3e9d2b6` — one change written once on each branch, so both carry the same guard, because which of them runs first is not fixed (the deployed database applied one order, an empty one takes the other) — and `a9c4e2f7d1b8`, which aligns a `user.phone` this fork dropped. Each carries its own reasoning; read the guard, not this row |
 | No payment code | `grep -rn "services.payment\|services.commission\|dg_sdk" app/ scripts/ tests/` | empty |
@@ -93,10 +106,9 @@ Keep hkgai's SMTP/Lark entirely; reject metaseq's Aliyun DirectMail client + its
 rarely touches email, so these usually auto-resolve to hkgai (no conflict) — verify with the
 probes above regardless. The single email seam is `app/services/auth/verification.py`
 (imports `send_html_email` / `render_*` from the `app.services.email` abstraction). It is
-**metaseq's file** — it has since grown a channel-agnostic email/phone OTP flow, so take metaseq's
-whole version and restate the transport as SMTP; the seam it calls is unchanged, so hkgai's SMTP
-client backs it either way. Aliyun **SMS** (`alibabacloud-dysmsapi`, `app/services/sms/`) is a
-different service from DirectMail and comes in with the phone channel — keep it.
+**metaseq's file**, but metaseq's copy carries the email/phone `channel` flow; take its changes
+and strip the phone half as "Excluding the phone channel" describes. Aliyun **SMS**
+(`alibabacloud-dysmsapi`, `app/services/sms/`) comes in with the phone channel — delete it.
 
 ### Parallel-developed functional code → converge to metaseq
 metaseq and hkgai sometimes both touch the same infra (SSE `/me/events` fan-out — `user/hub.py`,
@@ -171,8 +183,8 @@ because it is *addition*, not conflict.
 | `app/schemas/auth.py` | `_IdentifierBody` carries `email` alone — no `phone`, no `channel`/`identifier` properties, no "exactly one" validator |
 | `app/services/auth/verification.py` | one channel: no `Channel` type, no `_sms_sender`, keys come straight from `email_verify_key` |
 | `app/services/auth/{login,register}.py` | look up `User.email` directly; no `channel` parameter |
-| `app/api/endpoints/auth.py` | pass `identifier=body.email` |
-| `app/api/endpoints/user.py` | no `/me/phone` endpoints |
+| `app/api/public/auth.py` | pass `identifier=body.email` |
+| `app/api/public/user.py` | no `/me/phone` endpoints |
 | `app/services/auth/email_change.py`, `sudo.py` | metaseq folds email and phone change into `credential_change.py` and lets `request_sudo_code` pick a channel. Here `email_change.py` stays — taking `proof: SudoProof` — and `sudo.py` sends the code to `user.email`. A merge brings `credential_change.py` and `tests/test_credential_change.py` back as new files: fold any change into `email_change.py` / `tests/test_email_change.py` and delete them |
 | `app/schemas/user.py` | `SudoCodeRequest` carries `locale` alone — no `channel` |
 | `app/errors.py` | no `PhoneTakenError` / `SamePhoneError` / `SmsSendFailedError` |
@@ -200,7 +212,7 @@ Excluded (delete outright; nothing kept imports them):
 
 ```
 app/services/payment/            app/services/commission/
-app/api/endpoints/payment.py     app/api/endpoints/commission.py
+app/api/public/payment.py        app/api/public/commission.py
 app/schemas/payment.py           app/schemas/commission.py
 app/models/{payment_order,commission_ledger,withdrawal_request}.py
 app/workers/payment_reconciler.py
@@ -217,9 +229,9 @@ Then the edits deletion alone does not cover:
 
 | File | Edit |
 |---|---|
-| `app/main.py` | drop `commission`, `payment` from the import block and from `ROUTERS` |
+| `app/api/public/router.py` | drop `commission`, `payment` from the import block and their `include_router` lines |
 | `app/workers/run.py` | drop the `payment_reconciler` import, its `create_task`, its docstring bullet; task count **six → five** (settle sweeper, subscriber, schedule dispatcher, message queue dispatcher, budget enforcer); startup log string |
-| `app/models/user.py` | drop `commission_balance_fen` (the DB column stays — see below) |
+| `app/models/user.py` | drop `commission_balance_fen` (the column is dropped by `b7e2d9a4c1f5`) |
 | `app/errors.py` | drop the 8 payment/commission/withdrawal error classes; the domain list in the module docstring |
 | `config.py` | drop the `# ── Payments` and `# ── Referral commission` sections, and `credit_bonus_rate` (its only reader was order creation) |
 | `app/services/credits/rates.py` | drop `recharge_bonus_credits` (same — no caller left) |
@@ -231,23 +243,18 @@ Then the edits deletion alone does not cover:
 `scripts/topup_credits.py --cny` uses them. Invite-code rewards and daily check-in are
 **in scope**; only the money-in and cash-out halves are cut.
 
-### Migrations are NOT excluded
+### Migrations that create the removed schema are taken, then dropped
 
-All of metaseq's alembic revisions come across **unchanged**, including the three that create
-`payment_order` / `commission_wallet` / the commission CHECK constraints. hkgai's database
-therefore carries three permanently-empty tables and an always-zero `user.commission_balance_fen`.
+Metaseq's revisions that create `payment_order` / `commission_ledger` / `withdrawal_request`
+and their columns come across unchanged: they are interleaved with wanted ones, so excluding
+them would mean rewriting `down_revision` links on every sync. This fork's `b7e2d9a4c1f5`
+then drops the tables, their enum types, `user.commission_balance_fen` and `user.phone`.
+A later metaseq revision that alters any of them is not taken, or is guarded in place — see
+"⚠️ Alembic migration chain".
 
-That is deliberate. Those revisions are **interleaved** with wanted ones, not a contiguous block,
-so excluding them would mean rewriting three `down_revision` links, surgically editing one
-revision whose body mixes a `withdrawal_request` change with two unrelated index fixes
-(`e1c5a9d7b3f4`), and re-doing all of it on every future sync — with `alembic upgrade head`
-in production as the failure mode. Three empty tables are the cheaper side of that trade.
-
-Consequence: **never run `alembic revision --autogenerate` on hkgai.** `Base.metadata` no longer
-describes those tables, so autogenerate would emit `DROP TABLE` for them. Migrations come from
-metaseq, always — and a couple of their docstrings still point at `app/services/commission/`.
-That is expected: a revision is a historical record, and editing one is the fork this whole
-trade exists to avoid.
+**Never run `alembic revision --autogenerate` on hkgai.** Migrations come from metaseq, plus
+this fork's own revisions where the schema differs. Some metaseq docstrings still point at
+`app/services/commission/`; a revision is a record and is not edited for that.
 
 ### Brand check the *new* templates, not just the conflicted ones
 
@@ -407,7 +414,7 @@ git branch -d sync/metaseq-master-<date>
 
 1. `config.py` (email + model/tier + new fields — every merge that touches config)
 2. `app/services/email/*`, `pyproject.toml`, `uv.lock` (SMTP vs Aliyun)
-3. `app/services/{redis,user/events,user/hub,skill_bundle}.py`, `app/main.py` (parallel infra)
+3. `app/services/{redis,user/events,user/hub,skill_bundle}.py`, `app/public_main.py` (parallel infra)
 4. `scripts/seed_users.py`, `scripts/deploy.sh`
 5. `CLAUDE.md`
 6. Anything under `app/services/payment/` or `app/services/commission/` on metaseq — arrives as a

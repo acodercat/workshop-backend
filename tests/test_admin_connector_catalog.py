@@ -132,9 +132,10 @@ def test_an_instantiable_auth_type_is_accepted(auth_type) -> None:
 @pytest.mark.parametrize("auth_type", [MCPServerAuthType.HEADER])
 def test_an_auth_type_no_user_could_add_is_refused(auth_type) -> None:
     """``build_connector`` refuses these — HEADER's header name is
-    template-level and the catalog has no column for it (BEARER is offered
-    on this deployment: the add request supplies the user's token) — so an
-    entry declaring one is unusable the moment it is published. ``catalog.py`` says operator tooling should offer only
+    template-level and the catalog has no column for it (BEARER is offered:
+    the add request supplies the user's token) — so an entry declaring one
+    is unusable the moment it is published. ``catalog.py`` says operator
+    tooling should offer only
     ``INSTANTIABLE_AUTH_TYPES`` and ``manage_connector_catalog.py`` already
     limits its ``--auth-type`` choices; the console must not be the one
     surface that lets it through."""

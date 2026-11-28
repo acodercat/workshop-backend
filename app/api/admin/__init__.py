@@ -53,13 +53,11 @@ Two rules bind everything admin:
    row right here; routing it through a service function that would only
    forward buys indirection and no guarantee.
 2. **Every mutation commits itself** — ``await ctx.db.commit()`` as the
-   last write of the endpoint. This deployment keeps no operator trail,
-   so the ``audit()`` funnel that owns the commit upstream is absent
-   (revision ``c8f2a5e1d94b``); with it went the property that an
-   endpoint which forgot to audit also failed to save. A mutation that
-   forgets to commit silently does not stick, so this one is a
-   convention to remember — ``tests/test_admin_mutations_commit.py``
-   pins it for the endpoints it covers.
+   last write of the endpoint. This deployment keeps no operator trail
+   (no ``audit()`` funnel owns the commit), so a mutation that forgets to
+   commit silently does not stick. Each endpoint's tests assert its
+   commit: ``tests/test_admin_mutations_commit.py`` for staff and ``me``,
+   a ``db.commits`` check in the other endpoints' own test files.
 
 :mod:`app.api.admin.staff` is the worked example of both.
 """

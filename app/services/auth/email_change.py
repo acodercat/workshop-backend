@@ -1,20 +1,15 @@
-"""Email-change orchestration.
-
-Two-step flow that mirrors registration but operates on an *already
-authenticated* user:
+"""Changing a signed-in user's email.
 
 1. :func:`request_email_change_code` — the sudo gate
-   (:func:`~app.services.auth.sudo.require_sudo`), uniqueness pre-check
-   on the new address, send a 6-digit code to the new address.
-2. :func:`change_email` — verify the code, atomically update
-   ``user.email``, and bump ``token_version`` so all other sessions
-   are forced to re-authenticate. Email is a password-recovery
-   vector, so changing it should invalidate stale tokens the same
-   way changing the password does.
+   (:func:`~app.services.auth.sudo.require_sudo`), a refusal of a no-op
+   change, a uniqueness pre-check on the new address, and a 6-digit code
+   sent to it.
+2. :func:`change_email` — verify that code, swap the column, and bump
+   ``token_version``. Email is a login and recovery vector, so changing
+   it invalidates stale tokens the way a password change does.
 
-Lives next to :mod:`.register` and reuses
-:mod:`.verification` for the Redis code lifecycle (different
-namespace, same TTL / cooldown / max-attempts settings).
+The caller is already authenticated, so answering ``email_taken`` is
+expected UX rather than an account-existence leak.
 """
 
 import logging
@@ -44,43 +39,22 @@ async def request_email_change_code(
     user: User,
     new_email: str,
     proof: SudoProof,
-    # ``str`` rather than ``Locale``: the renderer documents a fallback for
-    # unknown values and implements it, so the narrow type was a promise the
-    # request schema never made.
     locale: str = "zh-CN",
 ) -> None:
-    """Step 1: sudo + uniqueness check + dispatch the verification
-    code to ``new_email``.
+    """Step 1: sudo, then send a code to *new_email*.
 
-    Unlike registration (where revealing "this email is registered"
-    would leak account existence to anonymous callers), the caller
-    here is already authenticated, so returning ``email_taken`` is
-    expected UX rather than an information leak.
-
-    The sudo check happens before the uniqueness check on purpose —
-    refusing a bad proof before doing any DB lookup gives an attacker
-    who steals a session no extra signal.
+    The sudo check runs before any lookup, so a stolen session learns
+    nothing from a bad proof. A no-op change is refused rather than burning
+    a code on nothing to verify.
     """
     await require_sudo(redis, user=user, proof=proof)
-
-    # Refuse no-op changes — there's nothing to verify and the user
-    # would just burn a code for no reason.
     if user.email is not None and user.email.lower() == new_email.lower():
-        raise SameEmailError("New email matches current email")
-
-    # Uniqueness pre-check. ``UNIQUE`` partial index on ``user.email``
-    # would catch a race at INSERT time too, but doing it here lets
-    # us return a clear reason before burning a code.
-    existing = await db.execute(select(User.id).where(User.email == new_email))
-    if existing.first() is not None:
+        raise SameEmailError("New email matches the current one")
+    # The ``user_email_key`` constraint catches a race at commit too; asking
+    # first gives a clear reason before a code is spent.
+    if (await db.execute(select(User.id).where(User.email == new_email))).first() is not None:
         raise EmailTakenError("Email already in use")
-
-    await send_email_change_code(
-        redis,
-        user_id=user.id,
-        email=new_email,
-        locale=locale,
-    )
+    await send_email_change_code(redis, user_id=user.id, email=new_email, locale=locale)
 
 
 async def change_email(
@@ -91,43 +65,24 @@ async def change_email(
     new_email: str,
     code: str,
 ) -> User:
-    """Step 2: verify the code (consuming it on success), atomically
-    update ``user.email``, and revoke all existing JWTs.
+    """Step 2: verify the code (consuming it), swap the column, revoke JWTs.
 
-    Token revocation is the security pivot — even though the caller
-    just proved possession of the new email, we don't trust that the
-    *current* session belongs to the legitimate user (could be a
-    hijacker who triggered the change). Bumping ``token_version``
-    forces every active session, including this one, to re-login at
-    the next request.
+    Revocation is the security pivot: the caller just proved they hold the
+    new address, not that the *current* session is the legitimate user's.
+    Bumping ``token_version`` makes every session, this one included, sign
+    in again.
     """
-    await verify_email_change_code(
-        redis,
-        user_id=user.id,
-        email=new_email,
-        code=code,
-    )
-
+    await verify_email_change_code(redis, user_id=user.id, email=new_email, code=code)
     user.email = new_email
     revoke_user_tokens(user)
     try:
         await db.commit()
     except IntegrityError as exc:
-        # Race: someone else claimed this email between the
-        # uniqueness pre-check (step 1) and now. Surface as
-        # ``email_taken`` so the user can pick another address.
+        # Someone claimed the address between step 1's pre-check and now.
         await db.rollback()
-        logger.info(
-            "email_change race: user_id=%s new_email=%s",
-            user.id,
-            new_email,
-        )
+        logger.info("email change race: user_id=%s new_email=%s", user.id, new_email)
         raise EmailTakenError("Email already in use") from exc
 
     await db.refresh(user)
-    logger.info(
-        "email changed: user_id=%s new_email=%s",
-        user.id,
-        new_email,
-    )
+    logger.info("email changed: user_id=%s new_email=%s", user.id, new_email)
     return user

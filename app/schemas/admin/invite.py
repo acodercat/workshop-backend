@@ -45,7 +45,7 @@ class InviteRedemptionResponse(BaseModel):
     """One redemption — who joined on whose code.
 
     ``referrer_*`` is ``None`` for ``SYSTEM`` codes: nobody referred
-    them, which is exactly why those redemptions pay no commission.
+    them, which is exactly why those redemptions pay no referral reward.
     """
 
     id: int

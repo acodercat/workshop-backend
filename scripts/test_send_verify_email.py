@@ -54,13 +54,13 @@ def _hint(exc: EmailSendError) -> None:
     """Print a one-line diagnostic for the most common SMTP failures."""
     message = (exc.message or "").lower()
     code = exc.code
-    if code in (535, "535") or "authentication" in message or "auth" in message:
+    if code == 535:
         print(
             "  → SMTP 认证失败：检查 smtp_username / smtp_password；"
             "Lark Suite 用 app-specific 密码（不是登录密码）",
             file=sys.stderr,
         )
-    elif code in (550, "550") or "sender" in message or "from" in message:
+    elif code == 550:
         print(
             f"  → 发件地址 {settings.smtp_from_address} 被服务器拒绝；"
             "确认它在 Lark Suite 已绑定且 SPF/DKIM 通过",

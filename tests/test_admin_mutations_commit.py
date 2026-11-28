@@ -1,12 +1,10 @@
 """Every console mutation commits itself.
 
-This deployment keeps no operator trail: the ``audit()`` funnel that used
-to own the commit was removed with ``admin_audit_log`` (revision
-``c8f2a5e1d94b``). The funnel had a side benefit worth more than the
-trail on some days — an endpoint that forgot to audit also failed to
-save, so a missing commit was impossible rather than merely unlikely.
-Nothing structural replaces it, so these tests do: one per mutation,
-asserting the endpoint awaited ``commit`` after the service call.
+This deployment keeps no operator trail, so no ``audit()`` funnel owns the
+commit: an endpoint that forgets to commit returns 200 and its change is
+rolled back. These tests pin the commit for the staff and ``me``
+mutations; the other console endpoints assert ``db.commits`` in their own
+test files.
 
 The service layer is patched out. What is under test is not what the
 mutation does — that has its own tests — but whether the endpoint
@@ -31,8 +29,7 @@ from app.services.admin import AdminContext
 
 
 class _FakeDb:
-    """Records the ordering the tests care about: did ``commit`` happen,
-    and did it happen *after* the service call."""
+    """Serves the PK lookup and counts commits."""
 
     def __init__(self, account: Staff | None = None) -> None:
         self._account = account
@@ -52,9 +49,9 @@ class _Env:
     account: Staff
 
 
-def _account(staff_id: int = 1) -> Staff:
+def _account() -> Staff:
     return Staff(
-        id=staff_id,
+        id=1,
         username="op",
         name="Operator",
         password_hash="hashed",

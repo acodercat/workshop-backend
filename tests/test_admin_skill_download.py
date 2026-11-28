@@ -1,9 +1,9 @@
 """The console can pull back a platform bundle, and only a platform one.
 
-Being able to fetch the bytes is what turns the upload audit row's
-``replaced_bundle_key`` into a rollback rather than a note. A ``CUSTOM``
-upload is refused: it is a user's private file, the same class of thing
-as a conversation, which this console removed rather than audited.
+Being able to fetch the bytes is what turns the logged displaced bundle
+key into a rollback rather than a note. A ``CUSTOM`` upload is refused:
+it is a user's private file, the same class of thing as a conversation,
+which this console does not read.
 
 asyncio_mode = "auto" (see pyproject.toml), so no ``@pytest.mark.asyncio``.
 """

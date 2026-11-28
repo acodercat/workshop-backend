@@ -78,7 +78,7 @@ async def test_create_hashes_the_password_and_flushes_for_an_id() -> None:
     )
 
     assert account.password_hash != "correct-horse-battery"
-    # Flushed, so the caller's audit row can reference the generated id.
+    # Flushed, so the caller has the generated id.
     assert db.flushes == 1
     assert db.added == [account]
 

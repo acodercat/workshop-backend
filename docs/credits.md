@@ -624,10 +624,12 @@ Two entry points:
 Each visits at most a handful of OPEN reservations per call
 (partial index keeps the lookup cheap).
 
-### Background process (settle sweeper + subscriber)
+### Background process (settle sweeper + subscriber + dispatchers)
 
-One process, two always-on concurrent async tasks (`app/workers/run.py`
-with an `asyncio.TaskGroup`; the budget enforcer is a flag-gated third). Standalone entrypoint:
+One process, four always-on concurrent async tasks — settle sweeper,
+settle subscriber, schedule dispatcher, message queue dispatcher — plus
+the flag-gated budget enforcer (`app/workers/run.py`, one
+`asyncio.TaskGroup`). The two settle tasks are described here. Standalone entrypoint:
 `uv run python -m app.workers.run`. Lifecycle commands:
 `bash scripts/deploy.sh background {start|stop|restart|status|logs}`.
 

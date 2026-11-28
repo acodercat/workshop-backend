@@ -25,8 +25,8 @@ class StaffCreate(BaseModel):
         min_length=3,
         max_length=64,
         # Login identifier, hand-provisioned, and it appears in log lines.
-        # Kept to an unambiguous set so it can't be
-        # confused with a display name or carry look-alike characters.
+        # Kept to an unambiguous set so it can't be confused with a display
+        # name or carry look-alike characters.
         pattern=r"^[a-z0-9][a-z0-9_.-]*$",
     )
     name: str = Field(min_length=1, max_length=64)

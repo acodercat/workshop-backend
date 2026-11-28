@@ -11,7 +11,7 @@ directory (see ``docs/admin-console.md``); the operator team is small and
 named, so there are no gates between operators.
 
 **This module is the reference slice.** Every future console feature —
-credit adjustments, withdrawal review, invite issuance — follows its
+credit adjustments, invite issuance — follows its
 shape: ``StaffContext`` in the signature, mutations ending in their own
 ``await ctx.db.commit()``, invariants in the service layer, plain reads
 inline.
@@ -94,10 +94,18 @@ async def read_staff(ctx: StaffContext, staff_id: int) -> StaffResponse:
 async def update_staff(ctx: StaffContext, staff_id: int, body: StaffUpdate) -> StaffResponse:
     """Change an account's name or status.
 
+    A no-op (every sent field already holds its value) returns the account
+    without writing, same as the user PATCH.
+
     A status change that would leave no active account is refused by the
     service layer, and the transaction rolls back with it.
     """
     account = await _get_or_404(ctx, staff_id)
+    if all(
+        value is None or getattr(account, field) == value
+        for field, value in (("name", body.name), ("status", body.status))
+    ):
+        return StaffResponse.model_validate(account)
 
     await staff_service.update(ctx.db, account, name=body.name, status=body.status)
     await ctx.db.commit()
